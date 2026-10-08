@@ -249,26 +249,77 @@ fn a_dotted_set_makes_the_levels_the_file_lacks_and_keeps_the_siblings() {
 	assert!(Settings::resolve(Some(&f), &sets(&["colour.space=rgb"])).is_err());
 }
 
+// The bundled profile, as a file, for a setting that names a profile by its path.
+fn fogra_file() -> String {
+	Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("fe2o3_graphics").join("data").join("icc")
+		.join("FOGRA39L_coated.icc").display().to_string()
+}
+
 #[test]
-fn each_setting_that_asks_for_what_is_not_built_is_refused_by_its_key() {
-	let (d, main) = project("unbuilt", "");
-	for (arg, key) in [
-		("colour.space=cmyk",				"colour.space"),
-		("colour.space=grey",				"colour.space"),
-		("colour.rgb_profile=adobe",		"colour.rgb_profile"),
-		("colour.grey_profile=gamma",		"colour.grey_profile"),
-		("colour.cmyk_profile=swop",		"colour.cmyk_profile"),
-		("colour.intent=relative",			"colour.intent"),
-		("colour.black=rich",				"colour.black"),
-		("colour.black_point=false",		"colour.black_point"),
+fn a_colour_key_that_the_space_does_not_read_is_refused_by_its_key() {
+	let (d, main) = project("unread", "");
+	// Native and rgb read none of the profiles, the intent, the black point or the black.
+	for space in ["native", "rgb"] {
+		for (arg, key) in [
+			("colour.rgb_profile=adobe",		"colour.rgb_profile"),
+			("colour.grey_profile=gamma",		"colour.grey_profile"),
+			("colour.cmyk_profile=swop",		"colour.cmyk_profile"),
+			("colour.intent=relative",			"colour.intent"),
+			("colour.black=rich",				"colour.black"),
+			("colour.black_point=false",		"colour.black_point"),
+		] {
+			let m = why(Plan::at(&d, Some(&main), &sets(&[format!("colour.space={}", space).as_str(), arg]), None));
+			assert!(m.contains(key), "{} {}: {}", space, arg, m);
+			assert!(m.contains("applies only when 'colour.space' is"), "{} {}: {}", space, arg, m);
+		}
+	}
+	// Cmyk does not read the grey profile, and grey does not read the black.
+	let m = why(Plan::at(&d, Some(&main), &sets(&["colour.space=cmyk", "colour.grey_profile=gamma"]), None));
+	assert!(m.contains("colour.grey_profile") && m.contains("\"grey\""), "{}", m);
+	let m = why(Plan::at(&d, Some(&main), &sets(&["colour.space=grey", "colour.black=rich"]), None));
+	assert!(m.contains("colour.black") && m.contains("\"cmyk\""), "{}", m);
+	// What is read is accepted, and what is only the default is never refused.
+	for arg in [
+		&["colour.space=native"][..], &["colour.space=rgb", "colour.black=k", "colour.black_point=true"],
+		&["colour.space=cmyk", "colour.black=rich", "colour.intent=relative", "colour.black_point=false"],
+		&["colour.space=grey", "colour.intent=saturation", "colour.black_point=false"],
 	] {
-		let m = why(Plan::at(&d, Some(&main), &sets(&[arg]), None));
-		assert!(m.contains(key), "{}: {}", arg, m);
-		assert!(m.contains("not built"), "{}: {}", arg, m);
+		assert!(Plan::at(&d, Some(&main), &sets(arg), None).is_ok(), "{:?} is built", arg);
 	}
-	for arg in ["colour.space=rgb", "colour.space=native", "colour.rgb_profile=srgb", "colour.black=k", "colour.black_point=true"] {
-		assert!(Plan::at(&d, Some(&main), &sets(&[arg]), None).is_ok(), "{} is built", arg);
+}
+
+#[test]
+fn a_profile_that_cannot_serve_its_role_is_refused_by_its_key() {
+	let (d, main) = project("profiles", "");
+	let fogra = fogra_file();
+	let cases: [(&str, String); 4] = [
+		("colour.cmyk_profile",	"missing.icc".to_string()),
+		("colour.rgb_profile",	fogra.clone()),
+		("colour.grey_profile",	fogra.clone()),
+		("colour.cmyk_profile",	format!("{}", d.join("main.typ").display())),
+	];
+	for (key, value) in cases {
+		let space = if key == "colour.grey_profile" { "grey" } else { "cmyk" };
+		let m = why(Plan::at(&d, Some(&main), &sets(&[format!("colour.space={}", space).as_str(), format!("{}={}", key, value).as_str()]), None));
+		assert!(m.contains(key), "{} = {}: {}", key, value, m);
 	}
+	// A CMYK profile named by its path serves, as the bundled word does.
+	let named = format!("colour.cmyk_profile={}", fogra);
+	assert!(Plan::at(&d, Some(&main), &sets(&["colour.space=cmyk", named.as_str()]), None).is_ok());
+	assert!(Plan::at(&d, Some(&main), &sets(&["colour.space=grey", named.as_str()]), None).is_ok());
+}
+
+#[test]
+fn the_colour_space_builds_the_writers_mode() {
+	let (d, main) = project("modes", "");
+	for (space, converts) in [("native", false), ("rgb", false), ("cmyk", true), ("grey", true)] {
+		let p = Plan::at(&d, Some(&main), &sets(&[format!("colour.space={}", space).as_str()]), None).expect("a built space");
+		assert_eq!(p.spec.pdf.colour.converts(), converts, "{}", space);
+		assert_eq!(p.spec.pdf.colour.group_space().is_some(), converts, "{}", space);
+	}
+	let rich = Plan::at(&d, Some(&main), &sets(&["colour.space=cmyk", "colour.black=rich"]), None).expect("rich");
+	let k = Plan::at(&d, Some(&main), &sets(&["colour.space=cmyk"]), None).expect("k only");
+	assert_ne!(rich.spec.pdf.colour, k.spec.pdf.colour, "the black changes what is written");
 }
 
 #[test]

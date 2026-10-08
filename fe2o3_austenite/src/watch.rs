@@ -204,7 +204,7 @@ pub fn compile_pdf(
 	let timings	= spec.timings.as_ref().map(|_| if spec.timings_fine { Timings::start_fine() } else { Timings::start() });
 	read.push(spec.main.clone());
 	crate::compile::supply_typst_package_cache();
-	let mut sink = res!(PdfSink::with_options(spec.pdf));
+	let mut sink = res!(PdfSink::with_options(spec.pdf.clone()));
 	let mut done = res!(session.compile(&spec.main, &spec.root, &mut sink, timings, None, cold));
 	*read = done.files_read();
 	let report = done.report();
@@ -331,7 +331,7 @@ impl Plan {
 			diag_summary:	settings.diagnostics == "summary",
 			timings:		timings.map(|t| t.to_path_buf()),
 			timings_fine:	false,
-			pdf:			res!(settings.pdf_options()),
+			pdf:			res!(settings.pdf_options(&base)),
 		};
 		Ok(Self { settings, file, spec, base })
 	}

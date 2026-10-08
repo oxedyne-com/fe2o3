@@ -6,13 +6,27 @@
 //! the file, then each `--set key=value` of the command line, in order, for the one run.
 //!
 //! A key that is not in [`KEYS`], a value of the wrong type and a value outside its range are each refused
-//! by the key's full dotted name before anything compiles. So is a setting that asks for what is not built
-//! yet ([`Settings::check_built`]), rather than being ignored.
+//! by the key's full dotted name before anything compiles. So is a setting that nothing reads under the
+//! chosen `colour.space`, and a profile that cannot be read or does not suit its role
+//! ([`Settings::check_built`], [`Settings::pdf_options`]), rather than being ignored.
 
 use crate::emit::pdf::PdfOptions;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_graphics::pdf::ColourOut;
+use oxedyne_fe2o3_graphics::icc;
+use oxedyne_fe2o3_graphics::icc::read::{
+	Profile,
+	Space,
+};
+use oxedyne_fe2o3_graphics::icc::transform::{
+	Dev,
+	Intent,
+	Transform,
+};
+use oxedyne_fe2o3_graphics::pdf::{
+	Black,
+	ColourOut,
+};
 use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::collections::BTreeMap;
@@ -20,6 +34,7 @@ use std::path::{
 	Path,
 	PathBuf,
 };
+use std::sync::Arc;
 
 pub const FILE: &str = "austenite.jdat";
 
@@ -321,27 +336,30 @@ impl Settings {
 		Self::from_dat(&top)
 	}
 
-	/// Refuses a setting that asks for what is not built, by the key's name. `doc_dir` is the document's own
-	/// directory, where the figure sources would be.
+	/// Refuses a setting that nothing would read, by the key's name, and a figures directory that nothing
+	/// would render. `doc_dir` is the document's own directory, where the figure sources would be.
+	///
+	/// The profiles, the intent and the black point apply when `colour.space` is `cmyk` or `grey`; the grey
+	/// profile only to `grey`, and the black only to `cmyk`. A value other than the default anywhere else
+	/// would be ignored, so it is refused.
 	pub fn check_built(&self, doc_dir: &Path) -> Outcome<()> {
 		let c = &self.colour;
-		if c.space == "cmyk" || c.space == "grey" {
-			return Err(err!("The setting 'colour.space' = \"{}\" is not built yet. Use \"native\" or \"rgb\".", c.space; Input, Invalid));
-		}
-		let defaults = Colour::default();
-		for (key, got, want) in [
-			("colour.rgb_profile",	&c.rgb_profile,		&defaults.rgb_profile),
-			("colour.grey_profile",	&c.grey_profile,	&defaults.grey_profile),
-			("colour.cmyk_profile",	&c.cmyk_profile,	&defaults.cmyk_profile),
-			("colour.intent",		&c.intent,			&defaults.intent),
-			("colour.black",		&c.black,			&defaults.black),
+		let d = Colour::default();
+		let both = ["cmyk", "grey"];
+		for (key, got, differs, only) in [
+			("colour.rgb_profile",	shown(&Dat::Str(c.rgb_profile.clone())),	c.rgb_profile != d.rgb_profile,		&both[..]),
+			("colour.grey_profile",	shown(&Dat::Str(c.grey_profile.clone())),	c.grey_profile != d.grey_profile,	&both[1..]),
+			("colour.cmyk_profile",	shown(&Dat::Str(c.cmyk_profile.clone())),	c.cmyk_profile != d.cmyk_profile,	&both[..]),
+			("colour.intent",		shown(&Dat::Str(c.intent.clone())),			c.intent != d.intent,				&both[..]),
+			("colour.black_point",	shown(&Dat::Bool(c.black_point)),			c.black_point != d.black_point,		&both[..]),
+			("colour.black",		shown(&Dat::Str(c.black.clone())),			c.black != d.black,					&both[..1]),
 		] {
-			if got != want {
-				return Err(err!("The setting '{}' = \"{}\" is not built yet; only \"{}\" can be used.", key, got, want; Input, Invalid));
+			if differs && !only.contains(&c.space.as_str()) {
+				let spaces = only.iter().map(|w| fmt!("\"{}\"", w)).collect::<Vec<_>>().join(" or ");
+				return Err(err!(
+					"The setting '{}' = {} applies only when 'colour.space' is {}, and it is \"{}\".",
+					key, got, spaces, c.space; Input, Invalid));
 			}
-		}
-		if !c.black_point {
-			return Err(err!("The setting 'colour.black_point' = false is not built yet; only true can be used."; Input, Invalid));
 		}
 		if self.figs.render && doc_dir.join(&self.figs.dir).is_dir() {
 			return Err(err!(
@@ -351,8 +369,9 @@ impl Settings {
 		Ok(())
 	}
 
-	/// How the PDF is written under these settings.
-	pub fn pdf_options(&self) -> Outcome<PdfOptions> {
+	/// How the PDF is written under these settings. `base` is the directory the settings file is in, which a
+	/// relative profile path is taken from.
+	pub fn pdf_options(&self, base: &Path) -> Outcome<PdfOptions> {
 		let minor = match self.pdf.version.strip_prefix("1.").and_then(|m| m.parse::<u8>().ok()) {
 			Some(m)	=> m,
 			None	=> return Err(err!("The setting 'pdf.version' = \"{}\" is not 1.4 to 1.7.", self.pdf.version; Input, Invalid)),
@@ -363,8 +382,43 @@ impl Settings {
 			outline:		self.pdf.outline,
 			doc_info:		self.metadata.document,
 			engine_info:	self.metadata.engine,
-			colour:			if self.colour.space == "rgb" { ColourOut::Rgb } else { ColourOut::Native },
+			colour:			res!(self.colour_out(base)),
 		})
+	}
+
+	// The colour mode the settings ask for, with its transforms built. Each profile is read once, here.
+	fn colour_out(&self, base: &Path) -> Outcome<ColourOut> {
+		let c = &self.colour;
+		if c.space != "cmyk" && c.space != "grey" {
+			return Ok(if c.space == "rgb" { ColourOut::Rgb } else { ColourOut::Native });
+		}
+		let intent = match c.intent.as_str() {
+			"perceptual"	=> Intent::Perceptual,
+			"relative"		=> Intent::Relative,
+			"saturation"	=> Intent::Saturation,
+			"absolute"		=> Intent::Absolute,
+			other			=> return Err(err!("The setting 'colour.intent' = \"{}\" is not an intent.", other; Input, Invalid)),
+		};
+		let bpc = c.black_point;
+		let rgb = res!(device("colour.rgb_profile", &c.rgb_profile, Space::Rgb, base));
+		let joined = |keys: &str, src: &Dev, dst: &Dev| -> Outcome<Arc<Transform>> {
+			match Transform::new(src, dst, intent, bpc) {
+				Ok(xf)	=> Ok(Arc::new(xf)),
+				Err(e)	=> Err(err!(e, "The profiles of {} cannot be joined at the intent \"{}\".", keys, c.intent; Input, Invalid)),
+			}
+		};
+		if c.space == "cmyk" {
+			let cmyk = res!(device("colour.cmyk_profile", &c.cmyk_profile, Space::Cmyk, base));
+			let xf = res!(joined("'colour.rgb_profile' and 'colour.cmyk_profile'", &rgb, &cmyk));
+			let black = if c.black == "rich" { Black::Rich } else { Black::KOnly };
+			ColourOut::cmyk(xf, black)
+		} else {
+			let grey = res!(device("colour.grey_profile", &c.grey_profile, Space::Gray, base));
+			let cmyk = res!(device("colour.cmyk_profile", &c.cmyk_profile, Space::Cmyk, base));
+			let xf = res!(joined("'colour.rgb_profile' and 'colour.grey_profile'", &rgb, &grey));
+			let cx = res!(joined("'colour.cmyk_profile' and 'colour.grey_profile'", &cmyk, &grey));
+			ColourOut::grey(xf, cx)
+		}
 	}
 
 	/// The finished PDF's path for `main`: `output` with `{stem}` filled in, beside the source unless absolute.
@@ -386,6 +440,32 @@ impl Settings {
 			return Some(self.view.app.clone());
 		}
 		["papers", "evince", "xdg-open"].iter().find(|c| on_path(c)).map(|c| c.to_string())
+	}
+}
+
+// The device space a profile setting names: the built-in one by its word, else the profile file at that path,
+// taken from `base` when relative. The error names the key.
+fn device(key: &str, name: &str, space: Space, base: &Path) -> Outcome<Dev> {
+	let made = || -> Outcome<Dev> {
+		match (space, name) {
+			(Space::Rgb, "srgb")		=> return Dev::srgb(),
+			(Space::Gray, "sgray")		=> return Ok(Dev::sgray()),
+			(Space::Cmyk, "fogra39")	=> return Dev::from_profile(&res!(icc::fogra39l())),
+			_							=> (),
+		}
+		let path = base.join(name);
+		let bytes = res!(std::fs::read(&path));
+		let p = res!(Profile::read(&path.display().to_string(), &bytes));
+		if p.head.space != space {
+			return Err(err!(
+				"The profile {} is a {:?} one, and the setting takes a {:?} one.", path.display(), p.head.space, space;
+				Input, Invalid, Mismatch));
+		}
+		Dev::from_profile(&p)
+	};
+	match made() {
+		Ok(dev)	=> Ok(dev),
+		Err(e)	=> Err(err!(e, "The setting '{}' = \"{}\" cannot be used as a profile.", key, name; Input, Invalid)),
 	}
 }
 

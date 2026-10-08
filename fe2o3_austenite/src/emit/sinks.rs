@@ -114,7 +114,7 @@ impl PdfSink {
 
 	fn open(opts: &PdfOptions) -> Outcome<PdfStream<Chunks>> {
 		let stream = res!(PdfStream::open_version(Chunks::default(), opts.compress, opts.minor));
-		Ok(stream.with_colour_out(opts.colour))
+		Ok(stream.with_colour_out(opts.colour.clone()))
 	}
 
 	/// The finished file, once the fixpoint has run `finish`.

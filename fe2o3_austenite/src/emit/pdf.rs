@@ -62,7 +62,7 @@ pub fn pdf_info(doc_info: &DocInfo) -> PdfInfo {
 /// version 1.7, compressed streams, an outline, and an Info dictionary of the document's metadata with the
 /// engine named as `/Creator` and `/Producer`. The `watch` and `build` commands set each from a setting, and
 /// by default write no Info dictionary at all.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PdfOptions {
 	pub minor:		u8,			// the version header, 1.`minor`
 	pub compress:	bool,		// Flate on the streams
