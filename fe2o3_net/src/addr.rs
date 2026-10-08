@@ -264,6 +264,9 @@ pub fn is_publicly_routable(ip: &IpAddr) -> bool {
             let o = v4.octets();
             // Shared address space (RFC 6598, carrier-grade NAT).
             if o[0] == 100 && (64..128).contains(&o[1]) { return false; }
+            // "This network", 0.0.0.0/8, and the IETF protocol assignments, 192.0.0.0/24.
+            if o[0] == 0 { return false; }
+            if o[0] == 192 && o[1] == 0 && o[2] == 0 { return false; }
             // Benchmarking (RFC 2544).
             if o[0] == 198 && (o[1] == 18 || o[1] == 19) { return false; }
             // Reserved for future use, 240/4 upwards.
@@ -282,8 +285,17 @@ pub fn is_publicly_routable(ip: &IpAddr) -> bool {
             if (seg[0] & 0xfe00) == 0xfc00 { return false; }
             // Link-local, fe80::/10.
             if (seg[0] & 0xffc0) == 0xfe80 { return false; }
-            // Documentation, 2001:db8::/32.
+            // Site-local, fec0::/10, deprecated but still routed locally by some stacks.
+            if (seg[0] & 0xffc0) == 0xfec0 { return false; }
+            // Documentation, 2001:db8::/32 and 3fff::/20.
             if seg[0] == 0x2001 && seg[1] == 0x0db8 { return false; }
+            if seg[0] == 0x3fff && seg[1] < 0x1000 { return false; }
+            // Teredo, 2001::/32, and benchmarking, 2001:2::/48.
+            if seg[0] == 0x2001 && seg[1] == 0x0000 { return false; }
+            if seg[0] == 0x2001 && seg[1] == 0x0002 && seg[2] == 0 { return false; }
+            // The local-use NAT64 block, 64:ff9b:1::/48 (RFC 8215), is reachable only through a
+            // translator the operator runs, which turns it back into a connection to the IPv4 inside.
+            if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2] == 0x0001 { return false; }
             // Any other form that carries an IPv4 address is only as safe as the IPv4 inside it: the
             // mapped (::ffff:a.b.c.d), the compatible (::a.b.c.d), NAT64 (64:ff9b::/96) and 6to4
             // (2002::/16, the address in the next 32 bits). A translator or a tunnel on the path turns

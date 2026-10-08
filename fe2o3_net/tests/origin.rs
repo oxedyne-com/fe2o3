@@ -209,3 +209,15 @@ mod wire {
         Ok(())
     }
 }
+
+// F2 B-1: a second hostname of the site, from a browser that sends no `Sec-Fetch-Site`, is the site.
+#[test]
+fn test_an_alias_host_without_fetch_metadata_is_let_on_09() -> Outcome<()> {
+    assert!(!res!(refused(&[("host", "www.example.com"), ("origin", "https://www.example.com")])),
+        "the site's own origin on its second hostname was refused");
+    // Only the request's own origin is let on: a foreign page, and the other scheme, still are not.
+    assert!(res!(refused(&[("host", "www.example.com"), ("origin", "https://evil.test")])));
+    assert!(res!(refused(&[("host", "www.example.com"), ("origin", "http://www.example.com")])));
+    assert!(res!(refused(&[("host", "example.com"), ("origin", "https://www.example.com")])));
+    Ok(())
+}

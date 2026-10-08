@@ -19,8 +19,10 @@ use oxedyne_fe2o3_core::prelude::*;
 ///
 /// `Sec-Fetch-Site`, where present, decides: the post passes only if every line says `same-origin`.
 /// Otherwise an `Origin` must name `expected_origin` on every line (scheme and host without case, a
-/// default port as good as none), and `null` does not. Neither header present passes. Neither field
-/// is a singleton, so a caller can send several lines, and one foreign line refuses the post.
+/// default port as good as none), or the request's own origin, which is the same scheme with the
+/// `Host` the visitor addressed, so that a site's second hostname works in a browser that sends no
+/// `Sec-Fetch-Site`. `null` does not pass. Neither header present passes. Neither field is a
+/// singleton, so a caller can send several lines, and one foreign line refuses the post.
 ///
 /// Where `expected_origin` is empty or is no URL, the `Host` the visitor addressed stands in for it
 /// and the scheme goes unchecked. An `Origin` that then cannot be checked at all is refused.
@@ -34,15 +36,12 @@ pub fn cross_site(headers: &HeaderFields, expected_origin: &str) -> bool {
         Some(list) if !list.is_empty()  => list,
         _                               => return false,
     };
-    let want = match Url::parse(expected_origin) {
-        Ok(u)   => Some(u.origin()),
-        Err(_)  => None,
-    };
+    let want = Url::parse(expected_origin).ok();
     let host = headers.get_one(&HeaderName::Host).map(|v| fmt!("{}", v).trim().to_lowercase());
-    origins.iter().any(|v| !origin_is_ours(fmt!("{}", v).trim(), want.as_deref(), host.as_deref()))
+    origins.iter().any(|v| !origin_is_ours(fmt!("{}", v).trim(), want.as_ref(), host.as_deref()))
 }
 
-fn origin_is_ours(raw: &str, want: Option<&str>, host: Option<&str>) -> bool {
+fn origin_is_ours(raw: &str, want: Option<&Url>, host: Option<&str>) -> bool {
     // Userinfo is no part of an origin, and `Url::parse` would discard it.
     if raw.contains('@') {
         return false;
@@ -55,7 +54,19 @@ fn origin_is_ours(raw: &str, want: Option<&str>, host: Option<&str>) -> bool {
         return false; // an origin has no path
     }
     match (want, host) {
-        (Some(w), _)        => url.origin() == w,
+        (Some(w), _)        => {
+            if url.origin() == w.origin() {
+                return true;
+            }
+            // The request's own origin: the site's scheme with the host the visitor addressed.
+            match host {
+                Some(h) => match Url::parse(&fmt!("{}://{}", w.scheme, h)) {
+                    Ok(own) => url.origin() == own.origin(),
+                    Err(_)  => false,
+                },
+                None    => false,
+            }
+        },
         (None, Some(h))     => {
             let bare = if url.port == url.scheme.default_port() {
                 url.host.clone()
