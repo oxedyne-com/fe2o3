@@ -503,7 +503,7 @@ impl OutboundClient {
                     Some(ip) => SocketAddr::new(IpAddr::V4(*ip), cfg.port),
                     None => return Err(err!(
                         "The submission host {} resolves to no address.", cfg.host;
-                        IO, Network, Missing)),
+                        IO, Network, Missing, Unreachable)),
                 }
             },
         };
@@ -530,14 +530,14 @@ impl OutboundClient {
                 return Err(err!(
                     "{} does not offer STARTTLS, so the account password cannot be sent to it \
                     without being readable on the wire.", cfg.host;
-                    IO, Network, Invalid));
+                    IO, Network, Invalid, Security));
             }
             res!(conv.command("STARTTLS").await);
             let resp = res!(conv.reply().await);
             if resp.code != 220 {
                 return Err(err!(
                     "{} refused STARTTLS: {} {}", cfg.host, resp.code, resp.text;
-                    IO, Network, Wire));
+                    IO, Network, Wire, Security));
             }
             conv = res!(conv.upgrade(self.tls_config.clone()).await);
             // The extension list before the upgrade cannot be trusted, and AUTH is usually only
@@ -632,8 +632,8 @@ impl Conversation {
     async fn connect(addr: SocketAddr, peer: &str, deadline: Duration) -> Outcome<Self> {
         let plain = match timeout(deadline, TcpStream::connect(addr)).await {
             Ok(Ok(s))  => s,
-            Ok(Err(e)) => return Err(err!(e,
-                "Connecting to {} at {}.", peer, addr; IO, Network)),
+            Ok(Err(e)) => return Err(tls::dial_fault(e,
+                fmt!("Connecting to {} at {}", peer, addr))),
             Err(_)     => return Err(err!(
                 "Timeout connecting to {} at {}.", peer, addr; IO, Network, Timeout)),
         };
@@ -692,8 +692,8 @@ impl Conversation {
         for piece in bytes.chunks(SEND_PIECE) {
             match timeout(self.timeout, self.stream.write_all(piece)).await {
                 Ok(Ok(()))  => (),
-                Ok(Err(e))  => return Err(err!(e,
-                    "Writing {} to {}.", what, self.peer; IO, Network, Write)),
+                Ok(Err(e))  => return Err(tls::wire_fault(e,
+                    fmt!("Writing {} to {}", what, self.peer), true)),
                 Err(_)      => return Err(err!(
                     "{} took no more of {} within {:?}.", self.peer, what, self.timeout;
                     IO, Network, Write, Timeout)),
@@ -701,8 +701,8 @@ impl Conversation {
         }
         match timeout(self.timeout, self.stream.flush()).await {
             Ok(Ok(()))  => Ok(()),
-            Ok(Err(e))  => Err(err!(e,
-                "Flushing {} to {}.", what, self.peer; IO, Network, Write)),
+            Ok(Err(e))  => Err(tls::wire_fault(e,
+                fmt!("Flushing {} to {}", what, self.peer), true)),
             Err(_)      => Err(err!(
                 "{} took no more of {} within {:?}.", self.peer, what, self.timeout;
                 IO, Network, Write, Timeout)),
@@ -910,7 +910,7 @@ async fn read_smtp_response(stream: &mut ClientStream) -> Outcome<SmtpResponse> 
             Some(l) => l,
             None => return Err(err!(
                 "Connection closed while reading SMTP response.";
-                IO, Network, Read)),
+                IO, Network, Read, Interrupted)),
         };
         if line.len() < 4 {
             return Err(err!(
@@ -2237,6 +2237,78 @@ mod tests {
         let took = start.elapsed();
         req!(true, qid.contains("STANDIN1"));
         req!(true, took < WAIT / 2, "submission waited {:?} on a silent QUIT", took);
+        Ok(())
+    }
+
+    // ── A failure says its cause in its tags (D-20261006-09) ──
+
+    /// A server that takes every connection and hangs up at once: a dropped connection, as the
+    /// client sees it.
+    async fn hangup_server() -> Outcome<SocketAddr> {
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the hang-up server."; IO, Network)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading the hang-up server's address."; IO, Network)));
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                drop(sock);
+            }
+        });
+        Ok(addr)
+    }
+
+    async fn submit_err(cfg: &SubmissionConfig) -> Outcome<Error<ErrTag>> {
+        let c = res!(client().await);
+        match c.submit(cfg, USER, &[fmt!("bob@example.net")], &body()).await {
+            Ok(_)  => Err(err!("A submission that should have failed was accepted."; Test, Invalid)),
+            Err(e) => Ok(e),
+        }
+    }
+
+    /// Nothing listening is `Unreachable`, which a caller explains as a name or port to check.
+    #[tokio::test]
+    async fn test_nothing_listening_is_tagged_unreachable_00() -> Outcome<()> {
+        let addr = {
+            let l = res!(TcpListener::bind("127.0.0.1:0").await
+                .map_err(|e| err!(e, "Binding a port to free."; Test, IO)));
+            res!(l.local_addr().map_err(|e| err!(e, "Reading its address."; Test, IO)))
+        };
+        let e = res!(submit_err(&cfg(addr, Security::Plain)).await);
+        req!(true, e.tags().contains(&ErrTag::Unreachable),
+            "a refused connection was not tagged Unreachable: {:?}", e.tags());
+        Ok(())
+    }
+
+    /// A hang-up, in the clear or in the TLS handshake, is `Interrupted`, and never a certificate
+    /// fault or an unreachable server: the owner's error was a drop reported as a certificate.
+    #[tokio::test]
+    async fn test_a_hang_up_is_tagged_interrupted_00() -> Outcome<()> {
+        let addr = res!(hangup_server().await);
+        for security in [Security::Plain, Security::ImplicitTls] {
+            let e = res!(submit_err(&cfg(addr, security)).await);
+            req!(true, e.tags().contains(&ErrTag::Interrupted),
+                "{:?}: a hang-up was not tagged Interrupted: {:?}", security, e.tags());
+            req!(false, e.tags().contains(&ErrTag::Security),
+                "{:?}: a hang-up was tagged as a security fault: {:?}", security, e.tags());
+            req!(false, e.tags().contains(&ErrTag::Unreachable),
+                "{:?}: a hang-up was called unreachable: {:?}", security, e.tags());
+        }
+        Ok(())
+    }
+
+    /// A provider that will not encrypt the line, by not offering STARTTLS or by refusing it, is
+    /// `Security` without `Init`: the password was withheld, and no certificate was involved.
+    #[tokio::test]
+    async fn test_an_unencrypted_line_is_tagged_security_not_a_certificate_00() -> Outcome<()> {
+        for (starttls, label) in [(false, "not offered"), (true, "refused")] {
+            let p = Provider { starttls, starttls_ok: false, ..Provider::accepting() };
+            let (addr, _) = res!(provider(p).await);
+            let e = res!(submit_err(&cfg(addr, Security::StartTls)).await);
+            req!(true, e.tags().contains(&ErrTag::Security),
+                "STARTTLS {}: not tagged Security: {:?}", label, e.tags());
+            req!(false, e.tags().contains(&ErrTag::Init),
+                "STARTTLS {}: tagged Init, which reads as a refused certificate: {:?}", label, e.tags());
+        }
         Ok(())
     }
 }

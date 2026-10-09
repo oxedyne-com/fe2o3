@@ -372,16 +372,6 @@ pub fn is_interrupted(e: &Error<ErrTag>) -> bool {
     e.tags().contains(&ErrTag::Interrupted)
 }
 
-/// A transport fault on the open connection, tagged `Interrupted` where the connection went away.
-fn wire_fault(e: std::io::Error, what: String, write: bool) -> Error<ErrTag> {
-    match (tls::is_dropped(&e), write) {
-        (true,  false) => err!(e, "{}: the connection dropped.", what; IO, Network, Read, Interrupted),
-        (true,  true)  => err!(e, "{}: the connection dropped.", what; IO, Network, Write, Interrupted),
-        (false, false) => err!(e, "{}.", what; IO, Network, Read),
-        (false, true)  => err!(e, "{}.", what; IO, Network, Write),
-    }
-}
-
 impl ImapClient {
 
     /// Protects the connection as configured and reads the greeting. Does not authenticate.
@@ -428,23 +418,8 @@ impl ImapClient {
         };
         let plain = match timeout(cfg.timeout, TcpStream::connect(&addr)).await {
             Ok(Ok(s))  => s,
-            Ok(Err(e)) => {
-                use std::io::ErrorKind;
-                return Err(match e.kind() {
-                    ErrorKind::ConnectionRefused
-                    | ErrorKind::HostUnreachable
-                    | ErrorKind::NetworkUnreachable
-                    | ErrorKind::AddrNotAvailable => err!(e,
-                        "Connecting to IMAP server {}: nothing would take the connection.", addr;
-                        IO, Network, Unreachable),
-                    _ if tls::is_dropped(&e) => err!(e,
-                        "Connecting to IMAP server {}: the connection dropped.", addr;
-                        IO, Network, Interrupted),
-                    _ => err!(e,
-                        "Connecting to IMAP server {}.", addr;
-                        IO, Network),
-                });
-            },
+            Ok(Err(e)) => return Err(tls::dial_fault(e,
+                fmt!("Connecting to IMAP server {}", addr))),
             Err(_)     => return Err(err!(
                 "Timeout connecting to IMAP server {}.", addr;
                 IO, Network, Timeout)),
@@ -1007,7 +982,7 @@ impl ImapClient {
         let w = res!(self.stream_mut()).get_mut();
         match timeout(deadline, w.write_all(bytes)).await {
             Ok(Ok(()))  => (),
-            Ok(Err(e))  => return Err(wire_fault(e,
+            Ok(Err(e))  => return Err(tls::wire_fault(e,
                 fmt!("Writing to IMAP server {}", host), true)),
             Err(_)      => return Err(err!(
                 "Timeout writing to IMAP server {}.", host;
@@ -1015,7 +990,7 @@ impl ImapClient {
         }
         match timeout(deadline, w.flush()).await {
             Ok(Ok(()))  => Ok(()),
-            Ok(Err(e))  => Err(wire_fault(e,
+            Ok(Err(e))  => Err(tls::wire_fault(e,
                 fmt!("Flushing to IMAP server {}", host), true)),
             Err(_)      => Err(err!(
                 "Timeout flushing to IMAP server {}.", host;
@@ -1050,7 +1025,7 @@ impl ImapClient {
             let rd       = res!(self.stream_mut());
             match timeout(deadline, rd.read_exact(&mut buf)).await {
                 Ok(Ok(_))  => (),
-                Ok(Err(e)) => return Err(wire_fault(e,
+                Ok(Err(e)) => return Err(tls::wire_fault(e,
                     fmt!("Reading a {}-byte literal from IMAP server {}", n, host), false)),
                 Err(_)     => return Err(err!(
                     "Timeout reading a {}-byte literal from IMAP server {}.",
@@ -1070,7 +1045,7 @@ impl ImapClient {
         let rd       = res!(self.stream_mut());
         let n = match timeout(deadline, rd.read_until(b'\n', &mut buf)).await {
             Ok(Ok(n))  => n,
-            Ok(Err(e)) => return Err(wire_fault(e,
+            Ok(Err(e)) => return Err(tls::wire_fault(e,
                 fmt!("Reading from IMAP server {}", host), false)),
             Err(_)     => return Err(err!(
                 "Timeout reading from IMAP server {}.", host;

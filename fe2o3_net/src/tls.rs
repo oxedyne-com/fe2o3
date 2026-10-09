@@ -118,6 +118,38 @@ pub fn is_dropped(e: &std::io::Error) -> bool {
         | ErrorKind::UnexpectedEof)
 }
 
+/// Did a connection attempt find nothing that would take it -- refused, or no route to the host?
+pub fn is_unreachable(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(e.kind(),
+        ErrorKind::ConnectionRefused
+        | ErrorKind::HostUnreachable
+        | ErrorKind::NetworkUnreachable
+        | ErrorKind::AddrNotAvailable)
+}
+
+/// A failed dial, tagged by cause: `Unreachable` where nothing would take the connection,
+/// `Interrupted` where it dropped as it was made.
+pub fn dial_fault(e: std::io::Error, what: String) -> Error<ErrTag> {
+    if is_unreachable(&e) {
+        err!(e, "{}: nothing would take the connection.", what; IO, Network, Unreachable)
+    } else if is_dropped(&e) {
+        err!(e, "{}: the connection dropped.", what; IO, Network, Interrupted)
+    } else {
+        err!(e, "{}.", what; IO, Network)
+    }
+}
+
+/// A transport fault on the open connection, tagged `Interrupted` where the connection went away.
+pub fn wire_fault(e: std::io::Error, what: String, write: bool) -> Error<ErrTag> {
+    match (is_dropped(&e), write) {
+        (true,  false) => err!(e, "{}: the connection dropped.", what; IO, Network, Read, Interrupted),
+        (true,  true)  => err!(e, "{}: the connection dropped.", what; IO, Network, Write, Interrupted),
+        (false, false) => err!(e, "{}.", what; IO, Network, Read),
+        (false, true)  => err!(e, "{}.", what; IO, Network, Write),
+    }
+}
+
 /// Did a client handshake fail because a certificate was not accepted, whether ours by the peer
 /// or the peer's by us?
 fn refuses_certificate(e: &std::io::Error) -> bool {
