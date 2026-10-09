@@ -30,6 +30,7 @@ use oxedyne_fe2o3_hash::{
         HashScheme,
     },
 };
+use oxedyne_fe2o3_data::time::Timestamp;
 use oxedyne_fe2o3_iop_db::api::Meta;
 use oxedyne_fe2o3_jdat::{
     daticle::Dat,
@@ -84,7 +85,14 @@ impl Encode {
             usize,
         )>
     {
-        res!(kv.stamp_time_now());
+        // The time the caller stamped is kept.  A record's time is its operation's, which is how
+        // the cache tells a newer write from an older one at a key: a tombstone sent after the
+        // write it retires for, and stamped again as it was framed, would outrank a newer value
+        // of the same key (A3 round 2a, `retire_does_not_erase_a_newer_value`).  A record with
+        // no time is stamped now.
+        if kv.meta.time == Timestamp::default() {
+            res!(kv.stamp_time_now());
+        }
         let KeyVal { key, val, chash, meta, cbpind } = kv;
         // [1.1] Assemble the StoredKey, StoredValue and StoredIndex to be written to file.
         let cind = key.index(); 
@@ -281,5 +289,40 @@ impl<
     pub fn set_key_hasher(mut self, hasher: KH) -> Self {
         self.hash = HasherDefAlt(DefAlt::Given(hasher));
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::test::setup::Uid;
+
+    fn framed(time: Timestamp) -> Outcome<Timestamp> {
+        let mut meta = Meta::<{ crate::test::setup::UID_LEN }, Uid>::new(Uid::default());
+        meta.time = time;
+        let kv = KeyVal {
+            key:    Key::Complete(vec![1, 2, 3]),
+            val:    vec![4, 5, 6],
+            chash:  [0; crate::base::constant::CACHE_HASH_BYTES],
+            meta,
+            cbpind: 0,
+        };
+        let csummer = ChecksummerDefAlt::<ChecksumScheme, ChecksumScheme>(
+            DefAlt::Default(ChecksumScheme::new_crc32()),
+        );
+        let (_, _, _, meta, _, _, _) = res!(Encode::encode(kv, csummer));
+        Ok(meta.time)
+    }
+
+    // A record keeps the time its operation stamped (a tombstone sent late must not outrank a newer
+    // write), and one with no time is stamped.
+    #[test]
+    fn encode_keeps_the_time_it_is_given() -> Outcome<()> {
+        let given = Timestamp::new(1_000, 7);
+        assert_eq!(res!(framed(given.clone())), given, "the framed record lost the time it was stamped with");
+        assert!(res!(framed(Timestamp::default())) > Timestamp::new(1_000_000, 0),
+            "a record with no time was not stamped");
+        Ok(())
     }
 }
