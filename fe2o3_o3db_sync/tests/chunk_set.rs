@@ -344,3 +344,89 @@ fn check(db: &TestDb, keys: &[Dat], lens: &[usize], phase: &str, bad: &mut Vec<S
     }
     Ok(())
 }
+
+// A delete is a store with no chunks: its head tombstone is durable before the chunks of the value
+// it deletes are retired, so a read made between the two finds the value whole or gone, never a
+// current bunch key missing a chunk (fix A, 2026-10-09).  The delete is held between the two by
+// `set_retire_delay`.  `marker` deletes by storing the deleted marker, as the distributed adapters
+// erase.
+fn read_during_delete(dir: &str, marker: bool) -> Outcome<()> {
+    let _lock = lock();
+    let db = res!(start(dir, res!(cfg()), true));
+    let k = dat!("deleted while read");
+    let v = val(1_100, 5); // 3 chunks
+    let tomb = Dat::Usr(oxedyne_fe2o3_o3db_sync::base::id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
+    res!(db.insert(k.clone(), v.clone(), Uid::default(), None));
+    let old = res!(res!(head(&db, &k)).ok_or_else(|| err!("No head for the value."; Test, Missing)));
+    hooks::set_retire_delay(Duration::from_millis(300));
+    let del = {
+        let (db, k, tomb) = (db.clone(), k.clone(), tomb.clone());
+        thread::spawn(move || {
+            let r = if marker {
+                db.api().store(k, tomb, Uid::default()).and_then(|resp| resp.recv_store_ack().map(|_| ()))
+            } else {
+                db.delete(&k, Uid::default(), None).map(|_| ())
+            };
+            r.map_err(|e| fmt!("{}", e))
+        })
+    };
+    pause(Duration::from_millis(100));
+    let mid = db.get(&k, None);
+    let del = match del.join() { Ok(r) => r, Err(_) => Err(fmt!("panicked")) };
+    hooks::set_retire_delay(Duration::ZERO);
+    let after = db.get(&k, None);
+    let gone = db.api().fetch_chunks(&Dat::Tup5u64(old), None).is_err();
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(del.is_ok(), "the delete failed: {:?}", del);
+    match &mid {
+        Ok(None) => (),
+        Ok(Some((g, _))) if *g == v || *g == tomb => (),
+        other => panic!("a read during the delete found neither the value nor its absence: {}",
+            fmt!("{:?}", other).chars().take(300).collect::<String>()),
+    }
+    match &after {
+        Ok(None) => (),
+        Ok(Some((g, _))) if *g == tomb => (),
+        other => panic!("the key does not read as deleted after the delete: {}",
+            fmt!("{:?}", other).chars().take(300).collect::<String>()),
+    }
+    assert!(gone, "the deleted value's chunks were not retired");
+    Ok(())
+}
+
+#[test]
+fn read_during_delete_of_chunked_value_is_whole_or_none() -> Outcome<()> {
+    read_during_delete("./test_db_chunk_set_read_delete", false)
+}
+
+#[test]
+fn read_during_marker_store_delete_is_whole_or_none() -> Outcome<()> {
+    read_during_delete("./test_db_chunk_set_read_marker", true)
+}
+
+// A delete stamped before the value at its key loses to it, and must leave that value whole: the
+// delete retires the set it read only when the key no longer names it.
+#[test]
+fn stale_delete_keeps_the_newer_value() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_set_stale_delete";
+    let db = res!(start(dir, res!(cfg()), true));
+    let k = dat!("stale delete");
+    let v0 = val(1_100, 6);
+    res!(db.insert(k.clone(), v0.clone(), Uid::default(), None));
+    let t0 = match res!(db.get(&k, None)) {
+        Some((_, meta)) => *meta.time,
+        None => return Err(err!("v0 is missing."; Test, Missing)),
+    };
+    hooks::set_stale_stamp(Some(t0.saturating_sub(Duration::from_secs(1))));
+    let del = db.delete(&k, Uid::default(), None);
+    hooks::set_stale_stamp(None);
+    let got = db.get(&k, None);
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    res!(del);
+    assert!(matches!(&got, Ok(Some((g, _))) if *g == v0), "a stale delete took the newer value: {}",
+        fmt!("{:?}", got).chars().take(300).collect::<String>());
+    Ok(())
+}

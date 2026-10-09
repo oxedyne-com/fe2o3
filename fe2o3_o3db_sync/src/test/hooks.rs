@@ -17,11 +17,12 @@ use std::{
     time::Duration,
 };
 
-// What a delete does with its tombstones, in order, for a test that counts rounds (QA A2-1).
+// What a delete does with its tombstones, in order, for a test that checks a chunked value's
+// chunks are retired only after its head tombstone is durable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Step {
-    Sent,   // a tombstone is dispatched
-    Waited, // the delete begins to wait for one tombstone's answer
+    Sent,       // a tombstone is dispatched
+    Durable,    // a write's head is durable, and what it replaced may be retired
 }
 
 static TRACING:  AtomicBool    = AtomicBool::new(false);
@@ -39,6 +40,7 @@ static READ_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a reade
 static TOMB_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk tombstone
 static CHUNK_DELAY_MS:   AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk
 static LIST_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a directory's listing and its opens
+static RETIRE_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before a store reads its key back to retire
 static SUP_PANICS:       AtomicBool = AtomicBool::new(false); // the supervisor panics starting up
 static BARRIER_FAILS:    AtomicBool = AtomicBool::new(false); // every durability barrier fails
 static BARRIERS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
@@ -125,6 +127,13 @@ pub fn set_chunk_tombstone_delay(d: Duration) {
 /// listed.
 pub fn set_list_delay(d: Duration) {
     LIST_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Holds a store this long once its head is durable and before it reads its key back to choose the
+/// chunk set to retire, so that a read can be made while a delete or an overwrite is between the
+/// two.
+pub fn set_retire_delay(d: Duration) {
+    RETIRE_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
 
 /// Makes the supervisor panic once it has brought the bots up, before the database is ready, as a
@@ -237,6 +246,10 @@ pub(crate) fn chunk_insert_delay(cind: Option<usize>) {
 
 pub(crate) fn list_delay() {
     pause(&LIST_DELAY_MS);
+}
+
+pub(crate) fn retire_delay() {
+    pause(&RETIRE_DELAY_MS);
 }
 
 pub(crate) fn supervisor_panic() {

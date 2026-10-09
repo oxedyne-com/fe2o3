@@ -559,46 +559,20 @@ impl<
     )
         -> Outcome<Begun<UIDL, UID, ENC, KH>>
     {
-        // A store of the deleted marker is a delete by another road, the one the distributed
-        // adapters erase by, and it supersedes only the bunch key.  The chunks of a chunked value
-        // live under keys of their own, so they are retired here, as `delete` retires them, or
-        // their bytes would stay live in the data files for ever.
-        let deleted = matches!(&v, Dat::Usr(kind, _) if *kind == id::usr_kind_id_deleted());
-        // Any other store over a chunked value leaves the old chunks live too, since every write
-        // has a chunk set of its own.  They are retired once the new value is durable, and not
-        // before: retired first, a crash would leave the old bunch key naming chunks that are gone.
-        let old = if deleted { None } else { res!(self.chunk_set_of(&k, schms2)) };
+        // Every write has a chunk set of its own, so a store over a chunked value leaves the old
+        // chunks live under keys of their own.  They are retired once the new value is durable,
+        // and not before: retired first, a crash would leave the old bunch key naming chunks that
+        // are gone, and a reader would find them gone while that key is still current.  A store
+        // of the deleted marker, the road the distributed adapters erase by, is no different.
+        let old = res!(self.chunk_set_of(&k, schms2));
         let (kbuf, vbuf) = res!(Encode::encode_dat(k.clone(), v));
         let (msgs, datkeys) = res!(self.prepare_write_keyed(kbuf, vbuf, user, schms2, resp.clone(), None));
         let nchunks = msgs.len();
         // Every tombstone this store sends is stamped with the store's own time (see
         // `tombstone_chunk_key_at`).
         let meta = res!(Self::write_meta(&msgs));
-        if deleted {
-            // The marker goes out beside the tombstones of the chunks it leaves, and their
-            // answers are awaited once all are sent.  It is one record and has no chunks of its
-            // own to wait for.
-            let retiring = res!(self.reclaim_chunks_on_delete(&k, &meta, schms2));
-            if resp.is_some() {
-                res!(resp.send(OzoneMsg::Chunks(nchunks)));
-            }
-            res!(self.store_bytes(msgs));
-            if let Some((pkey, waits)) = retiring {
-                if let Err(e) = self.await_retired(&k, &pkey, waits) {
-                    let e = err!(e,
-                        "{}: Deleting {:?}: its tombstones were sent together, and the bunch \
-                        key may have been deleted although a chunk was not confirmed retired.  \
-                        The delete can be repeated while the bunch key is live, and chunks \
-                        left behind wait for the orphan sweep.",
-                        self.ozid(), k;
-                        Write);
-                    if resp.is_none() {
-                        return Err(e);
-                    }
-                    res!(resp.send(OzoneMsg::Error(e)));
-                }
-            }
-            return Ok(Begun::Done(nchunks));
+        if resp.is_some() {
+            res!(resp.send(OzoneMsg::Chunks(nchunks)));
         }
         let (head, chunks) = res!(Self::head_and_chunks(msgs));
         let mut pending = res!(PendingStore::new(self, k, old, &datkeys, meta, schms2, resp, head, chunks));
@@ -646,6 +620,9 @@ impl<
         let nchunks = msgs.len();
         let meta = res!(Self::write_meta(&msgs));
         let (head, chunks) = res!(Self::head_and_chunks(msgs));
+        if resp.is_some() {
+            res!(resp.send(OzoneMsg::Chunks(nchunks)));
+        }
         let mut pending = res!(PendingStore::new(self, k, None, &[], meta, schms2, resp, head, chunks));
         if !res!(pending.start(self)) {
             res!(pending.run(self));
@@ -867,6 +844,11 @@ impl<
         })
     }
 
+    /// Deletes `k` by writing a tombstone over it.  A delete is a store with no chunks: over a
+    /// chunked value it waits for its tombstone to be durable, reads the key back, and only then
+    /// retires the value's chunks, if the key no longer names them.  A chunk tombstone that fails
+    /// after that is logged and its chunk left to the orphan sweep, as for a store, and does not
+    /// fail the delete.
     pub fn delete_using_responder(
         &self,
         k:          &Dat,
@@ -876,98 +858,45 @@ impl<
     )
         -> Outcome<()>
     {
-        // 0. Stamp the delete once.  A delete removes what existed when it began: every tombstone
-        //    it sends, the bunch key's and the chunks', carries this time, and the cache keeps the
-        //    newer of two records of a key.  A value stored after the delete began is newer than
-        //    all of them, so it survives whole, where tombstones stamped as each was sent would
-        //    have taken the chunks it shares with the value deleted (a store of the same length
-        //    writes the same chunk keys) and left its bunch key to the later tombstone.
+        // 0. The chunked value being deleted, if any, read before the delete is stamped, as a
+        //    store reads what it replaces.
+        let pred = res!(self.chunk_set_of(k, schms2));
+
+        // 1. Stamp the delete once.  A delete removes what existed when it began: its tombstone,
+        //    and those of the chunks it retires, carry this time or later, and the cache keeps the
+        //    newer of two records of a key, so a value stored after the delete began survives it.
         let mut meta = Meta::new(user);
         meta.time = res!(write_stamp());
 
-        // 1. Normalise the key.  The cache hash belongs to the stored record, not merely to the
+        // 2. Normalise the key.  The cache hash belongs to the stored record, not merely to the
         //    routing decision, so it is carried through to the writer rather than dropped.
         let (kstored, cbwind, chash) = res!(self.ozone_key_dat(k, schms2));
 
-        // 1a. If the value is chunked, the tombstone on the user key below supersedes only the
-        //     bunch key; the chunk records live under their own keys and would leak forever (the
-        //     whole reason a chunked value's chunks are never rewritten on delete).  So read the
-        //     current bunch key, reconstruct each chunk key from the set_id it stores -- random
-        //     for a pre-upgrade value, key-derived for a new one, either way exactly what
-        //     `fetch_chunks` reconstructs to read them -- and tombstone each so the ordinary
-        //     supersession path reclaims them.  Each carries a responder of its own, so that a
-        //     failure names its chunk.  They are sent together with the bunch key's tombstone
-        //     below, and awaited after it, so that the delete costs one durability round and not
-        //     two.  The read is confined to the delete path, which is rare relative to writes,
-        //     and only chunked values pay the fan-out.
-        let retiring = res!(self.reclaim_chunks_on_delete(k, &meta, schms2));
-
-        // 2. The value we use to indicate deletion is an unencrypted custom usr type.
+        // 3. The value we use to indicate deletion is an unencrypted custom usr type, framed
+        //    through the same encoder an insertion goes through.
         let v = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
         let vstored = res!(v.as_bytes());
-
-        // 3. Select a zone writer bot.
-        let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, cbwind.zind()));
-        let (bot, bpind) = wbots.choose_bot(&ChooseBot::Randomly);
-
-        // 4. Frame the tombstone through the same encoder an insertion goes through.
         let msg = res!(Self::package_write(
             KeyVal {
                 key:    Key::Complete(kstored),
                 val:    vstored,
                 chash,
-                meta,
+                meta:   meta.clone(),
                 cbpind: **cbwind.bpind(),
             },
-            resp,
+            resp.clone(),
             self.schemes().checksummer().clone(),
         ));
 
-        // 5. Send write request, with responder.
+        // 4. Publish it, then retire.  Without a chunked predecessor the tombstone goes out with
+        //    the caller's responder and nothing is awaited here.
         hooks::trace(hooks::Step::Sent);
-        if let Err(e) = bot.send(msg) {
-            return Err(err!(e,
-                "{}: While sending delete request to wbot {}.",
-                self.ozid(), WorkerInd::new(*cbwind.zind(), bpind);
-                Channel, Write));
-        }
-
-        // 6. Wait for the chunk tombstones, sent before the bunch key's and answered beside it.  A
-        //    delete that returns Ok has retired every chunk, and one that could not says which.
-        if let Some((pkey, waits)) = retiring {
-            if let Err(e) = self.await_retired(k, &pkey, waits) {
-                return Err(err!(e,
-                    "{}: Deleting {:?}: its tombstones were sent together, and the bunch key may \
-                    have been deleted although a chunk was not confirmed retired.  The delete can \
-                    be repeated while the bunch key is live, and chunks left behind wait for the \
-                    orphan sweep.",
-                    self.ozid(), k;
-                    Write));
-            }
+        let mut pending = res!(PendingStore::new(
+            self, k.clone(), pred, &[], meta, schms2, resp, (msg, *cbwind.zind()), Vec::new()));
+        if !res!(pending.start(self)) {
+            res!(pending.run(self));
         }
         Ok(())
-    }
-
-    /// Reads the current value at `k` and, if it is chunked, sends a tombstone for every chunk
-    /// record, stamped with the time of `meta`, so the collector reclaims them.  Nothing is
-    /// awaited: the part key and the waits come back for `await_retired`, so that the caller can
-    /// send its own tombstone before waiting.  `None` for an unchunked or absent value.  Chunk
-    /// keys are reconstructed from the part key exactly as `fetch_chunks` does, so this works for
-    /// values written under either the old random set_id or the new key-derived one.
-    fn reclaim_chunks_on_delete(
-        &self,
-        k:      &Dat,
-        meta:   &Meta<UIDL, UID>,
-        schms2: Option<&RestSchemesOverride<ENC, KH>>,
-    )
-        -> Outcome<Option<(PartKey, Vec<(u64, Responder<UIDL, UID, ENC, KH>)>)>>
-    {
-        let pkey = match res!(self.chunk_set_of(k, schms2)) {
-            Some((pkey, _)) => pkey,
-            None            => return Ok(None), // Not chunked, or the key is absent: nothing extra to reclaim.
-        };
-        let waits = res!(self.send_retires(&pkey, meta, schms2, None));
-        Ok(Some((pkey, waits)))
     }
 
     /// The part key of the value now at `k`, when that value is chunked, with the metadata of
@@ -997,58 +926,22 @@ impl<
         ])).collect()
     }
 
-    /// Sends a tombstone for each chunk record of the value `pkey` names, and returns the
-    /// responder to wait on for each, with the chunk's number.  Each has its own responder so
-    /// that a failure names its chunk, unless `shared` is given, in which case every tombstone
-    /// answers to it.
+    /// Sends a tombstone for each chunk record of the value `pkey` names, every one answering to
+    /// `resp`, and returns how many were sent.
     pub(crate) fn send_retires(
         &self,
         pkey:   &PartKey,
         meta:   &Meta<UIDL, UID>,
         schms2: Option<&RestSchemesOverride<ENC, KH>>,
-        shared: Option<&Responder<UIDL, UID, ENC, KH>>,
+        resp:   &Responder<UIDL, UID, ENC, KH>,
     )
-        -> Outcome<Vec<(u64, Responder<UIDL, UID, ENC, KH>)>>
+        -> Outcome<usize>
     {
-        let mut waits = Vec::new();
-        for (i, ck) in Self::chunk_keys_of(pkey).into_iter().enumerate() {
-            let resp = match shared {
-                Some(resp) => resp.clone(),
-                None => self.responder(),
-            };
-            res!(self.tombstone_chunk_key_at(&ck, meta.clone(), schms2, resp.clone()));
-            waits.push(((i + 1) as u64, resp));
+        let cks = Self::chunk_keys_of(pkey);
+        for ck in &cks {
+            res!(self.tombstone_chunk_key_at(ck, meta.clone(), schms2, resp.clone()));
         }
-        Ok(waits)
-    }
-
-    /// Waits until each of the tombstones `send_retires` sent is answered.
-    fn await_retired(
-        &self,
-        k:      &Dat,
-        pkey:   &PartKey,
-        waits:  Vec<(u64, Responder<UIDL, UID, ENC, KH>)>,
-    )
-        -> Outcome<()>
-    {
-        let n = pkey.num_parts();
-        for (i, resp) in waits {
-            hooks::trace(hooks::Step::Waited);
-            // Passed on with its own tags, so a write that landed unconfirmed can be told from one
-            // that did not.
-            if let Err(e) = resp.recv_write_acks(
-                1,
-                constant::USER_REQUEST_TIMEOUT,
-                constant::DURABILITY_TIMEOUT,
-            ) {
-                return Err(err!(e,
-                    "{}: Retiring the chunks of {:?}: the tombstone of chunk {} of {} was not \
-                    acknowledged, so the value's chunks are not all retired.",
-                    self.ozid(), k, i, n;
-                    Write));
-            }
-        }
-        Ok(())
+        Ok(cks.len())
     }
 
     // The metadata of a write prepared by `prepare_write_keyed`: every record of it carries the

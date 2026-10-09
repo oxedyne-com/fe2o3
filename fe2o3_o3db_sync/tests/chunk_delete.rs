@@ -1,6 +1,9 @@
 //! A delete of a chunked value waits for the tombstones of its chunks and fails if one fails
 //! (A3 R2, 2026-10-08).  The chunk tombstones were sent with no responder, so `delete` returned on
 //! the bunch key's answer alone, with the chunks possibly unwritten and a failure only logged.
+//! Since fix A (2026-10-09) a delete is a store with no chunks: the chunks are retired only once
+//! the head tombstone is durable, and a chunk tombstone that fails after that is left to the
+//! orphan sweep rather than failing the delete.
 //! The hooks used are process-wide, so the tests here take a lock and put each back.
 
 mod gc_pair;
@@ -132,8 +135,11 @@ fn chunked_delete_waits_for_chunks() -> Outcome<()> {
     Ok(())
 }
 
+// A delete whose head tombstone is not confirmed retires nothing: the value's chunks stay live,
+// so a bunch key that did not land still reads whole.  Every sync fails, so no tombstone is
+// confirmed; the old order sent the chunks' beside the head's and took them all.
 #[test]
-fn chunk_tombstone_failure_fails_delete() -> Outcome<()> {
+fn head_tombstone_failure_retires_nothing() -> Outcome<()> {
     log_set_level!("error");
     let _lock = match HOOKS.lock() { Ok(g) => g, Err(p) => p.into_inner() };
     let db = res!(open("./test_db_chunk_delete_fail"));
@@ -142,19 +148,15 @@ fn chunk_tombstone_failure_fails_delete() -> Outcome<()> {
     res!(db.insert(k.clone(), big(9), user, None));
     let cks = res!(chunk_keys(&db, &k));
 
-    // The disk fails every sync, so no tombstone is confirmed.  The bunch key's would fail too, but
-    // with words of its own: the error must name a chunk, which only the chunk wait can.
     hooks::set_barrier_failure(true);
     let result = db.delete(&k, user, None);
     hooks::set_barrier_failure(false);
-    let e = match result {
-        Err(e) => e,
-        Ok(b) => return Err(err!("A delete whose chunk tombstones failed returned Ok({}).", b; Test, Invalid)),
-    };
-    let text = fmt!("{}", e);
-    msg!("The delete failed with: {}", text.chars().take(400).collect::<String>());
-    assert!(text.contains(&fmt!("chunk 1 of {}", cks.len())),
-        "the error does not name the failed chunk: {}", text.chars().take(400).collect::<String>());
+    if let Ok(b) = result {
+        return Err(err!("A delete whose head tombstone failed returned Ok({}).", b; Test, Invalid));
+    }
+    for (i, ck) in cks.iter().enumerate() {
+        assert!(!res!(retired(&db, ck)), "chunk {} was retired although the head tombstone failed", i + 1);
+    }
     res!(db.close());
     Ok(())
 }
@@ -201,11 +203,11 @@ fn delete_does_not_erase_a_later_overwrite() -> Outcome<()> {
     Ok(())
 }
 
-// A chunked delete dispatches every tombstone, the chunks' and the bunch key's, before it waits
-// for any: one round, not the chunks' and then the bunch key's (QA A2-1).  Counted from the order
-// of the steps, not timed.
+// A chunked delete sends its head tombstone, waits for it to be durable, and only then sends the
+// tombstones of the chunks: sent together, the chunks' could land first and a reader find a chunk
+// gone under a current bunch key (fix A).  Counted from the order of the steps, not timed.
 #[test]
-fn chunked_delete_is_one_round() -> Outcome<()> {
+fn chunked_delete_retires_after_its_head_is_durable() -> Outcome<()> {
     log_set_level!("error");
     let _lock = match HOOKS.lock() { Ok(g) => g, Err(p) => p.into_inner() };
     let db = res!(open("./test_db_chunk_delete_round"));
@@ -221,12 +223,9 @@ fn chunked_delete_is_one_round() -> Outcome<()> {
     assert!(existed, "the delete did not find the value");
     let sent = steps.iter().filter(|s| **s == hooks::Step::Sent).count();
     assert_eq!(sent, cks.len() + 1, "expected a tombstone for each chunk and the bunch key: {:?}", steps);
-    let first_wait = steps.iter().position(|s| *s == hooks::Step::Waited);
-    let last_send = steps.iter().rposition(|s| *s == hooks::Step::Sent);
-    match (first_wait, last_send) {
-        (Some(w), Some(l)) => assert!(l < w, "the delete waited before it had sent every tombstone: {:?}", steps),
-        _ => return Err(err!("The delete recorded no wait: {:?}", steps; Test, Missing)),
-    }
+    let mut want = vec![hooks::Step::Sent, hooks::Step::Durable];
+    want.extend(cks.iter().map(|_| hooks::Step::Sent));
+    assert_eq!(steps, want, "the chunks were not retired after the head tombstone was durable");
     for ck in &cks {
         assert!(res!(retired(&db, ck)), "chunk {:?} is still live when delete returned", ck);
     }

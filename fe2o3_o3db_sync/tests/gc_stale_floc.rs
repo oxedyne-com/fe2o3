@@ -640,9 +640,9 @@ fn del_val(i: usize) -> Dat { value_of((i as u8).wrapping_mul(7).wrapping_add(3)
 fn chunked_survivor_key() -> Dat { dat!("gcrace:chunksurv") }
 fn chunked_survivor_val() -> Dat { value_of(0xa5, CHUNKED_BYTES) }
 
-/// A delete of a chunked key travels the same read path as a get: `delete_using_responder` calls
-/// `reclaim_chunks_on_delete`, which fetches the bunch key through a reader bot before it can
-/// tombstone the chunk records it names.  If that bunch-key record lives in a file a collection is
+/// A delete of a chunked key travels the same read path as a get: `delete_using_responder` reads
+/// the bunch key through a reader bot, through `chunk_set_of`, before it can tombstone the chunk
+/// records it names.  If that bunch-key record lives in a file a collection is
 /// renaming underneath the reader, the fetch is exposed to exactly the stale-handle race that
 /// `read_during_compaction` drives -- and a failed fetch there fails the delete with `[Checksum]`.
 /// This case deletes a set of chunked keys while a supersession burst compacts the files their
@@ -717,8 +717,8 @@ fn delete_during_compaction() -> Outcome<()> {
         if nc < 2 {
             let _ = db.shutdown();
             return Err(err!(
-                "[{}] Delete-target {} stored in {} chunk(s); it must chunk so its delete drives \
-                reclaim_chunks_on_delete.", label, i, nc;
+                "[{}] Delete-target {} stored in {} chunk(s); it must chunk so its delete reads \
+                its bunch key.", label, i, nc;
                 Test, Size));
         }
     }

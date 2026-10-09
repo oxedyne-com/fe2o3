@@ -11,6 +11,11 @@
 //! is durable the store reads the key back: if its own value is there, the value it replaced is
 //! retired; if a newer put or a delete won, it retires its own chunks instead.  Its set is held in
 //! the database's pending sets until then, so the orphan sweep leaves it alone.
+//!
+//! A delete is a store with no chunks (fix A, 2026-10-09).  It once tombstoned the chunks of the
+//! value it deleted beside its head tombstone, and the chunks' often landed first: a reader then
+//! found a chunk gone under a bunch key that was still current, which it must take for real loss.
+//! A set is retired only once a durable record has displaced the head that names it.
 
 use crate::{
     prelude::*,
@@ -26,6 +31,7 @@ use crate::{
             Responder,
         },
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_core::channels::{
@@ -178,18 +184,16 @@ impl<
     /// The time left before the silence that fails the step in hand.
     pub fn left(&self) -> Duration { self.wait.left() }
 
-    /// Counts the records to the caller and sends the chunks, each answering to the store's own
-    /// responder; the caller hears of them when all are in.  A value without chunks goes straight
-    /// to its bunch key.  Returns whether the store is already complete.
+    /// Sends the chunks, each answering to the store's own responder; the caller hears of them
+    /// when all are in.  A value without chunks goes straight to its bunch key.  A store tells its
+    /// caller the count of records before this, and a delete, whose caller expects one record's
+    /// answers, does not.  Returns whether the store is already complete.
     pub fn start<PR: Hasher, CS: Checksummer>(
         &mut self,
         api: &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
     )
         -> Outcome<bool>
     {
-        if self.resp.is_some() {
-            res!(self.resp.send(OzoneMsg::Chunks(self.nchunks)));
-        }
         let mut chunks = mem::take(&mut self.chunks);
         if chunks.is_empty() {
             return self.publish(api);
@@ -363,6 +367,8 @@ impl<
         if self.pred.is_none() && self.set.is_none() {
             return self.answer();
         }
+        hooks::trace(hooks::Step::Durable);
+        hooks::retire_delay();
         let cur = match api.chunk_set_of(&self.k, self.schms2.as_ref()) {
             Ok(cur) => cur.map(|(pkey, _)| pkey.set_id()),
             Err(e) => {
@@ -390,8 +396,8 @@ impl<
         self.own = api.responder();
         let mut n = 0;
         for (pkey, tmeta) in &retiring {
-            match api.send_retires(pkey, tmeta, self.schms2.as_ref(), Some(&self.own)) {
-                Ok(waits) => n += waits.len(),
+            match api.send_retires(pkey, tmeta, self.schms2.as_ref(), &self.own) {
+                Ok(sent) => n += sent,
                 Err(e) => {
                     self.not_retired(api, e);
                     break;
