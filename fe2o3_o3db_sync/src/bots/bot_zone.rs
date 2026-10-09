@@ -548,6 +548,9 @@ impl<
         let shards = res!(self.survey_files());
         if zcfg.init_load_caches {
             res!(self.init_caches(shards));
+            // Every record on disk is now in the caches, behind which this arrives, so a chunk
+            // tombstone that superseded nothing there shadows nothing.
+            res!(self.fwd_msg_to_pool(&WorkerType::Cache, OzoneMsg::ReplayDone));
         }
         Ok(())
     }

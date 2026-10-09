@@ -12,7 +12,10 @@ use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
 };
-use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_iop_db::api::{
+    Database,
+    Meta,
+};
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_o3db_sync::{
     api::OzoneApi,
@@ -20,7 +23,18 @@ use oxedyne_fe2o3_o3db_sync::{
         cfg::OzoneConfig,
         constant,
     },
+    api::CompactReport,
     comm::response::Wait,
+    data::cache::{
+        Cache,
+        CacheEntry,
+        is_chunk_key,
+    },
+    file::{
+        floc::FileLocation,
+        state::DataState,
+        stored::RecordDigest,
+    },
     sweep,
     test::{
         hooks,
@@ -34,7 +48,10 @@ use oxedyne_fe2o3_o3db_sync::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     path::Path,
     sync::{
         Mutex,
@@ -428,5 +445,375 @@ fn stale_delete_keeps_the_newer_value() -> Outcome<()> {
     res!(del);
     assert!(matches!(&got, Ok(Some((g, _))) if *g == v0), "a stale delete took the newer value: {}",
         fmt!("{:?}", got).chars().take(300).collect::<String>());
+    Ok(())
+}
+
+// Fix B (2026-10-09): a chunk tombstone is forgotten once every older record of its key is durably
+// gone, so a store whose chunked values are overwritten does not grow its caches for ever.
+
+const VLEN: usize = 1_100; // three chunks of 400
+
+fn cfg_b() -> Outcome<OzoneConfig> {
+    let mut c = res!(cfg());
+    c.data_file_max_bytes = 4_000;
+    c.num_wbots_per_zone  = 1; // each writer has a live file of its own, so one puts a value in one file
+    Ok(c)
+}
+
+fn start_gc(dir: &str, wipe: bool) -> Outcome<TestDb> {
+    log_set_level!("error");
+    if wipe {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    res!(std::fs::create_dir_all(dir));
+    let root = res!(Path::new(dir).canonicalize());
+    let db = res!(setup::start_db(root, Some(res!(cfg_b())), schemes(), None, true, wipe));
+    // Only `compact_now` collects, so a test places its tombstones and holds before any collection,
+    // and the reports count every collection and deletion.
+    res!(db.api().activate_gc(false));
+    Ok(db)
+}
+
+#[derive(Debug, Default)]
+struct Census {
+    chunks:     usize,                              // chunk-key cache entries
+    tombs:      BTreeMap<Vec<u8>, FileLocation>,    // chunk tombstones, where they lie
+    files:      BTreeSet<u32>,                      // files of the live chunk entries
+    entries:    usize,                              // all cache entries
+    anc:        usize,                              // ancillary bytes of every cache
+}
+
+fn census(db: &TestDb) -> Outcome<Census> {
+    res!(db.api().settle_for_test(Duration::from_secs(20)));
+    let mut c = Census::default();
+    for (_, cache) in res!(db.api().collect_caches(scan_wait())) {
+        c.entries += cache.map().len();
+        c.anc += cache.get_ancillary_size();
+        let tombs = cache.tomb_tracker().tombs();
+        for (k, e) in cache.map() {
+            if !is_chunk_key(k) { continue; }
+            c.chunks += 1;
+            if let CacheEntry::LocatedValue(mloc, _) = e {
+                match tombs.contains_key(k) {
+                    true    => { c.tombs.insert(k.clone(), *mloc.file_location()); },
+                    false   => { c.files.insert(mloc.file_number()); },
+                }
+            }
+        }
+    }
+    Ok(c)
+}
+
+// Every cache entry is one current record in the file states, and nothing waits on a record.
+fn accounted(db: &TestDb, c: &Census, label: &str) -> Outcome<()> {
+    let mut cur = 0;
+    for (_, fmap) in res!(db.api().collect_file_states(scan_wait())) {
+        for (fnum, fstat) in fmap.map() {
+            assert!(fstat.pending_old_empty(), "{}: file {} has parked supersessions", label, fnum);
+            cur += fstat.data_map().values().filter(|d| **d == DataState::Cur).count();
+        }
+    }
+    assert_eq!(cur, c.entries, "{}: current records against cache entries", label);
+    Ok(())
+}
+
+// Compacts until quiet: a dropped tombstone is flagged old only after its shadowed records go.
+fn quiet(db: &TestDb) -> Outcome<CompactReport> {
+    let mut sum = CompactReport::default();
+    for _ in 0..3 {
+        res!(db.api().settle_for_test(Duration::from_secs(20)));
+        let r = res!(db.api().compact_now(Duration::from_secs(60)));
+        sum.files_collected += r.files_collected;
+        sum.files_deleted   += r.files_deleted;
+        pause(Duration::from_millis(300));
+    }
+    Ok(sum)
+}
+
+// As `quiet`, with a file held, which keeps its old bytes and so cannot settle.
+fn quiet_held(db: &TestDb) {
+    for _ in 0..2 {
+        let _ = db.api().settle_for_test(Duration::from_secs(20));
+        let _ = db.api().compact_now(Duration::from_secs(3));
+        pause(Duration::from_millis(300));
+    }
+}
+
+fn filler(db: &TestDb, tag: &str, n: usize, seed: u8) -> Outcome<()> {
+    for i in 0..n {
+        res!(db.insert(dat!(fmt!("filler {} {:03}", tag, i)), val(100, seed), Uid::default(), None));
+    }
+    Ok(())
+}
+
+fn reads(db: &TestDb, k: &Dat, want: &Dat) -> Outcome<bool> {
+    Ok(matches!(res!(db.get(k, None)), Some((v, _)) if v == *want))
+}
+
+fn accumulate(dir: &str, n: usize) -> Outcome<(usize, Census, CompactReport)> {
+    let db = res!(start_gc(dir, true));
+    let k = dat!("accumulate");
+    res!(db.insert(k.clone(), val(VLEN, 0), Uid::default(), None));
+    let base = res!(census(&db)).chunks;
+    // Each compaction seals the value just written in a file of its own, which goes all-old once
+    // the next overwrite lands, so its deletion, and not only a collection, reports the records
+    // a tombstone shadows gone.
+    let mut rep = CompactReport::default();
+    for i in 1..=n {
+        res!(db.insert(k.clone(), val(VLEN, i as u8), Uid::default(), None));
+        let r = res!(db.api().compact_now(Duration::from_secs(60)));
+        rep.files_collected += r.files_collected;
+        rep.files_deleted   += r.files_deleted;
+    }
+    let r = res!(quiet(&db));
+    rep.files_collected += r.files_collected;
+    rep.files_deleted   += r.files_deleted;
+    let c = res!(census(&db));
+    let acc = accounted(&db, &c, "accumulate");
+    let ok = res!(reads(&db, &k, &val(VLEN, n as u8)));
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    res!(acc);
+    assert!(ok, "the last value does not read back");
+    Ok((base, c, rep))
+}
+
+#[test]
+fn chunk_tombstones_do_not_accumulate() -> Outcome<()> {
+    let _lock = lock();
+    let (base1, c1, r1) = res!(accumulate("./test_db_chunk_set_accumulate_a", 140));
+    let (base2, c2, r2) = res!(accumulate("./test_db_chunk_set_accumulate_b", 280));
+    assert!(base1 >= 2, "the value was not chunked");
+    assert_eq!(c1.chunks, base1, "140 overwrites leave {} tombstones", c1.tombs.len());
+    assert_eq!(c2.chunks, base2, "280 overwrites leave {} tombstones", c2.tombs.len());
+    assert!(c2.anc <= c1.anc + 256, "the ancillary size grows with overwrites: {} then {}", c1.anc, c2.anc);
+    assert!(r1.files_collected + r2.files_collected > 0, "no file was collected");
+    assert!(r1.files_deleted + r2.files_deleted > 0, "no all-old file was deleted");
+    Ok(())
+}
+
+// A value, sealed in a file of its own, overwritten with its tombstones in later files.
+fn overwritten(db: &TestDb, k: &Dat) -> Outcome<(usize, BTreeSet<u32>)> {
+    res!(db.insert(k.clone(), val(VLEN, 1), Uid::default(), None));
+    let c0 = res!(census(db));
+    res!(filler(db, "a", 40, 1));
+    res!(db.insert(k.clone(), val(VLEN, 2), Uid::default(), None));
+    res!(filler(db, "b", 40, 1));
+    Ok((c0.chunks, c0.files))
+}
+
+#[test]
+fn failed_dir_sync_keeps_tombstone() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_set_dir_sync";
+    let db = res!(start_gc(dir, true));
+    let k = dat!("dir sync");
+    let (base, _) = res!(overwritten(&db, &k));
+    hooks::set_dir_sync_failure(true);
+    quiet_held(&db);
+    let c = census(&db);
+    let acc = match &c { Ok(c) => accounted(&db, c, "dir sync"), Err(_) => Ok(()) };
+    hooks::set_dir_sync_failure(false);
+    let ok = reads(&db, &k, &val(VLEN, 2));
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    let c = res!(c);
+    res!(acc);
+    assert!(res!(ok), "the value does not read back");
+    assert!(c.tombs.len() >= base, "{} tombstones kept after a failed directory sync, {} wanted",
+        c.tombs.len(), base);
+    Ok(())
+}
+
+#[test]
+fn lone_chunk_tombstones_drop_at_restart() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_set_lone";
+    let db = res!(start_gc(dir, true));
+    let k = dat!("lone");
+    let (base, _) = res!(overwritten(&db, &k));
+    hooks::set_dir_sync_failure(true);
+    quiet_held(&db);
+    let before = census(&db);
+    hooks::set_dir_sync_failure(false);
+    res!(db.close());
+    let before = res!(before);
+    let db = res!(start_gc(dir, false));
+    let after = census(&db);
+    let rep = quiet(&db);
+    let fin = census(&db);
+    let acc = match &fin { Ok(c) => accounted(&db, c, "lone"), Err(_) => Ok(()) };
+    let ok = reads(&db, &k, &val(VLEN, 2));
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    let (after, fin) = (res!(after), res!(fin));
+    res!(rep);
+    res!(acc);
+    assert!(res!(ok), "the value does not read back");
+    assert!(before.tombs.len() >= base, "the setup kept no tombstones");
+    assert_eq!(after.chunks, base, "lone tombstones survived the restart: {}", after.tombs.len());
+    assert_eq!(fin.chunks, base, "tombstones after compaction: {}", fin.tombs.len());
+    Ok(())
+}
+
+#[test]
+fn tombstone_outlives_uncollected_record() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_set_outlives";
+    let db = res!(start_gc(dir, true));
+    let k = dat!("outlives");
+    let (base, files) = res!(overwritten(&db, &k));
+    assert_eq!(files.len(), 1, "the first value is not in one file: {:?}", files);
+    let f = files.iter().next().copied();
+    hooks::set_collect_fails_for(f);
+    quiet_held(&db);
+    let held = census(&db);
+    res!(db.close());
+    let db = res!(start_gc(dir, false));
+    let restarted = census(&db);
+    hooks::set_collect_fails_for(None);
+    let rep = quiet(&db);
+    let fin = census(&db);
+    let acc = match &fin { Ok(c) => accounted(&db, c, "outlives"), Err(_) => Ok(()) };
+    let ok = reads(&db, &k, &val(VLEN, 2));
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    let (held, restarted, fin) = (res!(held), res!(restarted), res!(fin));
+    res!(rep);
+    res!(acc);
+    assert!(res!(ok), "the value does not read back");
+    assert!(held.tombs.len() >= base, "a tombstone dropped while its record is on disk: {}", held.tombs.len());
+    assert!(restarted.tombs.len() >= base, "a tombstone dropped at a restart while its record is on disk: {}",
+        restarted.tombs.len());
+    assert_eq!(fin.chunks, base, "tombstones after the hold: {}", fin.tombs.len());
+    Ok(())
+}
+
+#[test]
+fn reanchored_tombstone_still_drops() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_set_reanchored";
+    let db = res!(start_gc(dir, true));
+    let k = dat!("reanchored");
+    res!(db.insert(k.clone(), val(VLEN, 1), Uid::default(), None));
+    let c0 = res!(census(&db));
+    assert_eq!(c0.files.len(), 1, "the first value is not in one file: {:?}", c0.files);
+    res!(filler(&db, "a", 40, 1));
+    // Records ahead of the tombstones in their file, then made old, so that collecting that file
+    // carries the tombstones to new offsets.
+    res!(filler(&db, "b", 8, 1));
+    res!(db.insert(k.clone(), val(VLEN, 2), Uid::default(), None));
+    res!(filler(&db, "b", 8, 2));
+    res!(filler(&db, "c", 40, 1));
+    let placed = res!(census(&db));
+    hooks::set_collect_fails_for(c0.files.iter().next().copied());
+    quiet_held(&db);
+    let held = census(&db);
+    hooks::set_collect_fails_for(None);
+    let rep = quiet(&db);
+    let fin = census(&db);
+    let acc = match &fin { Ok(c) => accounted(&db, c, "reanchored"), Err(_) => Ok(()) };
+    let ok = reads(&db, &k, &val(VLEN, 2));
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    let (held, fin) = (res!(held), res!(fin));
+    res!(rep);
+    res!(acc);
+    assert!(res!(ok), "the value does not read back");
+    let moved = placed.tombs.iter().filter(|(t, floc)| match held.tombs.get(*t) {
+        Some(now) => now.start != floc.start,
+        None => false,
+    }).count();
+    assert!(moved > 0, "no tombstone was carried by a collection: {:?} then {:?}", placed.tombs, held.tombs);
+    assert_eq!(fin.chunks, c0.chunks, "re-anchored tombstones did not drop: {}", fin.tombs.len());
+    Ok(())
+}
+
+#[test]
+fn legacy_tombstone_waits_for_every_older_record() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_set_legacy_wait";
+    let db = res!(start_gc(dir, true));
+    let k = dat!("legacy wait");
+    let (kbuf, _, _) = res!(db.api().ozone_key_dat(&k, None));
+    let legacy = OzoneApi::<{ UID_LEN }, Uid, (), HashScheme, HashScheme, ChecksumScheme>::legacy_chunk_set_id(&kbuf);
+    let mut first = BTreeSet::new();
+    for (seed, tag) in [(1u8, "a"), (2u8, "b")] {
+        let resp = db.api().responder();
+        res!(db.api().store_dat_using_responder_forcing_set_id(
+            k.clone(), val(VLEN, seed), Uid::default(), None, resp.clone(), legacy));
+        res!(resp.recv_store_ack());
+        if seed == 1 {
+            first = res!(census(&db)).files;
+        }
+        res!(filler(&db, tag, 40, seed));
+    }
+    let old = res!(res!(head(&db, &k)).ok_or_else(|| err!("No legacy head."; Test, Missing)));
+    let c0 = res!(census(&db));
+    assert_eq!(first.len(), 1, "the first legacy value is not in one file: {:?}", first);
+    assert!(c0.files.is_disjoint(&first), "the two legacy values share a file");
+    let f1 = first.iter().next().copied();
+    res!(db.insert(k.clone(), val(VLEN, 3), Uid::default(), None));
+    res!(filler(&db, "c", 40, 3));
+    hooks::set_collect_fails_for(f1);
+    quiet_held(&db);
+    let held = census(&db);
+    res!(db.close());
+    let db = res!(start_gc(dir, false));
+    let restarted = census(&db);
+    let report = sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO);
+    let gone = db.api().fetch_chunks(&Dat::Tup5u64(old), None).is_err();
+    hooks::set_collect_fails_for(None);
+    let rep = quiet(&db);
+    let fin = census(&db);
+    let ok = reads(&db, &k, &val(VLEN, 3));
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    let (held, restarted, fin, report) = (res!(held), res!(restarted), res!(fin), res!(report));
+    res!(rep);
+    assert!(res!(ok), "the value does not read back");
+    assert!(held.tombs.len() >= c0.chunks, "a legacy tombstone dropped with an older record on disk: {}",
+        held.tombs.len());
+    assert!(restarted.tombs.len() >= c0.chunks, "a legacy tombstone dropped at the restart: {}",
+        restarted.tombs.len());
+    assert_eq!(report.orphans_found, 0, "a retired legacy chunk came back");
+    assert!(gone, "the legacy value reads back after its retirement");
+    assert_eq!(fin.chunks, c0.chunks, "tombstones after the hold: {}", fin.tombs.len());
+    Ok(())
+}
+
+// A record reported gone before the replay ends drops no tombstone, since an older record of its
+// key may lie in a file not yet replayed.  Driven on a cache directly: the start sequence lets no
+// collection begin before the zone bot sends `ReplayDone`, so no store can reach this order.
+#[test]
+fn no_tombstone_drops_before_replay_done() -> Outcome<()> {
+    type C = Cache<{ UID_LEN }, Uid>;
+    let mut cache = C::new(None);
+    let k = res!(Dat::Tup5u64([1, 2, 3, 4, 5]).to_bytes(Vec::new()));
+    assert!(is_chunk_key(&k), "the key is not a chunk key");
+    let meta = |s: u64| Meta::<{ UID_LEN }, Uid> { time: Timestamp::new(s, 0), user: Uid::default() };
+    let floc = |f: u32| FileLocation { fnum: f, start: 0, klen: k.len() as u64, vlen: 10 };
+    let put = |cache: &mut C, cind: Option<usize>, f: u32, s: u64| -> Outcome<()> {
+        let sup = res!(cache.insert(k.clone(), None, floc(f), meta(s)));
+        cache.note(&k, cind, &floc(f), &meta(s), &sup);
+        Ok(())
+    };
+    let current = |cache: &C| match cache.map().get(&k) {
+        Some(CacheEntry::LocatedValue(mloc, _)) => Some(mloc.meta().time.secs()),
+        _ => None,
+    };
+    // The replay meets a chunk record in file 1, then the tombstone in file 3; file 2 waits.
+    res!(put(&mut cache, Some(0), 1, 1));
+    res!(put(&mut cache, None, 3, 3));
+    let early = res!(cache.records_gone(1, &[res!(RecordDigest::new(&k, &meta(1)))]));
+    assert!(early.is_empty(), "a tombstone dropped before the replay ended: {:?}", early);
+    // File 2's record of the key arrives late, and must not become current.
+    res!(put(&mut cache, Some(0), 2, 2));
+    assert_eq!(current(&cache), Some(3), "a record older than the tombstone became current");
+    let at_end = res!(cache.replay_done());
+    assert!(at_end.is_empty(), "the tombstone dropped with file 2's record unaccounted for");
+    let last = res!(cache.records_gone(2, &[res!(RecordDigest::new(&k, &meta(2)))]));
+    assert_eq!(last.len(), 1, "the tombstone did not drop once its last older record went");
+    assert_eq!(current(&cache), None, "the dropped tombstone is still in the cache");
     Ok(())
 }

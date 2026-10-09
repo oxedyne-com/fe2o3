@@ -49,6 +49,8 @@ static SYNCERS_STOPPED:  AtomicU64  = AtomicU64::new(0);      // stopped by the 
 static PAIR_HAND_FAILS:  AtomicBool = AtomicBool::new(false); // new live pairs cannot be handed over
 static COLLECT_FAILS:    AtomicBool = AtomicBool::new(false); // every collection fails before it commits
 static COLLECTS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
+static COLLECT_FAILS_FOR: AtomicU64 = AtomicU64::new(u64::MAX); // collections of this one file fail
+static DIR_SYNC_FAILS:   AtomicBool = AtomicBool::new(false); // the directory sync after a collection's data rename fails
 static COMPACT_FAILS:    AtomicBool = AtomicBool::new(false); // the zone bots cannot pass on a compaction order
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
@@ -177,6 +179,18 @@ pub fn set_collect_failure(on: bool) {
     COLLECT_FAILS.store(on, Ordering::Relaxed);
 }
 
+/// As `set_collect_failure`, for the collections of one file only, so that its old records stay
+/// on disk while other files are collected.
+pub fn set_collect_fails_for(fnum: Option<u32>) {
+    COLLECT_FAILS_FOR.store(fnum.map_or(u64::MAX, |n| n as u64), Ordering::Relaxed);
+}
+
+/// Makes the directory sync after a collection's data rename fail, so the records the collection
+/// left out are not known to be gone.
+pub fn set_dir_sync_failure(on: bool) {
+    DIR_SYNC_FAILS.store(on, Ordering::Relaxed);
+}
+
 /// Makes every zone bot fail to pass a compaction order on to its file bots, as a zone bot whose
 /// file pool has gone would, so that the call that gave the order can be seen to stop at the
 /// zone bot's error and not wait out its deadline.
@@ -276,12 +290,21 @@ pub(crate) fn pair_hand_fails() -> bool {
 }
 
 /// Is this collection to fail now?  Counted when it is.
-pub(crate) fn collect_fails() -> bool {
-    let fails = COLLECT_FAILS.load(Ordering::Relaxed);
+pub(crate) fn collect_fails(fnum: u32) -> bool {
+    let fails = COLLECT_FAILS.load(Ordering::Relaxed)
+        || COLLECT_FAILS_FOR.load(Ordering::Relaxed) == fnum as u64;
     if fails {
         COLLECTS_FAILED.fetch_add(1, Ordering::Relaxed);
     }
     fails
+}
+
+pub(crate) fn collect_fails_for(fnum: u32) -> bool {
+    COLLECT_FAILS_FOR.load(Ordering::Relaxed) == fnum as u64
+}
+
+pub(crate) fn dir_sync_fails() -> bool {
+    DIR_SYNC_FAILS.load(Ordering::Relaxed)
 }
 
 /// Is the disk to fail this sync?  Counted when it is.

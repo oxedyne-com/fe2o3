@@ -37,8 +37,10 @@ use crate::{
     },
     data::{
         cache::{
+            Cache,
             CacheEntry,
             KeyVal,
+            is_chunk_key,
         },
         choose::ChooseCache,
         core::{
@@ -830,6 +832,19 @@ impl<
     )
         -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>>
     {
+        // A whole key of the chunk form would be taken by a cache for a chunk tombstone, and
+        // forgotten once the chunk records it shadows are gone, so only a tombstone may use it.
+        if let Key::Complete(kbyts) = &kv.key {
+            if is_chunk_key(kbyts) {
+                let tomb = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
+                if kv.val != res!(tomb.as_bytes()) {
+                    return Err(err!(
+                        "The key {:?} has the form of a chunk key, a Dat::Tup5u64, which only \
+                        a chunk tombstone may be written under.", kbyts;
+                        Input, Invalid));
+                }
+            }
+        }
         let klen_cache = kv.key.len();
         let (kstored, vstored, cind, meta, cbpind, _, _) = res!(Encode::encode(kv, csummer));
 
@@ -1613,9 +1628,8 @@ impl<
         Ok(())
     }
 
-    /// Dump all cache contents to the log file.
-    pub fn dump_caches(&self, wait: Wait) -> Outcome<()> {
-        // Gather.
+    /// A copy of every cache, by the bot that holds it.
+    pub fn collect_caches(&self, wait: Wait) -> Outcome<BTreeMap<WorkerInd, Cache<UIDL, UID>>> {
         let resp = self.responder();
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::DumpCacheRequest(resp.clone())
@@ -1640,6 +1654,12 @@ impl<
                     Channel)),
             }
         }
+        Ok(sorted)
+    }
+
+    /// Dump all cache contents to the log file.
+    pub fn dump_caches(&self, wait: Wait) -> Outcome<()> {
+        let sorted = res!(self.collect_caches(wait));
         // Display.
         info!(sync_log::stream(), "Cache dump summary");
         info!(sync_log::stream(), "+-----------+--------------+--------------+");
@@ -1651,6 +1671,10 @@ impl<
                 cache.map().len(),
                 cache.get_size(),
             ); 
+            let tt = cache.tomb_tracker();
+            info!(sync_log::stream(), "{}: {} chunk tombstones, {} keys with older records, \
+                ancillary {} bytes.", wind, tt.tombs().len(), tt.older().len(),
+                cache.get_ancillary_size());
         }
         info!(sync_log::stream(), "+-----------+--------------+--------------+");
         for (wind, cache) in sorted {

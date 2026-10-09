@@ -17,6 +17,7 @@ use crate::{
             FileStateMap,
         },
         stored::RecordDigest,
+        zdir::sync_dir,
     },
     test::hooks,
 };
@@ -661,7 +662,7 @@ impl<
                 }
 
                 // Register data as old.
-                if let Err(e) = fstat.register_old(&floc2.keyval()) {
+                if let Err(e) = fstat.register_old(&floc2.keyval(), *rid) {
                     return Err(err!(e, "{:?}: file {}.", self_id, floc2.file_number(); Data));
                 }
             },
@@ -766,9 +767,11 @@ impl<
         match plan {
             Plan::Hold(hold)    => Ok(Collect::Held(hold)),
             Plan::Declined      => Ok(Collect::Declined),
+            Plan::Delete(_) if hooks::collect_fails_for(fnum) => Ok(Collect::Declined),
             Plan::Delete(size)  => {
                 // [18.2] Just delete the data file and its index file if it has no current data.
                 debug!(sync_log::stream(), "{}: Automated garbage collection for file {}", self_id, fnum);
+                let gone = res!(self.states().get_state(fnum)).old_rids();
                 for ftyp in [FileType::Data, FileType::Index] {
                     let mut path = self.zdir().dir.clone();
                     path.push(ZoneDir::relative_file_path(&ftyp, fnum));
@@ -784,6 +787,24 @@ impl<
                 // The readers cache open handles, and one left on an unlinked file would keep its
                 // bytes allocated for the life of the process, so they are told it has gone.
                 res!(self.notify_file_replaced(fnum, &[FileType::Data, FileType::Index]));
+                // The caches may forget the tombstones that shadowed these records once the
+                // unlinks are durable, and not before.
+                let synced = match hooks::dir_sync_fails() {
+                    true => Err(err!(
+                        "{}: The directory sync after deleting file {} failed on the \
+                        test::hooks::set_dir_sync_failure switch.", self_id, fnum;
+                        IO, File, Write)),
+                    false => sync_dir(&self.zdir().dir),
+                };
+                match synced {
+                    Err(e) => warn!(sync_log::stream(),
+                        "{}: {} The tombstones shadowing the records of deleted file {} are kept.",
+                        self_id, e, fnum),
+                    Ok(()) => if !gone.is_empty() {
+                        let bots = res!(self.cbots());
+                        res!(bots.send_to_all(OzoneMsg::RecordsGone(fnum, gone)));
+                    },
+                }
                 debug!(sync_log::stream(),
                     "{}: All the data in file {} is old, the file has therefore been deleted.",
                     self_id, fnum,

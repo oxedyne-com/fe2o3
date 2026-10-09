@@ -87,6 +87,8 @@ pub enum OzoneMsg<
     MessageCount(usize),
     NewFileStates(FileStateMap),
     ReadFinished(FileNum),
+    RecordsGone(FileNum, Vec<RecordDigest>), // gbot/fbot -> cbot, old records durably off disk
+    ReplayDone,             // zbot -> cbot, the start's replay has filled the cache
     ScheduleOld(FileLocation, RecordDigest, OzoneBotId),
     ShardFileSize(usize, usize),
     UpdateData {

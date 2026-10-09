@@ -9,6 +9,7 @@ use crate::{
     file::stored::RecordDigest,
 };
 
+use oxedyne_fe2o3_core::byte::FromBytes;
 use oxedyne_fe2o3_data::time::Timestamp;
 use oxedyne_fe2o3_iop_db::api::Meta;
 use oxedyne_fe2o3_jdat::{
@@ -17,7 +18,10 @@ use oxedyne_fe2o3_jdat::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     fmt,
     marker::PhantomData,
 };
@@ -147,6 +151,98 @@ pub struct Cache<
     lim:    usize, // limit on size in [MB]
     cwt:    CacheWriteTracker,
     csizes: CacheSizes<UIDL, UID>,
+    tombs:  TombTracker<UIDL, UID>,
+}
+
+/// Does the key name a chunk, a `Dat::Tup5u64` and nothing more?  A user key of that form is
+/// refused at the write, so a record under it without a chunk index is a chunk tombstone.
+pub fn is_chunk_key(k: &[u8]) -> bool {
+    if k.first() != Some(&Dat::TUP5_U64_CODE) {
+        return false;
+    }
+    match Dat::from_bytes(k) {
+        Ok((Dat::Tup5u64(_), n)) => n == k.len(),
+        _ => false,
+    }
+}
+
+/// The chunk tombstones a cache holds, and the older records of each chunk key still on disk.
+/// A tombstone shadows those records, so it may be forgotten only once every one of them is
+/// durably gone, which the collector and the file bots report.  Bounded only while collection
+/// runs: a record never collected keeps its tombstone.
+#[derive(Clone, Debug, Default)]
+pub struct TombTracker<
+    const UIDL: usize,
+    UID: NumIdDat<UIDL>,
+> {
+    older:      BTreeMap<Vec<u8>, BTreeSet<(FileNum, RecordDigest)>>,
+    by_rid:     BTreeMap<(FileNum, RecordDigest), Vec<u8>>,
+    tombs:      BTreeMap<Vec<u8>, Meta<UIDL, UID>>,
+    replayed:   bool,
+    size:       usize, // estimate of bytes held
+}
+
+impl<
+    const UIDL: usize,
+    UID: NumIdDat<UIDL>,
+>
+    TombTracker<UIDL, UID>
+{
+    const RID_SIZE:  usize = std::mem::size_of::<(FileNum, RecordDigest)>();
+    const META_SIZE: usize = std::mem::size_of::<Meta<UIDL, UID>>();
+
+    pub fn older(&self)     -> &BTreeMap<Vec<u8>, BTreeSet<(FileNum, RecordDigest)>> { &self.older }
+    pub fn tombs(&self)     -> &BTreeMap<Vec<u8>, Meta<UIDL, UID>>  { &self.tombs }
+    pub fn replayed(&self)  -> bool                                 { self.replayed }
+    pub fn size(&self)      -> usize                                { self.size }
+
+    fn add_older(&mut self, k: &[u8], fnum: FileNum, rid: RecordDigest) {
+        let set = match self.older.get_mut(k) {
+            Some(set) => set,
+            None => {
+                self.size = self.size.saturating_add(k.len());
+                self.older.entry(k.to_vec()).or_default()
+            },
+        };
+        if set.insert((fnum, rid)) {
+            self.size = self.size.saturating_add(2 * Self::RID_SIZE + k.len());
+            self.by_rid.insert((fnum, rid), k.to_vec());
+        }
+    }
+
+    /// Forgets the gone record, and gives the key whose set it emptied.
+    fn remove_older(&mut self, fnum: FileNum, rid: RecordDigest) -> Option<Vec<u8>> {
+        let k = match self.by_rid.remove(&(fnum, rid)) {
+            Some(k) => k,
+            None => return None,
+        };
+        self.size = self.size.saturating_sub(2 * Self::RID_SIZE + k.len());
+        let emptied = match self.older.get_mut(&k) {
+            Some(set) => {
+                set.remove(&(fnum, rid));
+                set.is_empty()
+            },
+            None => false,
+        };
+        if emptied {
+            self.older.remove(&k);
+            self.size = self.size.saturating_sub(k.len());
+            return Some(k);
+        }
+        None
+    }
+
+    fn set_tomb(&mut self, k: &[u8], meta: Meta<UIDL, UID>) {
+        if self.tombs.insert(k.to_vec(), meta).is_none() {
+            self.size = self.size.saturating_add(k.len() + Self::META_SIZE);
+        }
+    }
+
+    fn clear_tomb(&mut self, k: &[u8]) {
+        if self.tombs.remove(k).is_some() {
+            self.size = self.size.saturating_sub(k.len() + Self::META_SIZE);
+        }
+    }
 }
 
 impl<
@@ -169,7 +265,8 @@ impl<
     /// Getter for cache size in bytes.
     pub fn get_size(&self) -> usize { self.size }
     /// Getter for ancillary data structures size in bytes.
-    pub fn get_ancillary_size(&self) -> usize { self.cwt.size }
+    pub fn get_ancillary_size(&self) -> usize { self.cwt.size + self.tombs.size }
+    pub fn tomb_tracker(&self) -> &TombTracker<UIDL, UID> { &self.tombs }
     /// Getter for cache size limit in bytes.
     pub fn get_lim(&self) -> usize { self.lim }
     /// Getter for a reference to the cache map.
@@ -225,8 +322,9 @@ impl<
                     match self.map.get_mut(key) {
                         Some(CacheEntry::LocatedValue(_, val2_opt)) => {
                             if let Some(val2) = val2_opt {
-                                saved += val2.len();
-                                self.size = try_sub!(&self.size, val2.len());
+                                let vsize = res!(Self::valsize(val2.len()));
+                                saved += vsize;
+                                self.size = try_sub!(&self.size, vsize);
                                 *val2_opt = None;
                             }
                         },
@@ -310,6 +408,109 @@ impl<
 
     fn valsize(len: usize) -> Outcome<usize> {
         Ok(try_add!(&Self::MLOC_SIZE, len))
+    }
+
+    /// Records what an insert of a chunk key superseded, and whether the key now holds a
+    /// tombstone, the insert of `floc_new` carrying no chunk index.  Nothing is dropped here.
+    pub fn note(
+        &mut self,
+        kbyts:      &[u8],
+        cind:       Option<usize>,
+        floc_new:   &FileLocation,
+        meta:       &Meta<UIDL, UID>,
+        superseded: &Option<(FileLocation, RecordDigest)>,
+    ) {
+        if !is_chunk_key(kbyts) {
+            return;
+        }
+        if let Some((floc, rid)) = superseded {
+            self.tombs.add_older(kbyts, floc.fnum, *rid);
+        }
+        let holds_new = match self.map.get(kbyts) {
+            Some(CacheEntry::LocatedValue(mloc, _)) => mloc.floc == *floc_new,
+            _ => false,
+        };
+        if holds_new {
+            match cind {
+                None    => self.tombs.set_tomb(kbyts, meta.clone()),
+                Some(_) => self.tombs.clear_tomb(kbyts),
+            }
+        }
+    }
+
+    /// Forgets the old records of file `fnum` now durably gone, and once the start's replay is
+    /// done drops each tombstone they were the last shadowed record of.  Gives the location and
+    /// record of each tombstone dropped, for the caller to flag old.
+    pub fn records_gone(
+        &mut self,
+        fnum:   FileNum,
+        rids:   &[RecordDigest],
+    )
+        -> Outcome<Vec<(FileLocation, RecordDigest)>>
+    {
+        let mut emptied = Vec::new();
+        for rid in rids {
+            if let Some(k) = self.tombs.remove_older(fnum, *rid) {
+                emptied.push(k);
+            }
+        }
+        let mut dropped = Vec::new();
+        if self.tombs.replayed {
+            for k in emptied {
+                if let Some(gone) = res!(self.drop_tomb(&k)) {
+                    dropped.push(gone);
+                }
+            }
+        }
+        Ok(dropped)
+    }
+
+    /// The replay has entered every record on disk, so a tombstone with no older record known
+    /// shadows none, and is dropped.
+    pub fn replay_done(&mut self) -> Outcome<Vec<(FileLocation, RecordDigest)>> {
+        self.tombs.replayed = true;
+        let keys: Vec<Vec<u8>> = self.tombs.tombs.keys().cloned().collect();
+        let mut dropped = Vec::new();
+        for k in keys {
+            if let Some(gone) = res!(self.drop_tomb(&k)) {
+                dropped.push(gone);
+            }
+        }
+        Ok(dropped)
+    }
+
+    fn drop_tomb(&mut self, k: &[u8]) -> Outcome<Option<(FileLocation, RecordDigest)>> {
+        if self.tombs.older.contains_key(k) {
+            return Ok(None);
+        }
+        let meta = match self.tombs.tombs.get(k) {
+            Some(meta) => meta.clone(),
+            None => return Ok(None),
+        };
+        let floc = match self.map.get(k) {
+            Some(CacheEntry::LocatedValue(mloc, _)) if mloc.meta == meta => mloc.floc.clone(),
+            _ => return Ok(None),
+        };
+        let rid = res!(RecordDigest::new(k, &meta));
+        res!(self.remove(k, &meta));
+        self.tombs.clear_tomb(k);
+        Ok(Some((floc, rid)))
+    }
+
+    /// Removes the entry of `k` if it is still the record stamped `meta`.
+    pub fn remove(&mut self, k: &[u8], meta: &Meta<UIDL, UID>) -> Outcome<bool> {
+        let vlen = match self.map.get(k) {
+            Some(CacheEntry::LocatedValue(mloc, val)) if mloc.meta == *meta =>
+                val.as_ref().map(|v| v.len()),
+            _ => return Ok(false),
+        };
+        self.map.remove(k);
+        self.size = try_sub!(&self.size, k.len());
+        if let Some(vlen) = vlen {
+            self.size = try_sub!(&self.size, res!(Self::valsize(vlen)));
+        }
+        res!(self.cwt.remove(k));
+        Ok(true)
     }
 
     /// Update file location information for a key.
@@ -487,6 +688,16 @@ impl CacheWriteTracker {
     /// reduction of the tracker.  If the given value length exceeds the length of all existing
     /// cached values, the entire `CacheWriteTracker` contents will be deleted and the desired
     /// cache size reduction will not be achieved.
+    fn remove(&mut self, k: &[u8]) -> Outcome<()> {
+        let hash = seahash::hash(k);
+        if let Some(t) = self.rev.remove(&hash) {
+            if self.fwd.remove(&t).is_some() {
+                self.size = try_sub!(&self.size, self.bs + k.len());
+            }
+        }
+        Ok(())
+    }
+
     fn jettison(
         &mut self,
         vlen: usize,

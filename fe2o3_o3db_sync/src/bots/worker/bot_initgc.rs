@@ -20,6 +20,7 @@ use crate::{
             DataState,
             FileState,
         },
+        zdir::sync_dir,
         stored::{
             RecordDigest,
             StoredIndex,
@@ -64,6 +65,7 @@ struct Collected<
     shrink:     usize,                          // bytes lost from the data and index files
     old_size:   usize,                          // data file length before
     new_size:   usize,                          // data file length after
+    dropped:    Vec<RecordDigest>,              // old records left out of the new file
 }
 
 /// `InitGarbageBot`s have two functions:
@@ -801,7 +803,7 @@ impl<
             Ok(done) => done,
             Err(e) => return self.abandon_collection(fnum, fbot_index, e),
         };
-        if hooks::collect_fails() {
+        if hooks::collect_fails(fnum) {
             return self.abandon_collection(fnum, fbot_index, err!(
                 "{}: Garbage collection of file {} failed on the test::hooks::set_collect_failure \
                 switch.", self.ozid(), fnum;
@@ -821,8 +823,18 @@ impl<
 
         // From here the file is collected, and whatever goes wrong is carried past rather than
         // undone.
+        // The records left out are gone only once the rename is durable, and only then may a
+        // cache forget a tombstone that shadowed them.
         let mut late = None;
-        self.keep(&mut late, Self::sync_dir(&self.zdir().dir));
+        let synced = match hooks::dir_sync_fails() {
+            true => Err(err!(
+                "{}: The directory sync after collecting file {} failed on the \
+                test::hooks::set_dir_sync_failure switch.", self.ozid(), fnum;
+                IO, File, Write)),
+            false => sync_dir(&self.zdir().dir),
+        };
+        let data_durable = synced.is_ok();
+        self.keep(&mut late, synced);
         hooks::commit_delay();
 
         // 3. Replace the index with the one rebuilt from the new data file.
@@ -832,7 +844,7 @@ impl<
                 file was replaced; the next start rebuilds the index from the data file.",
                 self.ozid(), fnum, tmp_ind_path;
                 IO, File, Write))),
-            Ok(()) => self.keep(&mut late, Self::sync_dir(&self.zdir().dir)),
+            Ok(()) => self.keep(&mut late, sync_dir(&self.zdir().dir)),
         }
 
         // Both renames put a new inode behind an unchanged path and unlinked the old one, but
@@ -853,7 +865,17 @@ impl<
         let updated = self.update_caches(fnum, &mut done);
         self.keep(&mut late, updated);
 
-        // 5. Reset FileState, and send it back to the fbot.
+        // 5. Tell the caches which old records are gone, behind the re-anchoring.
+        if data_durable && !done.dropped.is_empty() {
+            let gone = OzoneMsg::RecordsGone(fnum, std::mem::take(&mut done.dropped));
+            let told = match self.cbots() {
+                Ok(bots) => bots.send_to_all(gone).map(|_| ()),
+                Err(e) => Err(e),
+            };
+            self.keep(&mut late, told);
+        }
+
+        // 6. Reset FileState, and send it back to the fbot.
         done.fstat.reset_old_accounting();
         let completed = OzoneMsg::GcCompleted(fnum, done.fstat, done.shrink);
         let told = self.tell_fbot(fnum, fbot_index, completed);
@@ -960,6 +982,7 @@ impl<
     )
         -> Outcome<Collected<UIDL, UID>>
     {
+        let mut dropped = Vec::new();
         let typ = FileType::Data;
         // 1. Open the data file for reading.
         let (data_path, file) = res!(self.zdir().open_ozone_file(
@@ -1033,8 +1056,9 @@ impl<
                             fstat.update_moved(&dloc, new_start, rid);
                             new_start += dloc.len;
                         },
-                        Some(DataState::Old) => {
+                        Some(DataState::Old(rid)) => {
                             res!(fstat.retire_old(&dloc));
+                            dropped.push(rid);
                         },
                         None => break,
                     }
@@ -1129,6 +1153,7 @@ impl<
             shrink:     dat_ind_file_size_decrease,
             old_size,
             new_size,
+            dropped,
         })
     }
 
@@ -1451,25 +1476,6 @@ impl<
             append costs one record.",
             self.ozid(), fnum, last_good_pos);
         Ok(true)
-    }
-
-    /// Forces a directory's entries to stable storage.  A `rename` is a
-    /// directory metadata operation, so fsyncing a renamed file's contents does
-    /// not persist the rename itself; this is called after the GC renames so a
-    /// power loss cannot leave the directory pointing at a file that never
-    /// reached disk.
-    fn sync_dir(dir: &std::path::Path) -> Outcome<()> {
-        match File::open(dir) {
-            Err(e) => Err(err!(e,
-                "While opening directory {:?} to fsync it.", dir;
-                IO, File, Read)),
-            Ok(d) => match d.sync_all() {
-                Err(e) => Err(err!(e,
-                    "While fsyncing directory {:?}.", dir;
-                    IO, File, Write)),
-                Ok(()) => Ok(()),
-            },
-        }
     }
 
 }

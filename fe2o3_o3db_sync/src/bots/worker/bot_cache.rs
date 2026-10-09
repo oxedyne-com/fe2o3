@@ -11,6 +11,7 @@ use crate::{
         cache::{
             Cache,
             ValueOrLocation,
+            is_chunk_key,
         },
         core::Key,
     },
@@ -183,6 +184,20 @@ impl<
                                     IO, Channel));
                             }
                         },
+                        OzoneMsg::RecordsGone(fnum, rids) => {
+                            let result = match self.cache_mut().records_gone(fnum, &rids) {
+                                Ok(dropped) => self.retire_tombs(dropped),
+                                Err(e) => Err(e),
+                            };
+                            self.result(&result);
+                        },
+                        OzoneMsg::ReplayDone => {
+                            let result = match self.cache_mut().replay_done() {
+                                Ok(dropped) => self.retire_tombs(dropped),
+                                Err(e) => Err(e),
+                            };
+                            self.result(&result);
+                        },
                         OzoneMsg::Insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed) => {
                             let result = self.insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed);
                             self.result(&result);
@@ -297,6 +312,19 @@ impl<
         self
     }
 
+    /// Flags each dropped tombstone's own record old, so that its bytes are collected in turn.
+    fn retire_tombs(&mut self, dropped: Vec<(FileLocation, RecordDigest)>) -> Outcome<()> {
+        if dropped.is_empty() {
+            return Ok(());
+        }
+        let bots = res!(self.fbots());
+        for (floc, rid) in dropped {
+            let (bot, _) = bots.choose_bot(&ChooseBot::ByFile(floc.file_number()));
+            res!(bot.send(OzoneMsg::ScheduleOld(floc, rid, self.ozid().clone())));
+        }
+        Ok(())
+    }
+
     pub fn insert(
         &mut self,
         key:        Vec<u8>,
@@ -315,6 +343,10 @@ impl<
         hooks::chunk_insert_delay(cind);
         // [12] Insert the data into the key-chosen zone cache.
         let floc_new = floc.clone();
+        let noted = match is_chunk_key(&key) {
+            true    => Some((key.clone(), meta.clone())),
+            false   => None,
+        };
         let floc_old_opt = match self.cache.insert(
             key,
             val,
@@ -333,6 +365,9 @@ impl<
             },
         };
 
+        if let Some((k, m)) = noted {
+            self.cache.note(&k, cind, &floc_new, &m, &floc_old_opt);
+        }
         let key_present = floc_old_opt.is_some();
         
         // [13] Inform the caller of successful file write and cache insertion, or of the barrier

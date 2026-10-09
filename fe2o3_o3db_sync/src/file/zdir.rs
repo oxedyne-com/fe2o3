@@ -268,3 +268,20 @@ mod tests {
         Ok(())
     }
 }
+
+/// Forces a directory's entries to stable storage.  A `rename` or an unlink is a directory
+/// metadata operation, so fsyncing a file's contents does not persist it; this is called after
+/// them so a power loss cannot undo what the caller then relies on.
+pub fn sync_dir(dir: &Path) -> Outcome<()> {
+    match File::open(dir) {
+        Err(e) => Err(err!(e,
+            "While opening directory {:?} to fsync it.", dir;
+            IO, File, Read)),
+        Ok(d) => match d.sync_all() {
+            Err(e) => Err(err!(e,
+                "While fsyncing directory {:?}.", dir;
+                IO, File, Write)),
+            Ok(()) => Ok(()),
+        },
+    }
+}

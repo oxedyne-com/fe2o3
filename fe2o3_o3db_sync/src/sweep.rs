@@ -12,8 +12,8 @@
 //! The sweep is the in-place counterpart of [`crate::migrate`]: the migration copies the live set
 //! into a fresh store and achieves zero residue (no orphans, no tombstones, no empty file states)
 //! but needs the store stopped and twice the disk transiently; the sweep runs online and reclaims
-//! the large chunk orphans, at the cost of leaving a small dead tombstone per orphan behind (the
-//! residue §"What it does not do" names).  Operators run the sweep routinely and a migration rarely.
+//! the large chunk orphans, leaving a small tombstone per orphan until collection reclaims it in
+//! turn (§"What it does not do").  Operators run the sweep routinely and a migration rarely.
 //!
 //! # How it stays correct against concurrent writers
 //!
@@ -30,10 +30,12 @@
 //!
 //! # What it does not do
 //!
-//! Retiring a large chunk orphan converts it into a small dead tombstone (a deleted-kind marker
-//! record at the chunk key).  The sweep therefore turns gigabytes of chunk orphans into a few
-//! mebibytes of tombstones -- a >99.9% reclaim -- but does not remove the key.  Clearing the
-//! tombstones is left to the offline migration, which drops them by never copying them.
+//! Retiring a large chunk orphan converts it into a small tombstone (a deleted-kind marker record
+//! at the chunk key), so the sweep turns gigabytes of chunk orphans into a few mebibytes of
+//! tombstones.  Since 2026-10-09 a cache forgets a chunk tombstone once every older record of its
+//! key is durably gone and flags it old, so collection reclaims the tombstone after the orphan:
+//! bounded only while GC is on, since a record no collection reaches keeps its tombstone.  The
+//! offline migration leaves none, by never copying them.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
