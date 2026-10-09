@@ -8,9 +8,9 @@
 //! printed: a refusal carries the key's tag, the text's number within the value, the line, the
 //! column and the class.
 //!
-//! The scan is read-only, but a read-only open of an Ozone store with garbage collection off still
-//! rewrites its `config.jdat`: scan a `cp -a` COPY, never a live store, and never with a second
-//! process on the same store.
+//! The scan writes nothing, and since 2026-10-09 neither does an open that is only read from (no
+//! live file is created and an unchanged `config.jdat` is left alone).  Scan a `cp -a` COPY all
+//! the same, never a live store, since a second process on one store is never safe.
 
 use crate::{
     prelude::*,

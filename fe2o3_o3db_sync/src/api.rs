@@ -1146,12 +1146,8 @@ impl<
     )
         -> Outcome<Option<(Dat, Meta<UIDL, UID>)>>
     {
-        let enc = self.schemes().encrypter();
-        let or_enc = schms2.map(|s| s.encrypter());
-
-        let resp = res!(self.fetch_using_schemes(k, schms2));
-        match res!(resp.recv_daticle(enc, or_enc)) {
-            (None, _) => Ok(None), // The key was not found.
+        match res!(self.get_head_wait(k, schms2)) {
+            None => Ok(None), // The key was not found.
             // The value was too large for a single record, so what is stored under this key is a
             // part key naming its chunks.  `fetch_chunks` gathers them, rejoins the bytes,
             // decrypts them and decodes them, so what it hands back is already the caller's
@@ -1164,11 +1160,27 @@ impl<
             // chunked was written perfectly well and could not be read: an accumulating value,
             // such as a ledger, worked until the day it crossed the chunk size and then failed
             // for good.
-            (Some((Dat::Tup5u64(tup), meta)), _) =>
+            Some((Dat::Tup5u64(tup), meta)) =>
                 Ok(Some((res!(self.fetch_chunks(&Dat::Tup5u64(tup), schms2)), meta))),
             // The data received was in a single piece.
-            (Some((dat, meta)), _) => Ok(Some((dat, meta))),
+            Some((dat, meta)) => Ok(Some((dat, meta))),
         }
+    }
+
+    /// `get_wait` without the chunks: what is stored under the key itself, which for a chunked
+    /// value is its bunch key, a `Dat::Tup5u64` that `fetch_chunks` takes.
+    pub fn get_head_wait(
+        &self,
+        k:      &Dat,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Option<(Dat, Meta<UIDL, UID>)>>
+    {
+        let enc = self.schemes().encrypter();
+        let or_enc = schms2.map(|s| s.encrypter());
+        let resp = res!(self.fetch_using_schemes(k, schms2));
+        let (got, _) = res!(resp.recv_daticle(enc, or_enc));
+        Ok(got)
     }
 
     // Read API, lower level.

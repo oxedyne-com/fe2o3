@@ -14,8 +14,8 @@
 //! store, or a store that holds nothing to read.
 //!
 //! # Safety
-//! - Scan a `cp -a` COPY, never a live store, and never with a second process on one store: a
-//!   read-only open of an Ozone store with garbage collection off still rewrites `config.jdat`.
+//! - Scan a `cp -a` COPY, never a live store: a second process on one store is never safe, even
+//!   though an open that is only read from writes nothing (since 2026-10-09).
 //! - The store is opened for the gateway's parameterisation (16-byte `u128` user ids, AES-256-GCM
 //!   at rest, CRC-32), as `o3db_migrate` is (`oxedyne_fe2o3_o3db_sync::gateway`). The at-rest key
 //!   is read from the path given and is never defaulted.

@@ -682,35 +682,31 @@ impl<
         Ok(shards)
     }
 
-    /// Assigns live files to WriterBots, re-using discovered incomplete files before creating
-    /// new ones, and leaves the zone live file counter above every number assigned.
+    /// Hands each discovered incomplete file to a WriterBot.  A writer left without one opens
+    /// its first live file, claimed through `NextLiveFile`, at its first write, so a start that
+    /// writes nothing creates no file and a store opened only to be read is left as it was.
     fn init_writer_live_files(
         &mut self,
         incomplete_files: &[(FileNum, usize)],
     )
         -> Outcome<()>
     {
-        let n_w = self.cfg().num_wbots_per_zone as usize;
+        let n_w = (self.cfg().num_wbots_per_zone as usize).min(incomplete_files.len());
         let wbots = res!(self.get_zwbots())[&WorkerType::Writer].clone();
     
-        trace!(sync_log::stream(), "{}: Assigning live files to {} writer bots.", self.ozid(), n_w);
+        trace!(sync_log::stream(), "{}: Assigning {} incomplete files to writer bots.",
+            self.ozid(), n_w);
     
         let resp = Responder::new(Some(self.ozid()));
         for i in 0..n_w {
-            let fnum = if i < incomplete_files.len() {
-                // Use existing incomplete file.  Its number is at or below the counter,
-                // which was seeded with the highest file number on disk, so the counter
-                // needs no adjustment.
-                incomplete_files[i].0
-            } else {
-                // There are not enough existing incomplete files to assign to wbots, create new
-                // file number.
-                self.fnum += 1;
-                self.fnum
-            };
-
+            // Its number is at or below the counter, which was seeded with the highest file
+            // number on disk, so the counter needs no adjustment.
+            let fnum = incomplete_files[i].0;
             let wbot = res!(wbots.get_bot(i));
             res!(wbot.send(OzoneMsg::NewLiveFile(Some(fnum), resp.clone())));
+        }
+        if n_w == 0 {
+            return Ok(());
         }
 
         // Start-up work, held to the control deadline: see constant::CONTROL_REQUEST_TIMEOUT.

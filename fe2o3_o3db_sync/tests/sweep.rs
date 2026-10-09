@@ -446,7 +446,7 @@ fn concurrency_is_safe(
     }
     thread::sleep(Duration::from_millis(200));
     for k in 0..n_recent {
-        res!(db.insert(dat!(fmt!("recent:{:03}", k)), value_of(k as u8, SMALL_BYTES), user, schms2));
+        res!(store_without_reclaim(&db, dat!(fmt!("recent:{:03}", k)), value_of(k as u8, SMALL_BYTES), user, schms2));
     }
 
     let report = res!(sweep::sweep_orphans(

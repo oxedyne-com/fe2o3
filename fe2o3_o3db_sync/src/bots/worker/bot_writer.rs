@@ -425,6 +425,9 @@ impl<
 
     fn new_live_pair(&mut self) -> Outcome<(FileNum, u64)> {
         let fnum_old = self.lpair().fnum;
+        // A writer given no incomplete file at start-up has none until its first write, so it
+        // has nothing to seal and its first file is registered as one taken over at start-up is.
+        let first = self.lpair().dat.file.is_none();
         // [3] Ask zbot for next live file number.
         let resp = Responder::new(Some(self.ozid()));
         match self.zbot() {
@@ -467,6 +470,10 @@ impl<
         self.lpair.close();
         self.lpair = lpair;
         let start = self.lpair().dat.size;
+        if first {
+            res!(self.register_live_file(fnum_new));
+            return Ok((fnum_new, start));
+        }
 
         // [5] Tell the fbot for the previous live file of the change and wait for the response.
         let resp_w3 = Responder::new(Some(self.ozid()));

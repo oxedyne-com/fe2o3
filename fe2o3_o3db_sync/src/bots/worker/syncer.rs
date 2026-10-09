@@ -244,6 +244,9 @@ impl<
                     None => return self.end(),
                 }
             }
+            // Read as the batch begins, so that a batch already under way when a test arms the
+            // stop, as the one releasing the write the test waited on can be, does not stop.
+            let stop_armed = hooks::syncer_stop_armed();
             // Take whatever else is waiting, so that one barrier can cover all of it.
             while let Ok(item) = self.rx.try_recv() {
                 self.queue.push_back(item);
@@ -264,7 +267,7 @@ impl<
                 }
             }
             // A syncer stopping as one that panicked would, with no last barrier.
-            if hooks::syncer_stops() {
+            if stop_armed && hooks::syncer_stops() {
                 return;
             }
         }

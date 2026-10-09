@@ -144,8 +144,8 @@ pub fn barriers_failed() -> u64 {
     BARRIERS_FAILED.load(Ordering::Relaxed)
 }
 
-/// Makes each writer's syncer stop once it has released the records it holds, as one that had
-/// panicked would, and counts the syncers it stops.
+/// Makes each writer's syncer stop once it has released a batch of records begun after this call,
+/// as one that had panicked would, and counts the syncers it stops.
 pub fn set_syncer_stop(on: bool) {
     SYNCER_STOPS.store(on, Ordering::Relaxed);
 }
@@ -246,6 +246,10 @@ pub(crate) fn supervisor_panic() {
 }
 
 /// Is this syncer to stop now?  Counted when it is.
+pub(crate) fn syncer_stop_armed() -> bool {
+    SYNCER_STOPS.load(Ordering::Relaxed)
+}
+
 pub(crate) fn syncer_stops() -> bool {
     let stops = SYNCER_STOPS.load(Ordering::Relaxed);
     if stops {

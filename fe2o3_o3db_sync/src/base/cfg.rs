@@ -279,12 +279,21 @@ impl OzoneConfig {
 
     pub fn write_config_file(&self, db_root: &Path) -> Outcome<()> {
         let path = Self::config_path(db_root);
-        let mut file = res!(std::fs::File::create(&path));
         let dat = Self::to_datmap(self.clone());
-        for mut line in dat.to_lines("    ", true) {
-            line.push_str("\n");
-            res!(file.write(line.as_bytes()));
+        let mut text = String::new();
+        for line in dat.to_lines("    ", true) {
+            text.push_str(&line);
+            text.push_str("\n");
         }
+        // A start under an unchanged configuration leaves the file alone, so that opening a store
+        // to read it, as `verify` and `textscan` do, writes nothing (2026-10-09).
+        if let Ok(old) = std::fs::read(&path) {
+            if old == text.as_bytes() {
+                return Ok(());
+            }
+        }
+        let mut file = res!(std::fs::File::create(&path));
+        res!(file.write_all(text.as_bytes()));
         debug!(sync_log::stream(), "O3db configuration written to {:?}: ", path);
         for line in dat.to_lines("    ", true) {
             debug!(sync_log::stream(), "{}", line);
