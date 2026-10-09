@@ -566,6 +566,49 @@ fn sweep_tmps(path: &Path, name: &OsStr, sweep_age: Duration, legacy: bool) {
     }
 }
 
+/// An exclusive advisory lock on a file, held by the kernel for as long as this value lives.  The
+/// lock belongs to the open file, so it is released on drop and when the process dies, a SIGKILL
+/// included: the file left behind is never a stale lock.  On unix it is `flock`, so a second open
+/// of the same file in this process is refused as well.
+#[derive(Debug)]
+pub struct ExclusiveLock {
+    file:   File,
+    path:   PathBuf,
+}
+
+impl ExclusiveLock {
+
+    /// Takes the lock on `path` without waiting, creating the file if need be.  `None` when
+    /// another open file holds it.
+    pub fn try_acquire(path: &Path) -> Outcome<Option<Self>> {
+        let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path) {
+            Ok(f) => f,
+            Err(e) => return Err(err!(e,
+                "Could not open the lock file {:?}.", path;
+                File, IO, Lock)),
+        };
+        match file.try_lock() {
+            Ok(())                                  => Ok(Some(Self { file, path: path.to_path_buf() })),
+            Err(fs::TryLockError::WouldBlock)       => Ok(None),
+            Err(fs::TryLockError::Error(e))         => Err(err!(e,
+                "Could not take the lock on {:?}.", path;
+                File, IO, Lock)),
+        }
+    }
+
+    pub fn path(&self) -> &Path { &self.path }
+
+    /// Releases the lock now rather than at drop.
+    pub fn release(self) -> Outcome<()> {
+        if let Err(e) = self.file.unlock() {
+            return Err(err!(e,
+                "Could not release the lock on {:?}.", self.path;
+                File, IO, Lock));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct TextFileState {
     pub path:       String,
@@ -607,6 +650,29 @@ mod tests {
             SystemTime,
         },
     };
+
+    #[test]
+    fn test_exclusive_lock_refuses_a_second_holder_until_released() -> Outcome<()> {
+        let path = scratch_path("lock");
+        let first = match res!(ExclusiveLock::try_acquire(&path)) {
+            Some(l) => l,
+            None => return Err(err!("A fresh lock file {:?} was refused.", path; Test, Lock)),
+        };
+        if res!(ExclusiveLock::try_acquire(&path)).is_some() {
+            return Err(err!("A second open of {:?} took the lock while it was held.", path; Test, Lock));
+        }
+        res!(first.release());
+        let again = res!(ExclusiveLock::try_acquire(&path));
+        if again.is_none() {
+            return Err(err!("The lock on {:?} was still held after its release.", path; Test, Lock));
+        }
+        drop(again);
+        if res!(ExclusiveLock::try_acquire(&path)).is_none() {
+            return Err(err!("The lock on {:?} was still held after its drop.", path; Test, Lock));
+        }
+        let _ = fs::remove_file(&path);
+        Ok(())
+    }
 
     // Combined with the PID this gives each test a scratch path that cannot
     // collide, even when the suite runs across threads.

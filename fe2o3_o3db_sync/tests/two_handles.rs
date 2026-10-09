@@ -4,8 +4,9 @@
 //! report): a zone survey hands its writer any incomplete data file, the live file of a handle
 //! that is still running included, without claiming it, so both handles append to one file.  Each
 //! writer takes a record's offset from the file length it last saw, and the other handle's appends
-//! make that stale.  Ignored until live files are made exclusive across handles, which is a
-//! decision still to be taken; run it with `--ignored` to see what is lost.
+//! make that stale.  Since 2026-10-09 a store takes an exclusive lock at start, so the second
+//! handle is refused before it writes anything (`tests/store_lock.rs`); this test stays ignored as
+//! the record of the fault, and with `--ignored` it now fails at the second start.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::{

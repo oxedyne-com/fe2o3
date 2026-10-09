@@ -51,6 +51,7 @@
 use crate::{
     prelude::*,
     comm::response::Wait,
+    gateway,
 };
 
 use oxedyne_fe2o3_data::time::Timestamp;
@@ -255,6 +256,33 @@ pub fn sweep_orphans<
         skipped_recent,
         bytes_before,
     })
+}
+
+/// Opens a store for a sweep from a process of its own, as the `o3db_sweep` tool does, under the
+/// gateway's parameterisation with collection on.  A store another process holds is refused with
+/// what to do instead: the sweep spares only the sets of stores in the process it runs in.
+pub fn open_store_alone(
+    root:   &Path,
+    key:    &[u8; gateway::DB_KEY_LEN],
+    label:  &str,
+)
+    -> Outcome<(gateway::Db, usize)>
+{
+    match gateway::open_store(root, None, key, true, label) {
+        Ok(opened) => Ok(opened),
+        Err(e) => {
+            let tags = e.tags();
+            if tags.contains(&ErrTag::Lock) && tags.contains(&ErrTag::Conflict) {
+                Err(err!(e,
+                    "The store at {:?} is open in another process, most likely the gateway.  \
+                    Stop the gateway before this sweep, or have the process that holds the store \
+                    call sweep::sweep_orphans on its own open store.", root;
+                    Init, Lock, Conflict))
+            } else {
+                Err(e)
+            }
+        },
+    }
 }
 
 // A copy of the chunk sets of the stores in progress.

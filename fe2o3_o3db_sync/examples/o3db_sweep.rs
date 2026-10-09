@@ -27,6 +27,8 @@
 //! - `--skew-secs` guards writers of the same process: only chunk records stamped more than this many seconds
 //!   before the sweep started are retired.  The default is deliberately generous.  Pass `0` only for
 //!   a store nothing is writing.
+//! - The store is locked by whichever process opens it, so this binary refuses a store the gateway
+//!   holds, and says so.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -77,7 +79,7 @@ fn run() -> Outcome<()> {
     // Open the store with garbage collection ON: the sweep needs the collector running to reclaim
     // what it tombstones.
     info!("Opening store at {:?} (gc on)...", args.source);
-    let (db, _) = res!(gateway::open_store(&args.source, None, &key, true, "sweep"));
+    let (db, _) = res!(sweep::open_store_alone(&args.source, &key, "sweep"));
 
     let scan_wait = Wait {
         max_wait:       Duration::from_secs(args.scan_secs),

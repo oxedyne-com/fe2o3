@@ -39,6 +39,7 @@ use oxedyne_fe2o3_core::{
         Simplex,
         Recv,
     },
+    file::ExclusiveLock,
     path::NormalPath,
     rand::RanDef,
     thread::{
@@ -159,6 +160,7 @@ pub struct O3db<
 struct Closing {
     wg:     Option<WaitGroup>,
     done:   bool,
+    lock:   Option<ExclusiveLock>, // the store's, from start until the bots have stopped
 }
 
 impl<
@@ -238,6 +240,7 @@ impl<
             closing: Arc::new(Mutex::new(Closing {
                 wg:     None,
                 done:   false,
+                lock:   None,
             })),
         })
     }
@@ -325,6 +328,25 @@ impl<
         for line in Stringer::new(fmt!("{:?}", self.schemes())).to_lines("  ") {
             info!(sync_log::stream(), "{}", line);
         }
+        // One process on a store: two survey the same files and append to the same live files.
+        // The lock is the kernel's, so a process that dies holding it releases it.
+        // A start that failed early and is tried again already holds it.
+        {
+            let mut closing = lock_mutex!(self.closing,
+                "Taking the shutdown record to hold the store's lock.");
+            if closing.lock.is_none() {
+                let lock_path = self.db_root.join(constant::STORE_LOCK_FILENAME);
+                match res!(ExclusiveLock::try_acquire(&lock_path)) {
+                    Some(l) => closing.lock = Some(l),
+                    None => return Err(err!(
+                        "The Ozone store at {:?} is held by another open, in another process or \
+                        this one ({:?} is locked).  Only one process may open a store: stop the \
+                        one holding it.", self.db_root, lock_path;
+                        Init, Lock, Conflict)),
+                }
+            }
+        }
+
         // Write config to a file now that we have a directory structure.
         res!(self.cfg().write_config_file(self.db_root()));
 
@@ -415,6 +437,10 @@ impl<
                         Init, Timeout));
                 }
             }
+            // The bots are gone, so the store is free for the next open.
+            let mut closing = lock_mutex!(self.closing,
+                "Taking the shutdown record to release the store's lock after a failed start.");
+            closing.lock = None;
             return Err(e);
         }
 
@@ -614,10 +640,14 @@ impl<
         };
         closing.done = true;
         if !stopped {
+            // The lock stays with the bots still running, until the last handle drops.
             return Err(err!(
                 "{}: The database's bots had not all stopped {:?} after it was closed.",
                 self_id, within.unwrap_or_default();
                 Timeout, Excessive));
+        }
+        if let Some(lock) = closing.lock.take() {
+            res!(lock.release());
         }
         warn!(sync_log::stream(), "Shutdown: Verified.");
         Ok(())
