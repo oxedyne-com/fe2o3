@@ -19,7 +19,11 @@
 #   an austenite.jdat tree, with and without --cmyk; USE_EVAL=1 with --cmyk, --grey, --scrub and --cmyk --scrub,
 #   from the environment and from a dev.conf; USE_TYPST=1 in the environment and in a dev.conf, --typst, and
 #   USE_TYPST=1 beside USE_EVAL=1; a binary whose usage has no watch command; a missing binary; the curated
-#   path; and the Ghostscript and pikepdf refusals, which the curated path keeps.
+#   path; and the Ghostscript and pikepdf refusals, which the curated path keeps. Then a book with its own
+#   austenite.jdat below the tree root, reached through the relative dev symlink a book directory holds: run
+#   in the book, run in a directory below it, with --cmyk, with USE_TYPST=1 in the environment, beside a
+#   dev.conf that sets USE_TYPST=1 for every other directory of the tree, and in that other directory; and a
+#   settings file above the tree root, which does not count.
 # Then the plant: the script with its USE_TYPST line removed, which the same cases must find red.
 set -u
 
@@ -76,10 +80,12 @@ chmod +x "$BIN"/austenite "$BIN"/typst "$BIN"/papers "$BIN"/evince "$BIN"/xdg-op
 echo "Usage: austenite watch|build ... or austenite [--watch] [--eval] <SOURCE.typ> [OUTPUT_DIR]" > "$S/usage_new"
 echo "Usage: austenite [--watch] [--eval] <SOURCE.typ> [OUTPUT_DIR]"                               > "$S/usage_old"
 
-# mk_tree <name> [jdat] [conf=<text>]: a document and what stands beside it.
+# mk_tree <name> [jdat] [conf=<text>]: a document and what stands beside it. `.root` marks the tree root,
+# where `go` puts the link to the script under test.
 mk_tree() {
 	local name="$1"; shift
 	mkdir -p "$TREES/$name"
+	: > "$TREES/$name/.root"
 	printf '= Title\n\nBody.\n' > "$TREES/$name/x.typ"
 	local a
 	for a in "$@"; do
@@ -88,6 +94,17 @@ mk_tree() {
 			conf=*)	printf '%s\n' "${a#conf=}" > "$TREES/$name/dev.conf" ;;
 		esac
 	done
+}
+
+# mk_sub <tree> <sub> [jdat]: a directory below a tree root with a document, its own dev linked relatively
+# to the one above it as a book directory's is, and optionally its own settings file.
+mk_sub() {
+	local d="$TREES/$1/$2"
+	mkdir -p "$d"
+	printf '= Title\n\nBody.\n' > "$d/x.typ"
+	ln -sfn ../dev "$d/dev"
+	[ "${3:-}" = "jdat" ] && echo '{"document": "x.typ"}' > "$d/austenite.jdat"
+	return 0
 }
 
 FAILS=0
@@ -104,7 +121,9 @@ go() {
 	local t="$TREES/$tree"
 	# Each run starts from the tree as made, without the last run's outputs.
 	rm -rf "$t/.x.aus-out" "$t/x.pdf" "$t/.x.source.pdf" "$t/.x.raw.pdf"
-	ln -sfn "$dev" "$t/dev"
+	local r="$t"
+	while [ ! -f "$r/.root" ]; do r="$(dirname "$r")"; done
+	ln -sfn "$dev" "$r/dev"
 	OUT="$(cd "$t" && timeout 30 /usr/bin/env -i PATH="$BIN" HOME="$S/home" \
 		AUSTENITE_BIN="$BIN/austenite" STUB_LOG="$log" STUB_USAGE="$S/$usage" \
 		"${envs[@]}" ./dev x.typ "$@" 2>&1)"
@@ -180,6 +199,39 @@ USE_EVAL=1'
 	expect curated_cmyk      1 - - no "needs Ghostscript"
 	go "$dev" curated_scrub     plain     usage_new -- --scrub
 	expect curated_scrub     1 - - no "needs pikepdf"
+
+	# A book with its own settings file below the tree root, as the Invitation has.
+	mk_tree shelf conf='case "$PWD" in
+	*/inv|*/inv/*) ;;
+	*) USE_TYPST=1 ;;
+esac'
+	mk_sub shelf inv jdat
+	mk_sub shelf inv/part
+	mk_sub shelf other
+	mk_tree bare_shelf
+	mk_sub bare_shelf inv jdat
+	mkdir -p "$TREES/outer"
+	echo '{"document": "x.typ"}' > "$TREES/outer/austenite.jdat"
+	mk_tree outer/inner
+	local sf="watch --root $T/shelf --font-path $T/shelf/assets/fonts x.typ x.pdf"
+	local bf="watch --root $T/bare_shelf --font-path $T/bare_shelf/assets/fonts x.typ x.pdf"
+
+	go "$dev" book_jdat         shelf/inv       usage_new --
+	expect book_jdat         0 "watch x.typ" - no "dev:"
+	go "$dev" book_jdat_below   shelf/inv/part  usage_new --
+	expect book_jdat_below   0 "watch x.typ" - no -
+	go "$dev" book_jdat_cmyk    bare_shelf/inv  usage_new -- --cmyk
+	expect book_jdat_cmyk    0 "watch x.typ --set colour.space=cmyk" - no -
+	go "$dev" book_jdat_eval    bare_shelf/inv  usage_new USE_EVAL=1 --
+	expect book_jdat_eval    0 "watch x.typ" - no -
+	go "$dev" book_typst_env    bare_shelf/inv  usage_new USE_TYPST=1 --
+	expect book_typst_env    0 - "$bf" yes -
+	go "$dev" book_typst_flag   bare_shelf/inv  usage_new -- --typst
+	expect book_typst_flag   0 - "$bf" yes -
+	go "$dev" book_other_typst  shelf/other     usage_new --
+	expect book_other_typst  0 - "$sf" yes -
+	go "$dev" above_root        outer/inner     usage_new --
+	expect above_root        0 "--watch x.typ .x.aus-out" - yes -
 }
 
 # The typst branch of start_typst, from its opening line to the first four-space fi.
