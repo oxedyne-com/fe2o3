@@ -118,13 +118,18 @@ fn verify_finds_a_torn_value_and_writes_nothing() -> Outcome<()> {
     }
 
     // Torn: the first chunk of another value of the same length lands under the same chunk key,
-    // as a crash or race between two writes of one key leaves it (A3 QA B1, B2).
+    // as a crash or race between two writes of one key left it while every write of a key used
+    // one chunk set (A3 QA B1, B2).  Writes have sets of their own now, so the set is forced.
     {
         let (db, _) = res!(gateway::open_store(&root, None, &KEY, false, "verify-tear"));
         let api = db.api();
+        let set = match res!(api.get_head_wait(&torn, None)) {
+            Some((Dat::Tup5u64(t), _)) => t[0],
+            other => return Err(err!("{:?} is not chunked: {:?}", torn, other; Test, Invalid)),
+        };
         let resp = api.responder();
         let msgs = res!(api.prepare_write_dat(
-            torn.clone(), val(700, 77), Uid::default(), None, resp.clone(), None));
+            torn.clone(), val(700, 77), Uid::default(), None, resp.clone(), Some(set)));
         assert!(msgs.len() > 2, "the value was not chunked");
         let chunk1 = msgs.into_iter().nth(1).into_iter().collect::<Vec<_>>();
         res!(api.store_bytes(chunk1));

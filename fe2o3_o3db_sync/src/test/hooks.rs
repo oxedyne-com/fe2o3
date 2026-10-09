@@ -314,3 +314,37 @@ pub(crate) fn trace(step: Step) {
         }
     }
 }
+
+static FIXED_STAMP: Mutex<Option<Duration>> = Mutex::new(None); // what the clock reads for a write
+static STALE_STAMP: Mutex<Option<Duration>> = Mutex::new(None); // a write's stamp, unordered
+
+/// Makes the clock read this time since the epoch for every write, as it reads for two puts in
+/// one clock tick, or after a clock step back.  The process still orders its stamps.  `None`
+/// restores the clock.
+pub fn set_fixed_stamp(t: Option<Duration>) {
+    if let Ok(mut s) = FIXED_STAMP.lock() {
+        *s = t;
+    }
+}
+
+pub(crate) fn fixed_stamp() -> Option<Duration> {
+    match FIXED_STAMP.lock() {
+        Ok(s)   => *s,
+        Err(_)  => None,
+    }
+}
+
+/// Stamps every write with this time since the epoch, past the process's ordering of its stamps,
+/// as a write stamped before another and landing after it is stamped.  `None` restores the clock.
+pub fn set_stale_stamp(t: Option<Duration>) {
+    if let Ok(mut s) = STALE_STAMP.lock() {
+        *s = t;
+    }
+}
+
+pub(crate) fn stale_stamp() -> Option<Duration> {
+    match STALE_STAMP.lock() {
+        Ok(s)   => *s,
+        Err(_)  => None,
+    }
+}

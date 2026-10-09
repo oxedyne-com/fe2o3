@@ -26,9 +26,14 @@ use oxedyne_fe2o3_core::{
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
+    collections::HashSet,
     ops::{
         Index,
         IndexMut,
+    },
+    sync::{
+        Arc,
+        Mutex,
     },
     time::{
         Duration,
@@ -399,6 +404,11 @@ impl OzoneMsgCount {
     }
 }
 
+/// The chunk set identifiers of the chunked stores in progress in one database, which the orphan
+/// sweep must not retire.  Shared by every clone of the database's `BotChannels`, the one thing
+/// all its bots and handles derive from.
+pub type PendingSets = Arc<Mutex<HashSet<u64>>>;
+
 /// Channels for all bots in all zones.  Rather than sharing references to these channels, clone them.  Unlike `bots::base::handles::BotHandles`, this includes the `Supervisor`.
 #[derive(Clone, Debug)]
 pub struct BotChannels<
@@ -413,6 +423,7 @@ pub struct BotChannels<
     cfg:    Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     sbots:  ChannelPool<UIDL, UID, ENC, KH>,
     sup:    Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
+    sets:   PendingSets,
 }
 
 impl<
@@ -437,8 +448,11 @@ impl<
             cfg:    simplex(),
             sbots:  ChannelPool::new(&PoolType::Server, cfg.num_sbots()),
             sup:    simplex(),
+            sets:   Arc::new(Mutex::new(HashSet::new())),
         }
     }
+
+    pub fn pending_sets(&self) -> &PendingSets { &self.sets }
 
     /// Returns channels for all worker pools, for the given zone.
     pub fn get_all_workers_in_zone(

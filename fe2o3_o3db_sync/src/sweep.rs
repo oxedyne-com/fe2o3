@@ -77,7 +77,7 @@ pub struct SweepReport {
     pub chunk_data_keys:        usize,  // all chunk-data keys (cind >= 1) the inverse scan emitted
     pub orphans_found:          usize,  // not in the live set and older than the epoch threshold
     pub orphans_retired:        usize,  // tombstones written (equals orphans_found on success)
-    pub skipped_recent:         usize,  // not in the live set but at/after the epoch threshold: kept
+    pub skipped_recent:         usize,  // not in the live set but recent, or held by a store in progress: kept
     pub bytes_before:           u64,    // zone data-file bytes when the sweep started
 }
 
@@ -147,6 +147,11 @@ pub fn sweep_orphans<
     let threshold_dur = t0_dur.saturating_sub(epoch_skew);
     let threshold = Timestamp::new(threshold_dur.as_secs(), threshold_dur.subsec_nanos());
 
+    // The chunk sets of the stores in progress, whose bunch keys may be published after the live
+    // scan reads their keys, however long their chunks took to land.  Taken now and again when
+    // the chunks are classified, a store that finishes between the two is spared by the first.
+    let pending_at_t0 = res!(pending_sets(api));
+
     let bytes_before = res!(zone_data_bytes(api.db_root()));
 
     // 2. Build the LIVE chunk-key set from every live bunch key.  Scan for main keys, fetch each to
@@ -185,6 +190,7 @@ pub fn sweep_orphans<
     let chunk_entries = res!(api.scan_with_wait(&chunk_opts, schms2, dup_wait(&scan_wait)));
     let chunk_data_keys = chunk_entries.len();
 
+    let pending_now = res!(pending_sets(api));
     let mut orphans: Vec<Dat> = Vec::new();
     let mut skipped_recent = 0usize;
     for (kdat, _empty, meta) in &chunk_entries {
@@ -195,6 +201,10 @@ pub fn sweep_orphans<
         };
         if live.contains(&tup) {
             continue; // Referenced by a live bunch key: keep.
+        }
+        if pending_at_t0.contains(&tup[0]) || pending_now.contains(&tup[0]) {
+            skipped_recent += 1;
+            continue; // A store in progress: its bunch key is still to come.
         }
         // Not referenced: an orphan by membership.  Retire only if old enough; a recent one is a
         // value that may still be settling, so it is kept and reclaimed by a later sweep.
@@ -235,6 +245,23 @@ pub fn sweep_orphans<
         skipped_recent,
         bytes_before,
     })
+}
+
+// A copy of the chunk sets of the stores in progress.
+fn pending_sets<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>(
+    api: &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
+)
+    -> Outcome<HashSet<u64>>
+{
+    let held = lock_mutex!(api.chans().pending_sets());
+    Ok(held.clone())
 }
 
 /// A fresh copy of a `Wait`, since `scan_with_wait` and `recv_number` take it by value and it is not

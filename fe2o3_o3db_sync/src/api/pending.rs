@@ -6,6 +6,11 @@
 //! therefore held here as a state that is advanced by one answer at a time, and the bot goes on
 //! with other requests between them.  A caller that has nothing else to do runs it to the end
 //! with `run`, which is how `OzoneApi::store_dat_using_responder` waits.
+//!
+//! Since 2026-10-09 (B1, B2) every chunked write has a chunk set of its own.  Once its bunch key
+//! is durable the store reads the key back: if its own value is there, the value it replaced is
+//! retired; if a newer put or a delete won, it retires its own chunks instead.  Its set is held in
+//! the database's pending sets until then, so the orphan sweep leaves it alone.
 
 use crate::{
     prelude::*,
@@ -14,6 +19,7 @@ use crate::{
         index::ZoneInd,
     },
     comm::{
+        channels::PendingSets,
         msg::OzoneMsg,
         response::{
             AckWait,
@@ -27,6 +33,7 @@ use oxedyne_fe2o3_core::channels::{
     Receiver,
     Recv,
 };
+use oxedyne_fe2o3_data::time::Timestamp;
 use oxedyne_fe2o3_iop_db::api::{
     Meta,
     RestSchemesOverride,
@@ -46,8 +53,36 @@ use std::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Step {
     Chunks, // every chunk written and readable
-    Head,   // the bunch key, after which the chunks of a value of other geometry are retired
-    Retire, // the tombstones of those chunks
+    Head,   // the bunch key, after which the key is read back to choose what to retire
+    Retire, // the tombstones of the chunks retired
+}
+
+// Holds a chunk set in the database's pending sets for as long as it lives.
+struct SetHold {
+    sets:   PendingSets,
+    id:     Option<u64>,
+}
+
+impl SetHold {
+    fn new(sets: &PendingSets, id: Option<u64>) -> Outcome<Self> {
+        if let Some(id) = id {
+            let mut held = lock_mutex!(sets);
+            held.insert(id);
+        }
+        Ok(Self { sets: sets.clone(), id })
+    }
+
+    fn release(&mut self) {
+        if let Some(id) = self.id.take() {
+            if let Ok(mut held) = self.sets.lock() {
+                held.remove(&id);
+            }
+        }
+    }
+}
+
+impl Drop for SetHold {
+    fn drop(&mut self) { self.release(); }
 }
 
 type Msgs<const UIDL: usize, UID, ENC, KH> = Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>;
@@ -59,8 +94,9 @@ pub struct PendingStore<
     KH:     Hasher,
 > {
     k:          Dat,
-    pkey:       Option<PartKey>, // the chunks of the value replaced, when they are to be retired
-    datkeys:    Vec<Dat>,        // the chunk keys of the new value
+    pred:       Option<(PartKey, Meta<UIDL, UID>)>, // the chunked value replaced, with its bunch key's metadata
+    set:        Option<PartKey>,                    // the new value's own chunks
+    hold:       SetHold,
     meta:       Meta<UIDL, UID>,
     schms2:     Option<RestSchemesOverride<ENC, KH>>,
     resp:       Responder<UIDL, UID, ENC, KH>, // the caller's
@@ -82,24 +118,35 @@ impl<
 >
     PendingStore<UIDL, UID, ENC, KH>
 {
-    /// Holds the prepared write `head` and `chunks`.  Nothing is sent until `start`.
+    /// Holds the prepared write `head` and `chunks`, whose keys beyond the main key are
+    /// `datkeys`, the bunch key first.  Nothing is sent until `start`, but the new value's chunk
+    /// set is held from here.
     pub fn new<PR: Hasher, CS: Checksummer>(
         api:        &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
         k:          Dat,
-        pkey:       Option<PartKey>,
-        datkeys:    Vec<Dat>,
+        pred:       Option<(PartKey, Meta<UIDL, UID>)>,
+        datkeys:    &[Dat],
         meta:       Meta<UIDL, UID>,
         schms2:     Option<&RestSchemesOverride<ENC, KH>>,
         resp:       Responder<UIDL, UID, ENC, KH>,
         head:       (OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd),
         chunks:     Msgs<UIDL, UID, ENC, KH>,
     )
-        -> Self
+        -> Outcome<Self>
     {
-        Self {
+        let set = match datkeys.first() {
+            Some(Dat::Tup5u64(tup)) => Some(PartKey(*tup)),
+            Some(other) => return Err(err!(
+                "The bunch key of a prepared write of {:?} is {:?}, not a part key.", k, other;
+                Bug, Unexpected)),
+            None => None,
+        };
+        let hold = res!(SetHold::new(api.chans().pending_sets(), set.as_ref().map(|p| p.set_id())));
+        Ok(Self {
             k,
-            pkey,
-            datkeys,
+            pred,
+            set,
+            hold,
             meta,
             schms2:     schms2.cloned(),
             resp,
@@ -111,7 +158,7 @@ impl<
             wait:       Self::wait_for(0),
             held:       Vec::new(),
             promised:   false,
-        }
+        })
     }
 
     fn wait_for(n: usize) -> AckWait<UIDL, UID, ENC, KH> {
@@ -268,9 +315,6 @@ impl<
             Step::Chunks => self.publish(api),
             Step::Head => {
                 self.held = acks;
-                if self.pkey.is_none() {
-                    return self.answer();
-                }
                 self.retire(api)
             },
             Step::Retire => self.answer(),
@@ -292,7 +336,7 @@ impl<
             Some(head) => head,
             None => return Err(err!("A store in progress has no bunch key left to send."; Bug, Missing)),
         };
-        if self.pkey.is_none() && !self.promised {
+        if self.pred.is_none() && self.set.is_none() && !self.promised {
             res!(api.store_bytes(vec![head]));
             return Ok(true);
         }
@@ -306,32 +350,69 @@ impl<
         Ok(false)
     }
 
-    // The value is stored and durable: its predecessor's chunks are tombstoned together, under
-    // a responder of their own, and awaited as one step.
+    // The bunch key is durable.  The key is read back, and every chunk set it does not name of
+    // the two this store knows, the value it replaced and its own, is tombstoned, together under
+    // a responder of their own and awaited as one step.  A set the key does not name is never
+    // named again, since no write reuses a set.  A read that fails retires nothing.
     fn retire<PR: Hasher, CS: Checksummer>(
         &mut self,
         api: &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
     )
         -> Outcome<bool>
     {
-        let pkey = match &self.pkey {
-            Some(pkey) => pkey.clone(),
-            None => return self.answer(),
-        };
-        self.own = api.responder();
-        let sent = api.send_retires(&pkey, &self.datkeys, &self.meta, self.schms2.as_ref(), Some(&self.own));
-        match sent {
-            Ok(waits) if !waits.is_empty() => {
-                self.step = Step::Retire;
-                self.wait = Self::wait_for(waits.len());
-                Ok(false)
-            },
-            Ok(_) => self.answer(),
+        if self.pred.is_none() && self.set.is_none() {
+            return self.answer();
+        }
+        let cur = match api.chunk_set_of(&self.k, self.schms2.as_ref()) {
+            Ok(cur) => cur.map(|(pkey, _)| pkey.set_id()),
             Err(e) => {
                 self.not_retired(api, e);
-                self.answer()
+                return self.answer();
             },
+        };
+        let mut retiring = Vec::new();
+        if let Some((pkey, pmeta)) = &self.pred {
+            if cur != Some(pkey.set_id()) {
+                // Outranks the predecessor's records even after the clock has stepped back.
+                let mut tmeta = self.meta.clone();
+                tmeta.time = Self::later(&self.meta.time, &Self::just_after(&pmeta.time));
+                retiring.push((pkey.clone(), tmeta));
+            }
         }
+        if let Some(own) = &self.set {
+            if cur != Some(own.set_id()) {
+                // A newer put or a delete won: these chunks are named by nothing.
+                let mut tmeta = self.meta.clone();
+                tmeta.time = Self::later(&res!(Timestamp::now()), &Self::just_after(&self.meta.time));
+                retiring.push((own.clone(), tmeta));
+            }
+        }
+        self.own = api.responder();
+        let mut n = 0;
+        for (pkey, tmeta) in &retiring {
+            match api.send_retires(pkey, tmeta, self.schms2.as_ref(), Some(&self.own)) {
+                Ok(waits) => n += waits.len(),
+                Err(e) => {
+                    self.not_retired(api, e);
+                    break;
+                },
+            }
+        }
+        if n == 0 {
+            return self.answer();
+        }
+        self.step = Step::Retire;
+        self.wait = Self::wait_for(n);
+        Ok(false)
+    }
+
+    fn just_after(t: &Timestamp) -> Timestamp {
+        let d = **t + Duration::from_nanos(1);
+        Timestamp::new(d.as_secs(), d.subsec_nanos())
+    }
+
+    fn later(a: &Timestamp, b: &Timestamp) -> Timestamp {
+        if a >= b { a.clone() } else { b.clone() }
     }
 
     // The new value is stored and durable; the old chunks are left to the orphan sweep, and the
@@ -342,13 +423,15 @@ impl<
         e:      Error<ErrTag>,
     ) {
         warn!(sync_log::stream(),
-            "{}: The value stored at {:?} is durable, but the chunks of the value it replaced \
-            were not all retired, and wait for the orphan sweep: {}",
+            "{}: The value stored at {:?} is durable, but the chunks it was to retire, of the \
+            value it replaced or its own after a newer write won, were not all retired, and wait \
+            for the orphan sweep: {}",
             api.ozid(), self.k, e);
     }
 
     // Tells the caller the bunch key is stored.
     fn answer(&mut self) -> Outcome<bool> {
+        self.hold.release();
         if self.resp.is_some() {
             if !self.promised {
                 res!(self.resp.send(OzoneMsg::Written));
@@ -370,6 +453,7 @@ impl<
     )
         -> Outcome<bool>
     {
+        self.hold.release();
         let e = match self.step {
             Step::Retire => {
                 self.not_retired(api, e);

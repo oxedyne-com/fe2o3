@@ -426,11 +426,15 @@ impl<
                 },
             };
 
-            // 5. Insert into the live map. Later occurrences of the
-            //    same raw key bytes (from higher fnum or later in
-            //    the same file) overwrite, which is exactly the
-            //    stale-filtering behaviour we want.
-            live.insert(kbyts, (kdat, meta, cind));
+            // 5. Insert into the live map, keeping the newer stamp of two records of a key as
+            //    the cache does.  File order is not stamp order: a zone's writers append to
+            //    files of their own, so a tombstone can sit in a lower-numbered file than the
+            //    record it retires, and order alone revived that record (2026-10-09).  Of two
+            //    records with one stamp the later occurrence is kept.
+            match live.get(&kbyts) {
+                Some((_, held, _)) if held.time > meta.time => (),
+                _ => { live.insert(kbyts, (kdat, meta, cind)); },
+            }
         }
         Ok(covered)
     }

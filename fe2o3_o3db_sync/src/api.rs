@@ -59,7 +59,11 @@ use crate::{
     },
 };
 
-use oxedyne_fe2o3_core::channels::Recv;
+use oxedyne_fe2o3_core::{
+    channels::Recv,
+    rand::Rand,
+};
+use oxedyne_fe2o3_data::time::Timestamp;
 use oxedyne_fe2o3_jdat::{
     prelude::*,
     chunk::PartKey,
@@ -92,6 +96,10 @@ use std::{
         Path,
         PathBuf,
     },
+    sync::atomic::{
+        AtomicU64,
+        Ordering,
+    },
     time::{
         Duration,
         Instant,
@@ -112,6 +120,31 @@ pub use pending::{
 pub enum Begun<const UIDL: usize, UID: NumIdDat<UIDL>, ENC: Encrypter, KH: Hasher> {
     Done(usize),                                // records in all
     Pending(PendingStore<UIDL, UID, ENC, KH>),
+}
+
+static LAST_STAMP: AtomicU64 = AtomicU64::new(0); // nanoseconds since the epoch, latest write stamp
+
+/// The stamp of a write: the clock, or one nanosecond past the latest stamp this process gave
+/// when the clock has not moved on.  The cache keeps the first of two records of a key with one
+/// stamp, and a restart the first it replays, which need not be the same, so two writes of a key
+/// in one clock tick, or after the clock stepped back, would otherwise end on different values
+/// before and after a restart.  One process serves a store, so its stamps are a total order.
+pub(crate) fn write_stamp() -> Outcome<Timestamp> {
+    if let Some(t) = hooks::stale_stamp() {
+        return Ok(Timestamp::new(t.as_secs(), t.subsec_nanos()));
+    }
+    let clock = match hooks::fixed_stamp() {
+        Some(t) => t,
+        None    => *res!(Timestamp::now()),
+    };
+    let now = try_into!(u64, clock.as_nanos());
+    let prev = match LAST_STAMP.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
+        |last| Some(now.max(last.saturating_add(1))))
+    {
+        Ok(p) | Err(p) => p,
+    };
+    let n = now.max(prev.saturating_add(1));
+    Ok(Timestamp::new(n / 1_000_000_000, (n % 1_000_000_000) as u32))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -203,15 +236,33 @@ impl<
         self.ozone_key(res!(k.as_bytes()), schms2)
     }
     
-    /// Derives the chunk set identifier for a value from its key bytes.  A chunked value's chunk
-    /// records are addressed by `Tup5u64([set_id, index, ..])`; deriving `set_id` from the key --
-    /// rather than from a fresh random ticket per operation -- makes a later overwrite of the same
-    /// key write its chunks under the same addresses, so the ordinary supersession path flags the
-    /// superseded chunk records old and the collector reclaims them.  Seahash gives a stable
-    /// 64-bit value across runs and builds; the dedicated salt keeps it distinct from the routing
-    /// hash.  The collision probability matches the random ticket it replaces (~2^-64).
-    pub fn chunk_set_id(kbuf: &[u8]) -> u64 {
-        match HashScheme::new_seahash().hash(&[kbuf], constant::CHUNK_SET_ID_SALT).as_hashform() {
+    /// The chunk set identifier of one chunked write: a hash of the key, the write's stamp and
+    /// a fresh random nonce.  A chunk key is `Tup5u64([set_id, index, length, count, size])`, so
+    /// no write ever addresses a chunk an earlier write used, a value's chunks are immutable until
+    /// retired, and its bunch key changes on every write (B1, B2, 2026-10-09).  The nonce keeps two
+    /// puts of one key in one clock tick, or after a clock step back, apart (~2^-64); the key and
+    /// stamp make an identifier traceable to its write and disjoint from the legacy family.
+    pub fn chunk_set_id(kbuf: &[u8], stamp: &Timestamp, nonce: u64) -> u64 {
+        let secs = stamp.secs().to_be_bytes();
+        let nanos = stamp.nanos().to_be_bytes();
+        let nonce = nonce.to_be_bytes();
+        Self::fold_set_id(HashScheme::new_seahash()
+            .hash(&[kbuf, &secs, &nanos, &nonce], constant::CHUNK_SET_ID_SALT)
+            .as_hashform())
+    }
+
+    /// The identifier the builds of 2026-09 derived from the key alone, under which every write
+    /// of one length reused one chunk set.  Values written so still read, since a reader takes
+    /// the identifier from the bunch key, and move to a set of their own on their next write.
+    /// Kept to reproduce such values in tests.
+    pub fn legacy_chunk_set_id(kbuf: &[u8]) -> u64 {
+        Self::fold_set_id(HashScheme::new_seahash()
+            .hash(&[kbuf], constant::CHUNK_SET_ID_SALT)
+            .as_hashform())
+    }
+
+    fn fold_set_id(h: HashForm) -> u64 {
+        match h {
             HashForm::U64(h)    => h,
             // Seahash always yields a U64; fold any other form defensively into one.
             other               => {
@@ -513,12 +564,9 @@ impl<
         // live under keys of their own, so they are retired here, as `delete` retires them, or
         // their bytes would stay live in the data files for ever.
         let deleted = matches!(&v, Dat::Usr(kind, _) if *kind == id::usr_kind_id_deleted());
-        // Any other store over a chunked value leaves the old chunks live too, unless the new value
-        // writes the very keys they have.  A chunk key carries the length, count and size of its
-        // value as well as the set identifier, so a value of another length shares none of them,
-        // and the ordinary supersession never reaches them.  They are retired once the new value
-        // is durable, and not before: retired first, a crash would leave the old bunch key naming
-        // chunks that are gone.
+        // Any other store over a chunked value leaves the old chunks live too, since every write
+        // has a chunk set of its own.  They are retired once the new value is durable, and not
+        // before: retired first, a crash would leave the old bunch key naming chunks that are gone.
         let old = if deleted { None } else { res!(self.chunk_set_of(&k, schms2)) };
         let (kbuf, vbuf) = res!(Encode::encode_dat(k.clone(), v));
         let (msgs, datkeys) = res!(self.prepare_write_keyed(kbuf, vbuf, user, schms2, resp.clone(), None));
@@ -552,13 +600,8 @@ impl<
             }
             return Ok(Begun::Done(nchunks));
         }
-        let stale = match &old {
-            Some(pkey) => Self::chunk_keys_of(pkey).into_iter().any(|ck| !datkeys.contains(&ck)),
-            None => false,
-        };
-        let pkey = if stale { old } else { None };
         let (head, chunks) = res!(Self::head_and_chunks(msgs));
-        let mut pending = PendingStore::new(self, k, pkey, datkeys, meta, schms2, resp, head, chunks);
+        let mut pending = res!(PendingStore::new(self, k, old, &datkeys, meta, schms2, resp, head, chunks));
         if res!(pending.start(self)) {
             return Ok(Begun::Done(nchunks));
         }
@@ -578,10 +621,9 @@ impl<
         Ok((head, msgs.collect()))
     }
 
-    /// Store forcing the chunk set identifier rather than deriving it from the key.  Test and
-    /// migration support: it reproduces a value as an earlier build wrote it (a random
-    /// per-operation set_id), so that reads of such a value can be exercised after the switch to
-    /// key-derived identifiers.  Production writes never take this path.
+    /// Store forcing the chunk set identifier.  Test support: it reproduces a value as an earlier
+    /// build wrote it, under a random or a key-derived (`legacy_chunk_set_id`) identifier, and
+    /// retires nothing.  Production writes never take this path.
     pub fn store_dat_using_responder_forcing_set_id(
         &self,
         k:      Dat,
@@ -604,7 +646,7 @@ impl<
         let nchunks = msgs.len();
         let meta = res!(Self::write_meta(&msgs));
         let (head, chunks) = res!(Self::head_and_chunks(msgs));
-        let mut pending = PendingStore::new(self, k, None, Vec::new(), meta, schms2, resp, head, chunks);
+        let mut pending = res!(PendingStore::new(self, k, None, &[], meta, schms2, resp, head, chunks));
         if !res!(pending.start(self)) {
             res!(pending.run(self));
         }
@@ -612,8 +654,8 @@ impl<
     }
 
     /// The key and value `Dat`icles are serialised here and then sent for final processing.  A
-    /// `set_id_override` of `None` derives the chunk set identifier from the key (the ordinary
-    /// path); `Some` forces it, for reproducing an earlier build's random-keyed values.
+    /// `set_id_override` of `None` gives a chunked value a chunk set of its own (the ordinary
+    /// path); `Some` forces it, for reproducing an earlier build's values.
     pub fn prepare_write_dat(
         &self,
         k:              Dat,
@@ -700,19 +742,18 @@ impl<
         let mut msgs = Vec::new();
         let mut keys = Vec::new();
         let mut meta = Meta::new(user);
-        res!(meta.stamp_time_now());
+        meta.time = res!(write_stamp());
 
         // 4. Package the value, breaking into chunks if it is too big.
         if vbuf.len() >= chunk_threshold {
             let chunker = OzoneConfig::chunker(chunk_config);
             // 4.1 Chunk data.
             let (chunks, chunk_state) = res!(chunker.chunk(&vbuf));
-            // Address the chunks by a key-derived identifier, not the per-operation ticket, so an
-            // overwrite of the same key supersedes the prior value's chunk records in place.  A
-            // forced identifier (test/migration only) reproduces an earlier build's random keys.
+            // A chunk set of the write's own.  A forced identifier (tests only) reproduces an
+            // earlier build's values.
             let set_id = match set_id_override {
                 Some(id)    => id,
-                None        => Self::chunk_set_id(&kbuf),
+                None        => Self::chunk_set_id(&kbuf, &meta.time, Rand::rand_u64()),
             };
             let datkeys = res!(chunker.keys(set_id, &chunk_state));
             keys = datkeys.clone();
@@ -842,7 +883,7 @@ impl<
         //    have taken the chunks it shares with the value deleted (a store of the same length
         //    writes the same chunk keys) and left its bunch key to the later tombstone.
         let mut meta = Meta::new(user);
-        res!(meta.stamp_time_now());
+        meta.time = res!(write_stamp());
 
         // 1. Normalise the key.  The cache hash belongs to the stored record, not merely to the
         //    routing decision, so it is carried through to the writer rather than dropped.
@@ -922,34 +963,30 @@ impl<
         -> Outcome<Option<(PartKey, Vec<(u64, Responder<UIDL, UID, ENC, KH>)>)>>
     {
         let pkey = match res!(self.chunk_set_of(k, schms2)) {
-            Some(pkey)  => pkey,
-            None        => return Ok(None), // Not chunked, or the key is absent: nothing extra to reclaim.
+            Some((pkey, _)) => pkey,
+            None            => return Ok(None), // Not chunked, or the key is absent: nothing extra to reclaim.
         };
-        let waits = res!(self.send_retires(&pkey, &[], meta, schms2, None));
+        let waits = res!(self.send_retires(&pkey, meta, schms2, None));
         Ok(Some((pkey, waits)))
     }
 
-    /// The part key of the value now at `k`, when that value is chunked.  The read is a whole
-    /// read, so a store pays it only where it must know.
-    fn chunk_set_of(
+    /// The part key of the value now at `k`, when that value is chunked, with the metadata of
+    /// its bunch key.  The read is a whole read, so a store pays it only where it must know.
+    pub(crate) fn chunk_set_of(
         &self,
         k:      &Dat,
         schms2: Option<&RestSchemesOverride<ENC, KH>>,
     )
-        -> Outcome<Option<PartKey>>
+        -> Outcome<Option<(PartKey, Meta<UIDL, UID>)>>
     {
-        let enc = self.schemes().encrypter();
-        let or_enc = schms2.map(|s| s.encrypter());
-
-        let resp = res!(self.fetch_using_schemes(k, schms2));
-        match res!(resp.recv_daticle(enc, or_enc)) {
-            (Some((Dat::Tup5u64(tup), _)), _) => Ok(Some(PartKey(tup))),
+        match res!(self.get_head_wait(k, schms2)) {
+            Some((Dat::Tup5u64(tup), meta)) => Ok(Some((PartKey(tup), meta))),
             _ => Ok(None),
         }
     }
 
     // The keys of a chunked value's chunk records, which `fetch_chunks` reconstructs likewise.
-    fn chunk_keys_of(pkey: &PartKey) -> Vec<Dat> {
+    pub(crate) fn chunk_keys_of(pkey: &PartKey) -> Vec<Dat> {
         let n = pkey.num_parts();
         (1..(n + 1)).map(|i| Dat::Tup5u64([
             pkey.set_id(),
@@ -960,14 +997,13 @@ impl<
         ])).collect()
     }
 
-    /// Sends a tombstone for each chunk record of the value `pkey` names, except those under the
-    /// keys in `keep`, and returns the responder to wait on for each, with the chunk's number.
-    /// Each has its own responder so that a failure names its chunk, unless `shared` is given, in
-    /// which case every tombstone answers to it.
-    fn send_retires(
+    /// Sends a tombstone for each chunk record of the value `pkey` names, and returns the
+    /// responder to wait on for each, with the chunk's number.  Each has its own responder so
+    /// that a failure names its chunk, unless `shared` is given, in which case every tombstone
+    /// answers to it.
+    pub(crate) fn send_retires(
         &self,
         pkey:   &PartKey,
-        keep:   &[Dat],
         meta:   &Meta<UIDL, UID>,
         schms2: Option<&RestSchemesOverride<ENC, KH>>,
         shared: Option<&Responder<UIDL, UID, ENC, KH>>,
@@ -976,9 +1012,6 @@ impl<
     {
         let mut waits = Vec::new();
         for (i, ck) in Self::chunk_keys_of(pkey).into_iter().enumerate() {
-            if keep.contains(&ck) {
-                continue;
-            }
             let resp = match shared {
                 Some(resp) => resp.clone(),
                 None => self.responder(),
@@ -1055,7 +1088,7 @@ impl<
         -> Outcome<()>
     {
         let mut cmeta = Meta::new(user);
-        res!(cmeta.stamp_time_now());
+        cmeta.time = res!(write_stamp());
         self.tombstone_chunk_key_at(ck, cmeta, schms2, resp)
     }
 
@@ -1160,8 +1193,34 @@ impl<
             // chunked was written perfectly well and could not be read: an accumulating value,
             // such as a ledger, worked until the day it crossed the chunk size and then failed
             // for good.
-            Some((Dat::Tup5u64(tup), meta)) =>
-                Ok(Some((res!(self.fetch_chunks(&Dat::Tup5u64(tup), schms2)), meta))),
+            //
+            // A chunk found gone means a newer write retired this set between the head read and
+            // the chunk reads, so the head is read again: a new head is retried, an unchanged one
+            // is a torn value.
+            Some((Dat::Tup5u64(mut tup), mut meta)) => {
+                for _ in 0..constant::CHUNK_READ_RETRIES {
+                    if let Some(dat) = res!(self.fetch_chunks_or_gone(&Dat::Tup5u64(tup), schms2)) {
+                        return Ok(Some((dat, meta)));
+                    }
+                    match res!(self.get_head_wait(k, schms2)) {
+                        None => return Ok(None), // Deleted since.
+                        Some((Dat::Tup5u64(tup2), _)) if tup2 == tup => return Err(err!(
+                            "{}: For key {:?}, a chunk of the value with bunch key {:?} is \
+                            missing while that value is still the key's current one.",
+                            self.ozid(), k, tup;
+                            Missing, Data)),
+                        Some((Dat::Tup5u64(tup2), meta2)) => {
+                            tup = tup2;
+                            meta = meta2;
+                        },
+                        Some((dat, meta2)) => return Ok(Some((dat, meta2))),
+                    }
+                }
+                Err(err!(
+                    "{}: For key {:?}, the value changed under each of {} chunked reads.",
+                    self.ozid(), k, constant::CHUNK_READ_RETRIES;
+                    LimitReached, Read))
+            },
             // The data received was in a single piece.
             Some((dat, meta)) => Ok(Some((dat, meta))),
         }
@@ -1330,6 +1389,24 @@ impl<
     )
         -> Outcome<Dat>
     {
+        match res!(self.fetch_chunks_or_gone(k, schms2)) {
+            Some(dat) => Ok(dat),
+            None => Err(err!(
+                "{}: For bunch key {:?}, a chunk was not found or has been retired.",
+                self.ozid(), k;
+                Missing, Data)),
+        }
+    }
+
+    // `fetch_chunks`, with `None` when a chunk is absent or tombstoned, which a newer write
+    // retiring this chunk set produces.
+    fn fetch_chunks_or_gone(
+        &self,
+        k:      &Dat,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Option<Dat>>
+    {
         let self_id = self.ozid().clone();
         let enc = self.schemes().encrypter();
         let or_enc = schms2.map(|s| s.encrypter());
@@ -1439,10 +1516,9 @@ impl<
                             }
                             joined[start..end].copy_from_slice(&v[..]);
                         },
-                        Ok(OzoneMsg::Value(Value::Chunk(None, i, _))) => return Err(err!(
-                            "{}: For key {:?}, data chunk {} of {} was not found.",
-                            self_id, k, i, num_chunks;
-                            Missing, Data)),
+                        Ok(OzoneMsg::Value(Value::Chunk(None, _, _))) => return Ok(None),
+                        Ok(OzoneMsg::Value(Value::Chunk(Some((Dat::Usr(kind, _), _)), _, _)))
+                            if kind == id::usr_kind_id_deleted() => return Ok(None),
                         Ok(msg) => return Err(err!(
                             "{}: Unrecognised chunk request response: {:?}", self_id, msg;
                             Invalid, Input)),
@@ -1458,7 +1534,7 @@ impl<
                         encrypter, {}, differs from that used to store the original data.",
                         self_id, k, enc.or_debug(or_enc);
                         Decode, Bytes)),
-                    Ok((dat, _)) => return Ok(dat),
+                    Ok((dat, _)) => return Ok(Some(dat)),
                 }
             },
             _ => return Err(err!("{}: Key must be a PartKey.", self_id; Input, Invalid)),

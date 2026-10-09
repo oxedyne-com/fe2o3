@@ -103,6 +103,9 @@ pub const STACK_SIZE:                   usize = 2 * 1024 * 1024;
 // still running are finished afterwards, in the same order (`Supervisor::shutdown`).
 pub const SHUTDOWN_MAX_WAIT:            Duration = Duration::from_secs(3);
 
+// A chunked read that finds its chunk set retired re-reads the key's head, at most this often.
+pub const CHUNK_READ_RETRIES:           usize = 8;
+
 // Intervals.
 pub const HEALTH_CHECK_INTERVAL:        Duration = Duration::from_secs(60);
 
