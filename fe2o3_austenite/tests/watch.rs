@@ -312,6 +312,35 @@ fn turning_off_a_black_point_compensation_that_every_transform_forces_is_refused
 }
 
 #[test]
+fn a_file_setting_a_set_makes_inapplicable_is_warned_once_and_the_run_goes_on() {
+	let (d, main) = project("layered_warn", "\"colour\": {\"space\": \"cmyk\", \"black\": \"rich\"}");
+	let plan = Plan::at(&d, Some(&main), &sets(&["colour.space=grey"]), None).expect("the run goes on");
+	assert_eq!(plan.warned.len(), 1, "one warning: {:?}", plan.warned);
+	assert!(plan.warned[0].contains("colour.black") && plan.warned[0].contains("\"grey\""), "{}", plan.warned[0]);
+	let plan = Plan::at(&d, Some(&main), &[], None).expect("the file alone is consistent");
+	assert!(plan.warned.is_empty(), "{:?}", plan.warned);
+}
+
+#[test]
+fn a_file_inconsistent_in_itself_is_refused_whatever_the_sets() {
+	let (d, main) = project("layered_file", "\"colour\": {\"space\": \"rgb\", \"black\": \"rich\"}");
+	let m = why(Plan::at(&d, Some(&main), &[], None));
+	assert!(m.contains("colour.black"), "{}", m);
+	let m = why(Plan::at(&d, Some(&main), &sets(&["colour.space=cmyk"]), None));
+	assert!(m.contains("colour.black") && m.contains(settings::FILE), "{}", m);
+}
+
+#[test]
+fn a_set_that_is_itself_inapplicable_is_refused_over_a_file() {
+	let (d, main) = project("layered_set", "\"colour\": {\"space\": \"cmyk\"}");
+	let m = why(Plan::at(&d, Some(&main), &sets(&["colour.space=grey", "colour.black=rich"]), None));
+	assert!(m.contains("colour.black"), "{}", m);
+	let (d, main) = project("layered_set_grey", "\"colour\": {\"space\": \"grey\"}");
+	let m = why(Plan::at(&d, Some(&main), &sets(&["colour.black=rich"]), None));
+	assert!(m.contains("colour.black"), "{}", m);
+}
+
+#[test]
 fn a_profile_that_cannot_serve_its_role_is_refused_by_its_key() {
 	let (d, main) = project("profiles", "");
 	let fogra = fogra_file();
@@ -535,9 +564,120 @@ fn a_reader_meets_one_whole_pdf_or_the_other_while_the_compile_swaps_a_new_one_i
 	}
 	assert!(reads > 50, "the readers read {} times, too few to mean anything", reads);
 	assert_eq!(torn, 0, "{} of {} reads met something other than a whole PDF", torn, reads);
-	let mut beside = live.as_os_str().to_owned();
+	assert_eq!(temporaries(&d), Vec::<String>::new(), "no half-written file is left beside the PDF");
+}
+
+// What a writer may have left in `d`: a `.part`, a `.tmp`, or any hidden file.
+fn temporaries(d: &Path) -> Vec<String> {
+	let mut left: Vec<String> = std::fs::read_dir(d).expect("the case's directory")
+		.map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned())
+		.filter(|n| n.ends_with(".part") || n.ends_with(".tmp") || n.starts_with('.'))
+		.collect();
+	left.sort();
+	left
+}
+
+#[test]
+fn a_slow_writer_still_writing_its_temporary_never_reaches_the_finished_pdf() {
+	let d = dir("slow_writer");
+	let a = d.join("a.typ");
+	write(&a, &source(40, "a"));
+	let out = d.join("out.pdf");
+	// The other writer, as `austenite build` beside a watch: it has its temporary open and has yet to write.
+	let mut beside = out.as_os_str().to_owned();
 	beside.push(".part");
-	assert!(!PathBuf::from(beside).exists(), "no half-written file is left beside the PDF");
+	let held = PathBuf::from(beside);
+	let mut slow = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&held).expect("the slow writer's file");
+	let mut session = Session::new(FontStore::default());
+	let mut read = Vec::new();
+	watch::compile_pdf(&spec(&a, &out), &mut session, true, false, &mut read).expect("the fast writer");
+	std::io::Write::write_all(&mut slow, b"%PDF-1.7 the slow writer's bytes\n%%EOF\n").expect("the slow writer's write");
+	drop(slow);
+	let bytes = std::fs::read(&out).expect("the PDF");
+	assert!(bytes.starts_with(b"%PDF-"), "the finished PDF begins as a PDF");
+	assert_eq!(count(&bytes, "%%EOF"), 1, "the finished PDF holds one end-of-file marker, its own");
+	assert!(!has(&bytes, "slow writer"), "nothing the other writer wrote reached the finished PDF");
+	std::fs::remove_file(&held).expect("the slow writer's file");
+	assert_eq!(temporaries(&d), Vec::<String>::new(), "the fast writer left nothing beside the PDF");
+}
+
+#[test]
+fn two_writers_of_one_output_leave_one_whole_pdf_and_no_temporary() {
+	let d = dir("two_writers");
+	let a = d.join("a.typ");
+	let b = d.join("b.typ");
+	write(&a, &source(40, "a"));
+	write(&b, &source(40, "b"));
+	let out = d.join("out.pdf");
+	let mut workers = Vec::new();
+	for main in [a.clone(), b.clone()] {
+		let out = out.clone();
+		workers.push(std::thread::spawn(move || {
+			let mut session = Session::new(FontStore::default());
+			let mut read = Vec::new();
+			for _ in 0..6 {
+				watch::compile_pdf(&spec(&main, &out), &mut session, true, false, &mut read).expect("each writer's compile");
+			}
+		}));
+	}
+	for w in workers {
+		w.join().expect("a writer");
+	}
+	let bytes = std::fs::read(&out).expect("the PDF");
+	assert_eq!(count(&bytes, "%%EOF"), 1, "one whole PDF, one end-of-file marker");
+	assert_eq!(temporaries(&d), Vec::<String>::new(), "no temporary is left beside the PDF");
+}
+
+#[test]
+fn a_write_that_fails_leaves_no_temporary_beside_the_output() {
+	let d = dir("failed_write");
+	let a = d.join("a.typ");
+	write(&a, &source(3, "a"));
+	// An output the swap cannot land on: a directory that is not empty.
+	let held = d.join("held");
+	write(&held.join("inner.txt"), "kept");
+	let mut session = Session::new(FontStore::default());
+	let mut read = Vec::new();
+	assert!(watch::compile_pdf(&spec(&a, &held), &mut session, true, false, &mut read).is_err(), "the write fails");
+	assert_eq!(std::fs::read_to_string(held.join("inner.txt")).expect("the directory's file"), "kept");
+	assert_eq!(temporaries(&d), Vec::<String>::new(), "a failed write leaves nothing beside the output");
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE OUTPUT                                                                 │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+#[test]
+fn an_output_that_would_replace_the_source_a_directory_or_a_link_is_refused_by_name() {
+	let (d, main) = project("output_refused", "");
+	write(&d.join("sub").join("x.txt"), "x");
+	write(&d.join("elsewhere.pdf"), "the link's target");
+	std::os::unix::fs::symlink(d.join("elsewhere.pdf"), d.join("link.pdf")).expect("a symlink");
+	for (set, said) in [
+		("output=",			"empty"),
+		("output=main.typ",	"main.typ"),
+		("output=sub",		"sub"),
+		("output=link.pdf",	"link.pdf"),
+	] {
+		let m = why(Plan::at(&d, Some(&main), &sets(&[set]), None));
+		assert!(m.contains("'output'"), "{}: {}", set, m);
+		assert!(m.contains(said), "{}: {}", set, m);
+	}
+	assert_eq!(std::fs::read_to_string(d.join("link.pdf")).expect("through the link"), "the link's target");
+	assert!(std::fs::symlink_metadata(d.join("link.pdf")).expect("the link").file_type().is_symlink());
+	assert!(Plan::at(&d, Some(&main), &sets(&["output=out/new.pdf"]), None).is_ok(), "a new file is fine");
+}
+
+#[test]
+fn an_output_the_compile_reads_is_refused_and_left_untouched() {
+	let (d, main) = project("output_read", "");
+	let fore = "A foreword of a few words.\n";
+	write(&d.join("foreword.typ"), fore);
+	write(&main, &format!("{}#include \"foreword.typ\"\n\n{}\n", HEAD, PARA));
+	let m = why(watch::build_at(&d, Some(&main), &sets(&["view.open=false", "output=foreword.typ"]), None));
+	assert!(m.contains("'output'") && m.contains("foreword.typ"), "{}", m);
+	assert_eq!(std::fs::read_to_string(d.join("foreword.typ")).expect("the foreword"), fore, "the foreword is untouched");
+	assert_eq!(temporaries(&d), Vec::<String>::new(), "a refused write leaves nothing beside the output");
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐

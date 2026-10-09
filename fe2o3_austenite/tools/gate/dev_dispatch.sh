@@ -16,7 +16,8 @@
 #
 # Cases, each checked for the exit status, the austenite argument line, the typst argument line, whether a viewer
 # was asked for, and a message where one is due:
-#   an austenite.jdat tree, with and without --cmyk; USE_EVAL=1 with --cmyk, --grey, --scrub and --cmyk --scrub,
+#   an austenite.jdat tree, with and without --cmyk, and with --scrub, which turns both metadata keys off over
+#   whatever the settings file asks; USE_EVAL=1 with --cmyk, --grey, --scrub and --cmyk --scrub,
 #   from the environment and from a dev.conf; USE_TYPST=1 in the environment and in a dev.conf, --typst, and
 #   USE_TYPST=1 beside USE_EVAL=1; a binary whose usage has no watch command; a missing binary; the curated
 #   path; and the Ghostscript and pikepdf refusals, which the curated path keeps. Then a book with its own
@@ -166,21 +167,24 @@ USE_EVAL=1'
 	local jf="watch --root $T/jdat --font-path $T/jdat/assets/fonts x.typ x.pdf"
 	local ef="watch --root $T/evalbare --font-path $T/evalbare/assets/fonts x.typ x.pdf"
 	local rf="--set root=$T/evalbare --set fonts=$T/evalbare/assets/fonts"
+	local sc="--set metadata.document=false --set metadata.engine=false"
 
 	go "$dev" jdat_plain        jdat      usage_new --
 	expect jdat_plain        0 "watch x.typ" - no "dev:"
 	go "$dev" jdat_cmyk         jdat      usage_new -- --cmyk
 	expect jdat_cmyk         0 "watch x.typ --set colour.space=cmyk" - no -
+	go "$dev" jdat_scrub        jdat      usage_new -- --scrub
+	expect jdat_scrub        0 "watch x.typ $sc" - no -
 	go "$dev" eval_cmyk         evalbare  usage_new USE_EVAL=1 -- --cmyk
 	expect eval_cmyk         0 "watch x.typ --set colour.space=cmyk $rf" - no -
 	go "$dev" eval_grey         evalbare  usage_new USE_EVAL=1 -- --grey
 	expect eval_grey         0 "watch x.typ --set colour.space=grey $rf" - no -
 	go "$dev" eval_cmyk_scrub   evalbare  usage_new USE_EVAL=1 -- --cmyk --scrub
-	expect eval_cmyk_scrub   0 "watch x.typ --set colour.space=cmyk $rf" - no -
+	expect eval_cmyk_scrub   0 "watch x.typ --set colour.space=cmyk $sc $rf" - no -
 	go "$dev" eval_scrub        evalbare  usage_new USE_EVAL=1 -- --scrub
-	expect eval_scrub        0 "watch x.typ $rf" - no -
+	expect eval_scrub        0 "watch x.typ $sc $rf" - no -
 	go "$dev" eval_conf         evalconf  usage_new --
-	expect eval_conf         0 "watch x.typ --set colour.space=cmyk --set root=$T/evalconf --set fonts=$T/evalconf/assets/fonts" - no -
+	expect eval_conf         0 "watch x.typ --set colour.space=cmyk $sc --set root=$T/evalconf --set fonts=$T/evalconf/assets/fonts" - no -
 	go "$dev" typst_env         jdat      usage_new USE_TYPST=1 --
 	expect typst_env         0 - "$jf" yes -
 	go "$dev" typst_conf        typstconf usage_new --

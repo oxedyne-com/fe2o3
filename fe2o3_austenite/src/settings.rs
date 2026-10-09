@@ -167,6 +167,14 @@ impl Default for View {
 	fn default() -> Self { Self { open: true, app: "auto".to_string() } }
 }
 
+/// Where a run's colour settings came from, so that a file setting a `--set` has made inapplicable is told
+/// apart from one that is wrong where it stands.
+#[derive(Clone, Debug, Default)]
+pub struct Layers {
+	pub file:	Option<(PathBuf, Colour)>,	// the settings file and its colour settings before any `--set`
+	pub set:	Vec<String>,				// the dotted keys the `--set`s named
+}
+
 /// The settings of a run. `root` and `document` are empty when unset.
 #[derive(Clone, Debug, FromDatMap)]
 pub struct Settings {
@@ -182,6 +190,7 @@ pub struct Settings {
 	#[skip] pub metadata:	Metadata,
 	#[skip] pub pdf:		Pdf,
 	#[skip] pub view:		View,
+	#[skip] pub layers:		Layers,
 }
 
 impl Default for Settings {
@@ -199,6 +208,7 @@ impl Default for Settings {
 			metadata:		Metadata::default(),
 			pdf:			Pdf::default(),
 			view:			View::default(),
+			layers:			Layers::default(),
 		}
 	}
 }
@@ -317,6 +327,7 @@ impl Settings {
 	/// The settings of one run: the defaults, then the file `file` when there is one, then each `--set`.
 	pub fn resolve(file: Option<&Path>, sets: &[String]) -> Outcome<Self> {
 		let mut top = Dat::Map(BTreeMap::new());
+		let mut layers = Layers::default();
 		if let Some(f) = file {
 			let text = res!(std::fs::read_to_string(f));
 			if !text.trim().is_empty() {
@@ -329,38 +340,47 @@ impl Settings {
 			if let Err(e) = leaves("", &top, &mut seen) {
 				return Err(err!(e, "In the settings file {}.", f.display(); Input, Invalid));
 			}
+			let alone = res!(Self::from_dat(&top));
+			layers.file = Some((f.to_path_buf(), alone.colour));
 		}
 		for set in sets {
 			let (path, val) = res!(parse_set(set));
+			layers.set.push(path.clone());
 			res!(top.map_put_dotted(&path, val));
 		}
-		Self::from_dat(&top)
+		let mut s = res!(Self::from_dat(&top));
+		s.layers = layers;
+		Ok(s)
 	}
 
 	/// Refuses a setting that nothing would read, by the key's name, and a figures directory that nothing
-	/// would render. `doc_dir` is the document's own directory, where the figure sources would be.
+	/// would render. `doc_dir` is the document's own directory, where the figure sources would be. What comes
+	/// back is one line for each file setting that a `--set` made inapplicable, for the caller to print.
 	///
 	/// The profiles, the intent and the black point apply when `colour.space` is `cmyk` or `grey`; the grey
 	/// profile only to `grey`, and the black only to `cmyk`. A value other than the default anywhere else
-	/// would be ignored, so it is refused. A black point the output profile and intent override is refused when
-	/// the profiles are read, in [`Settings::pdf_options`].
-	pub fn check_built(&self, doc_dir: &Path) -> Outcome<()> {
-		let c = &self.colour;
-		let d = Colour::default();
-		let both = ["cmyk", "grey"];
-		for (key, got, differs, only) in [
-			("colour.rgb_profile",	shown(&Dat::Str(c.rgb_profile.clone())),	c.rgb_profile != d.rgb_profile,		&both[..]),
-			("colour.grey_profile",	shown(&Dat::Str(c.grey_profile.clone())),	c.grey_profile != d.grey_profile,	&both[1..]),
-			("colour.cmyk_profile",	shown(&Dat::Str(c.cmyk_profile.clone())),	c.cmyk_profile != d.cmyk_profile,	&both[..]),
-			("colour.intent",		shown(&Dat::Str(c.intent.clone())),			c.intent != d.intent,				&both[..]),
-			("colour.black_point",	shown(&Dat::Bool(c.black_point)),			c.black_point != d.black_point,		&both[..]),
-			("colour.black",		shown(&Dat::Str(c.black.clone())),			c.black != d.black,					&both[..1]),
-		] {
-			if differs && !only.contains(&c.space.as_str()) {
-				let spaces = only.iter().map(|w| fmt!("\"{}\"", w)).collect::<Vec<_>>().join(" or ");
+	/// would be ignored, so it is refused when the settings file holds it beside a space that does not read
+	/// it, or when a `--set` gave it. A file setting that is inapplicable only because a `--set` changed
+	/// `colour.space` is not used for the run, and is told rather than refused. A black point the output
+	/// profile and intent override is refused when the profiles are read, in [`Settings::pdf_options`].
+	pub fn check_built(&self, doc_dir: &Path) -> Outcome<Vec<String>> {
+		if let Some((path, alone)) = &self.layers.file {
+			if let Some((key, got, only)) = unread(alone).into_iter().next() {
+				return Err(err!(
+					"In the settings file {}, the setting '{}' = {} applies only when 'colour.space' is {}, and \
+					the file makes it \"{}\".", path.display(), key, got, spaces(only), alone.space; Input, Invalid));
+			}
+		}
+		let mut warned = Vec::new();
+		for (key, got, only) in unread(&self.colour) {
+			if self.layers.file.is_some() && !self.layers.set.iter().any(|k| k == key) {
+				warned.push(fmt!(
+					"The setting '{}' = {} in the settings file applies only when 'colour.space' is {}, and a --set \
+					makes it \"{}\", so it is not used for this run.", key, got, spaces(only), self.colour.space));
+			} else {
 				return Err(err!(
 					"The setting '{}' = {} applies only when 'colour.space' is {}, and it is \"{}\".",
-					key, got, spaces, c.space; Input, Invalid));
+					key, got, spaces(only), self.colour.space; Input, Invalid));
 			}
 		}
 		if self.figs.render && doc_dir.join(&self.figs.dir).is_dir() {
@@ -368,7 +388,7 @@ impl Settings {
 				"The setting 'figs.render' is on and the figures directory '{}' exists beside the document, but \
 				figure rendering is not built yet. Set figs.render=false to go on.", self.figs.dir; Input, Invalid));
 		}
-		Ok(())
+		Ok(warned)
 	}
 
 	/// How the PDF is written under these settings. `base` is the directory the settings file is in, which a
@@ -491,6 +511,31 @@ fn on_path(cmd: &str) -> bool {
 		Some(path)	=> std::env::split_paths(&path).any(|d| d.join(cmd).is_file()),
 		None		=> false,
 	}
+}
+
+// The colour keys of `c` that its own space does not read and that differ from their defaults: each key, its
+// value as told, and the spaces that read it.
+fn unread(c: &Colour) -> Vec<(&'static str, String, &'static [&'static str])> {
+	let d = Colour::default();
+	const BOTH: &[&str] = &["cmyk", "grey"];
+	const GREY: &[&str] = &["grey"];
+	const CMYK: &[&str] = &["cmyk"];
+	[
+		("colour.rgb_profile",	shown(&Dat::Str(c.rgb_profile.clone())),	c.rgb_profile != d.rgb_profile,		BOTH),
+		("colour.grey_profile",	shown(&Dat::Str(c.grey_profile.clone())),	c.grey_profile != d.grey_profile,	GREY),
+		("colour.cmyk_profile",	shown(&Dat::Str(c.cmyk_profile.clone())),	c.cmyk_profile != d.cmyk_profile,	BOTH),
+		("colour.intent",		shown(&Dat::Str(c.intent.clone())),			c.intent != d.intent,				BOTH),
+		("colour.black_point",	shown(&Dat::Bool(c.black_point)),			c.black_point != d.black_point,		BOTH),
+		("colour.black",		shown(&Dat::Str(c.black.clone())),			c.black != d.black,					CMYK),
+	].into_iter()
+		.filter(|(_, _, differs, only)| *differs && !only.contains(&c.space.as_str()))
+		.map(|(key, got, _, only)| (key, got, only))
+		.collect()
+}
+
+// The spaces that read a key, as an error message names them.
+fn spaces(only: &[&str]) -> String {
+	only.iter().map(|w| fmt!("\"{}\"", w)).collect::<Vec<_>>().join(" or ")
 }
 
 // One `--set key=value`: the key, and the value typed by what the key takes. A list is comma-separated.

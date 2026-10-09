@@ -8,7 +8,9 @@
 //!
 //! [`Run`] is the loop of `austenite watch`, with a [`Run::tick`] that a test can drive; [`compile_pdf`]
 //! is the one compile to a PDF that it, `austenite build` and `austenite --eval` share. The PDF is written
-//! beside its place and renamed onto it, so a reader sees the previous file or the next, never part of one.
+//! to a hidden temporary of this writer's own beside its place and renamed onto it, so a reader sees the
+//! previous file or the next, never part of one, and a second writer of the same output never shares a file
+//! with the first.
 
 use crate::compile::Session;
 use crate::diag;
@@ -25,10 +27,13 @@ use crate::timings::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::file::{
+	self,
+	SaveMode,
+};
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::io::{
 	BufWriter,
 	Write,
@@ -158,8 +163,10 @@ pub struct Report {
 ///
 /// `read` is filled with the files the evaluation asked for as soon as it has run, so it is there for a
 /// compile that fails, and holds at least the source when even that could not be read. The PDF is written
-/// whole beside its place and renamed onto it, after every check, so a compile that fails leaves the last
-/// good one as it was and a reader never meets half of one. `fold` holds the `skipped:` line back in the
+/// whole to a hidden temporary of this call's own beside its place ([`file::save_atomic_with`]) and renamed
+/// onto it, after every check, so a compile that fails leaves the last good one as it was, a reader never
+/// meets half of one, and a failed write leaves nothing behind. An output where a directory or a symbolic link
+/// stands, or that the compile has just read, is refused and left as it was. `fold` holds the `skipped:` line back in the
 /// result for the caller to print, rather than writing it to the standard error.
 pub fn compile_pdf(
 	spec:		&Spec,
@@ -216,17 +223,18 @@ pub fn compile_pdf(
 	if let Some(t) = done.engine.timings.as_mut() {
 		t.enter(Phase::Write);
 	}
+	// What stands at the output may have changed since the plan was settled, and only now is the read set known.
+	res!(check_standing(&spec.out));
+	res!(check_unread(&spec.out, read));
 	if let Some(dir) = spec.out.parent().filter(|d| !d.as_os_str().is_empty()) {
 		res!(std::fs::create_dir_all(dir));
 	}
-	let mut beside = spec.out.as_os_str().to_owned();
-	beside.push(".part");
-	let beside = PathBuf::from(beside);
-	let mut file = BufWriter::new(res!(File::create(&beside)));
-	res!(out.write_to(&mut file));
-	res!(file.flush());
-	drop(file);
-	res!(std::fs::rename(&beside, &spec.out));
+	res!(file::save_atomic_with(&spec.out, SaveMode::Keep, |f| {
+		let mut w = BufWriter::new(f);
+		res!(out.write_to(&mut w));
+		res!(w.flush());
+		Ok(())
+	}));
 	if let (Some(tm), Some(dest)) = (done.engine.timings.as_mut(), spec.timings.as_ref()) {
 		tm.leave();
 		if let Ok(book) = done.engine.fonts.book() {
@@ -246,6 +254,49 @@ pub fn compile_pdf(
 	})
 }
 
+// Refuses an output that names no file, or the source itself, before anything compiles.
+fn check_output(out: &Path, raw: &str, main: &Path) -> Outcome<()> {
+	if raw.trim().is_empty() {
+		return Err(err!("The setting 'output' is empty, so it names no file to write the PDF to."; Input, Invalid));
+	}
+	if out.file_name().is_none() {
+		return Err(err!("The setting 'output' = \"{}\" names no file to write the PDF to.", raw; Input, Invalid));
+	}
+	res!(check_standing(out));
+	if std::fs::canonicalize(out).ok().as_deref() == Some(main) {
+		return Err(err!(
+			"The setting 'output' names {}, the document's own source; the PDF would replace it, so it is refused.",
+			out.display(); Input, Invalid));
+	}
+	Ok(())
+}
+
+// Refuses an output where a directory or a symbolic link stands: the swap renames over the name, so it would
+// replace the directory or the link itself, not write into it or through it.
+fn check_standing(out: &Path) -> Outcome<()> {
+	if let Ok(m) = std::fs::symlink_metadata(out) {
+		let what = if m.file_type().is_symlink() { "a symbolic link" } else if m.is_dir() { "a directory" } else { return Ok(()) };
+		return Err(err!(
+			"The setting 'output' names {}, where {} stands; the PDF would replace it, so it is refused.",
+			out.display(), what; Input, Invalid));
+	}
+	Ok(())
+}
+
+// Refuses an output that the compile has just read, before the swap, which would replace that file.
+fn check_unread(out: &Path, read: &[PathBuf]) -> Outcome<()> {
+	let at = match std::fs::canonicalize(out) {
+		Ok(p)	=> p,
+		Err(_)	=> return Ok(()),	// nothing there to read
+	};
+	if read.iter().any(|r| std::fs::canonicalize(r).ok().as_ref() == Some(&at)) {
+		return Err(err!(
+			"The setting 'output' names {}, a file the compile reads; the PDF would replace it, so it is refused \
+			and the file is left as it was.", out.display(); Input, Invalid));
+	}
+	Ok(())
+}
+
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ THE COMMANDS                                                               │
 // └───────────────────────────────────────────────────────────────────────────┘
@@ -257,6 +308,7 @@ pub struct Plan {
 	pub settings:	Settings,
 	pub file:		Option<PathBuf>,
 	pub spec:		Spec,
+	pub warned:		Vec<String>,	// a file setting a `--set` made inapplicable, one line each
 	base:			PathBuf,	// the directory the root, the document and the fonts are named from
 	bare:			bool,		// made by `bare`: no settings file is read or watched
 }
@@ -336,10 +388,15 @@ impl Plan {
 	// The plan for settings already read, a canonical `main`, and the `base` the root and the profiles are named from.
 	fn settle(settings: Settings, file: Option<PathBuf>, base: PathBuf, main: PathBuf, timings: Option<&Path>) -> Outcome<Self> {
 		let doc_dir = main.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| base.clone());
-		res!(settings.check_built(&doc_dir));
+		let warned = res!(settings.check_built(&doc_dir));
+		for w in &warned {
+			eprintln!("[austenite] {}", w);
+		}
 		let root = if settings.root.is_empty() { base.clone() } else { base.join(&settings.root) };
+		let out = settings.output_path(&main);
+		res!(check_output(&out, &settings.output, &main));
 		let spec = Spec {
-			out:			settings.output_path(&main),
+			out,
 			main,
 			root,
 			strict:			settings.strict,
@@ -348,7 +405,7 @@ impl Plan {
 			timings_fine:	false,
 			pdf:			res!(settings.pdf_options(&base)),
 		};
-		Ok(Self { settings, file, spec, base, bare: false })
+		Ok(Self { settings, file, spec, warned, base, bare: false })
 	}
 
 	/// A session over the font directories the settings name, relative to the root.
