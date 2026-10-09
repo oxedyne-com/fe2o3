@@ -82,7 +82,6 @@ pub enum Handshake<IO> {
 /// allowlist of the peer's own faults, so a variant added to that non-exhaustive
 /// enum is treated as ours until someone says otherwise.
 fn peer_ended(e: &std::io::Error) -> bool {
-    use std::io::ErrorKind;
     use tokio_rustls::rustls::Error as Tls;
     match e.get_ref().and_then(|inner| inner.downcast_ref::<Tls>()) {
         Some(Tls::PeerIncompatible(_))
@@ -99,11 +98,35 @@ fn peer_ended(e: &std::io::Error) -> bool {
         // server only this way, so it is never read as a scanner's doing.
         Some(Tls::AlertReceived(a))         => !rejects_certificate(a),
         Some(_)                             => false,
-        None => matches!(e.kind(),
-            ErrorKind::ConnectionReset
-            | ErrorKind::ConnectionAborted
-            | ErrorKind::BrokenPipe
-            | ErrorKind::UnexpectedEof),
+        None                                => is_dropped(e),
+    }
+}
+
+/// Did the transport go away under us -- reset, aborted, or ended mid-exchange -- rather than
+/// carry a fault either end could name? A fresh connection may well succeed where this one did
+/// not. An error wrapping a rustls error is a protocol or certificate fault, and never a drop.
+pub fn is_dropped(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    use tokio_rustls::rustls::Error as Tls;
+    if e.get_ref().and_then(|inner| inner.downcast_ref::<Tls>()).is_some() {
+        return false;
+    }
+    matches!(e.kind(),
+        ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe
+        | ErrorKind::UnexpectedEof)
+}
+
+/// Did a client handshake fail because a certificate was not accepted, whether ours by the peer
+/// or the peer's by us?
+fn refuses_certificate(e: &std::io::Error) -> bool {
+    use tokio_rustls::rustls::Error as Tls;
+    match e.get_ref().and_then(|inner| inner.downcast_ref::<Tls>()) {
+        Some(Tls::InvalidCertificate(_))
+        | Some(Tls::NoCertificatesPresented)    => true,
+        Some(Tls::AlertReceived(a))             => rejects_certificate(a),
+        _                                       => false,
     }
 }
 
@@ -321,6 +344,15 @@ pub async fn upgrade(
     let connector = TlsConnector::from(cfg);
     match tokio::time::timeout(deadline, connector.connect(name, plain)).await {
         Ok(Ok(s))  => Ok(ClientStream::Tls(Box::new(s))),
+        // Sorted by cause, because a caller explaining the failure to a person must not tell them
+        // a certificate was refused when the connection merely dropped (D-20261006-09). The
+        // words of both mention TLS and the handshake, so only the tags can tell them apart.
+        Ok(Err(e)) if refuses_certificate(&e) => Err(err!(e,
+            "TLS handshake to {}: the certificate was not accepted.", host;
+            IO, Network, Init, Security)),
+        Ok(Err(e)) if is_dropped(&e) => Err(err!(e,
+            "TLS handshake to {}: the connection dropped.", host;
+            IO, Network, Init, Interrupted)),
         Ok(Err(e)) => Err(err!(e,
             "TLS handshake to {}.", host;
             IO, Network, Init)),
@@ -706,6 +738,62 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+
+    use tokio::net::TcpListener;
+    use tokio_rustls::rustls::{
+        ServerConfig,
+        pki_types::{
+            CertificateDer,
+            PrivateKeyDer,
+            PrivatePkcs8KeyDer,
+        },
+    };
+
+    /// A server whose certificate no public root vouches for. The client must call that a refused
+    /// certificate, and not a dropped connection.
+    #[tokio::test]
+    async fn test_a_refused_certificate_is_tagged_security_not_interrupted_00() -> Outcome<()> {
+        ensure_crypto_provider();
+        let cert = res!(rcgen::generate_simple_self_signed(vec![fmt!("localhost")])
+            .map_err(|e| err!(e, "Making a test certificate."; Test, Init)));
+        let der  = res!(cert.serialize_der()
+            .map_err(|e| err!(e, "Serialising the test certificate."; Test, Encode)));
+        let key  = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.serialize_private_key_der()));
+        let scfg = res!(ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![CertificateDer::from(der)], key)
+            .map_err(|e| err!(e, "Building the test server config."; Test, Init)));
+        let acceptor = TlsAcceptor::from(Arc::new(scfg));
+
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the test server."; Test, IO)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading its address."; Test, IO)));
+        tokio::spawn(async move {
+            if let Ok((sock, _)) = listener.accept().await {
+                let _ = acceptor.accept(sock).await;
+            }
+        });
+
+        let plain = res!(TcpStream::connect(addr).await
+            .map_err(|e| err!(e, "Dialling the test server."; Test, IO)));
+        let ccfg  = Arc::new(res!(default_client_config()));
+        match upgrade(plain, "localhost", ccfg, Duration::from_secs(10)).await {
+            Ok(_)  => return Err(err!("A self-signed certificate was accepted."; Test, Invalid)),
+            Err(e) => {
+                req!(true, e.tags().contains(&ErrTag::Security),
+                    "a refused certificate was not tagged Security: {:?}", e.tags());
+                req!(false, e.tags().contains(&ErrTag::Interrupted),
+                    "a refused certificate read as a dropped connection: {:?}", e.tags());
+            },
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod cert_tests {
