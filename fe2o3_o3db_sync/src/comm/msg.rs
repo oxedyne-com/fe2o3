@@ -19,7 +19,10 @@ use crate::{
         bot_zone::ZoneState,
     },
     comm::{
-        channels::BotChannels,
+        channels::{
+            BotChannels,
+            Cut,
+        },
         response::Responder,
     },
     data::{
@@ -100,6 +103,8 @@ pub enum OzoneMsg<
     ChannelsReceived(OzoneBotId),
     Config(OzoneConfig),
     //ConfigConfirm(OzoneBotId, Ticket),
+    Cut(Vec<Cut>),          // syncer -> wbot, a barrier failed: cut these files to their marks
+    Durable(usize, FileNum), // syncer -> cbot, the mark of (zone, file) has moved
     Finish,
     FileReplaced(FileNum, FileType), // a collection renamed a new file over this one, or compaction deleted it
     GcAborted(FileNum),     // a collection gave up before it replaced anything
@@ -127,6 +132,7 @@ pub enum OzoneMsg<
     ClearCache(Responder<UIDL, UID, ENC, KH>),
     Settle(Responder<UIDL, UID, ENC, KH>),      // api -> cbot -> fbot, the accounting barrier
     SettleEcho(Responder<UIDL, UID, ENC, KH>),  // fbot -> fbot, answered once the fbot reaches it
+    SyncNow(Responder<UIDL, UID, ENC, KH>),     // api -> wbot -> syncer, a barrier over all before it
     CloseOldLiveFileState {
         fnum_old:       FileNum,
         fnum_new:       FileNum,

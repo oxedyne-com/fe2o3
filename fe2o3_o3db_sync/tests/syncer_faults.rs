@@ -60,14 +60,13 @@ const PERIOD_MS:        u64 = 200;                                  // the inter
 const WATCH:            Duration = Duration::from_millis(1_500);    // a failing disk watched
 const ANSWERED_WITHIN:  Duration = Duration::from_secs(10);         // a closing store's last write
 const SLOW_WRITES:      u8 = 20;                                    // arriving at a failing disk
-const SLOW_BARRIERS:    u64 = 6;                                    // enough for them, and more
 const EVERY_N:          u32 = 2;                                    // `sync_every_n_writes`
 
 #[test]
 fn main() -> Outcome<()> {
     log_set_level!("warn");
     // Whatever fails, the next check and the next binary must not inherit the fault.
-    let failing = failing_disk_is_retried_once_a_period();
+    let failing = failing_disk_stops_the_store();
     hooks::set_barrier_failure(false);
     let stopped = stopped_syncer_refuses_writes_before_appending();
     hooks::set_syncer_stop(false);
@@ -101,87 +100,112 @@ fn main() -> Outcome<()> {
     }
 }
 
-/// The disk fails every sync, under the interval policy, the library's default.  The barrier the
-/// policy owed used to be retried as fast as it could fail: a million times in three seconds, on
-/// nearly three cores, each failure logged.  It is retried once a period.  A write made while the
-/// disk is failing waits on a barrier of its own and is told it failed, rather than being answered
-/// as if its period will make it durable, and the store recovers with the disk.
-fn failing_disk_is_retried_once_a_period() -> Outcome<()> {
+/// The disk fails a sync, under the interval policy, the library's default.  After a failed fsync
+/// the kernel may have dropped the dirty pages, and a later fsync can succeed over the loss, so the
+/// store stops writing for good (F2): the failed barrier is not retried, the fault is recorded
+/// durably, writes are refused before anything is appended, even once the disk recovers, and
+/// reads go on for what a barrier proved.  The restart cuts the file back to its mark.  It used to
+/// retry the barrier once a period and carry on when one passed.
+fn failing_disk_stops_the_store() -> Outcome<()> {
     let root = res!(fresh("./test_db_syncer_faults_failing"));
     let mut cfg = res!(config());
     cfg.sync_interval_ms = PERIOD_MS;
-    let db = res!(open(&root, cfg));
+    let db = res!(open(&root, cfg.clone()));
     // The first write is owed a barrier at once, and the disk is still good.
     res!(db.insert(key(1), dat!(1u8), Uid::default(), None));
+    res!(db.insert(key(5), dat!(5u8), Uid::default(), None));
+    // Covered by a barrier, so it survives the fault whatever the timing.
+    res!(db.api().sync_now(wait(constant::USER_REQUEST_TIMEOUT)));
 
     hooks::set_barrier_failure(true);
     let counted = hooks::barriers_failed();
-    // Made within the period of that barrier, so released without one, leaving one owed.  Were
-    // the machine slow enough for the period to pass first, this write would wait on a barrier of
-    // its own and be told it failed; a barrier is owed either way, so the outcome is not the point.
+    // Made within the period, so perhaps released before the barrier that fails; the outcome of
+    // this write is not the point.
     let _ = db.insert(key(2), dat!(2u8), Uid::default(), None);
+    // A delete no barrier proves is a tombstone the restart cuts, bringing the value back, so
+    // it must not read as absent meanwhile.
+    let _ = db.delete(&key(5), Uid::default(), None);
     thread::sleep(WATCH);
     let tries = hooks::barriers_failed() - counted;
-    let most = 2 * (WATCH.as_millis() as u64 / PERIOD_MS) + 2;
-    if tries > most {
-        let _ = db.close(); // the check has failed already, and says why
-        return Err(err!(
-            "While the disk failed every sync for {:?}, the owed barrier was tried {} times, where \
-            once a {} ms period is at most {}: the syncer retries as fast as the disk fails.",
-            WATCH, tries, PERIOD_MS, most;
-            Test, Mismatch));
-    }
-    if tries < 2 {
-        let _ = db.close(); // the check has failed already, and says why
-        return Err(err!(
-            "While the disk failed every sync for {:?}, the owed barrier was tried {} times: a \
-            store that stops retrying never makes its writes durable once the disk recovers.",
-            WATCH, tries;
-            Test, Missing));
-    }
-
-    match db.insert(key(3), dat!(3u8), Uid::default(), None) {
-        Ok(_) => {
-            let _ = db.close(); // the check has failed already, and says why
-            return Err(err!(
-                "A write made while the disk failed every sync was answered as if its period \
-                would make it durable.";
-                Test, Unexpected));
-        },
-        Err(e) => {
-            let text = fmt!("{:?}", e);
-            if !text.contains("not confirmed durable") {
-                let _ = db.close(); // the check has failed already, and says why
-                return Err(err!(
-                    "A write made while the disk failed must be told its barrier failed, and it \
-                    was told: {}", text;
-                    Test, Mismatch));
-            }
-            // Written, so a caller must be able to tell it from a write that never landed
-            // without reading the words.
-            if !e.tags().contains(&ErrTag::Unconfirmed) {
-                let _ = db.close(); // the check has failed already, and says why
-                return Err(err!(
-                    "A write whose barrier failed after it was written reached its caller tagged \
-                    {:?}, which does not say Unconfirmed: a caller cannot tell it from a write that \
-                    never landed.", e.tags();
-                    Test, Mismatch));
-            }
-        },
-    }
-    // The record is in the files all the same, and readable.
-    match res!(db.get(&key(3), None)) {
-        Some((v, _)) => req!(v, dat!(3u8), "A write whose barrier failed."),
-        None => return Err(err!(
-            "A write whose barrier failed is not readable, although it is in the files.";
-            Test, Missing)),
-    }
-
-    // The disk recovers, and the store with it.
+    let fault = db.api().fault();
+    let recorded = root.join(constant::FAULT_FILENAME).exists();
+    // The disk recovers, and must not be believed.
     hooks::set_barrier_failure(false);
     thread::sleep(Duration::from_millis(2 * PERIOD_MS));
-    res!(db.insert(key(4), dat!(4u8), Uid::default(), None));
+    let refused = db.insert(key(3), dat!(3u8), Uid::default(), None);
+    let one = db.get(&key(1), None);
+    let two = db.get(&key(2), None);
+    let five = db.get(&key(5), None);
+    let compacted = db.api().compact_now(Duration::from_secs(2));
     res!(db.close());
+
+    if tries != 1 {
+        return Err(err!(
+            "While the disk failed every sync for {:?}, the owed barrier was tried {} times, where \
+            a failed barrier must be tried once and never again.", WATCH, tries;
+            Test, Mismatch));
+    }
+    let fault = res!(fault.ok_or_else(|| err!(
+        "A failed barrier did not stop the store: no fault is reported."; Test, Missing)));
+    if fault.cuts.is_empty() || fault.record.is_none() || !recorded {
+        return Err(err!(
+            "A failed barrier must leave a durable fault record naming the files to cut: cuts {:?}, \
+            record {:?}, file present {}.", fault.cuts, fault.record, recorded;
+            Test, Missing));
+    }
+    match refused {
+        Ok(_) => return Err(err!(
+            "A write made after a failed barrier, with the disk recovered, was accepted: a later \
+            fsync proves nothing once one has failed."; Test, Unexpected)),
+        Err(e) => if !e.tags().contains(&ErrTag::Fatal) || !fmt!("{:?}", e).contains("Restart the store") {
+            return Err(err!(
+                "A write refused after a failed barrier must be tagged Fatal and say to restart \
+                the store; it was {:?}", e; Test, Mismatch));
+        },
+    }
+    match res!(one) {
+        Some((v, _)) => req!(v, dat!(1u8), "A record a barrier proved, read after the fault."),
+        None => return Err(err!(
+            "A record a barrier proved is not readable after the fault."; Test, Missing)),
+    }
+    if let Ok(Some(_)) = two {
+        return Err(err!(
+            "A record no barrier proved was served after the fault, although the restart cuts \
+            it."; Test, Unexpected));
+    }
+    if let Ok(found) = five {
+        return Err(err!(
+            "A delete no barrier proved was served after the fault, as {:?}, although the \
+            restart cuts it and the value returns.", found; Test, Unexpected));
+    }
+    if compacted.is_ok() {
+        return Err(err!("Compaction ran on a store stopped by a failed sync."; Test, Unexpected));
+    }
+
+    // The restart cuts the file back to its mark and recovers.
+    let db = res!(open(&root, cfg));
+    let recorded = root.join(constant::FAULT_FILENAME).exists();
+    let one = res!(db.get(&key(1), None));
+    let two = res!(db.get(&key(2), None));
+    let five = res!(db.get(&key(5), None));
+    let after = db.insert(key(4), dat!(4u8), Uid::default(), None);
+    res!(db.close());
+    if recorded {
+        return Err(err!("The fault record outlived the open that applied it."; Test, Unexpected));
+    }
+    if one.is_none() {
+        return Err(err!("A record a barrier proved is missing after the restart."; Test, Missing));
+    }
+    if two.is_some() {
+        return Err(err!(
+            "A record past the mark survived the restart's cut."; Test, Unexpected));
+    }
+    match five {
+        Some((v, _)) => req!(v, dat!(5u8), "A value whose delete the restart cut."),
+        None => return Err(err!(
+            "The restart cut a delete past the mark but its value did not return."; Test, Missing)),
+    }
+    res!(after);
     Ok(())
 }
 
@@ -386,13 +410,11 @@ fn close_answers_what_the_syncer_holds() -> Outcome<()> {
     Ok(())
 }
 
-/// The disk fails every sync, slowly, under the interval policy, or under `sync_every_n_writes`
-/// when `every_n` is not zero, and twenty writes arrive at once.  While the last barrier has
-/// failed each write waits on a barrier, and those waiting together share one, as they do under
-/// `sync_on_write`.  Each had a barrier of its own, one after another, so a disk taking its time
-/// to fail answered twenty writes ten times slower, and with writes arriving faster than it
-/// failed the queue grew without bound.  Fixed for the interval policy on 2026-09-23 and for
-/// every-n, where a failed barrier leaves every later write due one, on 2026-09-24.
+/// The disk fails a sync, slowly, under the interval policy, or under `sync_every_n_writes` when
+/// `every_n` is not zero, and twenty writes arrive at once.  Each is answered with a failure, and
+/// none is given a barrier: the first failure stopped the store, so they are refused before
+/// anything is appended.  Each used to wait on a barrier of its own, then on one shared (fixed
+/// 2026-09-23 and 2026-09-24); since 2026-10-10 a failed barrier is never tried again (F2).
 fn slowly_failing_disk_answers_waiting_writes_together(every_n: u32) -> Outcome<()> {
     let root = res!(fresh(if every_n == 0 {
         "./test_db_syncer_faults_slowly"
@@ -462,11 +484,10 @@ fn slowly_failing_disk_answers_waiting_writes_together(every_n: u32) -> Outcome<
             failed.", policy, told, SLOW_WRITES;
             Test, Mismatch));
     }
-    if tries > SLOW_BARRIERS {
+    if tries != 0 {
         return Err(err!(
-            "Under {}, {} writes arriving together while the disk failed each sync slowly took {} \
-            barriers, where waiting together they share one, and a few more is the most: they \
-            were answered one barrier at a time.", policy, SLOW_WRITES, tries;
+            "Under {}, {} writes arriving after a failed barrier took {} more barriers, where a \
+            store stopped by a failed sync tries none.", policy, SLOW_WRITES, tries;
             Test, Mismatch));
     }
     Ok(())
@@ -540,6 +561,13 @@ fn close_answers_what_a_slow_cache_bot_holds() -> Outcome<()> {
 }
 
 /// The highest-numbered data file in the one zone.
+fn wait(d: Duration) -> Wait {
+    Wait {
+        max_wait:       d,
+        check_interval: Duration::from_millis(10),
+    }
+}
+
 fn newest_data_file(root: &Path, cfg: &OzoneConfig) -> Outcome<FileNum> {
     let zdir = cfg.zone_root(root).join("zone_001");
     let mut newest = None;

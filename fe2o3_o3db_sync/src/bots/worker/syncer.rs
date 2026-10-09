@@ -11,11 +11,24 @@
 //! its accounting reaches the file bots, only after every record written before it.  A file bot
 //! collects a sealed file only once the file's accounted size has caught up with its size on
 //! disk, so holding records here delays a collection and never races one.
+//!
+//! Since 2026-10-10 each successful barrier publishes how far it reached, the file's mark in
+//! `DurableMarks`, and then tells every cache bot it released a record to since the last one.
+//! Anything that discards an older record waits on its winner's mark (F1).  A failed barrier
+//! poisons the syncer for good: after a failed fsync the kernel may have dropped the dirty pages
+//! and a second fsync can succeed over the loss, so no later barrier proves anything (F2).  The
+//! store is stopped, its fault recorded durably, and the writer cuts the files in doubt back to
+//! their marks.
 
 use crate::{
     prelude::*,
     base::cfg::OzoneConfig,
     comm::{
+        channels::{
+            Cut,
+            DurableMarks,
+            Fault,
+        },
         msg::OzoneMsg,
         response::Responder,
     },
@@ -27,8 +40,13 @@ use oxedyne_fe2o3_core::channels::Simplex;
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
-    collections::VecDeque,
+    collections::{
+        BTreeMap,
+        VecDeque,
+    },
     fs::File,
+    mem,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{
@@ -53,7 +71,8 @@ use std::{
 };
 
 
-/// When a record has to be durable before it is released.
+/// When a record has to be durable before it is released, and so how long the discards a
+/// replacement makes wait: an older record is let go only once its winner is durable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SyncPolicy {
     EveryWrite,         // `sync_on_write`
@@ -78,23 +97,51 @@ impl SyncPolicy {
 }
 
 /// What a writer hands its syncer, in the order it wrote.  A `Pair` names the live data and index
-/// files every later record is appended to; the pair it replaces is sealed, made durable before
-/// any record written to the new one is released.  A `Record` is one appended record with the
-/// insert that releases it to its cache bot.
+/// files every later record is appended to, with their sizes, durable already; the pair it
+/// replaces is sealed, made durable before any record written to the new one is released.  A
+/// `Record` is one appended record with the insert that releases it to its cache bot, and the
+/// data and index ends after it.  `SyncNow` asks for a barrier over everything handed before it.
 pub enum Handed<
     const UIDL: usize,
     UID:    NumIdDat<UIDL>,
     ENC:    Encrypter,
     KH:     Hasher,
 > {
-    Pair(FileNum, File, File),  // number, data, index
+    Pair(LiveFiles),
     Record {
         cbot:   Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
+        cbpind: usize,
         insert: OzoneMsg<UIDL, UID, ENC, KH>,
         resp:   Responder<UIDL, UID, ENC, KH>,
         policy: SyncPolicy,
+        ends:   (u64, u64),
     },
+    SyncNow(Responder<UIDL, UID, ENC, KH>),
     Finish,
+}
+
+/// A live pair as its syncer holds it.
+pub struct LiveFiles {
+    pub fnum:   FileNum,
+    pub dat:    File,
+    pub ind:    File,
+    pub paths:  (PathBuf, PathBuf),
+    pub sizes:  (u64, u64), // durable already: synced at open, or new
+}
+
+/// What a syncer shares with its store.
+#[derive(Clone)]
+pub struct Shared<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+> {
+    pub zone:   usize,
+    pub root:   PathBuf,
+    pub marks:  DurableMarks,
+    pub fault:  Fault,
+    pub writer: Simplex<OzoneMsg<UIDL, UID, ENC, KH>>, // told to cut its files at the fault
 }
 
 /// A writer's handle on its syncer.
@@ -120,6 +167,7 @@ impl<
     pub fn start(
         label:          String,
         log_stream_id:  String,
+        shared:         Shared<UIDL, UID, ENC, KH>,
     )
         -> Outcome<Self>
     {
@@ -134,7 +182,7 @@ impl<
             .stack_size(constant::STACK_SIZE);
         let handle = res!(builder.spawn(move || {
             sync_log::set_stream(log_stream_id);
-            Barrier::new(label, rx, cleared).run();
+            Barrier::new(label, rx, cleared, shared).run();
         }));
         Ok(Self {
             tx,
@@ -159,8 +207,8 @@ impl<
         }
     }
 
-    /// Releases everything handed over, with a last barrier where the policy owes one, and ends
-    /// the thread.
+    /// Releases everything handed over, with a last barrier under every policy, and ends the
+    /// thread.
     pub fn finish(&mut self) -> Outcome<()> {
         // A syncer that has already stopped cannot be sent this, and the join says why.
         let _ = self.tx.send(Handed::Finish);
@@ -185,12 +233,16 @@ struct Barrier<
     label:      String,
     rx:         Receiver<Handed<UIDL, UID, ENC, KH>>,
     queue:      VecDeque<Handed<UIDL, UID, ENC, KH>>,
-    pair:       Option<(FileNum, File, File)>,
+    pair:       Option<LiveFiles>,
+    taken:      (u64, u64),         // the ends of the last record taken in from the pair
+    doubt:      Vec<(FileNum, (PathBuf, PathBuf))>, // this writer's files with a mark entry
+    told:       BTreeMap<usize, Simplex<OzoneMsg<UIDL, UID, ENC, KH>>>, // cache bots released to since the last barrier
     policy:     SyncPolicy,         // the latest record's
     dirty:      bool,               // the pair holds records no barrier has covered
     since:      u32,                // records released since the last barrier
     last:       Option<Instant>,    // when the last barrier completed
-    failed:     Option<Instant>,    // when the last barrier failed, until one completes
+    poisoned:   Option<Error<ErrTag>>, // the failed barrier, for good
+    shared:     Shared<UIDL, UID, ENC, KH>,
     running:    Arc<AtomicBool>,    // shared with the writer's handle
 }
 
@@ -206,6 +258,7 @@ impl<
         label:      String,
         rx:         Receiver<Handed<UIDL, UID, ENC, KH>>,
         running:    Arc<AtomicBool>,
+        shared:     Shared<UIDL, UID, ENC, KH>,
     )
         -> Self
     {
@@ -214,11 +267,15 @@ impl<
             rx,
             queue:      VecDeque::new(),
             pair:       None,
+            taken:      (0, 0),
+            doubt:      Vec::new(),
+            told:       BTreeMap::new(),
             policy:     SyncPolicy::Never,
             dirty:      false,
             since:      0,
             last:       None,
-            failed:     None,
+            poisoned:   None,
+            shared,
             running,
         }
     }
@@ -242,7 +299,7 @@ impl<
                 match item {
                     Some(item) => self.queue.push_back(item),
                     // The writer has gone without a word, so nothing more is coming.
-                    None => return self.end(),
+                    None => return self.end(false),
                 }
             }
             // Read as the batch begins, so that a batch already under way when a test arms the
@@ -254,17 +311,23 @@ impl<
             }
             while let Some(item) = self.queue.pop_front() {
                 match item {
-                    Handed::Pair(fnum, dat, ind) => {
-                        // Sealing is unconditional, whatever the policy: a file that is no
-                        // longer live is durable before anything written after it is released.
-                        if self.dirty {
-                            self.barrier_or_log();
+                    Handed::Pair(live) => self.seal(live),
+                    Handed::Record { cbot, cbpind, insert, resp, policy, ends } =>
+                        self.records(cbot, cbpind, insert, resp, policy, ends),
+                    Handed::SyncNow(resp) => {
+                        let result = match (&self.poisoned, self.dirty) {
+                            (Some(e), _)    => Err(e.clone()),
+                            (None, true)    => self.barrier(),
+                            (None, false)   => Ok(()),
+                        };
+                        if resp.is_some() {
+                            let _ = resp.send(match result {
+                                Ok(())  => OzoneMsg::Ok,
+                                Err(e)  => OzoneMsg::Error(e),
+                            });
                         }
-                        self.pair = Some((fnum, dat, ind));
                     },
-                    Handed::Record { cbot, insert, resp, policy } =>
-                        self.records(cbot, insert, resp, policy),
-                    Handed::Finish => return self.end(),
+                    Handed::Finish => return self.end(true),
                 }
             }
             // A syncer stopping as one that panicked would, with no last barrier.
@@ -274,57 +337,55 @@ impl<
         }
     }
 
-    /// Releases one record, and with it the run queued behind it where every record waits on a
-    /// barrier of its own: one barrier covers every record appended before it begins.  That is
-    /// always so under `sync_on_write`, and under the interval and every-n policies while the last
-    /// barrier has failed.  Batched only under the first, a disk failing its syncs slowly took one
-    /// barrier per record under the others, one after another, and with writes arriving faster
-    /// than it failed the queue grew without bound (2026-09-23, every-n 2026-09-24).
+    /// Releases one record, and with it the run queued behind it under `sync_on_write`, where
+    /// every record waits on a barrier and one barrier covers every record appended before it
+    /// begins.  Once the syncer is poisoned no barrier runs, and every record is released with
+    /// the failure as its caller's answer.
     fn records(
         &mut self,
         cbot:   Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
+        cbpind: usize,
         insert: OzoneMsg<UIDL, UID, ENC, KH>,
         resp:   Responder<UIDL, UID, ENC, KH>,
         policy: SyncPolicy,
+        ends:   (u64, u64),
     ) {
-        let mut run = vec![(cbot, insert, resp)];
-        let alone = match policy {
-            SyncPolicy::EveryWrite                          => true,
-            SyncPolicy::EveryN(_) | SyncPolicy::Interval(_) => self.failed.is_some(),
-            SyncPolicy::Never                               => false,
-        };
-        if alone {
+        let mut run = vec![(cbot, cbpind, insert, resp)];
+        self.taken = ends;
+        if policy == SyncPolicy::EveryWrite {
             while let Some(Handed::Record { policy: next, .. }) = self.queue.front() {
                 if *next != policy {
                     break;
                 }
-                if let Some(Handed::Record { cbot, insert, resp, .. }) = self.queue.pop_front() {
-                    run.push((cbot, insert, resp));
+                if let Some(Handed::Record { cbot, cbpind, insert, resp, ends, .. }) = self.queue.pop_front() {
+                    run.push((cbot, cbpind, insert, resp));
+                    self.taken = ends;
                 }
             }
         }
         self.policy = policy;
         self.dirty = true;
         self.since = self.since.saturating_add(run.len() as u32);
-        // While the disk is failing a record waits on a barrier of its own, so that its caller
-        // hears so rather than being answered as if its period will make it durable.
         let due = match policy {
             SyncPolicy::EveryWrite  => true,
             SyncPolicy::EveryN(n)   => self.since >= n,
-            SyncPolicy::Interval(p) => self.failed.is_some() || match self.last {
+            SyncPolicy::Interval(p) => match self.last {
                 None        => true,
                 Some(last)  => last.elapsed() >= p,
             },
             SyncPolicy::Never       => false,
         };
-        let synced = if due { self.barrier() } else { Ok(()) };
-        for (cbot, insert, resp) in run {
+        let synced = match (&self.poisoned, due) {
+            (Some(e), _)    => Err(e.clone()),
+            (None, true)    => self.barrier(),
+            (None, false)   => Ok(()),
+        };
+        for (cbot, cbpind, insert, resp) in run {
             // The caller hears when the barrier failed, from the cache bot once the record is
             // readable, as it hears of one that did not: told from here first, it could read its
             // write back and not find it.  The record is released all the same: it is in the
             // files whatever the barrier said, and holding it back would leave the cache
-            // disagreeing with them and its bytes accounted to no one, where no collection could
-            // ever reclaim them.
+            // disagreeing with them and its bytes accounted to no one.
             let insert = match (&synced, insert) {
                 (Ok(()), insert) => insert,
                 (Err(e), OzoneMsg::Insert(k, v, c, f, i, m, r, _, t)) =>
@@ -335,31 +396,121 @@ impl<
                     other
                 },
             };
-            if let Err(e) = cbot.send(insert) {
-                let e = err!(e,
-                    "{}: A written record could not be released to its cache bot.", self.label;
-                    Channel, Write);
-                error!(sync_log::stream(), e.clone());
-                Self::tell(&resp, e);
+            match cbot.send(insert) {
+                // Released before a barrier covers it: told when one does.
+                Ok(()) => if self.dirty {
+                    self.told.insert(cbpind, cbot);
+                },
+                Err(e) => {
+                    let e = err!(e,
+                        "{}: A written record could not be released to its cache bot.", self.label;
+                        Channel, Write);
+                    error!(sync_log::stream(), e.clone());
+                    Self::tell(&resp, e);
+                },
             }
         }
     }
 
-    /// Forces the current pair to stable storage.
+    /// Seals the live pair and takes the next.  Sealing is unconditional, whatever the policy: a
+    /// file that is no longer live is durable before anything written after it is released, and
+    /// its mark entry goes, which makes every record in it durable.  The new pair is entered at
+    /// the sizes it was opened with before anything of it is released.
+    fn seal(&mut self, live: LiveFiles) {
+        if self.dirty {
+            self.barrier_or_log();
+        }
+        if self.poisoned.is_none() {
+            if let Some(fnum) = self.pair.as_ref().map(|p| p.fnum) {
+                if let Err(e) = self.shared.marks.remove(self.shared.zone, fnum) {
+                    error!(sync_log::stream(), e);
+                }
+                self.doubt.retain(|(f, _)| *f != fnum);
+                self.notify(fnum);
+                // A sealed file held from collection only for its mark entry is looked at again
+                // now, through the writer, which relays to the file's bot (R3 liveness).
+                let _ = self.shared.writer.send(OzoneMsg::Durable(self.shared.zone, fnum));
+            }
+        }
+        if let Err(e) = self.shared.marks.open(self.shared.zone, live.fnum, live.sizes) {
+            error!(sync_log::stream(), e);
+        }
+        self.doubt.push((live.fnum, live.paths.clone()));
+        self.taken = live.sizes;
+        self.pair = Some(live);
+    }
+
+    // Tells every cache bot released to since the last barrier that `fnum`'s mark has moved.
+    fn notify(&mut self, fnum: FileNum) {
+        for (_, cbot) in mem::take(&mut self.told) {
+            let _ = cbot.send(OzoneMsg::Durable(self.shared.zone, fnum));
+        }
+    }
+
+    /// Forces the current pair to stable storage, publishes the mark it reached, and only then
+    /// tells the cache bots.  A failure poisons the syncer and raises the store's fault.
     fn barrier(&mut self) -> Outcome<()> {
+        if let Some(e) = &self.poisoned {
+            return Err(e.clone());
+        }
+        let covered = self.taken; // only what was taken in before the sync began
         if let Err(e) = self.sync_pair() {
-            self.failed = Some(Instant::now());
+            self.poison(&e);
             return Err(e);
         }
         self.dirty = false;
         self.since = 0;
         self.last = Some(Instant::now());
-        self.failed = None;
+        if let Some(fnum) = self.pair.as_ref().map(|p| p.fnum) {
+            if let Err(e) = self.shared.marks.set(self.shared.zone, fnum, covered) {
+                error!(sync_log::stream(), e);
+            }
+            self.notify(fnum);
+        }
         Ok(())
     }
 
+    /// No barrier counts from here on.  The store's fault names each file of this writer still
+    /// in doubt with its mark, and the writer is told to cut them.
+    fn poison(&mut self, e: &Error<ErrTag>) {
+        self.poisoned = Some(err!(e.clone(),
+            "{}: A durability barrier failed, so the store has stopped writing.  Restart the \
+            store; it recovers from the disk.", self.label;
+            Write, Fatal));
+        let mut cuts = Vec::new();
+        for (fnum, (data, index)) in &self.doubt {
+            let mark = match self.shared.marks.get(self.shared.zone, *fnum) {
+                Ok(Some(mark))  => mark,
+                Ok(None)        => continue,
+                Err(e)          => {
+                    error!(sync_log::stream(), e);
+                    continue;
+                },
+            };
+            cuts.push(Cut {
+                zone:       self.shared.zone,
+                fnum:       *fnum,
+                data:       data.clone(),
+                data_upto:  mark.0,
+                index:      index.clone(),
+                index_upto: mark.1,
+            });
+        }
+        error!(sync_log::stream(), err!(e.clone(),
+            "{}: A durability barrier failed.  The store stops writing, and the files in doubt \
+            are cut back to their last durable marks: {:?}", self.label, cuts;
+            IO, File, Write, Fatal));
+        self.shared.fault.raise(&self.shared.root, cuts.clone(), e);
+        if let Err(e) = self.shared.writer.send(OzoneMsg::Cut(cuts)) {
+            error!(sync_log::stream(), err!(e,
+                "{}: The writer could not be told to cut its files after a failed barrier; the \
+                next open cuts them.", self.label;
+                Channel, Write));
+        }
+    }
+
     fn sync_pair(&self) -> Outcome<()> {
-        if let Some((fnum, dat, ind)) = &self.pair {
+        if let Some(LiveFiles { fnum, dat, ind, .. }) = &self.pair {
             hooks::barrier_delay();
             if let Err(e) = Self::sync(*fnum, dat) {
                 return Err(err!(e,
@@ -394,20 +545,24 @@ impl<
         }
     }
 
-    /// How long until the interval policy owes a barrier, while it owes one.  A failed barrier is
-    /// retried a period after it failed: counted from the last one that completed, a disk refusing
-    /// every sync had this thread retry it as fast as the disk could refuse, a million times in
-    /// three seconds with an error logged for each (2026-09-23).
+    /// How long until the interval policy owes a barrier, while it owes one.  A poisoned syncer
+    /// owes nothing: no barrier of its can prove anything again.
     fn owed_in(&self) -> Option<Duration> {
-        match (self.dirty, self.policy, self.failed.or(self.last)) {
+        if self.poisoned.is_some() {
+            return None;
+        }
+        match (self.dirty, self.policy, self.last) {
             (true, SyncPolicy::Interval(p), Some(t))    => Some(p.saturating_sub(t.elapsed())),
             (true, SyncPolicy::Interval(_), None)       => Some(Duration::ZERO),
             _                                           => None,
         }
     }
 
-    fn end(&mut self) {
-        if self.dirty && self.policy != SyncPolicy::Never {
+    /// A close announced by `Finish` barriers under every policy, so that the discards held on
+    /// the last records are let go; `Never` governs the write path, not the close.  A writer gone
+    /// without a word keeps the old rule.
+    fn end(&mut self, announced: bool) {
+        if self.dirty && (announced || self.policy != SyncPolicy::Never) {
             self.barrier_or_log();
         }
     }

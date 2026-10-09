@@ -152,66 +152,73 @@ fn cbot_insert_failure_keeps_hold() -> Outcome<()> {
 }
 
 // Q1-4: a head that times out at the store keeps its set held until it lands, so a sweep in the
-// meantime takes none of its chunks, and the key then reads whole.  The barrier delay is set once
-// the chunks are past theirs; a round that catches a chunk's instead is staged again.
+// meantime takes none of its chunks, and the key then reads whole.  Staged on the head hold, where
+// the store has its chunks in and is about to send its head, so the barrier delay catches the head
+// and never a chunk; every wait is on a condition against a deadline, never a fixed sleep (the
+// sleeps it was staged with failed it under disk load, 2026-10-10).
 #[test]
 fn timed_out_head_keeps_its_set_until_it_lands() -> Outcome<()> {
     let _lock = lock();
     let dir = "./test_db_chunk_hold_timeout";
     let db = res!(start(dir, true));
     let mut bad = Vec::new();
-    let mut staged = false;
-    for attempt in 0..3u8 {
-        let k = dat!(fmt!("timed out head {}", attempt));
-        res!(db.insert(k.clone(), val(1_100, 1), Uid::default(), None));
-        hooks::set_durability_timeout(Some(Duration::from_secs(2)));
-        hooks::set_chunk_insert_delay(Duration::from_millis(400));
-        let put = { let (db, k) = (db.clone(), k.clone());
-            thread::spawn(move || db.insert(k, val(1_100, 2), Uid::default(), None).map(|_| ())) };
-        thread::sleep(Duration::from_millis(200));
-        hooks::set_barrier_delay(Duration::from_secs(5));
-        let put = match put.join() { Ok(r) => r, Err(_) => Err(err!("The put panicked."; Test)) };
-        hooks::set_chunk_insert_delay(Duration::ZERO);
-        let e = match put {
-            Ok(()) => { bad.push(fmt!("attempt {}: the timed-out put was confirmed", attempt)); break; },
-            Err(e) => e,
-        };
-        if !e.tags().contains(&ErrTag::Unconfirmed) {
-            // A chunk's barrier was caught, so the head was never written.
-            msg!("attempt {}: not staged: {}", attempt, e);
-            hooks::set_barrier_delay(Duration::ZERO);
-            hooks::set_durability_timeout(None);
-            thread::sleep(Duration::from_secs(5));
-            continue;
-        }
-        staged = true;
+    let k = dat!("timed out head");
+    res!(db.insert(k.clone(), val(1_100, 1), Uid::default(), None));
+    hooks::set_durability_timeout(Some(Duration::from_secs(2)));
+    let held = hooks::heads_held();
+    hooks::set_head_hold(true);
+    let put = { let (db, k) = (db.clone(), k.clone());
+        thread::spawn(move || db.insert(k, val(1_100, 2), Uid::default(), None).map(|_| ())) };
+    let reached = wait_until(Duration::from_secs(30), || Ok(hooks::heads_held() > held));
+    hooks::set_barrier_delay(Duration::from_secs(5));
+    hooks::set_head_hold(false);
+    let put = match put.join() { Ok(r) => r, Err(_) => Err(err!("The put panicked."; Test)) };
+    let staged = match (res!(reached), put) {
+        (false, _) => { bad.push(fmt!("the store never reached the head hold")); false },
+        (true, Ok(())) => { bad.push(fmt!("the timed-out put was confirmed")); false },
+        (true, Err(e)) if !e.tags().contains(&ErrTag::Unconfirmed) => {
+            bad.push(fmt!("the head was not written before the put timed out: {}", e)); false },
+        (true, Err(_)) => true,
+    };
+    if staged {
         let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
-        hooks::set_barrier_delay(Duration::ZERO);
-        hooks::set_durability_timeout(None);
         if report.orphans_found > 0 { bad.push(fmt!("the sweep took {} chunks of a head in flight", report.orphans_found)); }
         if report.skipped_pending == 0 { bad.push(fmt!("the sweep saw none of the put's chunks, so it proved nothing")); }
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut landed = describe(&db.get(&k, None));
-        while landed != "1100/2" && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(100));
-            landed = describe(&db.get(&k, None));
+    }
+    hooks::set_barrier_delay(Duration::ZERO);
+    hooks::set_durability_timeout(None);
+    if staged {
+        let landed = res!(wait_until(Duration::from_secs(20), || Ok(describe(&db.get(&k, None)) == "1100/2")));
+        if !landed { bad.push(fmt!("the head did not land whole: {}", describe(&db.get(&k, None)))); }
+        // The cache bot lets the set go once the head it carries is in; wait on that, not a clock.
+        if !res!(wait_until(Duration::from_secs(20), || pending_empty(&db))) {
+            bad.push(fmt!("a set is still held after the head landed"));
         }
-        if landed != "1100/2" { bad.push(fmt!("the head did not land whole: {}", landed)); }
-        thread::sleep(Duration::from_millis(200));
-        if !res!(pending_empty(&db)) { bad.push(fmt!("a set is still held after the head landed")); }
-        res!(db.close());
+    }
+    res!(db.close());
+    if staged {
         let db = res!(start(dir, false));
         let after = describe(&db.get(&k, None));
         if after != "1100/2" { bad.push(fmt!("restart read {}", after)); }
         res!(db.close());
-        break;
     }
-    hooks::set_barrier_delay(Duration::ZERO);
-    hooks::set_durability_timeout(None);
     let _ = std::fs::remove_dir_all(dir);
-    assert!(staged, "no attempt staged a head that timed out after its chunks");
     assert!(bad.is_empty(), "{:#?}", bad);
     Ok(())
+}
+
+// Polls `cond` until it holds or `limit` passes.
+fn wait_until(limit: Duration, mut cond: impl FnMut() -> Outcome<bool>) -> Outcome<bool> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if res!(cond()) {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

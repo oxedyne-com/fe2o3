@@ -6,13 +6,18 @@ use crate::{
         worker::{
             syncer::{
                 Handed,
+                LiveFiles,
+                Shared,
                 SyncPolicy,
                 Syncer,
             },
             worker_deps::*,
         },
     },
-    comm::msg::HeadTicket,
+    comm::{
+        channels::Cut,
+        msg::HeadTicket,
+    },
     file::{
         core::FileType,
         floc::{
@@ -179,6 +184,25 @@ impl<
                                 self.respond(Err(e), &resp);
                             }
                         }
+                        // A barrier failed: cut the files in doubt in this process too, so the
+                        // tail past the mark cannot be read for the rest of this boot.  Done here,
+                        // so it is ordered after any append in flight.
+                        OzoneMsg::Cut(cuts) => self.cut(cuts),
+                        OzoneMsg::Durable(z, fnum) => {
+                            let result = self.fbots().and_then(|bots| {
+                                let (bot, _) = bots.choose_bot(&ChooseBot::ByFile(fnum));
+                                bot.send(OzoneMsg::Durable(z, fnum))
+                            });
+                            self.result(&result);
+                        },
+                        OzoneMsg::SyncNow(resp) => {
+                            if let Err(e) = self.syncer.hand(Handed::SyncNow(resp.clone())) {
+                                self.respond(Err(err!(e,
+                                    "{}: The durability barrier thread could not take a sync.",
+                                    self.ozid();
+                                    Thread, Write)), &resp);
+                            }
+                        },
                         //OzoneMsg::Delete(kv, resp_w1) => {
                         //    let result = self.write(kv, resp_w1);
                         //    self.result(result);
@@ -209,7 +233,18 @@ impl<
     )
         -> Outcome<Self>
     {
-        let syncer = res!(Syncer::start(fmt!("{}", args.api.ozid), args.log_stream_id.clone()));
+        let shared = Shared {
+            zone:   args.wind.z(),
+            root:   args.api.db_root().to_path_buf(),
+            marks:  args.api.chans().marks().clone(),
+            fault:  args.api.chans().fault().clone(),
+            writer: args.chan_in.clone(),
+        };
+        let syncer = res!(Syncer::start(
+            fmt!("{}", args.api.ozid),
+            args.log_stream_id.clone(),
+            shared,
+        ));
         Ok(Self {
             // Identity
             wind:       args.wind,
@@ -300,6 +335,15 @@ impl<
                 anything was written.", self.ozid();
                 Thread, Missing, Write));
         }
+        // A failed barrier has stopped the store: nothing appended now could ever be proven.
+        if let Some(fault) = self.api().chans().fault().get() {
+            self.release_set(&head);
+            return Err(err!(
+                "{}: The store stopped writing after a failed sync at {:?} ({}), so the write was \
+                refused.  Restart the store; it recovers from the disk.",
+                self.ozid(), fault.when, fault.error;
+                Write, Fatal));
+        }
         let start = match self.write_to_file(FileType::Data, vec![&kbyts[..], &vstored[..]]) {
             Ok(start) => start,
             Err(e) => {
@@ -320,6 +364,7 @@ impl<
 
         // Append key and location to the current index file.
         res!(self.write_to_file(FileType::Index, vec![&kbyts[..], &istored[..]]));
+        let ends = (self.lpair().dat.size, self.lpair().ind.size);
 
         // [11] The record is in the live pair, so say so before anything waits on the disk.  The
         //      caller holds this answer to the short deadline, which then measures whether the
@@ -350,7 +395,7 @@ impl<
         let handed = if ticketed && hooks::head_hand_fails() {
             Err(err!("A store's head could not be handed to the syncer (test::hooks)."; Thread, Write))
         } else {
-            self.syncer.hand(Handed::Record { cbot, insert, resp, policy })
+            self.syncer.hand(Handed::Record { cbot, cbpind, insert, resp, policy, ends })
         };
         if let Err(e) = handed {
             // The syncer stopped after the check above, and the record is in the files.
@@ -393,7 +438,41 @@ impl<
                 "{}: The live index file {:?} is not open.", self.ozid(), lpair.ind.path;
                 Bug, Missing)),
         };
-        self.syncer.hand(Handed::Pair(lpair.fnum, dat, ind))
+        self.syncer.hand(Handed::Pair(LiveFiles {
+            fnum:   lpair.fnum,
+            dat,
+            ind,
+            paths:  (lpair.dat.path.clone(), lpair.ind.path.clone()),
+            sizes:  (lpair.dat.size, lpair.ind.size),
+        }))
+    }
+
+    /// Cuts each file in doubt back to its mark (R4a).  The open cuts them again should this
+    /// fail or the process die first; a cut is only ever a shortening, so twice is harmless.
+    fn cut(&mut self, cuts: Vec<Cut>) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        for c in cuts {
+            match c.apply(stamp) {
+                Ok((d, i)) => error!(sync_log::stream(), err!(
+                    "{}: After a failed sync, file {} was cut back to its durable mark, {} data \
+                    and {} index bytes removed.", self.ozid(), c.fnum, d, i;
+                    IO, File, Write, Fatal)),
+                Err(e) => error!(sync_log::stream(), err!(e,
+                    "{}: After a failed sync, file {} could not be cut back to its durable mark; \
+                    the next open cuts it.", self.ozid(), c.fnum;
+                    IO, File, Write, Fatal)),
+            }
+        }
+        // The writer's own view of the pair must agree with the disk, should anything read it.
+        if let Ok(len) = self.lpair.dat.get_file_len() {
+            self.lpair.dat.size = len;
+        }
+        if let Ok(len) = self.lpair.ind.get_file_len() {
+            self.lpair.ind.size = len;
+        }
     }
 
     /// Takes the live file the zone assigned at start-up, new or partly written.

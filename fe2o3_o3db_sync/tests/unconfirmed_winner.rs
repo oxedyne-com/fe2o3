@@ -1,11 +1,10 @@
-//! A record beaten or displaced only by a record whose sync failed is neither old nor an orphan
-//! (R2-1, QA agent 2, 2026-10-09).  When U's sync failed, U may never reach the disk -- a
-//! write-back error after which the kernel drops the dirty page, or a power cut -- and the older
-//! chunked put P is then the key's value again.  So P must not retire its own set, its head must
-//! not be collected, and the sweep must not take its chunks, before a restart settles it.  Two
-//! orders: P's head lands after U (P is beaten), and U lands after P (P is displaced).  The loss
-//! of U is simulated by cutting U's record, alone in its own data file, from that file.  The
-//! hooks are process-wide, so the two run one at a time.
+//! No record is ever beaten or displaced by an unconfirmed winner (durable mark, commit A).
+//! Before it, a record U whose sync failed could stand in the cache over an older chunked put P,
+//! and P had to be held from retiring, collection and the sweep until a restart (R2-1).  Now the
+//! failed sync stops the store: U is refused, a store in flight is refused, a read of what no
+//! mark covers is refused, compaction and the sweep are refused, and the restart cuts U from the
+//! disk.  Two orders, as before: P's head waits while U fails (P would be beaten), and U fails
+//! after P (P would be displaced).  The hooks are process-wide, so the two run one at a time.
 
 mod gc_pair;
 
@@ -23,14 +22,7 @@ use oxedyne_fe2o3_o3db_sync::{
         constant,
     },
     comm::response::Wait,
-    data::cache::{
-        CacheEntry,
-        is_chunk_key,
-    },
-    file::{
-        core::FileType,
-        floc::FileLocation,
-    },
+    file::core::FileType,
     sweep,
     test::{
         hooks,
@@ -40,11 +32,11 @@ use oxedyne_fe2o3_o3db_sync::{
             UID_LEN,
         },
     },
+    verify,
 };
 
 use std::{
     collections::BTreeMap,
-    fs::OpenOptions,
     path::{
         Path,
         PathBuf,
@@ -103,63 +95,38 @@ fn live_fnum(root: &Path, c: &OzoneConfig) -> u32 {
     n
 }
 
-// Writes U, unchunked, into a live file of its own whose barrier fails, and rolls past it.
+// Writes U, unchunked, into a live file of its own whose barrier fails.  The roll after it is
+// refused once the store has stopped, and that is not what is tested here.
 fn write_unconfirmed(db: &TestDb, root: &Path, k: &Dat) -> Outcome<Outcome<()>> {
     let c = res!(cfg());
     res!(db.api().new_live_files());
     hooks::set_barrier_failure_for(Some(live_fnum(root, &c)));
     let u = db.insert(k.clone(), val(50, 3), Uid::default(), None).map(|_| ());
-    res!(db.api().new_live_files());
+    let _ = db.api().new_live_files();
     hooks::set_barrier_failure_for(None);
     Ok(u)
 }
 
-// What the process holds once both stores are done: the key's value, chunk records retired, and
-// where the cache holds the key's record.
-fn observe(db: &TestDb, k: &Dat) -> Outcome<(String, usize, FileLocation)> {
+// What the stopped store still does: a read of the key, compaction and the sweep.
+fn stopped(db: &TestDb, k: &Dat) -> Outcome<(bool, String, Outcome<()>, Outcome<sweep::SweepReport>)> {
     res!(db.api().settle_for_test(Duration::from_secs(10)));
+    let faulted = db.api().fault().is_some();
     let live = describe(&db.get(k, None));
-    let (kbuf, _, _) = res!(db.api().ozone_key_dat(k, None));
-    let mut retired = 0usize;
-    let mut u_loc = None;
-    for (_, cache) in res!(db.api().collect_caches(scan_wait())) {
-        let tombs = cache.tomb_tracker().tombs();
-        for (kb, e) in cache.map() {
-            if let CacheEntry::LocatedValue(mloc, _) = e {
-                if *kb == kbuf {
-                    u_loc = Some(mloc.file_location().clone());
-                } else if is_chunk_key(kb) && tombs.contains_key(kb) {
-                    retired += 1;
-                }
-            }
-        }
-    }
-    let u_loc = match u_loc { Some(l) => l, None => return Err(err!("U is not in the cache"; Test)) };
-    Ok((live, retired, u_loc))
+    let compact = db.compact_now(Duration::from_secs(60)).map(|_| ());
+    let swept = sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait());
+    Ok((faulted, live, compact, swept))
 }
 
-// Collection and the sweep, before the restart: neither may take P.
-fn collect_and_sweep(db: &TestDb) -> Outcome<Outcome<sweep::SweepReport>> {
-    res!(db.compact_now(Duration::from_secs(60)));
-    Ok(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()))
-}
-
-// U never reaches the disk; after a restart P is the key's value.
-fn lose_u_and_restart(root: &Path, u_loc: &FileLocation, k: &Dat) -> Outcome<String> {
-    let c = res!(cfg());
-    let dat = file(root, &c, FileType::Data, u_loc.fnum);
-    let len = size(&dat);
-    if len < u_loc.start + u_loc.klen + u_loc.vlen {
-        return Err(err!("U's file {:?} is {} bytes, short of its record at {:?}.", dat, len, u_loc; Test));
-    }
-    let f = res!(OpenOptions::new().write(true).open(&dat));
-    res!(f.set_len(u_loc.start));
-    drop(f);
-    let _ = std::fs::remove_file(file(root, &c, FileType::Index, u_loc.fnum));
+// The restart cuts U.  Returns the key's value, whether the fault is gone, and whether the store
+// verifies clean after a sweep.
+fn restart(root: &Path, k: &Dat) -> Outcome<(String, bool, bool)> {
     let db = res!(start(root, false));
     let after = describe(&db.get(k, None));
+    let cleared = db.api().fault().is_none();
+    res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
+    let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));
     res!(db.close());
-    Ok(after)
+    Ok((after, cleared, v.clean()))
 }
 
 fn fresh(dir: &str) -> Outcome<PathBuf> {
@@ -168,17 +135,36 @@ fn fresh(dir: &str) -> Outcome<PathBuf> {
     Ok(res!(Path::new(dir).canonicalize()))
 }
 
-/// P's head lands after U: P is beaten by an unconfirmed winner.  It keeps its set, held from the
-/// sweep, and its head is not old.
+fn assert_stopped(
+    faulted:    bool,
+    live:       &str,
+    compact:    &Outcome<()>,
+    swept:      &Outcome<sweep::SweepReport>,
+)
+    -> Outcome<()>
+{
+    assert!(faulted, "a failed sync did not stop the store");
+    assert!(live.starts_with("ERR:"), "a read of U, which no mark covers, was served: {}", live);
+    assert!(compact.is_err(), "compaction ran on a stopped store");
+    match swept {
+        Ok(r) => return Err(err!("the sweep ran on a stopped store: {:?}", r; Test)),
+        Err(e) => assert!(fmt!("{}", e).contains("Restart the store"),
+            "the sweep's refusal does not say what to do: {}", e),
+    }
+    Ok(())
+}
+
+/// P's head waits while U's sync fails.  The store stops, so P's head is refused rather than
+/// beaten, and after the restart neither U nor P is the key's value.
 #[test]
-fn a_beaten_head_keeps_its_set_and_its_place() -> Outcome<()> {
+fn a_store_in_flight_when_a_sync_fails_is_refused() -> Outcome<()> {
     let _serial = SERIAL.lock();
     let dir = "./test_db_unconfirmed_winner_beaten";
     let root = res!(fresh(dir));
     let db = res!(start(&root, true));
     let k = dat!("unconfirmed winner beaten");
-    // P: chunked, stamped now, held with its chunks durable and cached until U is in.  Stored
-    // through the API, its store runs in this thread rather than a server bot, which U needs.
+    // P: chunked, held with its chunks in until U is in.  Stored through the API, its store
+    // runs in this thread rather than a server bot.
     hooks::set_head_hold(true);
     let p = { let (db, k) = (db.clone(), k.clone());
         thread::spawn(move || -> Outcome<()> {
@@ -193,59 +179,46 @@ fn a_beaten_head_keeps_its_set_and_its_place() -> Outcome<()> {
     let u = res!(write_unconfirmed(&db, &root, &k));
     hooks::set_head_hold(false);
     let pr = match p.join() { Ok(r) => r, Err(_) => Err(err!("P panicked"; Test)) };
-    let (live, retired, u_loc) = res!(observe(&db, &k));
-    let swept = res!(collect_and_sweep(&db));
-    res!(db.close());
-    println!("beaten: p={:?} u={:?} live={} retired={} u_loc={:?} swept={:?}",
+    let (faulted, live, compact, swept) = res!(stopped(&db, &k));
+    let _ = db.close();
+    println!("beaten: p={:?} u={:?} faulted={} live={} compact={:?} swept={:?}",
         pr.as_ref().map_err(|e| fmt!("{}", e)), u.as_ref().map_err(|e| fmt!("{}", e)),
-        live, retired, u_loc, swept.as_ref().map_err(|e| fmt!("{}", e)));
-    if let Err(e) = &pr {
-        return Err(err!("P's store failed: {}", e; Test));
-    }
-    if u.is_ok() {
-        return Err(err!("U's store succeeded although its sync was failed"; Test));
-    }
-    assert_eq!(live, "50/3", "the newer record U is the key's value while the process runs");
-    assert_eq!(retired, 0, "the older store retired its own set against an unconfirmed winner");
-    match &swept {
-        Ok(r) => assert_eq!(r.orphans_retired, 0, "the sweep took P's chunks"),
-        Err(e) => return Err(err!("the sweep refused although no head was displaced: {}", e; Test)),
-    }
-    let after = res!(lose_u_and_restart(&root, &u_loc, &k));
+        faulted, live, compact.as_ref().map_err(|e| fmt!("{}", e)),
+        swept.as_ref().map_err(|e| fmt!("{}", e)));
+    assert!(u.is_err(), "U's store succeeded although its sync was failed");
+    assert!(pr.is_err(), "P's head was written on a stopped store");
+    res!(assert_stopped(faulted, &live, &compact, &swept));
+    let (after, cleared, clean) = res!(restart(&root, &k));
     let _ = std::fs::remove_dir_all(dir);
-    assert_eq!(after, "1500/2", "with U lost, P's value is the key's value after the restart");
+    assert_eq!(after, "none", "after the restart's cut the key holds neither U nor P");
+    assert!(cleared, "the restart left the fault standing");
+    assert!(clean, "the store does not verify clean after the restart and a sweep");
     Ok(())
 }
 
-/// U lands after P: P's head is displaced by an unconfirmed record.  It is not old, and the sweep
-/// refuses until a restart, since only the store's schemes can name P's set.
+/// U's sync fails after P has landed.  U never displaces P: the store stops, U is not served, and
+/// the restart's cut leaves P as the key's value.
 #[test]
-fn a_displaced_head_keeps_its_place_and_stops_the_sweep() -> Outcome<()> {
+fn a_failed_sync_never_displaces_a_durable_head() -> Outcome<()> {
     let _serial = SERIAL.lock();
     let dir = "./test_db_unconfirmed_winner_displaced";
     let root = res!(fresh(dir));
     let db = res!(start(&root, true));
     let k = dat!("unconfirmed winner displaced");
     res!(db.insert(k.clone(), val(1_500, 2), Uid::default(), None));
+    res!(db.api().sync_now(scan_wait()));
     let u = res!(write_unconfirmed(&db, &root, &k));
-    let (live, retired, u_loc) = res!(observe(&db, &k));
-    let swept = res!(collect_and_sweep(&db));
-    res!(db.close());
-    println!("displaced: u={:?} live={} retired={} u_loc={:?} swept={:?}",
-        u.as_ref().map_err(|e| e.tags().to_vec()), live, retired, u_loc,
-        swept.as_ref().map_err(|e| fmt!("{}", e)));
-    if u.is_ok() {
-        return Err(err!("U's store succeeded although its sync was failed"; Test));
-    }
-    assert_eq!(live, "50/3", "the newer record U is the key's value while the process runs");
-    assert_eq!(retired, 0, "P's set was retired against an unconfirmed record");
-    match &swept {
-        Ok(r) => return Err(err!("the sweep ran over a displaced head: {:?}", r; Test)),
-        Err(e) => assert!(fmt!("{}", e).contains("Restart the store"),
-            "the sweep's refusal does not say what to do: {}", e),
-    }
-    let after = res!(lose_u_and_restart(&root, &u_loc, &k));
+    let (faulted, live, compact, swept) = res!(stopped(&db, &k));
+    let _ = db.close();
+    println!("displaced: u={:?} faulted={} live={} compact={:?} swept={:?}",
+        u.as_ref().map_err(|e| e.tags().to_vec()), faulted, live,
+        compact.as_ref().map_err(|e| fmt!("{}", e)), swept.as_ref().map_err(|e| fmt!("{}", e)));
+    assert!(u.is_err(), "U's store succeeded although its sync was failed");
+    res!(assert_stopped(faulted, &live, &compact, &swept));
+    let (after, cleared, clean) = res!(restart(&root, &k));
     let _ = std::fs::remove_dir_all(dir);
-    assert_eq!(after, "1500/2", "with U lost, P's value is the key's value after the restart");
+    assert_eq!(after, "1500/2", "after the restart's cut P is the key's value");
+    assert!(cleared, "the restart left the fault standing");
+    assert!(clean, "the store does not verify clean after the restart and a sweep");
     Ok(())
 }

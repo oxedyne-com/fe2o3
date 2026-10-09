@@ -146,6 +146,14 @@ pub fn sweep_orphans<
 )
     -> Outcome<SweepReport>
 {
+    // A store stopped by a failed sync retires nothing: what it would retire on may be cut.
+    if let Some(fault) = api.fault() {
+        return Err(err!(
+            "{}: The store stopped writing after a failed sync at {:?} ({}), so the sweep is \
+            refused.  Restart the store; it recovers from the disk.",
+            api.ozid(), fault.when, fault.error;
+            Write, Fatal));
+    }
     let enc = api.schemes().encrypter();
     let or_enc = schms2.map(|s| s.encrypter());
 

@@ -64,7 +64,6 @@ pub enum ReadResult<
     Location(MetaLocation<UIDL, UID>, bool),
     // Cachebot issued
     Value(Vec<u8>, Meta<UIDL, UID>),
-    Deleted(Meta<UIDL, UID>),
 }
 
 pub struct ReaderBot<
@@ -331,8 +330,7 @@ impl<
                 Ok(OzoneMsg::ReadResult(readres)) => {
                     match readres {
                         // <10> Return result to caller via resp_r1.
-                        ReadResult::None        |
-                        ReadResult::Deleted(_)  =>
+                        ReadResult::None =>
                             return Ok(OzoneMsg::Value(Value::new(
                                 None,
                                 cind,

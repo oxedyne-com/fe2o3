@@ -15,6 +15,10 @@ use crate::{
         worker::bot::WorkerType,
     },
     comm::msg::OzoneMsg,
+    file::floc::{
+        FileLocation,
+        FileNum,
+    },
 };
 
 use oxedyne_fe2o3_core::{
@@ -26,19 +30,31 @@ use oxedyne_fe2o3_core::{
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
-    collections::HashSet,
+    collections::{
+        BTreeMap,
+        HashSet,
+    },
+    fs::{
+        self,
+        File,
+    },
+    io::Write,
     ops::{
         Index,
         IndexMut,
     },
+    path::PathBuf,
     sync::{
         Arc,
         Mutex,
+        RwLock,
         atomic::AtomicUsize,
     },
     time::{
         Duration,
         Instant,
+        SystemTime,
+        UNIX_EPOCH,
     },
 };
 
@@ -462,6 +478,286 @@ impl SetRegistry {
 /// replay settles which records landed, clears it.
 pub type UnsettledHeads = Arc<AtomicUsize>;
 
+/// How far the last successful barrier of each live file reached, its data and index ends, by
+/// zone and file number.  A record past its file's mark may not survive a power cut, so nothing
+/// that discards an older record acts on it until the mark has passed it.  A file with no entry
+/// is durable: replayed and synced at start, sealed, or written by a collection that synced it.
+#[derive(Clone, Debug, Default)]
+pub struct DurableMarks(Arc<RwLock<BTreeMap<(usize, FileNum), (u64, u64)>>>);
+
+impl DurableMarks {
+    /// Enters a live file whose bytes up to `ends` are already durable.
+    pub fn open(&self, zone: usize, fnum: FileNum, ends: (u64, u64)) -> Outcome<()> {
+        let mut map = lock_write!(self.0);
+        map.insert((zone, fnum), ends);
+        Ok(())
+    }
+
+    pub fn set(&self, zone: usize, fnum: FileNum, ends: (u64, u64)) -> Outcome<()> {
+        let mut map = lock_write!(self.0);
+        if let Some(mark) = map.get_mut(&(zone, fnum)) {
+            mark.0 = mark.0.max(ends.0);
+            mark.1 = mark.1.max(ends.1);
+        }
+        Ok(())
+    }
+
+    /// The file is wholly durable, sealed by a barrier that covered all of it.
+    pub fn remove(&self, zone: usize, fnum: FileNum) -> Outcome<()> {
+        let mut map = lock_write!(self.0);
+        map.remove(&(zone, fnum));
+        Ok(())
+    }
+
+    pub fn get(&self, zone: usize, fnum: FileNum) -> Outcome<Option<(u64, u64)>> {
+        let map = lock_read!(self.0);
+        Ok(map.get(&(zone, fnum)).copied())
+    }
+
+    /// Has a barrier covered the whole record at `floc`?
+    pub fn covers(&self, zone: usize, floc: &FileLocation) -> Outcome<bool> {
+        let map = lock_read!(self.0);
+        Ok(match map.get(&(zone, floc.fnum)) {
+            None            => true,
+            Some((d, _))    => floc.start + floc.klen + floc.vlen <= *d,
+        })
+    }
+
+    /// The files of `zone` that still have records no barrier has covered, or may have.
+    pub fn files(&self, zone: usize) -> Outcome<Vec<(FileNum, (u64, u64))>> {
+        let map = lock_read!(self.0);
+        Ok(map.iter().filter(|((z, _), _)| *z == zone).map(|((_, f), m)| (*f, *m)).collect())
+    }
+}
+
+/// One file a failed barrier leaves in doubt: everything past `upto` is cut.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Cut {
+    pub zone:       usize,
+    pub fnum:       FileNum,
+    pub data:       PathBuf,
+    pub data_upto:  u64,
+    pub index:      PathBuf,
+    pub index_upto: u64,
+}
+
+impl Cut {
+    /// Cuts the data and index files back to their marks, first copying each tail to the zone's
+    /// quarantine as evidence (best effort: the tail may hold page-cache ghosts).  A file is only
+    /// ever shortened, never extended, so a cut run twice changes nothing the second time.  A
+    /// missing file is logged and skipped: a collection may have replaced it since.  Returns
+    /// the bytes cut from the data and the index.
+    pub fn apply(&self, stamp: u64) -> Outcome<(u64, u64)> {
+        let d = res!(Self::cut_file(&self.data, self.data_upto, stamp));
+        let i = res!(Self::cut_file(&self.index, self.index_upto, stamp));
+        Ok((d, i))
+    }
+
+    fn cut_file(path: &PathBuf, upto: u64, stamp: u64) -> Outcome<u64> {
+        let file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                warn!(sync_log::stream(),
+                    "Cutting {:?} back to {} found no such file, so there is nothing to cut.",
+                    path, upto);
+                return Ok(0);
+            },
+            Err(e) => return Err(err!(e,
+                "Cannot open {:?} to cut it back to its durable mark {}.", path, upto;
+                IO, File, Write)),
+        };
+        let len = res!(file.metadata()).len();
+        if len <= upto {
+            return Ok(0);
+        }
+        Self::quarantine(path, &file, upto, len, stamp);
+        if let Err(e) = file.set_len(upto) {
+            return Err(err!(e,
+                "Cannot cut {:?} from {} back to its durable mark {}.", path, len, upto;
+                IO, File, Write));
+        }
+        if let Err(e) = file.sync_all() {
+            return Err(err!(e,
+                "Cannot sync {:?} after cutting it back to {}.", path, upto;
+                IO, File, Write));
+        }
+        if let Some(dir) = path.parent() {
+            res!(crate::file::zdir::sync_dir(dir));
+        }
+        Ok(len - upto)
+    }
+
+    // Evidence only, so a failure is logged and the cut goes on.
+    fn quarantine(path: &PathBuf, file: &File, upto: u64, len: u64, stamp: u64) {
+        let result: Outcome<PathBuf> = (|| {
+            let dir = match path.parent() {
+                Some(dir)   => dir.join(crate::base::constant::QUARANTINE_DIR),
+                None        => return Err(err!("{:?} has no directory.", path; Path, Missing)),
+            };
+            res!(fs::create_dir_all(&dir));
+            let name = match path.file_name() {
+                Some(name)  => fmt!("{}.{}", name.to_string_lossy(), stamp),
+                None        => return Err(err!("{:?} has no file name.", path; Path, Missing)),
+            };
+            let qpath = dir.join(name);
+            let mut tail = Vec::with_capacity((len - upto) as usize);
+            {
+                use std::io::{Read, Seek, SeekFrom};
+                let mut f = file;
+                res!(f.seek(SeekFrom::Start(upto)));
+                res!(f.take(len - upto).read_to_end(&mut tail));
+            }
+            let mut q = res!(File::create(&qpath));
+            res!(q.write_all(&tail));
+            res!(q.sync_all());
+            Ok(qpath)
+        })();
+        match result {
+            Ok(qpath) => warn!(sync_log::stream(),
+                "The {} bytes of {:?} past its durable mark {} are kept in {:?}.",
+                len - upto, path, upto, qpath),
+            Err(e) => error!(sync_log::stream(), err!(e,
+                "The {} bytes of {:?} past its durable mark {} could not be kept in quarantine; \
+                they are cut all the same.", len - upto, path, upto;
+                IO, File, Write)),
+        }
+    }
+}
+
+/// Why and where a store stopped writing.
+#[derive(Clone, Debug)]
+pub struct FaultReport {
+    pub when:   SystemTime,
+    pub error:  String,
+    pub cuts:   Vec<Cut>,
+    pub record: Option<PathBuf>, // the durable fault record, if it could be written
+}
+
+/// The store's fault: set by the first failed barrier, and never cleared in the process.  After
+/// a failed fsync the page cache cannot be trusted and no later fsync can prove anything, so the
+/// store stops writing and the next open cuts each file in doubt back to its mark.
+#[derive(Clone, Debug, Default)]
+pub struct Fault(Arc<Mutex<Option<FaultReport>>>);
+
+impl Fault {
+    pub fn get(&self) -> Option<FaultReport> {
+        match self.0.lock() {
+            Ok(f)   => f.clone(),
+            // A poisoned lock says a thread panicked holding it, which is no proof of health.
+            Err(p)  => p.into_inner().clone(),
+        }
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.get().is_some()
+    }
+
+    /// Sets the fault and writes the record of it into `root`, durably.  The first raise sets the
+    /// time and the error; a later one adds its cuts.  A record that cannot be written leaves the store stopped in this process, and is
+    /// logged as critical, naming the cuts, since a restart would then replay the page cache.
+    pub fn raise(&self, root: &PathBuf, cuts: Vec<Cut>, error: &Error<ErrTag>) -> FaultReport {
+        let mut f = match self.0.lock() {
+            Ok(f)   => f,
+            Err(p)  => p.into_inner(),
+        };
+        // A second writer failing later adds its cuts to the record, which is written again.
+        let mut report = match f.take() {
+            Some(mut report) => {
+                for c in cuts {
+                    if !report.cuts.contains(&c) {
+                        report.cuts.push(c);
+                    }
+                }
+                report
+            },
+            None => FaultReport {
+                when:   SystemTime::now(),
+                error:  fmt!("{}", error),
+                cuts,
+                record: None,
+            },
+        };
+        match Self::write_record(root, &report) {
+            Ok(path) => report.record = Some(path),
+            Err(e) => error!(sync_log::stream(), err!(e,
+                "CRITICAL: The store at {:?} stopped after a failed sync, but its fault record \
+                could not be written, so a restart will not cut the files in doubt.  Before \
+                restarting, truncate them by hand: {:?}", root, report.cuts;
+                IO, File, Write, Fatal)),
+        }
+        *f = Some(report.clone());
+        report
+    }
+
+    pub fn record_path(root: &PathBuf) -> PathBuf {
+        root.join(crate::base::constant::FAULT_FILENAME)
+    }
+
+    // Through a temporary file, synced, renamed and the directory synced, so that the record is
+    // either whole or absent.
+    fn write_record(root: &PathBuf, report: &FaultReport) -> Outcome<PathBuf> {
+        if crate::test::hooks::fault_record_fails() {
+            return Err(err!("The fault record could not be written (test::hooks)."; IO, Write));
+        }
+        let secs = report.when.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let mut text = fmt!("when {}\nerror {}\n", secs, report.error.replace('\n', " "));
+        for c in &report.cuts {
+            text.push_str(&fmt!("cut {} {} {} {} {} {}\n",
+                c.zone, c.fnum, c.data_upto, c.index_upto,
+                c.data.display(), c.index.display()));
+        }
+        let path = Self::record_path(root);
+        let tmp = path.with_extension("fault.tmp");
+        {
+            let mut file = res!(File::create(&tmp));
+            res!(file.write_all(text.as_bytes()));
+            res!(file.sync_all());
+        }
+        res!(fs::rename(&tmp, &path));
+        res!(crate::file::zdir::sync_dir(root));
+        Ok(path)
+    }
+
+    /// Reads a fault record left by an earlier run.  A path holding spaces is the last field, so
+    /// the data path is held to be everything up to its extension's end.
+    pub fn read_record(path: &PathBuf) -> Outcome<Vec<Cut>> {
+        let text = res!(fs::read_to_string(path));
+        let mut cuts = Vec::new();
+        for line in text.lines() {
+            let rest = match line.strip_prefix("cut ") {
+                Some(rest)  => rest,
+                None        => continue,
+            };
+            let mut it = rest.splitn(5, ' ');
+            let mut num = |what: &str| -> Outcome<u64> {
+                let field = res!(it.next().ok_or_else(|| err!(
+                    "Fault record {:?}: a cut has no {}: {:?}", path, what, line; Decode, Missing)));
+                Ok(res!(field.parse::<u64>()))
+            };
+            let zone = res!(num("zone")) as usize;
+            let fnum = res!(num("file number")) as FileNum;
+            let data_upto = res!(num("data mark"));
+            let index_upto = res!(num("index mark"));
+            let paths = res!(it.next().ok_or_else(|| err!(
+                "Fault record {:?}: a cut has no paths: {:?}", path, line; Decode, Missing)));
+            let ext = fmt!(".{} ", crate::base::constant::DATA_FILE_EXT);
+            let split = res!(paths.find(&ext).ok_or_else(|| err!(
+                "Fault record {:?}: a cut's paths cannot be told apart: {:?}", path, line;
+                Decode, Invalid)));
+            let (data, index) = paths.split_at(split + ext.len() - 1);
+            cuts.push(Cut {
+                zone,
+                fnum,
+                data:       PathBuf::from(data),
+                data_upto,
+                index:      PathBuf::from(&index[1..]),
+                index_upto,
+            });
+        }
+        Ok(cuts)
+    }
+}
+
 /// Channels for all bots in all zones.  Rather than sharing references to these channels, clone them.  Unlike `bots::base::handles::BotHandles`, this includes the `Supervisor`.
 #[derive(Clone, Debug)]
 pub struct BotChannels<
@@ -478,6 +774,9 @@ pub struct BotChannels<
     sup:    Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     sets:   PendingSets,
     shadow: UnsettledHeads,
+    marks:  DurableMarks,
+    fault:  Fault,
+    held:   Arc<AtomicUsize>,   // effects waiting on their winner's barrier, a gauge
 }
 
 impl<
@@ -504,11 +803,17 @@ impl<
             sup:    simplex(),
             sets:   Arc::new(Mutex::new(SetRegistry::default())),
             shadow: Arc::new(AtomicUsize::new(0)),
+            marks:  DurableMarks::default(),
+            fault:  Fault::default(),
+            held:   Arc::new(AtomicUsize::new(0)),
         }
     }
 
     pub fn pending_sets(&self) -> &PendingSets { &self.sets }
     pub fn unsettled_heads(&self) -> &UnsettledHeads { &self.shadow }
+    pub fn marks(&self) -> &DurableMarks { &self.marks }
+    pub fn fault(&self) -> &Fault { &self.fault }
+    pub fn held_effects(&self) -> &Arc<AtomicUsize> { &self.held }
 
     /// Returns channels for all worker pools, for the given zone.
     pub fn get_all_workers_in_zone(

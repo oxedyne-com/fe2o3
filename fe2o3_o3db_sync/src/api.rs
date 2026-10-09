@@ -27,6 +27,7 @@ use crate::{
         channels::{
             BotChannels,
             ChooseBot,
+            FaultReport,
             OzoneMsgCount,
         },
         msg::OzoneMsg,
@@ -1724,22 +1725,21 @@ impl<
                 info!(sync_log::stream(), " No cache entries."); 
             } else {
                 for (kbyt, centry) in cache.map() {
-                    if let CacheEntry::LocatedValue(mloc, val) = centry {
-                        //let (k, _) = res!(Dat::from_bytes(&kbyt));
-                        let vlen = match val {
-                            Some(v) => v.len(),
-                            None => 0,
-                        };
-                        let size =
-                            kbyt.len() +
-                            vlen +
-                            cache.mloc_size();
+                    let CacheEntry::LocatedValue(mloc, val) = centry;
+                    //let (k, _) = res!(Dat::from_bytes(&kbyt));
+                    let vlen = match val {
+                        Some(v) => v.len(),
+                        None => 0,
+                    };
+                    let size =
+                        kbyt.len() +
+                        vlen +
+                        cache.mloc_size();
 
-                        info!(sync_log::stream(), " kbyt = {:02x?} vlen = {} floc = {:?}",
-                            kbyt, vlen, mloc.file_location(),
-                        );
-                        total_size += size;
-                    }
+                    info!(sync_log::stream(), " kbyt = {:02x?} vlen = {} floc = {:?}",
+                        kbyt, vlen, mloc.file_location(),
+                    );
+                    total_size += size;
                 }
             }
             info!(sync_log::stream(), "{} cache size estimate: {} [B]", wind, total_size);
@@ -2073,6 +2073,58 @@ impl<
         Ok(map)
     }
 
+    /// Why the store stopped writing, if a failed sync has stopped it.  Reads go on, but only of
+    /// records a barrier proved; a restart cuts the files in doubt and recovers.
+    pub fn fault(&self) -> Option<FaultReport> {
+        self.chans().fault().get()
+    }
+
+    /// The discards waiting on their winner's barrier, a gauge.  Under an interval policy it stays
+    /// near the write rate times the period; one that only grows says a syncer is not barriering.
+    pub fn held_effects(&self) -> usize {
+        self.chans().held_effects().load(Ordering::SeqCst)
+    }
+
+    /// A barrier over everything every writer of every zone took before the call, answered once
+    /// all have answered.  Each request queues behind the records already handed to its syncer.
+    /// Fails if any barrier fails, which stops the store, or at the wait.
+    pub fn sync_now(&self, wait: Wait) -> Outcome<()> {
+        if let Some(fault) = self.fault() {
+            return Err(err!(
+                "{}: The store stopped writing after a failed sync at {:?} ({}), so no barrier \
+                can prove anything.  Restart the store; it recovers from the disk.",
+                self.ozid(), fault.when, fault.error;
+                Write, Fatal));
+        }
+        let resp = self.responder();
+        let mut n = 0;
+        for z in 0..self.cfg().num_zones() {
+            let zind = ZoneInd::new(z);
+            let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, &zind));
+            for b in 0..wbots.len() {
+                if let Err(e) = res!(wbots.get_bot(b)).send(OzoneMsg::SyncNow(resp.clone())) {
+                    return Err(err!(e,
+                        "{}: Cannot ask writer {} of zone {} for a barrier.", self.ozid(), b + 1, z + 1;
+                        Channel, Write));
+                }
+                n += 1;
+            }
+        }
+        let (_, msgs) = res!(resp.recv_number(n, wait));
+        for msg in msgs {
+            match msg {
+                OzoneMsg::Ok => (),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: A writer's barrier failed.", self.ozid();
+                    Write)),
+                msg => return Err(err!(
+                    "{}: Unexpected answer to a barrier request: {:?}", self.ozid(), msg;
+                    Channel, Unexpected)),
+            }
+        }
+        Ok(())
+    }
+
     /// Collects every old byte that a write acknowledged before the call left behind, and returns
     /// once none is held by a sealed file, or fails at the deadline naming each file that still
     /// holds one and why.
@@ -2086,6 +2138,13 @@ impl<
     /// deadline.
     pub fn compact_now(&self, deadline: Duration) -> Outcome<CompactReport> {
         let emsg = "compaction";
+        if let Some(fault) = self.fault() {
+            return Err(err!(
+                "{}: The store stopped writing after a failed sync at {:?} ({}), so it is not \
+                compacted.  Restart the store; it recovers from the disk.",
+                self.ozid(), fault.when, fault.error;
+                Write, Fatal));
+        }
         let start = Instant::now();
         let left = |start: &Instant| deadline.saturating_sub(start.elapsed());
         let wait = |d: Duration| Wait {

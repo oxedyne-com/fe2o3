@@ -95,10 +95,13 @@ impl ZoneDir {
     )
         -> Outcome<(PathBuf, File)>
     {
-        let mut path = self.dir.clone();
-        path.push(Self::relative_file_path(typ, fnum));
+        let path = self.ozone_file_path(fnum, typ);
         let file = res!(Self::open_file(&path, how));
         Ok((path, file))
+    }
+
+    pub fn ozone_file_path(&self, fnum: FileNum, typ: &FileType) -> PathBuf {
+        self.dir.join(Self::relative_file_path(typ, fnum))
     }
     
     pub fn claim(&self, fnum: FileNum)

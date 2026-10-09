@@ -598,11 +598,10 @@ fn census(db: &TestDb) -> Outcome<Census> {
         for (k, e) in cache.map() {
             if !is_chunk_key(k) { continue; }
             c.chunks += 1;
-            if let CacheEntry::LocatedValue(mloc, _) = e {
-                match tombs.contains_key(k) {
-                    true    => { c.tombs.insert(k.clone(), *mloc.file_location()); },
-                    false   => { c.files.insert(mloc.file_number()); },
-                }
+            let CacheEntry::LocatedValue(mloc, _) = e;
+            match tombs.contains_key(k) {
+                true    => { c.tombs.insert(k.clone(), *mloc.file_location()); },
+                false   => { c.files.insert(mloc.file_number()); },
             }
         }
     }

@@ -60,6 +60,8 @@ static HEAD_HOLD:        AtomicBool = AtomicBool::new(false); // a store waits b
 static HEADS_HELD:       AtomicU64  = AtomicU64::new(0);      // stores that have reached the hold above
 static SWEEP_HOLD:       AtomicBool = AtomicBool::new(false); // a sweep waits between its two scans
 static SWEEPS_HELD:      AtomicU64  = AtomicU64::new(0);      // sweeps that have reached the hold above
+static FAULT_RECORD_FAILS: AtomicBool = AtomicBool::new(false); // the fault record cannot be written
+static REPLAY_SYNC_FAILS_FOR: AtomicU64 = AtomicU64::new(0);   // file whose sync before replay fails, 0 none
 static DURABILITY_MS:    AtomicU64  = AtomicU64::new(0);      // a store's durability timeout, when set
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
@@ -202,6 +204,25 @@ pub(crate) fn sweep_hold() {
             thread::sleep(Duration::from_millis(2));
         }
     }
+}
+
+/// Makes the durable record of a store's fault fail to be written, as a failing disk would.
+pub fn set_fault_record_fails(on: bool) {
+    FAULT_RECORD_FAILS.store(on, Ordering::SeqCst);
+}
+
+pub(crate) fn fault_record_fails() -> bool {
+    FAULT_RECORD_FAILS.load(Ordering::SeqCst)
+}
+
+/// Makes the sync an open gives file `fnum` before replaying it fail, as a write-back error
+/// left by a crashed run would.
+pub fn set_replay_sync_failure_for(fnum: Option<u32>) {
+    REPLAY_SYNC_FAILS_FOR.store(fnum.map_or(0, u64::from), Ordering::SeqCst);
+}
+
+pub(crate) fn replay_sync_fails(fnum: u32) -> bool {
+    u64::from(fnum) == REPLAY_SYNC_FAILS_FOR.load(Ordering::SeqCst)
 }
 
 /// Makes the durability barriers of live file `fnum` fail, as `set_barrier_failure` does every

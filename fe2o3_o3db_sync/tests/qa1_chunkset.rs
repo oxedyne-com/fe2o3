@@ -597,9 +597,10 @@ fn qa1_legacy_crash_mid_overwrite() -> Outcome<()> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// An Unconfirmed bunch key that lands: the head's barrier fails after its chunks were confirmed.
-// The store reports failure; the value is current and must read whole, survive the sweep and a
-// restart.
+// A bunch key whose barrier fails after its chunks were written.  Since 2026-10-10 (F2) the
+// failure stops the store: the head is past its file's mark, so it is not served, the sweep is
+// refused, and the restart cuts it, leaving the value a barrier proved.  It used to be served
+// and kept as an unconfirmed head that landed.
 
 #[test]
 fn qa1_unconfirmed_head_that_lands() -> Outcome<()> {
@@ -608,6 +609,7 @@ fn qa1_unconfirmed_head_that_lands() -> Outcome<()> {
     let db = res!(start(dir, res!(cfg()), true));
     let k = dat!("unconfirmed head");
     res!(db.insert(k.clone(), val(1_100, 1), Uid::default(), None));
+    res!(db.api().sync_now(scan_wait()));
     hooks::set_chunk_insert_delay(Duration::from_millis(400));
     let put = { let (db, k) = (db.clone(), k.clone());
         thread::spawn(move || db.insert(k, val(1_100, 2), Uid::default(), None).map(|_| ()).map_err(|e| fmt!("{}", e))) };
@@ -616,21 +618,23 @@ fn qa1_unconfirmed_head_that_lands() -> Outcome<()> {
     let put = match put.join() { Ok(x) => x, Err(_) => Err(fmt!("panicked")) };
     hooks::set_barrier_failure(false);
     hooks::set_chunk_insert_delay(Duration::ZERO);
+    let faulted = db.api().fault().is_some();
     let live = describe(&db.get(&k, None));
     let report = sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait());
-    let swept = describe(&db.get(&k, None));
     let _ = db.close();
     let db = res!(start(dir, res!(cfg()), false));
     let rest = describe(&db.get(&k, None));
     let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));
     res!(db.close());
     let _ = std::fs::remove_dir_all(dir);
-    println!("QA1 unconfirmed put={:?} live={} sweep={:?} swept={} restart={} verify={}",
-        put.as_ref().map_err(|e| e.chars().take(200).collect::<String>()), live,
-        report.as_ref().map(|r| r.orphans_found), swept, rest, v.clean());
-    assert!(live == "1100/1" || live == "1100/2", "live read {}", live);
-    assert_eq!(swept, live, "the sweep changed the read");
-    assert!(rest == "1100/1" || rest == "1100/2", "restart read {}", rest);
+    println!("QA1 unconfirmed put={:?} faulted={} live={} sweep={:?} restart={} verify={}",
+        put.as_ref().map_err(|e| e.chars().take(200).collect::<String>()), faulted, live,
+        report.as_ref().map(|r| r.orphans_found), rest, v.clean());
+    assert!(put.is_err(), "a put whose barrier failed was reported stored");
+    assert!(faulted, "a failed barrier did not stop the store");
+    assert!(live == "1100/1" || live.starts_with("ERR:"), "live read {}", live);
+    assert!(report.is_err(), "the sweep ran on a store stopped by a failed sync");
+    assert_eq!(rest, "1100/1", "restart read");
     assert!(v.clean(), "verify after restart: {}", v.summary(4));
     Ok(())
 }

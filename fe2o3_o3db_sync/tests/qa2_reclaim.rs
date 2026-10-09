@@ -12,10 +12,7 @@ use oxedyne_fe2o3_o3db_sync::{
         constant,
     },
     comm::response::Wait,
-    data::cache::{
-        CacheEntry,
-        is_chunk_key,
-    },
+    data::cache::is_chunk_key,
     sweep,
     test::{
         hooks,
@@ -117,14 +114,12 @@ fn census(db: &TestDb, dir: &str) -> Outcome<Census> {
         c.anc += cache.get_ancillary_size();
         let tt = cache.tomb_tracker();
         c.older += tt.older().values().map(|s| s.len()).sum::<usize>();
-        for (k, e) in cache.map() {
+        for (k, _) in cache.map() {
             if !is_chunk_key(k) { continue; }
-            if let CacheEntry::LocatedValue(..) = e {
-                c.chunks += 1;
-                match tt.tombs().contains_key(k) {
-                    true    => c.tombs += 1,
-                    false   => c.live += 1,
-                }
+            c.chunks += 1;
+            match tt.tombs().contains_key(k) {
+                true    => c.tombs += 1,
+                false   => c.live += 1,
             }
         }
     }

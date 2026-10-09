@@ -49,6 +49,8 @@ pub enum Hold {
     Readers,    // a read has it open
     Undrained,  // writes not yet accounted for
     Fault,      // the evaluation failed
+    Stopped,    // a failed sync stopped the store
+    Unsynced,   // a barrier has yet to cover all of it
 }
 
 impl Hold {
@@ -60,6 +62,8 @@ impl Hold {
             Self::Readers       => "readers",
             Self::Undrained     => "undrained",
             Self::Fault         => "fault",
+            Self::Stopped       => "store stopped",
+            Self::Unsynced      => "not yet durable",
         }
     }
 }
@@ -472,6 +476,11 @@ impl<
                     self.result(&result);
                 }
             }
+            // A sealed file's mark entry is gone, so a collection held for it may go ahead.
+            OzoneMsg::Durable(_, fnum) => {
+                let result = self.maybe_collect(*fnum, Force::No).map(|_| ());
+                self.result(&result);
+            },
             _ => return true,
         }    
         false
@@ -697,7 +706,13 @@ impl<
     fn maybe_collect(&mut self, fnum: FileNum, force: Force) -> Outcome<Collect> {
         let self_id = self.ozid().clone();
         let ordered = force == Force::Yes;
+        // A collection rewrites its file under the same number, so it must not touch one a cut may
+        // still name (R3), nor anything once a failed sync has stopped the store.
+        let chans = self.api().chans();
+        let stopped = chans.fault().is_set();
+        let unsynced = res!(chans.marks().get(self.wind().z(), fnum)).is_some();
         let plan = match self.states().get_state(fnum) {
+            Ok(_) if stopped => Plan::Hold(Hold::Stopped),
             Ok(fstat) => {
                 let oldvals = fstat.get_old_sum() as f64;
                 let datfilemax = self.cfg().data_file_max_bytes as f64;
@@ -705,6 +720,8 @@ impl<
                 let oldfrac = 100.0 * (oldvals / datfilemax);
                 if fstat.is_live() {
                     Plan::Hold(Hold::Live)
+                } else if unsynced {
+                    Plan::Hold(Hold::Unsynced)
                 } else if fstat.gc_active() { // Never set a second collector on the same file.
                     Plan::Hold(Hold::Collecting)
                 } else if !fstat.no_pending_moves() {

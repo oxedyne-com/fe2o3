@@ -238,6 +238,22 @@ impl<
         }
     }
 
+    fn prove(&self, fnum: FileNum, path: &std::path::Path, file: &std::fs::File) -> Outcome<()> {
+        let synced = match hooks::replay_sync_fails(fnum) {
+            true    => Err(std::io::Error::other(
+                "the disk failed the sync (test::hooks::set_replay_sync_failure_for)")),
+            false   => file.sync_data(),
+        };
+        match synced {
+            Ok(()) => Ok(()),
+            Err(e) => Err(err!(e,
+                "{}: Cannot make {:?} durable before replaying it, so the store is not \
+                opened: a record replayed from it might not survive a power cut.",
+                self.ozid(), path;
+                Init, IO, File, Write)),
+        }
+    }
+
     fn cache_file(
         &mut self,
         fnum:       FileNum,
@@ -248,11 +264,26 @@ impl<
         -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>>
     {
         hooks::replay_file_delay();
-        let (_, file) = res!(self.zdir().open_ozone_file(
+        let (path, file) = res!(self.zdir().open_ozone_file(
             fnum,
             typ,
             &FileAccess::Reading,
         ));
+        // Replay calls every record it reads durable, so prove it first (R2): after a process
+        // crash the tail may be only in the page cache, and a fresh handle's sync also reports a
+        // write-back failure nobody has seen yet.  On a clean file it costs almost nothing.  The
+        // pair's other file is proved too where there is one; a data file whose index is missing
+        // is rebuilt from the data alone.
+        res!(self.prove(fnum, &path, &file));
+        let other = match typ {
+            FileType::Data  => FileType::Index,
+            FileType::Index => FileType::Data,
+        };
+        let opath = self.zdir().ozone_file_path(fnum, &other);
+        if opath.exists() {
+            let (opath, ofile) = res!(self.zdir().open_ozone_file(fnum, &other, &FileAccess::Reading));
+            res!(self.prove(fnum, &opath, &ofile));
+        }
         let meta = res!(file.metadata());
         let reader = BufReader::new(file);
         match typ {

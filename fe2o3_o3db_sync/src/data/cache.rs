@@ -64,7 +64,6 @@ pub enum ValueOrLocation<
     const UIDL: usize,
     UID: NumIdDat<UIDL>,
 > {
-    Deleted(Meta<UIDL, UID>),
     Value(Vec<u8>, Meta<UIDL, UID>),
     Location(MetaLocation<UIDL, UID>),
 }
@@ -190,7 +189,6 @@ pub enum CacheEntry<
     UID: NumIdDat<UIDL>,
 > {
     LocatedValue(MetaLocation<UIDL, UID>, Option<Vec<u8>>),
-    Deleted(Meta<UIDL, UID>),
 }
 
 /// The heads a cache holds with their bytes, which count toward its size but are never jettisoned.
@@ -490,9 +488,8 @@ impl<
                     prior,
                 })
             },
-            None |
-            Some(CacheEntry::Deleted(_)) => {
-                // 2.3 It doesn't exist or was deleted, so create the entry and insert.
+            None => {
+                // 2.3 It doesn't exist, so create the entry and insert.
                 match &val {
                     Some(v) => {
                         let vlen = v.len();
@@ -650,10 +647,6 @@ impl<
                 *mloc = MetaLocation { meta, floc, head: mloc.head, conf: mloc.conf };
                 Ok(())
             },
-            Some(CacheEntry::Deleted(_)) => Err(err!(
-                "Key starting with {:?} has been deleted from cache.",
-                if k.len() > 8 { &k[..8] } else { &k };
-                Missing, Data)),
             None => Err(err!(
                 "Key starting with {:?} not present in cache.",
                 if k.len() > 8 { &k[..8] } else { &k };
@@ -709,20 +702,28 @@ impl<
                     None => return Ok(Some(ValueOrLocation::Location(mloc.clone()))),
                 }
             },
-            Some(CacheEntry::Deleted(meta)) =>
-                return Ok(Some(ValueOrLocation::Deleted(meta.clone()))),
             None => return Ok(None),
+        }
+    }
+
+    /// Where the record cached for `k` is in the files, following a key referral as `get` does.
+    /// A deletion is a tombstone record, so it has one too.
+    pub fn located(&self, k: &[u8]) -> Option<&FileLocation> {
+        match self.map.get(k) {
+            Some(CacheEntry::LocatedValue(_, Some(val)))
+                if val.len() > 1 && val[0] == Dat::BOX_CODE => self.located(&val[1..]),
+            Some(CacheEntry::LocatedValue(mloc, _)) => Some(mloc.file_location()),
+            _ => None,
         }
     }
 
     pub fn clear_all_values(&mut self) {
         for (_k, centry) in self.map.iter_mut() {
-            if let CacheEntry::LocatedValue(mloc, val) = centry {
-                // A head's bytes are what its displacement is reported with, and are not
-                // jettisoned.
-                if !mloc.head {
-                    *val = None;
-                }
+            let CacheEntry::LocatedValue(mloc, val) = centry;
+            // A head's bytes are what its displacement is reported with, and are not
+            // jettisoned.
+            if !mloc.head {
+                *val = None;
             }
         }
     }
