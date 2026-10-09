@@ -2,6 +2,7 @@
 //! 
 //! This crate provides several core data structures:
 //! 
+//! - Generation-swept maps ([`gen_map`]) - A cache map that drops what the last two compiles left untouched, under a byte ceiling
 //! - Interval maps ([`interval`]) - Disjoint half-open integer ranges mapped to values
 //! - Ring buffers ([`ring`]) - Fixed-size circular buffers with position tracking
 //! - Stacks ([`stack`]) - Immutable stack implementation using Arc for thread-safety
@@ -20,6 +21,7 @@
 //!
 #![forbid(unsafe_code)]
 pub mod digraph;
+pub mod gen_map;
 pub mod hll;
 pub mod iblt;
 pub mod interval;

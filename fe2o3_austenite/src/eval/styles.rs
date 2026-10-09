@@ -53,7 +53,10 @@ use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 use oxedyne_fe2o3_hash::fingerprint::LazyFingerprint;
 
-use std::sync::Arc;
+use std::sync::{
+	Arc,
+	OnceLock,
+};
 
 pub const DEFAULT_FONT_SIZE_PT: f64 = 11.0;	// Typst's `text.size` default
 
@@ -113,7 +116,7 @@ impl Recipe {
 #[derive(Clone, Debug)]
 pub enum Style {
 	Property(Property),
-	Recipe(Recipe),
+	Recipe(Arc<Recipe>),
 	Revocation(RecipeIndex),
 }
 
@@ -225,7 +228,7 @@ impl Styles {
 		Styles::from_vec(self.iter().cloned().map(|mut s| {
 			match &mut s {
 				Style::Property(p)	=> p.outside = true,
-				Style::Recipe(r)	=> r.outside = true,
+				Style::Recipe(r)	=> if !r.outside { Arc::make_mut(r).outside = true; },
 				Style::Revocation(_)	=> (),
 			}
 			s
@@ -268,19 +271,51 @@ impl Styles {
 	}
 }
 
-// Built once by `StyleChain::chain` and never changed, so its fingerprint cell is never stale.
+/// A recipe in force at a link, with its root-relative index.
+#[derive(Clone, Debug)]
+pub struct RecipeSlot {
+	pub index:	RecipeIndex,
+	pub recipe:	Arc<Recipe>,
+}
+
+/// A 128-slot Bloom filter over the `(element, field)` keys of properties: one bit per key, so a link can
+/// say "no property of this key lies here" without a scan. A clear bit is exact; a set bit may be a clash.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct KeyBits(u128);
+
+impl KeyBits {
+	const NONE: KeyBits = KeyBits(0);
+
+	fn of(elem: ElemKind, field: FieldId) -> Self {
+		// A multiplicative hash; its top seven bits pick the slot.
+		let k = (((elem as u32) << 8) | field.0 as u32).wrapping_mul(0x9E37_79B1);
+		KeyBits(1u128 << (k >> 25))
+	}
+
+	fn has(self, key: KeyBits) -> bool { self.0 & key.0 != 0 }
+
+	fn with(self, other: KeyBits) -> KeyBits { KeyBits(self.0 | other.0) }
+}
+
+// A link is immutable once made, so the figures it caches cannot go stale. Its fields are private and no
+// method takes `&mut self`; `styles` is copy-on-write behind an `Arc` that the link holds, so a later edit
+// to any `Styles` the link was made from copies and leaves the link's list as it was; and `parent` is an
+// `Arc` link, itself immutable. Every cached figure -- `own`, `reach`, `total`, `plain`, the recipe list
+// in `force` and the fingerprint in `fp` -- is a pure function of `styles` and the parent's figures, both fixed at construction. A
+// different style is a different link, with a different identity and a cold cache.
 #[derive(Debug)]
 pub struct ChainLink {
 	styles:	Styles,
 	parent:	Option<Arc<ChainLink>>,
+	own:	KeyBits,	// keys of the properties in `styles`
+	reach:	KeyBits,	// keys of the properties in this link and every one above
+	total:	usize,		// recipes in this link and every one above
+	plain:	bool,		// no recipe and no revocation in `styles`
+	force:	OnceLock<Arc<[RecipeSlot]>>,	// the recipes in force here, filled on first use
 	fp:		LazyFingerprint,
 }
 
 impl ChainLink {
-	pub fn new(styles: Styles, parent: Option<Arc<ChainLink>>) -> Self {
-		Self { styles, parent, fp: LazyFingerprint::new() }
-	}
-
 	pub fn styles(&self) -> &Styles { &self.styles }
 
 	pub fn parent(&self) -> Option<&Arc<ChainLink>> { self.parent.as_ref() }
@@ -296,6 +331,110 @@ impl ChainLink {
 			}
 			h.finish()
 		})
+	}
+
+	pub fn new(styles: Styles, parent: Option<Arc<ChainLink>>) -> Self {
+		let mut own = KeyBits::NONE;
+		let mut recipes = 0;
+		let mut plain = true;
+		for s in styles.as_slice() {
+			match s {
+				Style::Property(p)		=> own = own.with(KeyBits::of(p.elem, p.field)),
+				Style::Recipe(_)		=> { recipes += 1; plain = false; },
+				Style::Revocation(_)	=> plain = false,
+			}
+		}
+		let (above, total) = match &parent {
+			Some(p)	=> (p.reach, p.total),
+			None	=> (KeyBits::NONE, 0),
+		};
+		Self { styles, parent, own, reach: own.with(above), total: total + recipes, plain, force: OnceLock::new(), fp: LazyFingerprint::new() }
+	}
+
+	/// The recipes in force at this link, innermost first, none that a revocation further in switched off.
+	/// A plain link adds nothing to its parent's list, so it shares the list of the nearest link above that
+	/// is not plain, and a chain of plain links costs no allocation.
+	fn slots(&self) -> &[RecipeSlot] {
+		let mut link = self;
+		while link.plain {
+			match link.parent.as_deref() {
+				Some(p)	=> link = p,
+				None	=> return &[],
+			}
+		}
+		link.force.get_or_init(|| link.build())
+	}
+
+	fn build(&self) -> Arc<[RecipeSlot]> {
+		let mut out = Vec::new();
+		let mut revoked: Vec<RecipeIndex> = Vec::new();
+		let mut r = 0;
+		for s in self.styles.as_slice().iter().rev() {
+			match s {
+				Style::Recipe(recipe) => {
+					let index = RecipeIndex(self.total - r);
+					r += 1;
+					if !revoked.contains(&index) {
+						out.push(RecipeSlot { index, recipe: recipe.clone() });
+					}
+				}
+				Style::Revocation(i)	=> revoked.push(*i),
+				Style::Property(_)		=> (),
+			}
+		}
+		// Every revocation here lies inside everything the parent holds.
+		if let Some(p) = self.parent.as_deref() {
+			out.extend(p.slots().iter().filter(|slot| !revoked.contains(&slot.index)).cloned());
+		}
+		out.into()
+	}
+}
+
+/// The values set for one `(element, field)`, innermost first. It skips the links whose figures rule the
+/// key out and reads only those that may hold it.
+struct Values<'a> {
+	link:	Option<&'a ChainLink>,
+	elem:	ElemKind,
+	field:	FieldId,
+	key:	KeyBits,
+	pos:	usize,	// styles of `link` still to read, counting down
+}
+
+impl<'a> Values<'a> {
+	fn new(head: Option<&'a ChainLink>, elem: ElemKind, field: FieldId) -> Self {
+		let mut v = Values { link: None, elem, field, key: KeyBits::of(elem, field), pos: 0 };
+		v.enter(head);
+		v
+	}
+
+	// Nothing from a link whose reach lacks the key, nor from any above it.
+	fn enter(&mut self, link: Option<&'a ChainLink>) {
+		match link {
+			Some(l) if l.reach.has(self.key)	=> {
+				self.pos = if l.own.has(self.key) { l.styles.len() } else { 0 };
+				self.link = Some(l);
+			}
+			_									=> self.link = None,
+		}
+	}
+}
+
+impl<'a> Iterator for Values<'a> {
+	type Item = &'a Value;
+
+	fn next(&mut self) -> Option<&'a Value> {
+		loop {
+			let l = self.link?;
+			while self.pos > 0 {
+				self.pos -= 1;
+				if let Style::Property(p) = &l.styles.as_slice()[self.pos] {
+					if p.elem == self.elem && p.field == self.field {
+						return Some(&p.value);
+					}
+				}
+			}
+			self.enter(l.parent.as_deref());
+		}
 	}
 }
 
@@ -357,26 +496,12 @@ impl StyleChain {
 	}
 
 	/// Every recipe with its index, innermost first, skipping those a revocation further in switched off.
-	pub fn recipes(&self) -> Vec<(RecipeIndex, &Recipe)> {
-		let all: Vec<&Style> = self.walk().collect();
-		let total = all.iter().filter(|s| matches!(s, Style::Recipe(_))).count();
-		let mut revoked = Vec::new();
-		let mut out = Vec::new();
-		let mut r = 0;
-		for s in all {
-			match s {
-				Style::Recipe(recipe) => {
-					let index = RecipeIndex(total - r);
-					r += 1;
-					if !revoked.contains(&index) {
-						out.push((index, recipe));
-					}
-				}
-				Style::Revocation(i)	=> revoked.push(*i),
-				Style::Property(_)		=> (),
-			}
+	/// The list is built once per link and shared by every chain that has the link at its head.
+	pub fn recipes(&self) -> &[RecipeSlot] {
+		match self.head.as_deref() {
+			Some(l)	=> l.slots(),
+			None	=> &[],
 		}
-		out
 	}
 
 	/// The chain of the longest link sequence every chain shares, counted from the root: Typst's trunk,
@@ -412,21 +537,39 @@ impl StyleChain {
 	/// Every value set for `elem.field`, innermost first, for a unit that folds a `Fold::Custom` field
 	/// itself.
 	pub fn values(&self, elem: ElemKind, field: FieldId) -> Vec<&Value> {
-		self.walk().filter_map(|s| match s {
-			Style::Property(p) if p.elem == elem && p.field == field	=> Some(&p.value),
-			_															=> None,
-		}).collect()
+		self.value_iter(elem, field).collect()
+	}
+
+	fn value_iter(&self, elem: ElemKind, field: FieldId) -> Values<'_> {
+		Values::new(self.head.as_deref(), elem, field)
+	}
+
+	/// Runs `f` on the values set for `elem.field`, innermost first. Nothing allocates for none or one
+	/// value, which is nearly every lookup.
+	fn with_values<R>(&self, elem: ElemKind, field: FieldId, f: impl FnOnce(&[&Value]) -> R) -> R {
+		let mut it = self.value_iter(elem, field);
+		let first = match it.next() {
+			Some(v)	=> v,
+			None	=> return f(&[]),
+		};
+		match it.next() {
+			None		=> f(&[first]),
+			Some(second) => {
+				let mut all = vec![first, second];
+				all.extend(it);
+				f(&all)
+			}
+		}
 	}
 
 	/// The value of `elem.field` in force: the set values folded by the field's schema rule onto the
 	/// schema default, the innermost set value for `Replace`, and the owning family's fold for `Custom`.
 	pub fn get(&self, elem: ElemKind, field: FieldId) -> Outcome<Option<Value>> {
-		let values = self.values(elem, field);
-		match elem.field_spec(field) {
-			Some(s) if s.fold == Fold::Custom	=> fold_custom_all(elem, s, &values),
-			Some(s)								=> Ok(fold_all(s, &values)),
+		self.with_values(elem, field, |values| match elem.field_spec(field) {
+			Some(s) if s.fold == Fold::Custom	=> fold_custom_all(elem, s, values),
+			Some(s)								=> Ok(fold_all(s, values)),
 			None								=> Ok(values.first().map(|v| (*v).clone())),
-		}
+		})
 	}
 
 	pub fn get_as<T: FromValue>(&self, elem: ElemKind, field: FieldId) -> Outcome<Option<T>> {
@@ -459,7 +602,7 @@ impl StyleChain {
 		if spec.fold == Fold::Custom {
 			return Ok(Some(res!(content::fold_custom(kind, spec.name, own.clone(), outer))));
 		}
-		let is_def = self.values(kind, field).is_empty();
+		let is_def = self.value_iter(kind, field).next().is_none();
 		Ok(Some(fold(spec, own, &outer, is_def)))
 	}
 
@@ -467,7 +610,7 @@ impl StyleChain {
 	pub fn font_size(&self) -> f64 {
 		// `text.size` folds by `Add`, which cannot fail.
 		let size = ElemKind::Text.field_id("size").and_then(|id| match ElemKind::Text.field_spec(id) {
-			Some(s) if s.fold != Fold::Custom	=> fold_all(s, &self.values(ElemKind::Text, id)),
+			Some(s) if s.fold != Fold::Custom	=> self.with_values(ElemKind::Text, id, |vs| fold_all(s, vs)),
 			_									=> None,
 		});
 		match size {
@@ -951,7 +1094,7 @@ pub fn styled_with_recipe(engine: &mut Engine, content: Content, recipe: Recipe)
 		};
 		return apply_recipe(engine, &recipe, content, &chain);
 	}
-	Ok(content.styled(Styles::from_style(Style::Recipe(recipe))))
+	Ok(content.styled(Styles::from_style(Style::Recipe(Arc::new(recipe)))))
 }
 
 /// Applies one recipe to its target. A function recipe runs with the target's location and `chain` as

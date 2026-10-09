@@ -11,8 +11,10 @@
 //! The record also carries the shaped-run cache's counters, which say whether the time in flow was spent
 //! shaping again what had been shaped.
 //!
-//! Realisation is split further. Five sub-phases (rules, regex, show, repack, styles) are opened inside
-//! `Realise` and are exclusive in the same way, so the time of `Realise` outside them is its own. A pass's
+//! Realisation is split further. Six sub-phases (rules, regex, show, repack, styles, intro) are opened inside
+//! `Realise` and are exclusive in the same way, so the time of `Realise` outside them is its own. The
+//! `intro` sub-phase is the introspector reads a realised body makes (counters, states, queries, locations);
+//! a read opened inside another, or by flow or the page furniture, is left to whatever holds the clock. A pass's
 //! `realise` cell is the whole of it, the sub-phases and the rest, so a reader of the phase table sees one
 //! realisation total; the `sub` object splits it, with `self` the part outside every sub-phase. Each pass
 //! also counts the realise calls by the mode and the shape of the content realised and by cause, and a few
@@ -63,13 +65,14 @@ pub enum Phase {
 	Show,
 	Repack,
 	Styles,
+	Intro,
 }
 
 impl Phase {
-	pub const COUNT:	usize = 16;
+	pub const COUNT:	usize = 17;
 	pub const RUN:		[Phase; 4] = [Phase::Load, Phase::Eval, Phase::Finish, Phase::Write];
 	pub const PASS:		[Phase; 7] = [Phase::Realise, Phase::Flow, Phase::Place, Phase::Decorate, Phase::Sink, Phase::Settle, Phase::Probe];
-	pub const SUB:		[Phase; 5] = [Phase::Rules, Phase::Regex, Phase::Show, Phase::Repack, Phase::Styles];
+	pub const SUB:		[Phase; 6] = [Phase::Rules, Phase::Regex, Phase::Show, Phase::Repack, Phase::Styles, Phase::Intro];
 
 	pub fn name(&self) -> &'static str {
 		match self {
@@ -89,6 +92,7 @@ impl Phase {
 			Self::Show		=> "show",
 			Self::Repack	=> "repack",
 			Self::Styles	=> "styles",
+			Self::Intro		=> "intro",
 		}
 	}
 
@@ -204,7 +208,7 @@ impl Bucket {
 /// The carry state a page was laid out from, as one fingerprint for each part of it, so that two compiles
 /// are compared field by field. The counters are the absolute ones (`count`, `pulled`, `base`, `work_idx`
 /// and `abs`), which shift for every later page when an edit adds a line; the rest are unaffected by such
-/// a shift. Locations, spans and marks are masked everywhere.
+/// a shift. Source offsets are masked everywhere; locations, places and marks are hashed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Entry {
 	pub count:		u32,	// pages yielded before this one
@@ -224,7 +228,7 @@ pub struct Entry {
 	pub skips:		u64,	// insertions placed, their children relative to `work_idx`
 	pub abs:		u64,	// the absolute child indices of `floats` and `skips`
 	pub locator:	u64,	// the place counters
-	pub masked:		u32,	// locations met and masked in the whole entry
+	pub masked:		u32,	// source offsets met and masked in the whole entry
 }
 
 impl Entry {
@@ -261,7 +265,7 @@ impl Entry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageRec {
 	pub pairs:	usize,	// pairs taken from the root feed while the page was made
-	pub input:	u64,	// those pairs and the page's run setup, spans and locations masked
+	pub input:	u64,	// those pairs and the page's run setup, source offsets masked
 	pub entry:	Entry,
 }
 
@@ -320,6 +324,11 @@ impl Timings {
 
 	/// Opens a phase inside whatever is open, the enclosing phase's clock stopping until it ends.
 	pub fn enter(&mut self, p: Phase) {
+		if p == Phase::Intro && !self.intro_here() {
+			// Neither counted nor clocked: a read made inside another read, or outside realisation.
+			self.open.push(false);
+			return;
+		}
 		self.count(p);
 		let clocked = self.fine || !p.fine();
 		self.open.push(clocked);
@@ -327,6 +336,14 @@ impl Timings {
 			self.charge_top();
 			self.stack.push(p);
 		}
+	}
+
+	// Is the innermost phase one that realisation owns, and not an introspector read already? The reads are
+	// opened at several levels of the introspector's own calls, and flow and the page furniture make reads of
+	// their own, whose time belongs to them.
+	fn intro_here(&self) -> bool {
+		matches!(self.stack.last(), Some(Phase::Realise) | Some(Phase::Rules) | Some(Phase::Regex) | Some(Phase::Show)
+			| Some(Phase::Repack) | Some(Phase::Styles))
 	}
 
 	/// Closes the innermost phase.

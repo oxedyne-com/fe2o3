@@ -13,7 +13,9 @@
 //! meets PDF's bottom-left, y-up one.
 //!
 //! A colour is an [`Ink`], and a [`ColourOut`] says how it is written: in the ink's own space (`g`, `rg`
-//! or `k`), or lowered to sRGB, which is what every file written before an ink knew its space holds.
+//! or `k`), lowered to sRGB, which is what every file written before an ink knew its space holds, or
+//! converted to CMYK or grey through an ICC transform, with each raster, and a transparency group on each
+//! page that names the space.
 //!
 //! The bytes are deterministic: no dates are written, the `/ID` is derived from the file's own
 //! content rather than the clock, and the Info dictionary ([`PdfInfo`]) holds only what the caller
@@ -24,6 +26,7 @@
 //! Anthropic Claude
 
 use crate::colour::Ink;
+use crate::pdf_colour::Inks;
 use crate::pdf_font::{
 	FontFile,
 	FontProgram,
@@ -35,6 +38,13 @@ use crate::path::{
 	Seg,
 };
 use crate::transform::Transform;
+
+pub use crate::pdf_colour::{
+	Black,
+	CacheStats,
+	ColourOut,
+	ImageCache,
+};
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -365,27 +375,6 @@ fn pdf_text_string(s: &str) -> String {
 	}
 }
 
-/// How the writer sets a colour. `Rgb` lowers every ink to sRGB and writes `rg` and `RG`, the bytes a
-/// file carried before an ink knew its space; `Native` writes each ink in its own space, `g` for a
-/// grey, `k` for a CMYK and `rg` for the rest, and the same for the stroke forms.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ColourOut {
-	Native,
-	#[default]
-	Rgb,
-}
-
-impl ColourOut {
-
-	// The ink as this mode writes it. An RGB ink is written as `rg`, so lowering is the whole of `Rgb`.
-	fn ink(&self, ink: Ink) -> Ink {
-		match self {
-			Self::Native	=> ink,
-			Self::Rgb		=> Ink::Rgb(ink.to_rgba()),
-		}
-	}
-}
-
 /// Accumulates pages and writes them out as one PDF file.
 #[derive(Clone, Debug, Default)]
 pub struct PdfWriter {
@@ -440,7 +429,7 @@ impl PdfWriter {
 	pub fn to_bytes(&self) -> Outcome<Vec<u8>> {
 		let mut stream = res!(PdfStream::new_with_outline_and_info(
 			Vec::new(), self.pages.len(), self.compress, self.outline.clone(), self.info.clone()))
-			.with_colour_out(self.colour_out);
+			.with_colour_out(self.colour_out.clone());
 		for page in &self.pages {
 			res!(stream.page(page));
 		}
@@ -690,6 +679,15 @@ impl<W: Write> PdfStream<W> {
 	/// catalogue and the page tree, so a reader that follows the trailer finds them wherever they sit.
 	/// A stream opened here is ended by `close`; `finish` refuses it.
 	pub fn open(out: W, compress: bool) -> Outcome<Self> {
+		Self::open_version(out, compress, 7)
+	}
+
+	/// As [`open`](Self::open), the header naming PDF version 1.`minor`, which may be 4 to 7. The writer
+	/// uses nothing newer than 1.4, so the version is the header's claim and nothing else changes.
+	pub fn open_version(out: W, compress: bool, minor: u8) -> Outcome<Self> {
+		if !(4..=7).contains(&minor) {
+			return Err(err!("A PDF version of 1.{} cannot be written; 1.4 to 1.7 can.", minor; Input, Invalid, Range));
+		}
 		let mut s = Self {
 			out,
 			compress,
@@ -711,7 +709,7 @@ impl<W: Write> PdfStream<W> {
 			page_objs:	Vec::new(),
 			colour_out:	ColourOut::default(),
 		};
-		res!(s.body(b"%PDF-1.7\n"));
+		res!(s.body(fmt!("%PDF-1.{}\n", minor).as_bytes()));
 		res!(s.body(b"%\xE2\xE3\xCF\xD3\n"));
 		Ok(s)
 	}
@@ -797,11 +795,17 @@ impl<W: Write> PdfStream<W> {
 			Some(a)	=> fmt!(" /Annots {} 0 R", a),
 			None	=> String::new(),
 		};
+		// A converting mode names its output space for the page's transparency, so a viewer blends in it
+		// and never in RGB. Native and RGB write nothing here, and their bytes are as they were.
+		let group = match self.colour_out.group_space() {
+			Some(cs)	=> fmt!(" /Group << /S /Transparency /CS /{} /I true >>", cs),
+			None		=> String::new(),
+		};
 		let head = fmt!(
 			"{} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] {} \
-				/Contents {} 0 R{} >>\nendobj\n",
+				/Contents {} 0 R{}{} >>\nendobj\n",
 			page_obj, numf(page.width), numf(page.height),
-			resources(page, &img_objs, &page_fonts), content_obj, annots);
+			resources(page, &img_objs, &page_fonts), content_obj, group, annots);
 		res!(self.body(head.as_bytes()));
 
 		self.set_extra_offset(content_obj);
@@ -819,7 +823,10 @@ impl<W: Write> PdfStream<W> {
 			if let Draw::Image { rgb, alpha, iw, ih, .. } = d {
 				let (image_obj, smask_obj) = img_objs[idx];
 				idx += 1;
-				res!(self.write_image(image_obj, rgb, *iw, *ih, smask_obj));
+				match res!(self.colour_out.image(rgb, *iw, *ih)) {
+					Some((chans, data))	=> res!(self.write_image(image_obj, &data, chans, *iw, *ih, smask_obj)),
+					None				=> res!(self.write_image(image_obj, rgb, 3, *iw, *ih, smask_obj)),
+				}
 				if let (Some(m), Some(a)) = (smask_obj, alpha) {
 					res!(self.write_smask(m, a, *iw, *ih));
 				}
@@ -850,7 +857,8 @@ impl<W: Write> PdfStream<W> {
 		s.push_str(&fmt!("1 0 0 -1 0 {} cm\n", numf(page.height)));
 
 		let translucent = page.draws.iter().any(|d| d.alpha() != 255);
-		let out = self.colour_out;
+		let out = self.colour_out.clone();
+		let mut inks = Inks::new(&out);
 		let mut cur_alpha: Option<u8> = None;
 		let mut img_k = 0;	// the image index, naming each `/Im{k}` XObject in draw order
 		let mut used: Vec<(String, usize)> = Vec::new();
@@ -893,7 +901,7 @@ impl<W: Write> PdfStream<W> {
 					if translucent {
 						set_alpha(&mut s, &mut cur_alpha, colour.alpha());
 					}
-					set_colour(&mut s, out.ink(*colour), false);
+					set_colour(&mut s, res!(inks.get(*colour)), false);
 					path_ops(&mut s, path);
 					// Non-zero winding, to match the SVG writer, whose fill-rule defaults to nonzero.
 					s.push_str("f\n");
@@ -902,7 +910,7 @@ impl<W: Write> PdfStream<W> {
 					if translucent {
 						set_alpha(&mut s, &mut cur_alpha, colour.alpha());
 					}
-					set_colour(&mut s, out.ink(*colour), true);
+					set_colour(&mut s, res!(inks.get(*colour)), true);
 					s.push_str(&fmt!("{} w\n", numf(*width)));
 					path_ops(&mut s, path);
 					s.push_str("S\n");
@@ -916,7 +924,7 @@ impl<W: Write> PdfStream<W> {
 					}
 					ts.flush(&mut s);
 					// Under `d1` a Type-3 glyph paints with the text state's fill colour, set by `begin`.
-					ts.begin(&mut s, translucent, &mut cur_alpha, out.ink(*colour), &name, *size);
+					ts.begin(&mut s, translucent, &mut cur_alpha, res!(inks.get(*colour)), &name, *size);
 					// The text matrix places the glyph and flips it back to y up: the page CTM flips the whole
 					// page in y, and this `[1 0 0 -1 x y]` flips the text within it, so the glyph reads upright.
 					// A per-glyph matrix means the font's advance never moves the pen -- the offset is exact.
@@ -930,7 +938,7 @@ impl<W: Write> PdfStream<W> {
 					if !used.iter().any(|(n, _)| n == &name) {
 						used.push((name.clone(), obj));
 					}
-					let colour = out.ink(*colour);
+					let colour = res!(inks.get(*colour));
 					let same_state = ts.open
 						&& ts.colour == Some(colour)
 						&& ts.font.as_ref().map_or(false, |(n, z)| n == &name && z == size);
@@ -1237,19 +1245,28 @@ impl<W: Write> PdfStream<W> {
 		Ok(())
 	}
 
-	/// Writes an image XObject: a straight-RGB, eight-bit `/DeviceRGB` sample stream, always
-	/// zlib-compressed so a photograph does not bloat the file, and pointing at its soft mask when one
-	/// was assigned. The samples are folded into the deterministic `/ID` like all body bytes.
+	/// Writes an image XObject: eight-bit samples of one, three or four channels, named `/DeviceGray`,
+	/// `/DeviceRGB` or `/DeviceCMYK`, always zlib-compressed so a photograph does not bloat the file, and
+	/// pointing at its soft mask when one was assigned. The samples are folded into the deterministic
+	/// `/ID` like all body bytes.
 	fn write_image(
 		&mut self,
 		obj:	usize,
 		rgb:	&[u8],
+		chans:	usize,
 		iw:		usize,
 		ih:		usize,
 		smask:	Option<usize>,
 	)
 		-> Outcome<()>
 	{
+		let space = match chans {
+			1	=> "DeviceGray",
+			3	=> "DeviceRGB",
+			4	=> "DeviceCMYK",
+			n	=> return Err(err!(
+				"An image of {} channels cannot be written; one, three and four can.", n; Invalid, Input, Size)),
+		};
 		let data = res!(deflate(rgb));
 		self.set_extra_offset(obj);
 		let mask = match smask {
@@ -1257,9 +1274,9 @@ impl<W: Write> PdfStream<W> {
 			None	=> String::new(),
 		};
 		let head = fmt!(
-			"{} 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB \
+			"{} 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /{} \
 				/BitsPerComponent 8{} /Filter /FlateDecode /Length {} >>\nstream\n",
-			obj, iw, ih, mask, data.len());
+			obj, iw, ih, space, mask, data.len());
 		res!(self.body(head.as_bytes()));
 		res!(self.body(&data));
 		res!(self.body(b"\nendstream\nendobj\n"));
@@ -2206,6 +2223,23 @@ mod tests {
 			assert!(bytes[off..].starts_with(want.as_bytes()),
 				"object {} offset {} does not open with '{}'", obj, off, want);
 		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_deferred_stream_names_the_version_it_is_asked_for_24() -> Outcome<()> {
+		for minor in 4..=7u8 {
+			let mut stream = res!(PdfStream::open_version(Vec::new(), true, minor));
+			let mut page = PdfPage::new(50.0, 50.0);
+			page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+			res!(stream.page(&page));
+			let bytes = res!(stream.close(Vec::new(), None));
+			let want = fmt!("%PDF-1.{}\n", minor);
+			assert!(bytes.starts_with(want.as_bytes()), "the header says 1.{}", minor);
+		}
+		assert!(PdfStream::open_version(Vec::new(), true, 3).is_err(), "1.3 is below what the writer uses");
+		assert!(PdfStream::open_version(Vec::new(), true, 8).is_err(), "1.8 does not exist");
+		assert!(res!(PdfStream::open(Vec::new(), true)).pages() == 0);
 		Ok(())
 	}
 

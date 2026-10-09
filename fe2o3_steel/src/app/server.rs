@@ -648,6 +648,10 @@ impl AppShellContext {
                 everything serves normally.");
         }
 
+        let mut outboxes: HashMap<String, (
+            Arc<crate::srv::publish::PublishConfig>,
+            Arc<crate::srv::publish::send::MailSender>,
+        )> = HashMap::new();
         for vh in &vhosts_cfg {
             let public_dir = match res!(vh.get_public_dir(&root_path)) {
                 Some(p) => p,
@@ -697,6 +701,15 @@ impl AppShellContext {
                 res!(p.resolve_secrets(root_path.as_ref()));
             }
 
+            let publish = publish.map(Arc::new);
+            // A vhost that publishes and has a sender gets a drainer once its database opens.
+            if let (Some(p), Some(m)) = (&publish, &mail_sender) {
+                outboxes.insert(
+                    vh.primary_hostname().to_lowercase(),
+                    (p.clone(), m.clone()),
+                );
+            }
+
             let web_handler = AppWebHandler::new(
                 server_cfg.clone(),
                 public_dir,
@@ -710,7 +723,7 @@ impl AppShellContext {
                 tls_client.clone(),
                 Some(admin_state.clone()),
                 Some(traffic.clone()),
-                publish.map(Arc::new),
+                publish,
                 mail_sender.clone(),
                 Arc::new(vh.site_admins.clone()),
             ).with_admin_dashboard(vh.admin_dashboard);
@@ -819,6 +832,7 @@ impl AppShellContext {
             vhost_dbs.clone(),
             db_specs,
             uid,
+            outboxes,
         ));
 
         info!("Starting server...");
@@ -980,10 +994,17 @@ async fn open_dbs_on_unseal(
                     >>,
     db_specs:       Vec<VhostDbSpec>,
     uid:            id::Uid,
+    outboxes:       HashMap<String, (
+                        Arc<crate::srv::publish::PublishConfig>,
+                        Arc<crate::srv::publish::send::MailSender>,
+                    )>,
 ) {
     if db_specs.is_empty() {
         return;
     }
+    let handle = tokio::runtime::Handle::current();
+    // Each drainer tells the operator through the host's alerter, where there is one.
+    let alerter = admin_state.alerter().cloned();
 
     let enc_key = match admin_state.await_master_key().await {
         Ok(k) => k,
@@ -1017,10 +1038,20 @@ async fn open_dbs_on_unseal(
             // no reason to keep answering 503 while a later one starts.
             let mut guard = lock_write!(vhost_dbs,
                 "Attaching the database for vhost '{}'.", spec.vhost_key);
-            guard.insert(
-                spec.vhost_key.clone(),
-                (Arc::new(RwLock::new(db)), uid),
-            );
+            let db = Arc::new(RwLock::new(db));
+            guard.insert(spec.vhost_key.clone(), (db.clone(), uid));
+            // The outbox drains from the moment its database is up. One task for each vhost that
+            // publishes, all sharing the sender's pacer, so the host's ceiling is one ceiling.
+            if let Some((cfg, mail)) = outboxes.get(&spec.vhost_key) {
+                handle.spawn(crate::srv::publish::outbox::run(
+                    (db, uid),
+                    cfg.clone(),
+                    mail.clone(),
+                    mail.pacer().clone(),
+                    alerter.clone(),
+                    spec.vhost_key.clone(),
+                ));
+            }
             opened += 1;
         }
         Ok(opened)
@@ -1080,9 +1111,10 @@ fn newsletter_sender(
         mail_cfg.hostname.clone(), dkim.clone(), default_from.clone())
     {
         Ok(s) => {
-            info!("Newsletter sender ready (default from {}, {} DKIM key(s)).",
-                default_from, dkim.len());
-            Some(Arc::new(s))
+            info!("Newsletter sender ready (default from {}, {} DKIM key(s), outbound ceiling {} \
+                an hour{}).", default_from, dkim.len(), mail_cfg.outbound_hourly,
+                if mail_cfg.outbound_hourly == 0 { ", so every send is held" } else { "" });
+            Some(Arc::new(s.with_outbound_hourly(mail_cfg.outbound_hourly)))
         },
         Err(e) => {
             warn!("Building the newsletter sender failed ({}); newsletter \

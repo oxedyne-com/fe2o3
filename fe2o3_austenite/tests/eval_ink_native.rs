@@ -60,7 +60,7 @@ impl PageSink for ModeSink {
 	}
 
 	fn finish(&mut self, _engine: &mut Engine, _intro: &Introspector) -> Outcome<()> {
-		let mut w = PdfWriter::new().with_colour_out(self.mode);
+		let mut w = PdfWriter::new().with_colour_out(self.mode.clone());
 		for p in self.pages.drain(..) {
 			w.add_page(p);
 		}

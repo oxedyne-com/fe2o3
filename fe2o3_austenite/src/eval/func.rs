@@ -25,6 +25,7 @@ use crate::eval::lib::{
 };
 use crate::eval::lib;
 use crate::eval::methods::CoreFn;
+use crate::eval::fp;
 use crate::eval::scope::Scope;
 use crate::eval::select::StyleFn;
 use crate::eval::value::Value;
@@ -35,6 +36,8 @@ use crate::syntax::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::LazyFingerprint;
 
 use std::sync::Arc;
 
@@ -52,7 +55,7 @@ impl Func {
 		match self {
 			Func::Native(n)		=> Some(n.name()),
 			Func::Element(k)	=> Some(k.name()),
-			Func::Closure(c)	=> c.name.as_deref(),
+			Func::Closure(c)	=> c.name(),
 			Func::With(w)		=> w.0.name(),
 		}
 	}
@@ -79,13 +82,34 @@ pub enum Param {
 }
 
 /// A user function. `captured` is a snapshot of the defining scope: Typst closures capture by value.
+///
+/// A closure is built once and held behind an `Arc`, so every closure that captures it shares it, and its
+/// fingerprint is worked out once however many paths reach it. The fields are private so that nothing can
+/// change a closure under a fingerprint already read.
 #[derive(Clone, Debug)]
 pub struct Closure {
-	pub name:		Option<String>,	// set by `let f(x) = ..`, for recursion and `repr`
-	pub params:		Vec<Param>,
-	pub body:		SyntaxNode,
-	pub captured:	Scope,
-	pub span:		Span,
+	name:		Option<String>,	// set by `let f(x) = ..`, for recursion and `repr`
+	params:		Vec<Param>,
+	body:		SyntaxNode,
+	captured:	Scope,
+	span:		Span,
+	fp:			LazyFingerprint,
+}
+
+impl Closure {
+	pub fn new(name: Option<String>, params: Vec<Param>, body: SyntaxNode, captured: Scope, span: Span) -> Self {
+		Self { name, params, body, captured, span, fp: LazyFingerprint::new() }
+	}
+
+	pub fn name(&self) -> Option<&str>		{ self.name.as_deref() }
+	pub fn params(&self) -> &[Param]		{ &self.params }
+	pub fn body(&self) -> &SyntaxNode		{ &self.body }
+	pub fn captured(&self) -> &Scope		{ &self.captured }
+	pub fn span(&self) -> Span				{ self.span }
+
+	/// What the closure is, never where it was written (see `eval::fp`). It covers everything the closure
+	/// captured, so it is kept: a capture reached by many paths would otherwise be walked once per path.
+	pub fn fingerprint(&self) -> Fingerprint { self.fp.get_or_init(|| fp::closure_fp(self)) }
 }
 
 /// Every native function, grouped by the library area that implements it.

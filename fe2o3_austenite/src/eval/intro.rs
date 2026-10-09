@@ -54,6 +54,7 @@ use crate::ledger::{
 	Position,
 };
 use crate::syntax::Span;
+use crate::timings::Phase;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
@@ -475,12 +476,14 @@ impl CounterKey {
 	}
 
 	/// A key equal for equal counters in every pass, for the sequence memo.
-	fn memo_key(&self) -> String {
+	fn memo_key(&self) -> Fingerprint {
+		let mut h = Fingerprinter::new();
 		match self {
-			CounterKey::Page		=> "page".to_string(),
-			CounterKey::Str(s)		=> fmt!("str {}", s),
-			CounterKey::Selector(s)	=> fmt!("sel {}", selector_key(s)),
+			CounterKey::Page		=> h.write_u8(0),
+			CounterKey::Str(s)		=> { h.write_u8(1); h.write_str(s); }
+			CounterKey::Selector(s)	=> { h.write_u8(2); fp::hash_selector(&mut h, s); }
 		}
+		h.finish()
 	}
 }
 
@@ -613,7 +616,7 @@ impl Question {
 					}
 				}
 			}
-			Question::CountBefore(sel, loc) => h.write_u64(res!(intro.count_before(sel, *loc)) as u64),
+			Question::CountBefore(sel, loc) => return Ok(count_answer(res!(intro.count_before(sel, *loc)))),
 			Question::Page(loc) => h.write_u64(intro.page(*loc).map(|p| p as u64 + 1).unwrap_or(0)),
 			Question::Position(loc) => match intro.position(*loc) {
 				Some(p) => {
@@ -631,23 +634,59 @@ impl Question {
 	}
 
 	/// What was asked, as a key equal for equal questions in every pass.
-	pub fn key(&self) -> String {
+	pub fn key(&self) -> Fingerprint {
 		match self {
-			Question::Query(s)				=> fmt!("query {}", selector_key(s)),
-			Question::CountBefore(s, l)		=> fmt!("count {} before {:016x}", selector_key(s), l.0),
-			Question::Page(l)				=> fmt!("page {:016x}", l.0),
-			Question::Position(l)			=> fmt!("position {:016x}", l.0),
-			Question::Pages					=> "pages".to_string(),
-			Question::PageNumbering(l)		=> fmt!("page-numbering {:016x}", l.0),
+			Question::Query(s)			=> Self::query_key(selector_fp(s)),
+			Question::CountBefore(s, l)	=> Self::count_key(selector_fp(s), *l),
+			Question::Page(l)			=> Self::loc_key(2, *l),
+			Question::Position(l)		=> Self::loc_key(3, *l),
+			Question::Pages				=> Self::bare_key(4),
+			Question::PageNumbering(l)	=> Self::loc_key(5, *l),
 		}
 	}
+
+	// The keys of the questions a fold asks again and again, from a selector hashed once.
+	fn query_key(sel: Fingerprint) -> Fingerprint {
+		let mut h = Fingerprinter::new();
+		h.write_u8(0);
+		h.write_fingerprint(sel);
+		h.finish()
+	}
+
+	fn count_key(sel: Fingerprint, loc: Location) -> Fingerprint {
+		let mut h = Fingerprinter::new();
+		h.write_u8(1);
+		h.write_fingerprint(sel);
+		h.write_u64(loc.0);
+		h.finish()
+	}
+
+	fn loc_key(tag: u8, loc: Location) -> Fingerprint {
+		let mut h = Fingerprinter::new();
+		h.write_u8(tag);
+		h.write_u64(loc.0);
+		h.finish()
+	}
+
+	fn bare_key(tag: u8) -> Fingerprint {
+		let mut h = Fingerprinter::new();
+		h.write_u8(tag);
+		h.finish()
+	}
+}
+
+/// The answer to a count-before question, from the count.
+fn count_answer(n: usize) -> Fingerprint {
+	let mut h = Fingerprinter::new();
+	h.write_u64(n as u64);
+	h.finish()
 }
 
 /// One introspection read: what was asked, a hash of the answer, and the counter or state it was
 /// asked for, which is what a non-convergence warning names.
 #[derive(Clone, Debug)]
 pub struct Read {
-	pub key:		String,
+	pub key:		Fingerprint,
 	pub answer:		Fingerprint,
 	pub question:	Question,
 	pub subject:	Option<Arc<str>>,	// "value of `counter(heading)`"
@@ -666,29 +705,49 @@ impl std::hash::Hash for Read {
 	}
 }
 
+/// A sequence folded over the matches of a selector, once per pass: a counter's states or a state's
+/// values, with where in document order each stop stands, so that a read finds its stop by a binary
+/// search and never by a rescan of the updates.
+#[derive(Debug)]
+struct Fold<T> {
+	sel:		Selector,		// what the sequence was folded over
+	fp:			Fingerprint,	// `sel` hashed, the selector part of every count question
+	all:		Vec<u32>,		// every match of `sel`, in document order
+	orders:		Vec<u32>,		// the matches that made a stop, in document order
+	stops:		Vec<T>,			// the initial stop, then one after each of `orders`
+	subject:	Arc<str>,		// the counter or state, as a warning names it
+}
+
 /// Every distinct read of the pass, and the counter and state sequences already folded against the
 /// introspector the pass reads, so that a document displaying its heading numbers folds the heading
 /// counter once, not once a heading.
 #[derive(Clone, Debug, Default)]
 pub struct ReadLog {
 	pub all:	Vec<Read>,
-	seen:		HashSet<String>,
+	seen:		HashSet<Fingerprint>,
 	subject:	Option<Arc<str>>,						// the counter or state being folded
 	memo_of:	usize,									// the introspector the memo was folded against
-	counters:	HashMap<String, Arc<Vec<(Vec<u64>, u32)>>>,
-	states:		HashMap<String, Arc<Vec<Value>>>,
+	counters:	HashMap<Fingerprint, Arc<Fold<(Vec<u64>, u32)>>>,
+	states:		HashMap<Fingerprint, Arc<Fold<Value>>>,
 }
 
 impl ReadLog {
-	fn record(&mut self, q: Question, intro: &Introspector) -> Outcome<()> {
-		let key = q.key();
+	/// Records a question the pass has not asked yet. The question is built, and its answer hashed,
+	/// only when it is new, so a repeated question costs a key and a lookup.
+	fn note<F: FnOnce() -> Question>(&mut self, key: Fingerprint, intro: &Introspector, make: F) -> Outcome<()> {
 		if self.seen.contains(&key) {
 			return Ok(());
 		}
-		let answer = res!(q.answer(intro));
-		self.seen.insert(key.clone());
-		self.all.push(Read { key, answer, question: q, subject: self.subject.clone() });
+		let question = make();
+		let answer = res!(question.answer(intro));
+		self.push(key, question, answer);
 		Ok(())
+	}
+
+	// Stores a new read whose answer the caller already knows.
+	fn push(&mut self, key: Fingerprint, question: Question, answer: Fingerprint) {
+		self.seen.insert(key);
+		self.all.push(Read { key, answer, question, subject: self.subject.clone() });
 	}
 
 	/// Does every read of the pass answer the same against `intro`? The fixpoint's convergence test.
@@ -724,8 +783,8 @@ impl ReadLog {
 }
 
 fn ask(engine: &mut Engine, q: Question) -> Outcome<()> {
-	let intro = engine.intro.clone();
-	engine.reads.record(q, &intro)
+	let key = q.key();
+	engine.reads.note(key, &engine.intro, || q)
 }
 
 /// Runs `f` with the reads it makes attributed to `subject`.
@@ -812,9 +871,11 @@ pub fn document_info(styles: &StyleChain) -> Outcome<DocInfo> {
 }
 
 pub fn query(engine: &mut Engine, selector: &Selector) -> Outcome<Vec<Content>> {
-	res!(ask(engine, Question::Query(selector.clone())));
-	let intro = engine.intro.clone();
-	intro.query(selector)
+	engine.timed(Phase::Intro, |engine| {
+		let key = Question::query_key(selector_fp(selector));
+		res!(engine.reads.note(key, &engine.intro, || Question::Query(selector.clone())));
+		engine.intro.query(selector)
+	})
 }
 
 /// The one element carrying `label`, or Typst's error for none and for several. Answered without a
@@ -837,30 +898,32 @@ pub fn query_label_opt(engine: &mut Engine, label: &Label, span: Span) -> Outcom
 }
 
 pub fn position(engine: &mut Engine, loc: Location) -> Outcome<Option<Position>> {
-	res!(ask(engine, Question::Position(loc)));
-	Ok(engine.intro.position(loc))
+	engine.timed(Phase::Intro, |engine| {
+		res!(ask(engine, Question::Position(loc)));
+		Ok(engine.intro.position(loc))
+	})
 }
 
 /// The page `loc` landed on. Asked apart from its position, it settles as soon as the page does.
 pub fn page(engine: &mut Engine, loc: Location) -> Outcome<Option<u32>> {
-	res!(ask(engine, Question::Page(loc)));
-	Ok(engine.intro.page(loc))
+	engine.timed(Phase::Intro, |engine| {
+		res!(ask(engine, Question::Page(loc)));
+		Ok(engine.intro.page(loc))
+	})
 }
 
 pub fn pages(engine: &mut Engine) -> Outcome<u32> {
-	res!(ask(engine, Question::Pages));
-	Ok(engine.intro.pages)
+	engine.timed(Phase::Intro, |engine| {
+		res!(ask(engine, Question::Pages));
+		Ok(engine.intro.pages)
+	})
 }
 
 pub fn page_numbering(engine: &mut Engine, loc: Location) -> Outcome<Value> {
-	res!(ask(engine, Question::PageNumbering(loc)));
-	Ok(engine.intro.page_numbering(loc))
-}
-
-fn count_before(engine: &mut Engine, selector: &Selector, loc: Location) -> Outcome<usize> {
-	res!(ask(engine, Question::CountBefore(selector.clone(), loc)));
-	let intro = engine.intro.clone();
-	intro.count_before(selector, loc)
+	engine.timed(Phase::Intro, |engine| {
+		res!(ask(engine, Question::PageNumbering(loc)));
+		Ok(engine.intro.page_numbering(loc))
+	})
 }
 
 /// The error Typst gives a context-only function called outside `context`.
@@ -968,25 +1031,36 @@ fn counter_selector(counter: &Counter) -> Selector {
 
 /// Every state the counter passes through, with the page it was on, and the document order of each
 /// element that moved it: the initial state, then one after each element. Folded once per pass.
-fn counter_sequence(engine: &mut Engine, counter: &Counter) -> Outcome<Arc<Vec<(Vec<u64>, u32)>>> {
-	let sel = counter_selector(counter);
-	let found = res!(query(engine, &sel));
-	let intro = engine.intro.clone();
-	engine.reads.validate_memo(&intro);
+fn counter_fold(engine: &mut Engine, counter: &Counter) -> Outcome<Arc<Fold<(Vec<u64>, u32)>>> {
+	engine.reads.validate_memo(&engine.intro);
 	let key = counter.key.memo_key();
-	if let Some(seq) = engine.reads.counters.get(&key) {
-		return Ok(seq.clone());
+	if let Some(fold) = engine.reads.counters.get(&key) {
+		return Ok(fold.clone());
 	}
+	let subject = counter_subject(counter);
+	let fold = Arc::new(res!(attributed(engine, subject.clone(), |engine| fold_counter(engine, counter, subject))));
+	engine.reads.counters.insert(key, fold.clone());
+	Ok(fold)
+}
+
+fn fold_counter(engine: &mut Engine, counter: &Counter, subject: Arc<str>) -> Outcome<Fold<(Vec<u64>, u32)>> {
+	let intro = engine.intro.clone();
+	let sel = counter_selector(counter);
+	let fp = selector_fp(&sel);
+	res!(engine.reads.note(Question::query_key(fp), &intro, || Question::Query(sel.clone())));
+	let all: Vec<u32> = res!(intro.query_indices(&sel)).into_iter().map(|i| i as u32).collect();
 	let mut state = vec![if counter.is_page() { 1 } else { 0 }];
 	let mut pg = 1u32;
-	let mut stops = Vec::with_capacity(found.len() + 1);
+	let mut orders = Vec::new();
+	let mut stops = Vec::with_capacity(all.len() + 1);
 	stops.push((state.clone(), pg));
-	for e in &found {
-		if e.is(ElemKind::CounterUpdate) {
-			let key = e.field("key").and_then(CounterKey::from_value);
-			if !key.map(|k| k.same(&counter.key)).unwrap_or(false) {
-				continue;
-			}
+	for i in &all {
+		let e = match intro.records.get(*i as usize) {
+			Some(r)	=> &r.elem,
+			None	=> continue,
+		};
+		if !moves(counter, e) {
+			continue;
 		}
 		if counter.is_page() {
 			if let Some(loc) = e.location() {
@@ -1000,11 +1074,10 @@ fn counter_sequence(engine: &mut Engine, counter: &Counter) -> Outcome<Arc<Vec<(
 		if let Some(update) = element_update(e) {
 			state = res!(apply_update(engine, e.span(), &state, update));
 		}
+		orders.push(*i);
 		stops.push((state.clone(), pg));
 	}
-	let seq = Arc::new(stops);
-	engine.reads.counters.insert(key, seq.clone());
-	Ok(seq)
+	Ok(Fold { sel, fp, all, orders, stops, subject })
 }
 
 fn apply_update(engine: &mut Engine, span: Span, state: &[u64], update: CounterUpdate) -> Outcome<Vec<u64>> {
@@ -1018,7 +1091,7 @@ fn apply_update(engine: &mut Engine, span: Span, state: &[u64], update: CounterU
 		CounterUpdate::Func(f)	=> {
 			// A closure's own span, where Typst reports an argument it cannot take.
 			let span = match &f {
-				Func::Closure(c) if !c.span.is_detached()	=> c.span,
+				Func::Closure(c) if !c.span().is_detached()	=> c.span(),
 				_											=> span,
 			};
 			let mut args = Args::new(span);
@@ -1037,33 +1110,25 @@ fn apply_update(engine: &mut Engine, span: Span, state: &[u64], update: CounterU
 	}
 }
 
-/// The stop of a sequence folded over the matches of `sel` that sits at `loc`: after every match at or
-/// before it, or after all of them when the pages did not place `loc`. Only the updates of this counter
-/// or state made stops, so the matches of other keys are skipped by recounting in document order.
-fn stop_at<T: Clone, F: Fn(&Content) -> bool>(
-	engine:	&mut Engine,
-	sel:	&Selector,
-	stops:	&[T],
-	keep:	F,
-	loc:	Location,
-)
-	-> Outcome<T>
-{
-	res!(count_before(engine, sel, loc));
-	let intro = engine.intro.clone();
-	let at = intro.order(loc);
-	let mut n = 0;
-	for i in res!(intro.query_indices(sel)) {
-		if at.map(|a| i > a).unwrap_or(false) {
-			break;
-		}
-		if let Some(r) = intro.records.get(i) {
-			if keep(&r.elem) {
-				n += 1;
-			}
-		}
+/// The stop of a fold that sits at `loc`: after every match at or before it, or after all of them when
+/// the pages did not place `loc`. Only the updates of this counter or state made stops, so a binary
+/// search of their document order finds it.
+fn stop_at<T: Clone>(engine: &mut Engine, fold: &Fold<T>, loc: Location) -> Outcome<T> {
+	let at = engine.intro.order(loc);
+	let key = Question::count_key(fold.fp, loc);
+	if !engine.reads.seen.contains(&key) {
+		// The count of every match at or before `loc`, as `Introspector::count_before` answers it.
+		let n = match at {
+			Some(a)	=> fold.all.partition_point(|i| *i as usize <= a),
+			None	=> fold.all.len(),
+		};
+		engine.reads.push(key, Question::CountBefore(fold.sel.clone(), loc), count_answer(n));
 	}
-	match stops.get(n).or_else(|| stops.last()) {
+	let n = match at {
+		Some(a)	=> fold.orders.partition_point(|i| *i as usize <= a),
+		None	=> fold.orders.len(),
+	};
+	match fold.stops.get(n).or_else(|| fold.stops.last()) {
 		Some(s)	=> Ok(s.clone()),
 		None	=> Err(err!("A sequence has no initial stop."; Bug)),
 	}
@@ -1079,35 +1144,38 @@ fn moves(counter: &Counter, e: &Content) -> bool {
 
 /// The counter's value at a location: after every update at or before it.
 pub fn counter_at(engine: &mut Engine, counter: &Counter, loc: Location) -> Outcome<Vec<u64>> {
-	attributed(engine, counter_subject(counter), |engine| {
-		let seq = res!(counter_sequence(engine, counter));
-		let sel = counter_selector(counter);
-		let (mut state, pg) = res!(stop_at(engine, &sel, &seq, |e| moves(counter, e), loc));
-		if counter.is_page() {
-			let at = res!(page(engine, loc)).unwrap_or(1);
-			if at > pg {
-				step(&mut state, 1, (at - pg) as u64);
+	engine.timed(Phase::Intro, |engine| {
+		let fold = res!(counter_fold(engine, counter));
+		attributed(engine, fold.subject.clone(), |engine| {
+			let (mut state, pg) = res!(stop_at(engine, &fold, loc));
+			if counter.is_page() {
+				let at = res!(page(engine, loc)).unwrap_or(1);
+				if at > pg {
+					step(&mut state, 1, (at - pg) as u64);
+				}
 			}
-		}
-		Ok(state)
+			Ok(state)
+		})
 	})
 }
 
 /// The counter's value at the end of the document.
 pub fn counter_final(engine: &mut Engine, counter: &Counter) -> Outcome<Vec<u64>> {
-	attributed(engine, counter_subject(counter), |engine| {
-		let seq = res!(counter_sequence(engine, counter));
-		let (mut state, pg) = match seq.last() {
-			Some(s)	=> s.clone(),
-			None	=> return Err(err!("A counter sequence has no initial state."; Bug)),
-		};
-		if counter.is_page() {
-			let total = res!(pages(engine)).max(1);
-			if total > pg {
-				step(&mut state, 1, (total - pg) as u64);
+	engine.timed(Phase::Intro, |engine| {
+		let fold = res!(counter_fold(engine, counter));
+		attributed(engine, fold.subject.clone(), |engine| {
+			let (mut state, pg) = match fold.stops.last() {
+				Some(s)	=> s.clone(),
+				None	=> return Err(err!("A counter sequence has no initial state."; Bug)),
+			};
+			if counter.is_page() {
+				let total = res!(pages(engine)).max(1);
+				if total > pg {
+					step(&mut state, 1, (total - pg) as u64);
+				}
 			}
-		}
-		Ok(state)
+			Ok(state)
+		})
 	})
 }
 
@@ -1223,21 +1291,39 @@ fn updates(state: &State, e: &Content) -> bool {
 
 /// Every value the state passes through: the initial one, then one after each of its updates. Folded
 /// once per pass.
-fn state_sequence(engine: &mut Engine, state: &State) -> Outcome<Arc<Vec<Value>>> {
-	let found = res!(query(engine, &state_selector()));
-	let intro = engine.intro.clone();
-	engine.reads.validate_memo(&intro);
+fn state_fold(engine: &mut Engine, state: &State) -> Outcome<Arc<Fold<Value>>> {
+	engine.reads.validate_memo(&engine.intro);
 	let mut h = Fingerprinter::new();
 	h.write_str(&state.key);
 	hash_value(&mut h, &state.init);
-	let key = fmt!("{}", h.finish());
-	if let Some(seq) = engine.reads.states.get(&key) {
-		return Ok(seq.clone());
+	let key = h.finish();
+	if let Some(fold) = engine.reads.states.get(&key) {
+		return Ok(fold.clone());
 	}
+	let subject = state_subject(state);
+	let fold = Arc::new(res!(attributed(engine, subject.clone(), |engine| fold_state(engine, state, subject))));
+	engine.reads.states.insert(key, fold.clone());
+	Ok(fold)
+}
+
+fn fold_state(engine: &mut Engine, state: &State, subject: Arc<str>) -> Outcome<Fold<Value>> {
+	let intro = engine.intro.clone();
+	let sel = state_selector();
+	let fp = selector_fp(&sel);
+	res!(engine.reads.note(Question::query_key(fp), &intro, || Question::Query(sel.clone())));
+	let all: Vec<u32> = res!(intro.query_indices(&sel)).into_iter().map(|i| i as u32).collect();
 	let mut v = state.init.clone();
-	let mut stops = Vec::with_capacity(found.len() + 1);
+	let mut orders = Vec::new();
+	let mut stops = Vec::with_capacity(all.len() + 1);
 	stops.push(v.clone());
-	for e in found.iter().filter(|e| updates(state, e)) {
+	for i in &all {
+		let e = match intro.records.get(*i as usize) {
+			Some(r)	=> &r.elem,
+			None	=> continue,
+		};
+		if !updates(state, e) {
+			continue;
+		}
 		v = match e.field("update") {
 			Some(Value::Func(f)) => {
 				let f = f.clone();
@@ -1252,24 +1338,23 @@ fn state_sequence(engine: &mut Engine, state: &State) -> Outcome<Arc<Vec<Value>>
 			Some(x)	=> x.clone(),
 			None	=> v,
 		};
+		orders.push(*i);
 		stops.push(v.clone());
 	}
-	let seq = Arc::new(stops);
-	engine.reads.states.insert(key, seq.clone());
-	Ok(seq)
+	Ok(Fold { sel, fp, all, orders, stops, subject })
 }
 
 pub fn state_at(engine: &mut Engine, state: &State, loc: Location) -> Outcome<Value> {
-	attributed(engine, state_subject(state), |engine| {
-		let seq = res!(state_sequence(engine, state));
-		stop_at(engine, &state_selector(), &seq, |e| updates(state, e), loc)
+	engine.timed(Phase::Intro, |engine| {
+		let fold = res!(state_fold(engine, state));
+		attributed(engine, fold.subject.clone(), |engine| stop_at(engine, &fold, loc))
 	})
 }
 
 pub fn state_final(engine: &mut Engine, state: &State) -> Outcome<Value> {
-	attributed(engine, state_subject(state), |engine| {
-		let seq = res!(state_sequence(engine, state));
-		Ok(seq.last().cloned().unwrap_or(Value::None))
+	engine.timed(Phase::Intro, |engine| {
+		let fold = res!(state_fold(engine, state));
+		Ok(fold.stops.last().cloned().unwrap_or(Value::None))
 	})
 }
 
@@ -1300,11 +1385,11 @@ pub fn selector_eq(a: &Selector, b: &Selector) -> bool {
 	}
 }
 
-/// A key for a selector that is equal for equal selectors in every pass.
-fn selector_key(s: &Selector) -> String {
+/// A selector hashed by its structure, equal for equal selectors in every pass.
+fn selector_fp(s: &Selector) -> Fingerprint {
 	let mut h = Fingerprinter::new();
 	fp::hash_selector(&mut h, s);
-	fmt!("{}", h.finish())
+	h.finish()
 }
 
 /// Hashes content by what a reader of a query result can observe: its structure, which [`fp`] hashes

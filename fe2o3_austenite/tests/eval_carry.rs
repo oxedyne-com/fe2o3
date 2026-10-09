@@ -5,7 +5,8 @@
 //! fingerprint for each part of the state it began in. The cases pin that a part of the state the walk is
 //! meant to carry does change the record where the documents differ: a footnote that spills onto the next
 //! page, and the unplaced lines of a paragraph that splits over a page break. And that a one-letter edit
-//! changes nothing after the page it is on, which only holds if spans and locations are masked.
+//! changes nothing after the page it is on, which only holds if source offsets are masked and locations
+//! are stable across the edit (`eval::locate`).
 
 #[allow(dead_code)]
 #[path = "eval_oracle/json.rs"]

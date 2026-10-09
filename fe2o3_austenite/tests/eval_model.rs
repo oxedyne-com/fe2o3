@@ -352,10 +352,12 @@ fn located(k: ElemKind) -> bool { k.locatable() || TYPST_LOCATABLE.contains(&k) 
 /// from the chain, then the family's synthesis (which also materialises the computed defaults).
 fn prepare(engine: &mut Engine, c: &Content, chain: &StyleChain) -> Outcome<Content> {
 	let mut out = c.clone();
+	// Read before `edit` forgets the cell.
+	let fp = c.fingerprint();
 	if let Content::Elem(e) = &mut out {
 		let e = e.edit();
 		if e.location.is_none() && (located(e.kind) || e.label.is_some()) {
-			e.location = Some(engine.locator.locate(e.kind, e.span));
+			e.location = Some(engine.locator.locate(e.kind, fp));
 		}
 		for (i, spec) in e.kind.fields().iter().enumerate() {
 			let id = FieldId(i as u8);

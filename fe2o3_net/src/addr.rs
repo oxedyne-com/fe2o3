@@ -4,7 +4,11 @@ use oxedyne_fe2o3_stds::regions::Country;
 use std::{
     convert::TryFrom,
     fmt::{self},
-    net::IpAddr,
+    net::{
+        IpAddr,
+        Ipv4Addr,
+        Ipv6Addr,
+    },
 };
 
 pub struct PhoneNumbers;
@@ -202,6 +206,33 @@ mod tests {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ CLIENT KEYS                                                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The address a per-client limit is keyed on.
+///
+/// An IPv6 subscriber is given a whole /64 and can take a fresh address from it on every request, so
+/// a limit keyed on the full 128 bits is no limit at all. IPv4 is kept as it is, and an IPv4-mapped
+/// IPv6 address (`::ffff:a.b.c.d`) is the IPv4 address it carries, so one client reached over either
+/// family is one key. Every other IPv6 address becomes the first address of its /64.
+pub fn client_key(ip: &IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_)   => *ip,
+        IpAddr::V6(v6)  => match v6.to_ipv4_mapped() {
+            Some(v4)    => IpAddr::V4(v4),
+            None        => {
+                let mut o = v6.octets();
+                for b in &mut o[8..] {
+                    *b = 0;
+                }
+                IpAddr::V6(Ipv6Addr::from(o))
+            },
+        },
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ OUTBOUND ADDRESS VETTING                                                  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -233,6 +264,9 @@ pub fn is_publicly_routable(ip: &IpAddr) -> bool {
             let o = v4.octets();
             // Shared address space (RFC 6598, carrier-grade NAT).
             if o[0] == 100 && (64..128).contains(&o[1]) { return false; }
+            // "This network", 0.0.0.0/8, and the IETF protocol assignments, 192.0.0.0/24.
+            if o[0] == 0 { return false; }
+            if o[0] == 192 && o[1] == 0 && o[2] == 0 { return false; }
             // Benchmarking (RFC 2544).
             if o[0] == 198 && (o[1] == 18 || o[1] == 19) { return false; }
             // Reserved for future use, 240/4 upwards.
@@ -251,13 +285,38 @@ pub fn is_publicly_routable(ip: &IpAddr) -> bool {
             if (seg[0] & 0xfe00) == 0xfc00 { return false; }
             // Link-local, fe80::/10.
             if (seg[0] & 0xffc0) == 0xfe80 { return false; }
-            // Documentation, 2001:db8::/32.
+            // Site-local, fec0::/10, deprecated but still routed locally by some stacks.
+            if (seg[0] & 0xffc0) == 0xfec0 { return false; }
+            // Documentation, 2001:db8::/32 and 3fff::/20.
             if seg[0] == 0x2001 && seg[1] == 0x0db8 { return false; }
-            // An IPv4-mapped address is only as safe as the IPv4 inside it.
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_publicly_routable(&IpAddr::V4(v4));
+            if seg[0] == 0x3fff && seg[1] < 0x1000 { return false; }
+            // Teredo, 2001::/32, and benchmarking, 2001:2::/48.
+            if seg[0] == 0x2001 && seg[1] == 0x0000 { return false; }
+            if seg[0] == 0x2001 && seg[1] == 0x0002 && seg[2] == 0 { return false; }
+            // The local-use NAT64 block, 64:ff9b:1::/48 (RFC 8215), is reachable only through a
+            // translator the operator runs, which turns it back into a connection to the IPv4 inside.
+            if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2] == 0x0001 { return false; }
+            // Any other form that carries an IPv4 address is only as safe as the IPv4 inside it: the
+            // mapped (::ffff:a.b.c.d), the compatible (::a.b.c.d), NAT64 (64:ff9b::/96) and 6to4
+            // (2002::/16, the address in the next 32 bits). A translator or a tunnel on the path turns
+            // each back into a connection to that IPv4 host.
+            let v4_in = |hi: u16, lo: u16| Ipv4Addr::new(
+                (hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
+            let embedded = if let Some(v4) = v6.to_ipv4_mapped() {
+                Some(v4)
+            } else if seg[..6].iter().all(|&s| s == 0) {
+                Some(v4_in(seg[6], seg[7]))
+            } else if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2..6].iter().all(|&s| s == 0) {
+                Some(v4_in(seg[6], seg[7]))
+            } else if seg[0] == 0x2002 {
+                Some(v4_in(seg[1], seg[2]))
+            } else {
+                None
+            };
+            match embedded {
+                Some(v4)    => is_publicly_routable(&IpAddr::V4(v4)),
+                None        => true,
             }
-            true
         }
     }
 }
@@ -353,8 +412,70 @@ mod vetting_tests {
     }
 
     #[test]
+    fn test_ipv6_forms_that_carry_a_private_ipv4_are_refused() {
+        for s in [
+            "::7f00:1",             // IPv4-compatible 127.0.0.1
+            "::a01:203",            // IPv4-compatible 10.1.2.3
+            "64:ff9b::7f00:1",      // NAT64 127.0.0.1
+            "64:ff9b::a01:203",     // NAT64 10.1.2.3
+            "2002:7f00:1::",        // 6to4 127.0.0.1
+            "2002:a01:203::1",      // 6to4 10.1.2.3
+        ] {
+            assert!(!is_publicly_routable(&v4(s)), "{} should be refused", s);
+        }
+        // The same forms around a public IPv4 stay allowed: it is the inside that is judged.
+        for s in ["64:ff9b::808:808", "2002:808:808::1"] {
+            assert!(is_publicly_routable(&v4(s)), "{} should be allowed", s);
+        }
+    }
+
+    #[test]
     fn test_literal_loopback_is_refused_without_dns() {
         assert!(resolve_public("127.0.0.1").is_err());
         assert!(resolve_public("::1").is_err());
+    }
+}
+
+#[cfg(test)]
+mod client_key_tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr { s.parse().expect("test address") }
+
+    #[test]
+    fn test_ipv4_is_its_own_key() {
+        for s in ["1.2.3.4", "10.0.0.1", "127.0.0.1", "255.255.255.255"] {
+            assert_eq!(client_key(&ip(s)), ip(s), "{} changed", s);
+        }
+    }
+
+    #[test]
+    fn test_an_ipv4_mapped_address_keys_as_its_ipv4_form() {
+        assert_eq!(client_key(&ip("::ffff:1.2.3.4")), ip("1.2.3.4"));
+        assert_eq!(client_key(&ip("::ffff:127.0.0.1")), ip("127.0.0.1"));
+    }
+
+    #[test]
+    fn test_ipv6_is_masked_to_its_slash_64() {
+        assert_eq!(client_key(&ip("2001:db8:1:2:aaaa:bbbb:cccc:dddd")), ip("2001:db8:1:2::"));
+        assert_eq!(client_key(&ip("2001:db8:1:2::")), ip("2001:db8:1:2::"));
+        assert_eq!(client_key(&ip("::1")), ip("::"));
+    }
+
+    #[test]
+    fn test_two_addresses_in_one_slash_64_share_a_key_and_two_slash_64s_do_not() {
+        let a = client_key(&ip("2001:db8:1:2::1"));
+        let b = client_key(&ip("2001:db8:1:2:ffff:ffff:ffff:ffff"));
+        let c = client_key(&ip("2001:db8:1:3::1"));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_a_key_is_stable_under_a_second_application() {
+        for s in ["2001:db8:1:2:aaaa:bbbb:cccc:dddd", "::ffff:1.2.3.4", "9.9.9.9"] {
+            let once = client_key(&ip(s));
+            assert_eq!(client_key(&once), once, "{} is not a fixed point", s);
+        }
     }
 }

@@ -21,12 +21,10 @@ use oxedyne_fe2o3_austenite::ledger::{
 	AnchorId,
 	AnchorKind,
 };
-use oxedyne_fe2o3_austenite::syntax::{
-	FileId,
-	Span,
-};
+use oxedyne_fe2o3_austenite::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::collections::HashSet;
@@ -111,13 +109,13 @@ fn dict_keeps_insertion_order() {
 
 #[test]
 fn locations_are_stable_and_distinct() {
-	let span = Span::new(FileId(0), 10, 20);
+	let fp = Fingerprint::of(b"a heading");
 	let mut a = Locator::default();
 	let mut b = Locator::default();
-	let a1 = a.locate(ElemKind::Heading, span);
-	let a2 = a.locate(ElemKind::Heading, span);
+	let a1 = a.locate(ElemKind::Heading, fp);
+	let a2 = a.locate(ElemKind::Heading, fp);
 	assert_ne!(a1, a2);
-	assert_eq!(a1, b.locate(ElemKind::Heading, span));
+	assert_eq!(a1, b.locate(ElemKind::Heading, fp));
 }
 
 #[test]

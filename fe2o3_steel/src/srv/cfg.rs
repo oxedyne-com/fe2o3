@@ -1927,6 +1927,7 @@ pub struct MailConfig {
     pub dkim_rsa_selector:  String,         // must differ from `dkim_selector`; default "rsa"
     pub dkim_domain:        String,         // may differ from `hostname`
     pub local_domains:      Vec<String>,    // recipients outside this set are refused at RCPT TO
+    pub outbound_hourly:    u32,            // newsletter mail sent an hour, host-wide; 0 holds it all
 }
 
 impl Default for MailConfig {
@@ -1946,6 +1947,7 @@ impl Default for MailConfig {
             dkim_rsa_selector:  String::new(),
             dkim_domain:        String::new(),
             local_domains:      Vec::new(),
+            outbound_hourly:    crate::srv::publish::outbox::HOURLY_DEFAULT,
         }
     }
 }
@@ -1991,6 +1993,21 @@ impl MailConfig {
         }
         if let Some(Dat::Str(s)) = m.get(&dat!("dkim_domain")) {
             out.dkim_domain = s.clone();
+        }
+        // A count, however narrowly the grammar typed it: a bare `0` is not a `u32` to the decoder.
+        match m.get(&dat!("outbound_hourly")) {
+            None                                    => (),
+            Some(Dat::U8(n))                        => out.outbound_hourly = *n as u32,
+            Some(Dat::U16(n))                       => out.outbound_hourly = *n as u32,
+            Some(Dat::U32(n))                       => out.outbound_hourly = *n,
+            Some(Dat::U64(n))                       => out.outbound_hourly = (*n).min(u32::MAX as u64) as u32,
+            Some(Dat::I8(n)) if *n >= 0             => out.outbound_hourly = *n as u32,
+            Some(Dat::I16(n)) if *n >= 0            => out.outbound_hourly = *n as u32,
+            Some(Dat::I32(n)) if *n >= 0            => out.outbound_hourly = *n as u32,
+            Some(Dat::I64(n)) if *n >= 0            => out.outbound_hourly = (*n).min(u32::MAX as i64) as u32,
+            _ => return Err(err!(
+                "MailConfig: 'outbound_hourly' must be a count of zero or more.";
+                Invalid, Input, Mismatch)),
         }
         match m.get(&dat!("local_domains")) {
             Some(Dat::List(l)) => {

@@ -19,6 +19,7 @@ use crate::eval::content::{
 	self,
 	native_show,
 	Content,
+	Elem,
 	ElemKind,
 	Family,
 	FieldDefault,
@@ -26,12 +27,14 @@ use crate::eval::content::{
 	FieldSpec,
 	FieldType,
 };
+use crate::eval::fp;
 use crate::eval::locate::Location;
 use crate::eval::styles::{
 	apply_recipe,
 	error_hints,
 	Recipe,
 	RecipeIndex,
+	RecipeSlot,
 	Style,
 	StyleChain,
 	Styles,
@@ -53,6 +56,8 @@ use crate::timings::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
+
+use std::sync::Arc;
 
 pub const MAX_SHOW_RULE_DEPTH:	usize	= 64;	// Typst's own limit
 pub const MAX_GROUPING_STEPS:	usize	= 512;	// ditto, for groups that keep producing groups
@@ -460,7 +465,7 @@ enum SpaceState {
 
 /// The show step a verdict chose.
 enum Step {
-	Recipe(Recipe, RecipeIndex),
+	Recipe(Arc<Recipe>, RecipeIndex),
 	Builtin,
 }
 
@@ -468,7 +473,7 @@ struct RegexMatch {
 	offset:	usize,
 	text:	String,
 	index:	RecipeIndex,
-	recipe:	Recipe,
+	recipe:	Arc<Recipe>,
 	styles:	StyleChain,
 }
 
@@ -614,21 +619,21 @@ impl State<'_> {
 			let mut map = Styles::new();
 			let mut step = None;
 			let mut tried = 0;
-			for (index, recipe) in recipes {
+			for slot in recipes {
 				tried += 1;
-				if !res!(recipe.applicable(target, styles)) {
+				if !res!(slot.recipe.applicable(target, styles)) {
 					continue;
 				}
-				if let Transformation::Style(set) = &recipe.transform {
+				if let Transformation::Style(set) = &slot.recipe.transform {
 					if !prepared {
 						map.apply_outer(set);
 					}
 					continue;
 				}
-				if step.is_some() || guards.contains(&index) {
+				if step.is_some() || guards.contains(&slot.index) {
 					continue;
 				}
-				step = Some(Step::Recipe(recipe.clone(), index));
+				step = Some(Step::Recipe(slot.recipe.clone(), slot.index));
 				if prepared {
 					break;
 				}
@@ -711,25 +716,25 @@ impl State<'_> {
 		let recipes = self.engine.timed(Phase::Styles, |_| styles.recipes());
 		self.engine.bump(Counter::Shown, 1);
 		self.engine.bump(Counter::Recipes, recipes.len() as u64);
-		let (map, step) = res!(self.engine.timed(Phase::Show, |engine| -> Outcome<(Styles, Option<(Recipe, RecipeIndex)>)> {
+		let (map, step) = res!(self.engine.timed(Phase::Show, |engine| -> Outcome<(Styles, Option<(Arc<Recipe>, RecipeIndex)>)> {
 			let mut map = Styles::new();
 			let mut step = None;
 			let mut tried = 0;
-			for (index, recipe) in recipes {
+			for slot in recipes {
 				tried += 1;
-				if !res!(recipe.applicable(target, styles)) {
+				if !res!(slot.recipe.applicable(target, styles)) {
 					continue;
 				}
-				if let Transformation::Style(set) = &recipe.transform {
+				if let Transformation::Style(set) = &slot.recipe.transform {
 					if !prepared {
 						map.apply_outer(set);
 					}
 					continue;
 				}
-				if step.is_some() || guards.contains(&index) {
+				if step.is_some() || guards.contains(&slot.index) {
 					continue;
 				}
-				step = Some((recipe.clone(), index));
+				step = Some((slot.recipe.clone(), slot.index));
 				if prepared {
 					break;
 				}
@@ -742,10 +747,15 @@ impl State<'_> {
 		}
 		let mut output = target.clone();
 		let mut tags = None;
+		// The fingerprint is read before `edit` forgets the cell, and only for a sequence yet to be located.
+		let fp = match &output {
+			Content::Sequence(seq) if seq.location.is_none()	=> Some(output.fingerprint()),
+			_													=> None,
+		};
 		if let Content::Sequence(seq) = &mut output {
 			let seq = seq.edit();
-			if seq.location.is_none() {
-				let loc = self.engine.locator.locate(ElemKind::Sequence, seq.span);
+			if let (None, Some(fp)) = (seq.location, fp) {
+				let loc = self.engine.locator.locate(ElemKind::Sequence, fp);
 				seq.location = Some(loc);
 				tags = Some(loc);
 			}
@@ -1148,11 +1158,21 @@ impl State<'_> {
 	}
 }
 
+fn wants_location(e: &Elem) -> bool { e.location.is_none() && (e.kind.locatable() || e.label.is_some()) }
+
+fn wants_place(e: &Elem) -> bool { e.place.is_none() && e.kind.has_place() }
+
 /// Gives the element its location (when locatable or labelled) and copies the style chain's values
 /// of its unset settable fields into it, so a show rule sees them; returns its tags when located.
 fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: &StyleChain) -> Outcome<Option<(Tag, Tag)>> {
 	// Built-in show-set styles sit outside the user's, which override them.
 	let builtin = res!(content::show_set(target, styles));
+	// A location is keyed by the content's fingerprint, read before `edit` forgets the cell and only when one is
+	// wanted. A place is keyed by the element's shell, never by what it holds.
+	let key = match &*target {
+		Content::Elem(e) if wants_location(e)	=> Some(target.fingerprint()),
+		_										=> None,
+	};
 	let e = match target {
 		Content::Elem(e)	=> {
 			if e.is_shared() {
@@ -1162,13 +1182,13 @@ fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: 
 		},
 		_					=> return Ok(None),
 	};
-	if e.location.is_none() && (e.kind.locatable() || e.label.is_some()) {
-		e.location = Some(engine.locator.locate(e.kind, e.span));
+	if let Some(key) = key {
+		e.location = Some(engine.locator.locate(e.kind, key));
 	}
-	// An element that lays a body out keeps one place for it however often it is laid out. One a layouter
-	// made and gave a place already (a grid's cell) keeps that.
-	if e.place.is_none() && e.kind.has_place() {
-		e.place = Some(engine.locator.next(e.kind, e.span));
+	// An element that lays a body out keeps one place for it however often it is laid out, and however its
+	// body is edited. One a layouter made and gave a place already (a grid's cell) keeps that.
+	if wants_place(e) {
+		e.place = Some(engine.locator.next(e.kind, fp::elem_shell_fp(e)));
 	}
 	map.apply_outer(&builtin);
 	let chain = styles.chain(map);
@@ -1376,9 +1396,9 @@ fn find_regex_match_in_elems(elems: &[Pair]) -> Outcome<Option<RegexMatch>> {
 
 /// The leftmost non-empty match of the text and regex rules in force, the innermost rule winning a tie.
 fn find_regex_match_in_str(text: &str, styles: &StyleChain) -> Outcome<Option<RegexMatch>> {
-	let mut best: Option<(usize, usize, RecipeIndex, &Recipe)> = None;
-	for (index, recipe) in styles.recipes() {
-		let sel = match &recipe.selector {
+	let mut best: Option<(usize, usize, &RecipeSlot)> = None;
+	for slot in styles.recipes() {
+		let sel = match &slot.recipe.selector {
 			Some(s)	=> s,
 			None	=> continue,
 		};
@@ -1392,13 +1412,13 @@ fn find_regex_match_in_str(text: &str, styles: &StyleChain) -> Outcome<Option<Re
 		if best.map(|(bs, ..)| bs <= s).unwrap_or(false) {
 			continue;
 		}
-		best = Some((s, e, index, recipe));
+		best = Some((s, e, slot));
 	}
-	Ok(best.map(|(s, e, index, recipe)| RegexMatch {
+	Ok(best.map(|(s, e, slot)| RegexMatch {
 		offset:	s,
 		text:	text[s..e].to_string(),
-		index,
-		recipe:	recipe.clone(),
+		index:	slot.index,
+		recipe:	slot.recipe.clone(),
 		styles:	styles.clone(),
 	}))
 }

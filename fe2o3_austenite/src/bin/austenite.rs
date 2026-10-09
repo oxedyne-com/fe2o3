@@ -12,11 +12,12 @@
 //!
 //! Usage: `austenite <SOURCE.typ> [OUTPUT_DIR]` (default output `austenite-out`), or
 //! `austenite --watch <SOURCE.typ> [OUTPUT_DIR]` to recompile on every change to the root, its includes,
-//! its `config.typ`, or its assets.
+//! its `config.typ`, or its assets. `austenite watch` and `austenite build` compile through the evaluator
+//! under the settings of an `austenite.jdat`; `austenite --eval --watch` is an alias of `watch` with no
+//! settings file.
 
 use oxedyne_fe2o3_austenite::{
 	compile,
-	diag,
 	emit::{
 		self,
 		svg,
@@ -30,7 +31,10 @@ use oxedyne_fe2o3_austenite::{
 		Page,
 		PlacedKind,
 	},
-	watch,
+	watch::{
+		self,
+		Report as EvalStats,
+	},
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -499,23 +503,13 @@ struct EvalJob {
 	timings_fine:	bool,
 }
 
-/// What a compile through the evaluator reports of itself once its PDF is written.
-struct EvalStats {
-	pages:	u32,
-	passes:	u32,
-	warm:	bool,		// the first pass began from the session's kept introspector
-	bytes:	usize,
-	skip:	Option<String>,	// the terse `skipped:` line, when the watch holds it back to fold into its status line
-	secs:	f64,
-}
-
 /// Compiles through the evaluator (`--eval`) and writes `OUT_DIR/document.pdf`. `--root` is what a leading
 /// `/` resolves against (default the source's directory) and each `--font-path` a directory of fonts, as
 /// `typst compile` takes them. The terse `skipped:` line is built from the diagnostics of kind
 /// `unsupported`; under `--strict` a refusal of the strict rule fails the compile as Daimond's does.
 /// `--diag-summary` adds one stderr line for each severity, kind and construct, counts only
-/// ([`diag::summary_lines`]), and one for each error that names its call and types in Typst's own terms
-/// ([`diag::error_lines`]), on a compile that succeeds and on one that fails. `--timings FILE` writes each
+/// (`diag::summary_lines`), and one for each error that names its call and types in Typst's own terms
+/// (`diag::error_lines`), on a compile that succeeds and on one that fails. `--timings FILE` writes each
 /// phase's wall time, for the load, the evaluation, every fixpoint pass and the finish, as JSON to `FILE`
 /// after a compile that succeeds; the PDF is the same bytes either way.
 ///
@@ -537,17 +531,7 @@ fn compile_eval(
 )
 	-> Outcome<EvalStats>
 {
-	use oxedyne_fe2o3_austenite::emit::sinks::PdfSink;
-	use oxedyne_fe2o3_austenite::timings::{
-		Phase,
-		Timings,
-	};
-	use std::io::Write;
-
-	let t		= std::time::Instant::now();
-	let timings	= job.timings_out.as_ref().map(|_| if job.timings_fine { Timings::start_fine() } else { Timings::start() });
 	let main	= PathBuf::from(&job.source);
-	read.push(main.clone());
 	// The source's own directory, which for a bare file name is the working directory and not the empty
 	// path `parent` gives, which no canonical path lies beneath.
 	let root	= match &job.root {
@@ -557,74 +541,17 @@ fn compile_eval(
 			_										=> PathBuf::from("."),
 		},
 	};
-	compile::supply_typst_package_cache();
-	let mut sink = res!(PdfSink::new());
-	let mut done = res!(session.compile(&main, &root, &mut sink, timings, None, cold));
-	*read = done.files_read();
-	let report = done.report();
-	let mut skip = None;
-	if let Some(line) = &report.skipped {
-		if fold {
-			skip = Some(line.clone());
-		} else {
-			eprintln!("[austenite] {}", line);
-		}
-	}
-	// Before the error a failed compile returns, so a run that stops still names what it passed over.
-	if job.diag_summary {
-		for line in diag::summary_lines(&done.engine.diags) {
-			eprintln!("{}", line);
-		}
-		for line in diag::error_lines(&done.engine.diags, &done.engine.world.sources) {
-			eprintln!("{}", line);
-		}
-	}
-	let laid = match &done.laid {
-		Ok(l)	=> l,
-		Err(e)	=> {
-			for d in &done.engine.diags {
-				eprintln!("{}", d.render(&done.engine.world.sources));
-			}
-			return Err(err!("{}", e.plain(); Input, Invalid));
-		},
+	let spec = watch::Spec {
+		out:			PathBuf::from(&job.out_dir).join("document.pdf"),
+		main,
+		root,
+		strict:			job.strict,
+		diag_summary:	job.diag_summary,
+		timings:		job.timings_out.as_ref().map(PathBuf::from),
+		timings_fine:	job.timings_fine,
+		pdf:			emit::pdf::PdfOptions::default(),
 	};
-	if job.strict {
-		if let Some(refusal) = report.strict_failure(&main) {
-			return Err(err!("{}", refusal.message; Input, Invalid));
-		}
-	}
-	let out = match sink.output() {
-		Some(o)	=> o,
-		None	=> return Err(err!("The fixpoint ended without a finished PDF."; Bug)),
-	};
-	if let Some(t) = done.engine.timings.as_mut() {
-		t.enter(Phase::Write);
-	}
-	res!(std::fs::create_dir_all(&job.out_dir));
-	let path	= PathBuf::from(&job.out_dir).join("document.pdf");
-	let beside	= PathBuf::from(&job.out_dir).join("document.pdf.part");
-	let mut file = BufWriter::new(res!(File::create(&beside)));
-	res!(out.write_to(&mut file));
-	res!(file.flush());
-	drop(file);
-	res!(std::fs::rename(&beside, &path));
-	if let (Some(tm), Some(dest)) = (done.engine.timings.as_mut(), job.timings_out.as_ref()) {
-		tm.leave();
-		if let Ok(book) = done.engine.fonts.book() {
-			if let Ok(stats) = book.shape_stats() {
-				tm.set_shape(stats);
-			}
-		}
-		res!(std::fs::write(dest, tm.json(t.elapsed().as_nanos() as u64)));
-	}
-	Ok(EvalStats {
-		pages:	laid.pages,
-		passes:	laid.passes,
-		warm:	done.warm,
-		bytes:	out.len(),
-		skip,
-		secs:	t.elapsed().as_secs_f64(),
-	})
+	watch::compile_pdf(&spec, session, cold, fold, read)
 }
 
 /// A session over the faces `--font-path` names, for a run of compiles.
@@ -645,42 +572,80 @@ fn print_eval_done(job: &EvalJob, stats: &EvalStats) {
 		job.source, stats.pages, stats.passes, stats.bytes, stats.secs, job.out_dir);
 }
 
-/// `--eval --watch`: compiles through the evaluator, then again whenever a file the last compile read
-/// changes ([`watch::run_read`]). The rebuilds share one session, so each starts warm from the introspector
-/// of the one before and keeps the parsed fonts; the status line says `warm, 1 pass` or `cold, 3 passes`. The watched set is the evaluator's own record of what it asked for, so an
-/// import, an include, an image, a data file, a package file or a font under `--font-path` each rebuilds, and
-/// a file the document does not use never does. Each rebuild prints one status line, the page count and the
-/// wall, with the `skipped:` line folded on; one that fails prints why and leaves the last good
-/// `document.pdf` in place.
+/// `--eval --watch`: an alias of `austenite watch` with no settings file, so that a script written for it
+/// keeps working. The positional output directory becomes `output = "<dir>/document.pdf"`, taken from the
+/// working directory; `--root`, each `--font-path`, `--strict`, `--diag-summary` and `--timings` become
+/// their settings; the viewer and the figure rendering are off, as the caller has its own. Nothing else
+/// of a settings file applies, so a `austenite.jdat` above the source is not read.
 fn watch_eval(job: EvalJob) -> Outcome<()> {
-	// Brisk enough to feel live, cheap enough to leave the cores to the compile.
-	let interval = Duration::from_millis(400);
-	println!("[austenite] watching {} -> {}/ (Ctrl-C to stop)", job.source, job.out_dir);
-	let mut session = eval_session(&job);
-	watch::run_read(
-		move || {
-			let mut read = Vec::new();
-			match compile_eval(&job, &mut session, false, true, &mut read) {
-				Ok(stats)	=> {
-					let mut line = fmt!("[austenite] {} -> {} page(s), {:.2}s, {}, {} pass{} -> {}/",
-						job.source, stats.pages, stats.secs,
-						if stats.warm { "warm" } else { "cold" },
-						stats.passes, if stats.passes == 1 { "" } else { "es" }, job.out_dir);
-					if let Some(skip) = &stats.skip {
-						line.push_str("; ");
-						line.push_str(skip);
-					}
-					println!("{}", line);
-					(Ok(()), read)
-				},
-				Err(e)		=> (Err(e), read),
-			}
-		},
-		interval,
-	)
+	let cwd = res!(std::env::current_dir());
+	let bare = watch::Bare {
+		source:			PathBuf::from(&job.source),
+		out_dir:		PathBuf::from(&job.out_dir),
+		root:			job.root.as_ref().map(PathBuf::from),
+		fonts:			job.font_paths.iter().map(PathBuf::from).collect(),
+		strict:			job.strict,
+		diag_summary:	job.diag_summary,
+		timings:		job.timings_out.as_ref().map(PathBuf::from),
+		timings_fine:	job.timings_fine,
+	};
+	let run = res!(watch::Run::bare(&cwd, &bare));
+	run.run()
+}
+
+/// Reads the arguments of `watch` and `build`: the source, each `--set key=value`, `--cold` and `--timings FILE`.
+fn command_args(name: &str, args: &[String]) -> Outcome<(Option<PathBuf>, Vec<String>, bool, Option<PathBuf>)> {
+	let mut source:	Option<PathBuf>	= None;
+	let mut sets:	Vec<String>		= Vec::new();
+	let mut cold	= false;
+	let mut timings	= None;
+	let mut it = args.iter();
+	while let Some(a) = it.next() {
+		match a.as_str() {
+			"--set"		=> sets.push(match it.next() {
+				Some(kv)	=> kv.clone(),
+				None		=> return Err(err!("--set needs key=value."; Input, Invalid, Missing)),
+			}),
+			"--cold"	=> cold = true,
+			"--timings"	=> timings = Some(match it.next() {
+				Some(p)	=> PathBuf::from(p),
+				None	=> return Err(err!("--timings needs a file argument."; Input, Invalid, Missing)),
+			}),
+			flag if flag.starts_with("--")	=> return Err(err!(
+				"austenite {} does not take {}. It takes [SOURCE.typ] [--set key=value]... [--cold] [--timings FILE].", name, flag;
+				Input, Invalid)),
+			_			=> if source.replace(PathBuf::from(a)).is_some() {
+				return Err(err!("austenite {} takes one source, and a second was given: {}.", name, a; Input, Invalid));
+			},
+		}
+	}
+	Ok((source, sets, cold, timings))
+}
+
+/// `austenite watch [SOURCE.typ] [--set k=v]... [--cold] [--timings FILE]`.
+fn command_watch(args: &[String]) -> Outcome<()> {
+	let (source, sets, cold, timings) = res!(command_args("watch", args));
+	watch::Run::new(source, sets, cold, timings).and_then(|run| run.run())
+}
+
+/// `austenite build [SOURCE.typ] [--set k=v]... [--timings FILE]`: one cold compile under the settings, of the
+/// source or, with none named, of the document the settings or the selection rule name.
+fn command_build(args: &[String]) -> Outcome<()> {
+	let (source, sets, _cold, timings) = res!(command_args("build", args));
+	let (plan, stats) = res!(watch::build(source.as_deref(), &sets, timings.as_deref()));
+	println!(
+		"austenite: {} -> {} page(s) in {} pass(es); {} byte(s); {:.2}s; written to {}",
+		plan.spec.main.display(), stats.pages, stats.passes, stats.bytes, stats.secs, plan.spec.out.display());
+	Ok(())
 }
 
 fn main() -> Outcome<()> {
+	let argv: Vec<String> = std::env::args().skip(1).collect();
+	match argv.first().map(|a| a.as_str()) {
+		Some("watch")	=> return command_watch(&argv[1..]),
+		Some("build")	=> return command_build(&argv[1..]),
+		_				=> (),
+	}
 	// Flags may precede or follow the paths; `--watch` (`-w`), `--pearl`, `--ledger-out <path>`, `--explain`,
 	// and the evaluator's `--eval`, `--strict`, `--root <dir>` and `--font-path <dir>` are recognised,
 	// everything else is a positional argument in order: the source root, then the optional output directory.
@@ -731,7 +696,7 @@ fn main() -> Outcome<()> {
 	let source = match pos.first() {
 		Some(s)	=> s.clone(),
 		None	=> return Err(err!(
-			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--diag-summary] [--timings FILE.json [--timings-fine]] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
+			"Usage: austenite watch|build ... or austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--diag-summary] [--timings FILE.json [--timings-fine]] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
 			Input, Invalid, Missing)),
 	};
 	let out_dir = match pos.get(1) {

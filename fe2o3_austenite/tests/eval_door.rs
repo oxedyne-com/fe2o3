@@ -20,6 +20,7 @@ use harness::pdf::{
 	TYPST,
 };
 
+use oxedyne_fe2o3_austenite::caches::Budgets;
 use oxedyne_fe2o3_austenite::compile::DiagnosticKind;
 use oxedyne_fe2o3_austenite::delta::{
 	Changed,
@@ -1310,5 +1311,83 @@ fn a_warning_with_no_site_is_reported_at_zero_zero_in_the_main() -> Outcome<()> 
 	for d in detached {
 		assert_eq!((d.line, d.col), (0, 0), "{:?}", d);
 	}
+	Ok(())
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ CACHE BUDGETS, COUNTERS AND A PANIC                                        │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+const WORDS: &str = "Some ordinary words to set, enough to run on to a second line of the page and to be shaped.\n";
+
+#[test]
+fn the_cache_budgets_are_the_hosts_and_the_result_carries_the_counters() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let default = Budgets::default();
+	assert_eq!(inst.cache_budget(), default);
+	assert_eq!((default.shapes, default.pars), (32 << 20, 16 << 20), "32 MiB of shapes and 16 MiB of paragraphs");
+	let p = project(&[("/main.typ", WORDS)]);
+	let made = res!(must_pdf(inst.compile_pdf(&p)));
+	assert_eq!(made.counters.shapes.budget, default.shapes, "the shaped-run cache holds the default share");
+	assert!(made.counters.shapes.entries > 0 && made.counters.shapes.bytes > 0, "and the compile filled it");
+	assert_eq!((made.counters.replayed, made.counters.relaid, made.counters.par_hits, made.counters.par_misses),
+		(0, 0, 0, 0), "the page and paragraph counts are zero until those caches exist");
+	let by_default = pdf_of(&made);
+
+	// A budget too small to keep any run slows the compile and changes nothing it makes.
+	let tiny = Budgets { shapes: 1, pars: 2, ledger: 3 };
+	inst.set_cache_budget(tiny);
+	assert_eq!(inst.cache_budget(), tiny);
+	assert_eq!(inst.caches().budgets, tiny);
+	let made = res!(must_pdf(inst.compile_pdf(&p)));
+	assert_eq!(made.counters.shapes.budget, 1, "the new budget reaches the shaped-run cache");
+	assert_eq!(made.counters.shapes.bytes, 0, "which keeps nothing under it");
+	assert_eq!(pdf_of(&made), by_default, "and the document is the same bytes");
+	assert_eq!(inst.caches().resets(), 0, "a budget is not part of the configuration");
+
+	// The counters ride the delta result as they ride the PDF's.
+	let delta = res!(delta_made(&mut inst, &p));
+	assert_eq!(delta.counters.shapes.budget, 1);
+	Ok(())
+}
+
+/// A consumer of changed pages that panics, which the fixpoint's `finish` reaches inside the compile.
+struct Boom;
+
+impl Changed for Boom {
+	fn take(&mut self, _id: u64, _svg: String) -> Outcome<()> {
+		panic!("the consumer of a changed page panicked");
+	}
+}
+
+#[test]
+fn a_panic_drops_the_whole_session_and_keeps_the_hosts_budgets() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let budgets = Budgets { shapes: 1 << 20, pars: 2 << 20, ledger: 3 << 20 };
+	inst.set_cache_budget(budgets);
+	let mut p = project(&[("/main.typ", WORDS)]);
+	p.fonts.push(("noto.ttf".to_string(), res!(noto())));
+	res!(must_pdf(inst.compile_pdf(&p)));
+	let before = match inst.caches().config() {
+		Some(c)	=> c,
+		None	=> return Err(err!("A compile left no configuration."; Test)),
+	};
+	// A delta reaches the consumer inside the compile, so the panic is the compiler's to catch.
+	let fail = match inst.compile_delta_into(&p, Boom) {
+		Err(f)	=> f,
+		Ok(_)	=> return Err(err!("A compile whose consumer panicked produced a result."; Test)),
+	};
+	assert!(fail.head.message.contains("panicked"), "{}", fail.head.message);
+	assert!(inst.caches().config().is_none(),
+		"the session that panicked is gone, and with it the configuration its caches were made under");
+	assert!(inst.query("heading", "").is_none(), "and nothing answers a query");
+	assert_eq!(inst.cache_budget(), budgets, "the host's budgets outlast it");
+
+	// The next compile starts from a new session over the embedded faces, the project's font added again.
+	let made = res!(must_pdf(inst.compile_pdf(&p)));
+	assert_eq!(inst.caches().config(), Some(before), "the same faces, the same configuration");
+	assert_eq!(inst.caches().resets(), 0, "and nothing was emptied for it");
+	assert_eq!(made.counters.shapes.budget, budgets.shapes, "the budget still reaches the shaped-run cache");
+	assert!(inst.font_families(Some(&p)).iter().any(|f| f == "Noto Sans"));
 	Ok(())
 }

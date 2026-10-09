@@ -44,7 +44,11 @@ use oxedyne_fe2o3_austenite::eval::fixpoint::{
 use oxedyne_fe2o3_austenite::eval::intro::{
 	self,
 	Builder,
+	Counter,
+	CounterKey,
+	CounterUpdate,
 	Introspector,
+	State,
 };
 use oxedyne_fe2o3_austenite::eval::lib;
 use oxedyne_fe2o3_austenite::eval::locate::Location;
@@ -78,6 +82,7 @@ use oxedyne_fe2o3_austenite::page::{
 use oxedyne_fe2o3_austenite::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -639,31 +644,31 @@ fn place_streams_each_page_to_the_sink() -> Outcome<()> {
 /// `Locator::root()` does.
 #[test]
 fn measure_takes_none_of_the_documents_ordinals() -> Outcome<()> {
-	let span = Span::detached();
+	let fp = Fingerprint::of(b"a heading");
 	let mut e = Engine::new(World::new(PathBuf::from("/")));
-	let first = e.locator.locate(ElemKind::Heading, span);
+	let first = e.locator.locate(ElemKind::Heading, fp);
 	let inside = res!(intro::detached(&mut e, |e| {
-		let a = e.locator.locate(ElemKind::Heading, span);
-		let b = e.locator.locate(ElemKind::Heading, span);
+		let a = e.locator.locate(ElemKind::Heading, fp);
+		let b = e.locator.locate(ElemKind::Heading, fp);
 		Ok((a, b))
 	}));
-	let second = e.locator.locate(ElemKind::Heading, span);
+	let second = e.locator.locate(ElemKind::Heading, fp);
 	// What a document that measured nothing locates its second heading at.
 	let mut quiet = Engine::new(World::new(PathBuf::from("/")));
-	assert_eq!(quiet.locator.locate(ElemKind::Heading, span), first);
-	let want = quiet.locator.locate(ElemKind::Heading, span);
+	assert_eq!(quiet.locator.locate(ElemKind::Heading, fp), first);
+	let want = quiet.locator.locate(ElemKind::Heading, fp);
 	assert_eq!(second, want, "the second heading of the document took an ordinal the measured layout used");
 	assert_eq!(inside.0, first, "a measured element is located under a fresh root");
 	assert_ne!(inside.0, inside.1, "ordinals still count inside the measured layout");
 	assert_ne!(second, first);
 	// The locator comes back when the layout fails.
 	let failed: Outcome<()> = intro::detached(&mut e, |e| {
-		e.locator.locate(ElemKind::Heading, span);
+		e.locator.locate(ElemKind::Heading, fp);
 		Err(err!("a measured layout failed"; Test))
 	});
 	assert!(failed.is_err());
-	let third = e.locator.locate(ElemKind::Heading, span);
-	assert_eq!(third, quiet.locator.locate(ElemKind::Heading, span), "an error left the measured ordinals behind");
+	let third = e.locator.locate(ElemKind::Heading, fp);
+	assert_eq!(third, quiet.locator.locate(ElemKind::Heading, fp), "an error left the measured ordinals behind");
 	Ok(())
 }
 
@@ -824,5 +829,162 @@ fn introspector_cost_per_element() -> Outcome<()> {
 	println!("introspector: {:.1} bytes per element of its own (a record is {} bytes); each prepared \
 		metadata element holds {:.1} bytes more", own, std::mem::size_of::<intro::Record>(), elem);
 	assert!(own <= 96.0, "the introspector costs {:.1} bytes per element", own);
+	Ok(())
+}
+
+/// A counter update element as `counter(key).update(..)` makes it, with a location.
+fn counter_update(key: &CounterKey, update: &CounterUpdate, loc: u64) -> Content {
+	let kind = ElemKind::CounterUpdate;
+	let fields = vec![
+		(kind.field_id("key").unwrap_or(FieldId(0)),	key.to_value()),
+		(kind.field_id("update").unwrap_or(FieldId(1)),	update.to_value()),
+	];
+	let mut e = Elem::new(kind, fields, Span::detached());
+	e.location = Some(Location(loc));
+	e.prepared = true;
+	Content::from_elem(e)
+}
+
+/// A state update element as `state(key).update(v)` makes it, with a location.
+fn state_update(key: &str, v: i64, loc: u64) -> Content {
+	let kind = ElemKind::StateUpdate;
+	let fields = vec![
+		(kind.field_id("key").unwrap_or(FieldId(0)),	Value::str(key.to_string())),
+		(kind.field_id("update").unwrap_or(FieldId(1)),	Value::Int(v)),
+	];
+	let mut e = Elem::new(kind, fields, Span::detached());
+	e.location = Some(Location(loc));
+	e.prepared = true;
+	Content::from_elem(e)
+}
+
+/// The counter at `loc` the slow way: every update in document order up to it, folded afresh. Only
+/// `Set` and `Step` updates are used, so no engine is needed to apply them.
+fn counter_rescan(intro: &Introspector, counter: &Counter, loc: Location) -> Vec<u64> {
+	let sel = match &counter.key {
+		CounterKey::Selector(s)	=> Some(s.clone()),
+		_						=> None,
+	};
+	let at = intro.order(loc);
+	let mut state = vec![if counter.is_page() { 1 } else { 0 }];
+	let mut pg = 1u32;
+	for (i, e) in intro.elems().enumerate() {
+		if at.map(|a| i > a).unwrap_or(false) {
+			break;
+		}
+		let selected = e.is(ElemKind::CounterUpdate)
+			|| sel.as_ref().map(|s| s.matches(e, None).unwrap_or(false)).unwrap_or(false);
+		let moves = !e.is(ElemKind::CounterUpdate)
+			|| e.field("key").and_then(CounterKey::from_value).map(|k| k.same(&counter.key)).unwrap_or(false);
+		if !selected || !moves {
+			continue;
+		}
+		if counter.is_page() {
+			if let Some(l) = e.location() {
+				let p = intro.page(l).unwrap_or(1);
+				if p > pg {
+					intro::step(&mut state, 1, (p - pg) as u64);
+				}
+				pg = p;
+			}
+		}
+		match intro::element_update(e) {
+			Some(CounterUpdate::Set(ns))	=> state = ns,
+			Some(CounterUpdate::Step(l))	=> intro::step(&mut state, l, 1),
+			_								=> (),
+		}
+	}
+	if counter.is_page() {
+		let p = intro.page(loc).unwrap_or(1);
+		if p > pg {
+			intro::step(&mut state, 1, (p - pg) as u64);
+		}
+	}
+	state
+}
+
+/// The state at `loc` the slow way: the last update of its key at or before `loc`.
+fn state_rescan(intro: &Introspector, key: &str, init: i64, loc: Location) -> i64 {
+	let at = intro.order(loc);
+	let mut v = init;
+	for (i, e) in intro.elems().enumerate() {
+		if at.map(|a| i > a).unwrap_or(false) {
+			break;
+		}
+		if !e.is(ElemKind::StateUpdate) {
+			continue;
+		}
+		if let (Some(Value::Str(k)), Some(Value::Int(n))) = (e.field("key"), e.field("update")) {
+			if **k == *key {
+				v = *n;
+			}
+		}
+	}
+	v
+}
+
+/// A counter or state read finds its stop by the document order of the updates that moved it, and so
+/// answers as a rescan of every update before the location would: for several keys, updates of other
+/// keys between, a selector key counting the elements it selects, the page counter, a location the
+/// pages never placed, and a location no update stands at. The reads it records answer the same
+/// against the introspector, so the pass holds, and a second ask records nothing new.
+#[test]
+fn counter_and_state_reads_equal_a_rescan() -> Outcome<()> {
+	let (a, b, z) = (CounterKey::Str("a".to_string()), CounterKey::Str("b".to_string()), CounterKey::Str("z".to_string()));
+	let meta = CounterKey::Selector(Selector::Elem(ElemKind::Metadata, None));
+	let mut bld = Builder::new();
+	let mut loc = 0u64;
+	let mut put = |c: Content, page: u32| { loc += 1; bld.record(&c, at(page, loc as i32), None); };
+	put(located(10, "m", 1), 1);
+	put(counter_update(&a, &CounterUpdate::Step(1), 2), 1);
+	put(counter_update(&b, &CounterUpdate::Set(vec![7]), 3), 1);
+	put(located(11, "m", 4), 1);
+	put(counter_update(&a, &CounterUpdate::Step(2), 5), 2);
+	put(state_update("s", 5, 6), 2);
+	put(counter_update(&meta, &CounterUpdate::Set(vec![40]), 7), 2);
+	put(located(12, "m", 8), 2);
+	put(counter_update(&CounterKey::Page, &CounterUpdate::Step(1), 9), 3);
+	put(counter_update(&a, &CounterUpdate::Set(vec![1, 2]), 10), 3);
+	put(state_update("s", 9, 11), 3);
+	put(state_update("t", 3, 12), 3);
+	put(located(13, "m", 13), 4);
+	put(counter_update(&a, &CounterUpdate::Step(1), 14), 4);
+	let intro = bld.finish();
+
+	let mut engine = Engine::new(World::new(PathBuf::from("/")));
+	engine.intro = Arc::new(intro.clone());
+	let counters = [
+		Counter::new(a), Counter::new(b), Counter::new(z), Counter::new(meta), Counter::page(),
+		Counter::of(ElemKind::Metadata),
+	];
+	let mut locs: Vec<Location> = (1..=14).map(Location).collect();
+	locs.push(Location(999));		// never placed
+	for _ in 0..2 {
+		for c in &counters {
+			for l in &locs {
+				let want = counter_rescan(&intro, c, *l);
+				let got = res!(intro::counter_at(&mut engine, c, *l));
+				assert_eq!(got, want, "counter {:?} at {:?}", c.key, l);
+			}
+		}
+		for (key, init) in [("s", 0i64), ("t", 1), ("none", 2)] {
+			let s = State { key: key.to_string(), init: Value::Int(init) };
+			for l in &locs {
+				let want = state_rescan(&intro, key, init, *l);
+				match res!(intro::state_at(&mut engine, &s, *l)) {
+					Value::Int(got)	=> assert_eq!(got, want, "state {} at {:?}", key, l),
+					other			=> return Err(err!("state {} at {:?} read {:?}", key, l, other; Test)),
+				}
+			}
+		}
+		// The first round made every distinct read; the second makes none.
+		if engine.reads.all.is_empty() {
+			return Err(err!("no read was recorded"; Test));
+		}
+	}
+	let made = engine.reads.all.len();
+	let _ = res!(intro::counter_at(&mut engine, &counters[0], Location(2)));
+	assert_eq!(engine.reads.all.len(), made, "a question asked again was recorded again");
+	assert!(res!(engine.reads.holds(&intro)), "a recorded answer differs from the introspector's own");
 	Ok(())
 }

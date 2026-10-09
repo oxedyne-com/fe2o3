@@ -247,7 +247,7 @@ fn split_faults(record: &J, fine: bool) -> Vec<String> {
 		let at = i + 1;
 		let (ns, n) = (num(pass, &["realise", "ns"]), num(pass, &["realise", "n"]));
 		let (mut sub_ns, mut sub_n) = (0i64, 0i64);
-		for key in ["rules", "regex", "show", "repack", "styles", "self"] {
+		for key in ["rules", "regex", "show", "repack", "styles", "intro", "self"] {
 			sub_ns += num(pass, &["sub", key, "ns"]);
 			sub_n += if key == "self" { num(pass, &["sub", key, "n"]) } else { 0 };
 		}
@@ -319,7 +319,7 @@ fn check_split(text: &str, fine: bool) {
 		_				=> panic!("the record has no pass array"),
 	};
 	for (i, pass) in each.iter().enumerate() {
-		for key in ["show", "repack", "styles", "regex"] {
+		for key in ["show", "repack", "styles", "regex", "intro"] {
 			assert!(num(pass, &["sub", key, "n"]) >= 1, "pass {} never entered the {} sub-phase:\n{}", i + 1, key, text);
 		}
 		for c in ["visits", "shown", "recipes", "matched", "prepared", "textual", "finished"] {

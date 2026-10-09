@@ -25,11 +25,25 @@
 
 use crate::srv::publish::{
 	PublishConfig,
+	json,
+	outbox::{
+		self,
+		Entry,
+		Kind,
+	},
 	send::{
 		self,
 		MailSender,
 	},
 	page,
+	rate::{
+		self,
+		Window,
+	},
+	store::{
+		self,
+		Edit,
+	},
 };
 
 use oxedyne_fe2o3_core::{
@@ -44,13 +58,19 @@ use oxedyne_fe2o3_jdat::{
 	id::NumIdDat,
 };
 use oxedyne_fe2o3_net::{
-	http::msg::HttpMessage,
-	smtp::client::is_permanent,
+	http::{
+		fields::HeaderFields,
+		msg::HttpMessage,
+		status::HttpStatus,
+	},
 };
 
-use std::sync::{
-	Arc,
-	RwLock,
+use std::{
+	collections::HashSet,
+	sync::{
+		Arc,
+		RwLock,
+	},
 };
 
 
@@ -125,6 +145,9 @@ pub struct Subscriber {
 	pub state:	SubState,	// where they are in the double opt-in
 	pub token:	String,		// unguessable, and minted fresh on each sign-up
 	pub created:	Option<String>,	// ISO timestamp, where it is known
+	// ISO timestamp of the last confirmation the outbox actually sent. A pending record held while
+	// the outbound ceiling is 0 has none, and the expiry clock reads this, not `created`.
+	pub sent:	Option<String>,
 }
 
 impl Subscriber {
@@ -142,6 +165,9 @@ impl Subscriber {
 		// post takes: an absent key and an empty value say the one thing.
 		if let Some(c) = &self.created {
 			m.insert(dat!("created"), dat!(c.clone()));
+		}
+		if let Some(t) = &self.sent {
+			m.insert(dat!("sent"), dat!(t.clone()));
 		}
 		Dat::Map(m)
 	}
@@ -165,15 +191,18 @@ impl Subscriber {
 				"publish: a subscriber record names no email.";
 				Invalid, Input, Missing));
 		}
-		let created = match m.get(&dat!("created")) {
-			Some(Dat::Str(s))	=> Some(s.clone()),
-			_			=> None,
+		let stamp = |key: &str| -> Option<String> {
+			match m.get(&dat!(key)) {
+				Some(Dat::Str(s))	=> Some(s.clone()),
+				_			=> None,
+			}
 		};
 		Ok(Self {
 			email,
-			state:	SubState::of(&get_str("state")),
-			token:	get_str("token"),
-			created,
+			state:		SubState::of(&get_str("state")),
+			token:		get_str("token"),
+			created:	stamp("created"),
+			sent:		stamp("sent"),
 		})
 	}
 }
@@ -196,7 +225,8 @@ pub fn normalise_email(s: &str) -> String {
 /// Whether a normalised address is one the form will take.
 ///
 /// A shape check, not a delivery guarantee: exactly one `@`, a non-empty local part, a domain that
-/// carries a dot and is not a bare label, no whitespace, and within [`EMAIL_MAX`]. The point is to
+/// carries a dot, is not a bare label and is not an address literal, no whitespace, and within
+/// [`EMAIL_MAX`]. The point is to
 /// refuse what is plainly not an address before it reaches a key and a piece of mail -- the true test
 /// of an address is whether the confirmation to it is ever followed, which is the whole reason for
 /// double opt-in.
@@ -227,6 +257,15 @@ pub fn valid_email(s: &str) -> bool {
 	if !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') {
 		return false;
 	}
+	// An address literal (`[127.0.0.1]`) names a machine, not a mailbox, and a form has no business
+	// aiming this host's mail at one. Nor does a bare IPv4 form (`127.0.0.1`), which no domain is:
+	// a top-level domain is never all digits.
+	if domain.starts_with('[') {
+		return false;
+	}
+	if domain.rsplit('.').next().map_or(true, |tld| tld.chars().all(|c| c.is_ascii_digit())) {
+		return false;
+	}
 	true
 }
 
@@ -240,7 +279,9 @@ pub fn mint_token() -> String {
 // `display: none` or `hidden`, which the better form-fillers skip.
 pub const TRAP_FIELD: &str = "website";
 
-const RATE_PREFIX: &str = "publish/subscribe-rate/";	// apart from the comment counter
+pub const RATE_PREFIX: &str = "publish/subscribe-rate/";	// apart from the comment counter
+
+pub const TO_PREFIX: &str = "publish/subscribe-to/";	// the counter of confirmations to one address
 
 /// Whether a submission filled in the field no person sees.
 ///
@@ -257,6 +298,16 @@ pub fn trapped(value: &str) -> bool {
 /// address. The store holds no readable record of who signed up from where.
 fn from_hash(addr: &str, salt: &[u8]) -> String {
 	super::comment::hash_with(addr, b"subscribe-from", salt)
+}
+
+/// A salted, one-way rendering of the address a confirmation goes to.
+///
+/// The counter of confirmations to an address lives under this and not on the subscriber record, so
+/// that expiring an unconfirmed record does not hand the limit back, and so that the store keeps no
+/// readable address for someone who never consented. Its own domain separator keeps it apart from
+/// [`from_hash`].
+fn to_hash(email: &str, salt: &[u8]) -> String {
+	super::comment::hash_with(email, b"subscribe-to", salt)
 }
 
 
@@ -278,36 +329,86 @@ pub fn get<
 {
 	let (db_arc, _) = db;
 	let guard = lock_read!(db_arc);
-	match res!(guard.get(&key_of(email), None)) {
-		Some((val, _))	=> Ok(Some(res!(Subscriber::from_dat(&val)))),
-		None		=> Ok(None),
-	}
+	get_in(&*guard, email)
 }
 
-/// Writes a subscriber, adding it to the index if it is new.
-fn put<
+// As `get`, on a database already locked.
+fn get_in<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
 	ENC:	Encrypter,
 	KH:	Hasher,
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
-	db:	&(Arc<RwLock<DB>>, UID),
+	dbr:	&DB,
+	email:	&str,
+)
+	-> Outcome<Option<Subscriber>>
+{
+	match res!(dbr.get(&key_of(email), None)) {
+		Some((val, _))	=> Ok(Some(res!(Subscriber::from_dat(&val)))),
+		None		=> Ok(None),
+	}
+}
+
+/// Writes a subscriber, adding it to the index if it is new, on a database already write-locked.
+///
+/// The record and the index entry go in under one write guard. With a read guard two sign-ups each
+/// read the index, added their own address and wrote it back over the other's, and the loser had a
+/// record the list never named.
+fn put_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	user:	UID,
 	sub:	&Subscriber,
 )
 	-> Outcome<()>
 {
-	let (db_arc, user) = db;
-	{
-		let guard = lock_read!(db_arc);
-		res!(guard.insert(key_of(&sub.email), sub.to_dat(), *user, None));
-	}
-	let mut emails = res!(index(db));
-	if !emails.iter().any(|e| e == &sub.email) {
+	res!(dbr.insert(key_of(&sub.email), sub.to_dat(), user, None));
+	store::edit_in(dbr, user, &dat!(INDEX_KEY), |old| -> Outcome<(Edit, ())> {
+		let mut emails = res!(store::names_of(old, "subscriber index"));
+		if emails.iter().any(|e| e == &sub.email) {
+			return Ok((Edit::Keep, ()));
+		}
 		emails.push(sub.email.clone());
-		res!(put_index(db, &emails));
-	}
-	Ok(())
+		Ok((Edit::Set(store::names_dat(&emails)), ()))
+	})
+}
+
+// Reads a subscriber, lets `f` make of it what it will, and writes that back, all under one write
+// guard. `f` answers the subscriber to write, if any, and what the caller wants to know. `None` where
+// the store holds no such address.
+fn amend<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+	R,
+	F:	FnOnce(Subscriber) -> Outcome<(Option<Subscriber>, R)>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	email:	&str,
+	f:	F,
+)
+	-> Outcome<Option<R>>
+{
+	store::exclusive(db, |dbr, user| -> Outcome<Option<R>> {
+		let cur = match res!(get_in(dbr, email)) {
+			Some(s)	=> s,
+			None	=> return Ok(None),
+		};
+		let (next, out) = res!(f(cur));
+		if let Some(n) = next {
+			res!(put_in(dbr, user, &n));
+		}
+		Ok(Some(out))
+	})
 }
 
 fn index<
@@ -323,44 +424,12 @@ fn index<
 {
 	let (db_arc, _) = db;
 	let guard = lock_read!(db_arc);
-	let val = match res!(guard.get(&dat!(INDEX_KEY), None)) {
-		Some((v, _))	=> v,
-		// No index is a list nobody has subscribed to, not an error -- the empty list it never wrote.
-		None		=> return Ok(Vec::new()),
+	// No index is a list nobody has subscribed to, not an error -- the empty list it never wrote.
+	let old = match res!(guard.get(&dat!(INDEX_KEY), None)) {
+		Some((v, _))	=> Some(v),
+		None		=> None,
 	};
-	let items = match &val {
-		Dat::List(items)	=> items.clone(),
-		Dat::Vek(vek)		=> vek.as_slice().to_vec(),
-		_			=> return Err(err!(
-			"publish: the subscriber index must be a list, not {:?}.", val.kind();
-			Invalid, Input, Mismatch)),
-	};
-	let mut out = Vec::new();
-	for item in &items {
-		if let Dat::Str(s) = item {
-			out.push(s.clone());
-		}
-	}
-	Ok(out)
-}
-
-fn put_index<
-	const UIDL: usize,
-	UID:	NumIdDat<UIDL>,
-	ENC:	Encrypter,
-	KH:	Hasher,
-	DB:	Database<UIDL, UID, ENC, KH>,
->(
-	db:	&(Arc<RwLock<DB>>, UID),
-	emails:	&[String],
-)
-	-> Outcome<()>
-{
-	let (db_arc, user) = db;
-	let list = Dat::List(emails.iter().map(|e| dat!(e.clone())).collect());
-	let guard = lock_read!(db_arc);
-	res!(guard.insert(dat!(INDEX_KEY), list, *user, None));
-	Ok(())
+	store::names_of(old, "subscriber index")
 }
 
 /// Every subscriber the store holds, in index order.
@@ -501,14 +570,19 @@ fn find_by_token<
 ///
 /// - A **new** or previously **unsubscribed** address is written [`Pending`](SubState::Pending) with a
 ///   fresh token, and `Some(subscriber)` is returned: send them a confirmation.
-/// - An address already **pending** is re-issued a fresh token and re-sent -- the earlier link may be
-///   lost -- and `Some(subscriber)` is returned.
+/// - An address already **pending** keeps its token, since the link already sent to it must go on
+///   working, and `Some(subscriber)` is returned: send the confirmation again.
 /// - An address already **confirmed** is left exactly as it is and `None` is returned: it is on the
 ///   list, and re-confirming it would be a second welcome to someone who never left.
 /// - An address **bounced** is left suppressed and `None` is returned: a permanent failure marked it,
 ///   and a re-subscribe must not resurrect an address the mail server said does not exist.
 ///
-/// The caller answers the same page whichever it gets, so the form never reveals which case it was.
+/// Whatever the address's state, a confirmation is asked for only if `w` allows one more to it at
+/// `now`; otherwise `None` is returned and nothing is written to the subscriber. The counter is only
+/// read here. It counts confirmations **sent**, and [`count_sent`] moves it when one has left, so a
+/// sign-up that waits behind a hold or a backlog, or is repeated, spends nothing. This is the
+/// drainer's call, never a request's: the request queues the address and answers, so its reply does
+/// not depend on which of these cases the address is.
 pub fn add_pending<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -518,6 +592,32 @@ pub fn add_pending<
 >(
 	db:	&(Arc<RwLock<DB>>, UID),
 	email:	&str,
+	w:	&Window,
+	now:	u64,
+)
+	-> Outcome<Option<Subscriber>>
+{
+	add_pending_from(db, email, w, now, None)
+}
+
+/// As [`add_pending`] for a sign-up that came off the queue at `from`, a lane and a sequence number.
+///
+/// The sign-up is applied only if that entry is still queued, checked under the guard that writes the
+/// record. The drainer takes an entry and acts on it a moment later, and an erasure in between has
+/// removed the entry and the record; without the check the drainer would make the record again. Where
+/// the entry is gone, `None` is returned and nothing is written.
+pub fn add_pending_from<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	email:	&str,
+	w:	&Window,
+	now:	u64,
+	from:	Option<(Kind, u64)>,
 )
 	-> Outcome<Option<Subscriber>>
 {
@@ -527,23 +627,70 @@ pub fn add_pending<
 			"publish: {} is not a shape an address takes.", redact(&email);
 			Invalid, Input));
 	}
-	// An address already confirmed is on the list; do not welcome it twice. A bounced address is
-	// suppressed and stays so -- a re-subscribe does not undo a permanent failure. Neither leaks that it
-	// is known, since the caller shows the same page whether `Some` or `None` comes back.
-	if let Some(existing) = res!(get(db, &email)) {
-		match existing.state {
-			SubState::Confirmed | SubState::Bounced	=> return Ok(None),
-			_					=> {}
+	// The secret is read before the write guard is taken. `site_secret` takes the lock itself, and a
+	// std `RwLock` is not re-entrant.
+	let salt = res!(super::comment::site_secret(db));
+	let rkey = fmt!("{}{}", TO_PREFIX, to_hash(&email, &salt));
+	// The reads of what is there and of the counter, and the writes that replace them, are one step
+	// under the write guard.
+	store::exclusive(db, |dbr, user| -> Outcome<Option<Subscriber>> {
+		if let Some((kind, seq)) = from {
+			if !res!(outbox::queued_at_in(dbr, kind, seq)) {
+				return Ok(None);
+			}
 		}
-	}
-	let sub = Subscriber {
-		email:		email.clone(),
-		state:		SubState::Pending,
-		token:		mint_token(),
-		created:	send::iso_now().ok(),
-	};
-	res!(put(db, &sub));
-	Ok(Some(sub))
+		let existing = res!(get_in(dbr, &email));
+		let allowed = res!(rate::permits_in(dbr, &rkey, w, now));
+		// A confirmed address is on the list; do not welcome it twice. A bounced address is
+		// suppressed and stays so.
+		let kept = match existing {
+			Some(s)	=> match s.state {
+				SubState::Confirmed | SubState::Bounced	=> return Ok(None),
+				SubState::Pending			=> Some(s),
+				SubState::Unsubscribed			=> None,
+			},
+			None	=> None,
+		};
+		if !allowed {
+			return Ok(None);
+		}
+		if let Some(s) = kept {
+			return Ok(Some(s));
+		}
+		let sub = Subscriber {
+			email:		email.clone(),
+			state:		SubState::Pending,
+			token:		mint_token(),
+			created:	send::iso_now().ok(),
+			sent:		None,
+		};
+		res!(put_in(dbr, user, &sub));
+		Ok(Some(sub))
+	})
+}
+
+/// Counts a confirmation sent to an address, in the window `w`, at `now`.
+///
+/// The limit of confirmations to one address is spent here, when the mail has left, and checked in
+/// [`add_pending`] before it goes.
+pub fn count_sent<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	email:	&str,
+	w:	&Window,
+	now:	u64,
+)
+	-> Outcome<()>
+{
+	let email = normalise_email(email);
+	let salt = res!(super::comment::site_secret(db));
+	res!(rate::allow_at(db, &fmt!("{}{}", TO_PREFIX, to_hash(&email, &salt)), w, now));
+	Ok(())
 }
 
 /// What a confirmation link found when it was followed.
@@ -571,19 +718,29 @@ pub fn confirm<
 )
 	-> Outcome<ConfirmOutcome>
 {
-	let mut sub = match res!(find_by_token(db, token, id)) {
+	let found = match res!(find_by_token(db, token, id)) {
 		Some(s)	=> s,
 		None	=> return Ok(ConfirmOutcome::Unknown),
 	};
-	match sub.state {
-		SubState::Confirmed	=> Ok(ConfirmOutcome::Already),
-		_			=> {
-			sub.state = SubState::Confirmed;
-			res!(put(db, &sub));
-			info!("{}: publish: {} confirmed their subscription", id, redact(&sub.email));
-			Ok(ConfirmOutcome::Confirmed)
+	// The record is read again under the write guard: a re-subscribe may have minted a new token, or an
+	// unsubscribe changed the state, between the search and now.
+	let out = res!(amend(db, &found.email, |mut sub| -> Outcome<(Option<Subscriber>, ConfirmOutcome)> {
+		if sub.token != token {
+			return Ok((None, ConfirmOutcome::Unknown));
 		}
+		match sub.state {
+			SubState::Confirmed	=> Ok((None, ConfirmOutcome::Already)),
+			_			=> {
+				sub.state = SubState::Confirmed;
+				Ok((Some(sub), ConfirmOutcome::Confirmed))
+			}
+		}
+	}));
+	let out = out.unwrap_or(ConfirmOutcome::Unknown);
+	if out == ConfirmOutcome::Confirmed {
+		info!("{}: publish: {} confirmed their subscription", id, redact(&found.email));
 	}
+	Ok(out)
 }
 
 /// What an unsubscribe link found when it was followed.
@@ -610,16 +767,30 @@ pub fn unsubscribe<
 )
 	-> Outcome<UnsubOutcome>
 {
-	let mut sub = match res!(find_by_token(db, token, id)) {
+	let found = match res!(find_by_token(db, token, id)) {
 		Some(s)	=> s,
 		None	=> return Ok(UnsubOutcome::Unknown),
 	};
-	if sub.state != SubState::Unsubscribed {
+	// `Some(true)` where this call changed the state, `Some(false)` where it already was, `None` where
+	// the token no longer names the record.
+	let changed = res!(amend(db, &found.email, |mut sub| -> Outcome<(Option<Subscriber>, Option<bool>)> {
+		if sub.token != token {
+			return Ok((None, None));
+		}
+		if sub.state == SubState::Unsubscribed {
+			return Ok((None, Some(false)));
+		}
 		sub.state = SubState::Unsubscribed;
-		res!(put(db, &sub));
-		info!("{}: publish: {} unsubscribed", id, redact(&sub.email));
+		Ok((Some(sub), Some(true)))
+	}));
+	match changed.flatten() {
+		Some(true)	=> {
+			info!("{}: publish: {} unsubscribed", id, redact(&found.email));
+			Ok(UnsubOutcome::Done)
+		},
+		Some(false)	=> Ok(UnsubOutcome::Done),
+		None		=> Ok(UnsubOutcome::Unknown),
 	}
-	Ok(UnsubOutcome::Done)
 }
 
 /// Sets a subscriber unsubscribed, by their address, for the admin console.
@@ -643,16 +814,21 @@ pub fn unsubscribe_email<
 	-> Outcome<bool>
 {
 	let email = normalise_email(email);
-	let mut sub = match res!(get(db, &email)) {
-		Some(s)	=> s,
-		None	=> return Ok(false),
-	};
-	if sub.state != SubState::Unsubscribed {
+	let changed = res!(amend(db, &email, |mut sub| -> Outcome<(Option<Subscriber>, bool)> {
+		if sub.state == SubState::Unsubscribed {
+			return Ok((None, false));
+		}
 		sub.state = SubState::Unsubscribed;
-		res!(put(db, &sub));
-		info!("{}: publish: {} unsubscribed by an admin", id, redact(&sub.email));
+		Ok((Some(sub), true))
+	}));
+	match changed {
+		Some(true)	=> {
+			info!("{}: publish: {} unsubscribed by an admin", id, redact(&email));
+			Ok(true)
+		},
+		Some(false)	=> Ok(true),
+		None		=> Ok(false),
 	}
-	Ok(true)
 }
 
 /// Suppresses a subscriber after a permanent delivery failure, by their address.
@@ -676,24 +852,60 @@ pub fn mark_bounced<
 	-> Outcome<bool>
 {
 	let email = normalise_email(email);
-	let mut sub = match res!(get(db, &email)) {
-		Some(s)	=> s,
-		None	=> return Ok(false),
-	};
-	if sub.state != SubState::Bounced {
+	let changed = res!(amend(db, &email, |mut sub| -> Outcome<(Option<Subscriber>, bool)> {
+		if sub.state == SubState::Bounced {
+			return Ok((None, false));
+		}
 		sub.state = SubState::Bounced;
-		res!(put(db, &sub));
-		warn!("{}: publish: {} suppressed after a permanent delivery failure", id, redact(&sub.email));
+		Ok((Some(sub), true))
+	}));
+	match changed {
+		Some(true)	=> {
+			warn!("{}: publish: {} suppressed after a permanent delivery failure", id, redact(&email));
+			Ok(true)
+		},
+		Some(false)	=> Ok(true),
+		None		=> Ok(false),
 	}
-	Ok(true)
+}
+
+/// Records that a confirmation was sent to a pending subscriber, at an ISO time the caller names.
+///
+/// Only a [`SubState::Pending`] record takes it; a subscriber who has confirmed or left since the
+/// send is left as it is. `true` where the time was written.
+pub fn mark_sent<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	email:	&str,
+	at:	&str,
+)
+	-> Outcome<bool>
+{
+	let email = normalise_email(email);
+	let done = res!(amend(db, &email, |mut sub| -> Outcome<(Option<Subscriber>, bool)> {
+		if sub.state != SubState::Pending {
+			return Ok((None, false));
+		}
+		sub.sent = Some(at.to_string());
+		Ok((Some(sub), true))
+	}));
+	Ok(done.unwrap_or(false))
 }
 
 /// Erases a subscriber outright: the record and its place in the index both, by their address.
 ///
 /// A GDPR erasure, distinct from [`unsubscribe_email`]: an unsubscribe keeps the record so a re-subscribe
-/// opts in afresh, whereas this leaves nothing behind -- no state, no token, no row in the count. Mirrors
-/// [`super::store::delete`]: the key is deleted and the address filtered out of the index, so a listing
-/// does not name what is gone. `true` where an address was there to erase.
+/// opts in afresh, whereas this leaves nothing behind -- no state, no token, no counter row of the
+/// confirmations sent to it, no message queued to the address. Mirrors [`super::store::delete`]: the key
+/// is deleted and the address filtered out of the index, so a listing does not name what is gone. The
+/// counter row is the one [`count_sent`] keeps under a hash, so an erased address that signs up again
+/// starts with its limit whole, which is also an operator's remedy for an address held at its limit.
+/// `true` where an address was there to erase.
 pub fn remove<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -708,22 +920,146 @@ pub fn remove<
 	-> Outcome<bool>
 {
 	let email = normalise_email(email);
-	// Whether the address was really there, read by key so a tombstone reads as absent -- unlike the
-	// database's own `delete`, which marks a key for deletion and reports success even for one already
-	// gone. So a repeat erase honestly says there was nothing to erase.
-	let existed = res!(get(db, &email)).is_some();
-	let (db_arc, user) = db;
-	{
-		let guard = lock_read!(db_arc);
-		res!(guard.delete(&key_of(&email), *user, None));
-	}
-	let emails = res!(index(db));
-	let kept: Vec<String> = emails.into_iter().filter(|e| e != &email).collect();
-	res!(put_index(db, &kept));
+	// The secret is read before the write guard is taken: `site_secret` takes the lock itself, and a std
+	// `RwLock` is not re-entrant.
+	let salt = res!(super::comment::site_secret(db));
+	let rkey = fmt!("{}{}", TO_PREFIX, to_hash(&email, &salt));
+	let existed = res!(store::exclusive(db, |dbr, user| -> Outcome<bool> {
+		// Whether the address was really there, read by key so a tombstone reads as absent -- unlike the
+		// database's own `delete`, which marks a key for deletion and reports success even for one already
+		// gone. So a repeat erase honestly says there was nothing to erase.
+		let existed = res!(get_in(dbr, &email)).is_some();
+		res!(dbr.delete(&key_of(&email), user, None));
+		res!(unlist_in(dbr, user, &HashSet::from([email.as_str()])));
+		// The count of confirmations sent to the address goes with it, under the same guard.
+		res!(dbr.delete(&dat!(rkey.clone()), user, None));
+		// What is queued for the address goes under the same guard, so the drainer cannot make the
+		// record again from a sign-up that waits, or mail the address a copy that waits.
+		let queued = res!(outbox::purge_in(dbr, user, &email));
+		if queued > 0 {
+			info!("{}: publish: {} queued message(s) to {} removed with the erasure",
+				id, queued, redact(&email));
+		}
+		Ok(existed)
+	}));
 	if existed {
 		info!("{}: publish: {} erased from the list by an admin", id, redact(&email));
 	}
 	Ok(existed)
+}
+
+// Takes the addresses in `gone` out of the index, on a database already write-locked. The index is
+// written back once, and not at all where it names none of them.
+fn unlist_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	user:	UID,
+	gone:	&HashSet<&str>,
+)
+	-> Outcome<()>
+{
+	store::edit_in(dbr, user, &dat!(INDEX_KEY), |old| -> Outcome<(Edit, ())> {
+		let emails = res!(store::names_of(old, "subscriber index"));
+		let kept: Vec<String> = emails.iter().filter(|e| !gone.contains(e.as_str())).cloned().collect();
+		if kept.len() == emails.len() {
+			return Ok((Edit::Keep, ()));
+		}
+		Ok((Edit::Set(store::names_dat(&kept)), ()))
+	})
+}
+
+// Has a pending subscriber waited `age` seconds since the last confirmation was sent to it?
+//
+// The clock is `sent`. A record never sent anything (one from before `sent` existed, or whose
+// confirmation was given up) lapses from `created`, but only while the host is `sending`: held behind
+// a ceiling of 0 nothing has been sent to anyone, and an address kept for the hold must outlive it. A
+// `sent` that will not read is no clock, since an age that cannot be shown is not one to delete on.
+// Only a pending record can lapse.
+fn lapsed(sub: &Subscriber, age: u64, now: u64, sending: bool) -> bool {
+	if sub.state != SubState::Pending {
+		return false;
+	}
+	let parse = super::comment::parse_stamp_secs;
+	let clock = match (&sub.sent, &sub.created) {
+		(Some(s), _)			=> parse(s),
+		(None, Some(c)) if sending	=> parse(c),
+		_				=> None,
+	};
+	clock.map_or(false, |t| now.saturating_sub(t) >= age)
+}
+
+// Subscribers judged under one write guard when expiring. The index is written back once for each
+// chunk, so this also sets how often a long list is rewritten.
+const EXPIRE_CHUNK: usize = 256;
+
+/// Deletes the pending subscribers whose last confirmation was sent `days` or more ago, and says how
+/// many went. A `days` of 0 deletes nothing. A record never sent one lapses from its creation, while
+/// `sending` says the host's ceiling is above 0.
+///
+/// Each goes whole, the record and its place in the index. Only [`SubState::Pending`] lapses: a
+/// confirmed, unsubscribed or bounced record is kept, the last because its suppression is the
+/// reason it exists. The counter of confirmations to the address lives apart, under a hash, so a
+/// lapsed address that signs up again does not find its limit handed back.
+///
+/// The index is walked and no scan is made, so the cost is the size of the list. Every record is
+/// read again under the write guard before it is deleted, so one that has confirmed, left or been
+/// sent another confirmation since the walk is kept.
+pub fn expire_pending<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	days:	u64,
+	now:	u64,
+	id:	&str,
+	sending: bool,
+)
+	-> Outcome<usize>
+{
+	if days == 0 {
+		return Ok(0);
+	}
+	let age = days.saturating_mul(86_400);
+	let mut due = Vec::new();
+	for email in res!(index(db)) {
+		match get(db, &email) {
+			Ok(Some(s)) if lapsed(&s, age, now, sending)	=> due.push(email),
+			Ok(_)					=> {},
+			Err(e)					=> warn!(
+				"{}: publish: skipping subscriber {} while expiring: {}", id, redact(&email), e),
+		}
+	}
+	let mut gone = 0;
+	for chunk in due.chunks(EXPIRE_CHUNK) {
+		gone += res!(store::exclusive(db, |dbr, user| -> Outcome<usize> {
+			let mut done: HashSet<&str> = HashSet::new();
+			for email in chunk {
+				match res!(get_in(dbr, email)) {
+					Some(s) if lapsed(&s, age, now, sending)	=> {
+						res!(dbr.delete(&key_of(email), user, None));
+						done.insert(email.as_str());
+					},
+					_				=> {},
+				}
+			}
+			if !done.is_empty() {
+				res!(unlist_in(dbr, user, &done));
+			}
+			Ok(done.len())
+		}));
+	}
+	if gone > 0 {
+		info!("{}: publish: {} sign-up(s) expired unconfirmed after {} days", id, gone, days);
+	}
+	Ok(gone)
 }
 
 /// An address with its local part masked, for a log line.
@@ -753,10 +1089,54 @@ pub fn subscribe_form(cfg: &PublishConfig) -> HttpMessage {
 	page::subscribe_form_page(cfg)
 }
 
-/// Records a pending sign-up and sends the confirmation, for a `POST {path}/subscribe`.
+/// What a sign-up is told, as a page or, for a caller asking for JSON, as `{"said", "message"}`.
+///
+/// `Sent` is every outcome that looks like success -- a new address, a pending one, a confirmed one,
+/// a trapped fill and a sender over its limit -- so it is no oracle for the list. A site may map
+/// `said` to its own words and ignore `message`, which is Steel's generic English.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Said {
+	Sent,
+	Invalid,
+	Unavailable,
+}
+
+impl Said {
+
+	fn as_str(&self) -> &'static str {
+		match self {
+			Self::Sent		=> "sent",
+			Self::Invalid		=> "invalid",
+			Self::Unavailable	=> "unavailable",
+		}
+	}
+
+	fn text(&self) -> &'static str {
+		match self {
+			Self::Sent		=> page::SENT_TEXT,
+			Self::Invalid		=> page::INVALID_TEXT,
+			Self::Unavailable	=> page::UNAVAILABLE_TEXT,
+		}
+	}
+
+	// The same answer in the form the caller asked for. All three are a 200, as the pages always were.
+	fn answer(self, cfg: &PublishConfig, headers: &HeaderFields) -> Outcome<HttpMessage> {
+		if headers.wants_json() {
+			return json::said(HttpStatus::OK, self.as_str(), self.text());
+		}
+		Ok(match self {
+			Self::Sent		=> page::subscribe_sent_page(cfg),
+			Self::Invalid		=> page::subscribe_invalid_page(cfg),
+			Self::Unavailable	=> page::subscribe_unavailable_page(cfg),
+		})
+	}
+}
+
+/// Records a pending sign-up and queues the confirmation, for a `POST {path}/subscribe`.
 ///
 /// Always answers the same "check your inbox" page, whether the address was new, pending or already
-/// confirmed, so nothing here reveals whether an address is on the list. Where mail is not configured,
+/// confirmed, so nothing here reveals whether an address is on the list. A caller whose `Accept`
+/// asks for JSON gets `{"said", "message"}` instead, with the same property. Where mail is not configured,
 /// or the site has no canonical origin to build an absolute confirmation link from, it says the
 /// newsletter is not set up rather than storing a pending subscriber it can never confirm.
 ///
@@ -773,9 +1153,11 @@ pub fn subscribe_form(cfg: &PublishConfig) -> HttpMessage {
 /// - **A limit per sender**, keyed on a salted hash of where the request came from and counted
 ///   apart from the comment limiter. Over it, the same page again: a form that says "you are doing
 ///   that too often" is a form that tells a script exactly what it has found.
+/// - **A limit per address**, in [`add_pending`], counted whoever asks: a script rotating its
+///   sources still cannot bury one mailbox. Over it the page is the same again.
 ///
-/// Double opt-in is the third layer and the one already here: an address that never confirms hears
-/// nothing further, so the worst a flood achieves is one message per address rather than a
+/// Double opt-in is the further layer and the one already here: an address that never confirms hears
+/// nothing further, so the worst a flood achieves is a few messages per address rather than a
 /// correspondence.
 pub async fn handle_subscribe<
 	const UIDL: usize,
@@ -787,6 +1169,7 @@ pub async fn handle_subscribe<
 	cfg:	&PublishConfig,
 	db:	Option<&(Arc<RwLock<DB>>, UID)>,
 	mail:	&Option<Arc<MailSender>>,
+	hdrs:	&HeaderFields,
 	body:	&[u8],
 	from:	Option<&str>,
 	id:	&str,
@@ -795,18 +1178,18 @@ pub async fn handle_subscribe<
 {
 	let db = match db {
 		Some(db)	=> db,
-		None		=> return Ok(page::subscribe_unavailable_page(cfg)),
+		None		=> return Said::Unavailable.answer(cfg, hdrs),
 	};
 	// The newsletter needs a sender to post the confirmation, and an absolute origin to build the link
 	// it carries. Missing either, the honest answer is that signup is not available -- not a pending row
 	// that will wait for a confirmation nothing can send.
 	let sender = match mail {
 		Some(m)	=> m,
-		None	=> return Ok(page::subscribe_unavailable_page(cfg)),
+		None	=> return Said::Unavailable.answer(cfg, hdrs),
 	};
 	if cfg.base_url.is_empty() {
 		warn!("{}: publish: a subscribe arrived but the site has no base_url for a confirm link", id);
-		return Ok(page::subscribe_unavailable_page(cfg));
+		return Said::Unavailable.answer(cfg, hdrs);
 	}
 
 	// The trap, read before the address: a filled one means nothing else about this submission is
@@ -814,7 +1197,7 @@ pub async fn handle_subscribe<
 	let trap = crate::srv::console::form_field(body, TRAP_FIELD).unwrap_or_default();
 	if trapped(&trap) {
 		info!("{}: publish: a sign-up filled the field no person sees; dropped", id);
-		return Ok(page::subscribe_sent_page(cfg));
+		return Said::Sent.answer(cfg, hdrs);
 	}
 
 	// What this sender is allowed. A refusal costs one read and writes no subscriber, which is why
@@ -823,11 +1206,10 @@ pub async fn handle_subscribe<
 	if let Some(addr) = from {
 		let salt = res!(crate::srv::publish::comment::site_secret(db));
 		let hashed = from_hash(addr, &salt);
-		if !res!(crate::srv::publish::comment::rate_allows_at(
-			db, RATE_PREFIX, &hashed, cfg.subscribe_rate_secs, cfg.subscribe_rate_hourly))
-		{
+		let w = Window::hourly(cfg.subscribe_rate_secs, cfg.subscribe_rate_hourly);
+		if !res!(rate::allow(db, &fmt!("{}{}", RATE_PREFIX, hashed), &w)) {
 			info!("{}: publish: a sender is signing up faster than this site allows", id);
-			return Ok(page::subscribe_sent_page(cfg));
+			return Said::Sent.answer(cfg, hdrs);
 		}
 	}
 
@@ -836,37 +1218,44 @@ pub async fn handle_subscribe<
 	// A plainly malformed address is told so on its own page: that reveals nothing about the list, only
 	// about what was typed.
 	if !valid_email(&email) {
-		return Ok(page::subscribe_invalid_page(cfg));
+		return Said::Invalid.answer(cfg, hdrs);
 	}
 
-	match res!(add_pending(db, &email)) {
-		// New or pending: send the confirmation. A send that fails is logged, and the reader still gets
-		// the same page -- retrying the form re-sends, and saying "we could not email you" would leak
-		// that the address was actionable.
-		Some(sub)	=> {
-			let url = cfg.url_of(&cfg.confirm_path(&sub.token));
-			let from = cfg.newsletter_from(sender);
-			match sender.send_confirmation(&from, &sub.email, &url, &cfg.site_name).await {
-				Ok(_)	=> info!("{}: publish: confirmation sent to {}", id, redact(&sub.email)),
-				// A permanent failure means the address does not exist; suppress it so a retry of the form
-				// does not keep mailing a mailbox the server has refused. A transient failure is left to be
-				// retried by the form, exactly as before.
-				Err(e) if is_permanent(&e)	=> {
-					warn!("{}: publish: confirmation to {} failed permanently; suppressing: {}",
-						id, redact(&sub.email), e);
-					if let Err(e2) = mark_bounced(db, &sub.email, id) {
-						warn!("{}: publish: could not suppress {}: {}", id, redact(&sub.email), e2);
-					}
-				}
-				Err(e)	=> warn!("{}: publish: confirmation to {} did not send: {}",
-					id, redact(&sub.email), e),
-			}
+	queue_signup(cfg, db, sender, &email, id);
+	Said::Sent.answer(cfg, hdrs)
+}
+
+// The whole of a sign-up that the request does: one entry on the queue, the same small write for every
+// valid address, whatever state it is in. The drainer applies the sign-up (see [`add_pending`]), judges
+// the limits and sends, so the reply carries no trace of whether the address was new, pending,
+// confirmed or over its limit. A push that fails is logged, and the reader still gets the same page --
+// retrying the form queues it again, and saying "we could not email you" would leak that the address
+// was actionable. The queue is capped (`outbox_confirm_max`): past the cap the sign-up is dropped
+// with a warning and the reply is the same page, so a flood fills no more than the cap and nobody
+// can tell by the reply whether theirs was queued.
+fn queue_signup<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	&(Arc<RwLock<DB>>, UID),
+	sender:	&Arc<MailSender>,
+	email:	&str,
+	id:	&str,
+) {
+	let entry = Entry::new(Kind::Confirm, email, "", rate::now_secs());
+	match outbox::push_capped(db, &entry, cfg.outbox_confirm_max) {
+		Ok(true)	=> {
+			debug!("{}: publish: sign-up of {} queued", id, redact(email));
+			sender.pacer().wake();
 		}
-		// Already confirmed: send nothing, and answer identically.
-		None		=> debug!("{}: publish: subscribe for an address already on the list", id),
+		Ok(false)	=> warn!("{}: publish: the confirmation queue is full at {}, so a sign-up of {} is dropped",
+			id, cfg.outbox_confirm_max, redact(email)),
+		Err(e)		=> warn!("{}: publish: sign-up of {} could not be queued: {}", id, redact(email), e),
 	}
-
-	Ok(page::subscribe_sent_page(cfg))
 }
 
 /// Confirms a pending subscriber, for a `GET {path}/confirm?token=...`.
@@ -967,6 +1356,17 @@ mod tests {
 		Ok(())
 	}
 
+	/// An address literal names no mailbox a stranger should be able to aim this host's mail at.
+	#[test]
+	fn test_an_address_literal_is_refused_13() -> Outcome<()> {
+		assert!(!valid_email("user@[127.0.0.1]"));
+		assert!(!valid_email("user@[::1]"));
+		assert!(!valid_email("user@127.0.0.1"));	// a bare IPv4 form: no top-level domain is all digits
+		assert!(valid_email("user@mail.example.com"));
+		assert!(valid_email("user@example.co2"));	// a digit in the last label is still a name
+		Ok(())
+	}
+
 	/// A subscriber survives the trip through a daticle, with and without a sign-up time.
 	#[test]
 	fn test_a_subscriber_round_trips_01() -> Outcome<()> {
@@ -975,6 +1375,7 @@ mod tests {
 			state:		SubState::Confirmed,
 			token:		fmt!("abc123"),
 			created:	Some(fmt!("2026-07-18T10:00:00Z")),
+			sent:		Some(fmt!("2026-07-18T10:05:00Z")),
 		};
 		let back = res!(Subscriber::from_dat(&sub.to_dat()));
 		assert_eq!(back, sub);
@@ -1005,6 +1406,7 @@ mod tests {
 			state:		SubState::Bounced,
 			token:		fmt!("tok"),
 			created:	Some(fmt!("2026-07-18T10:00:00Z")),
+			sent:		None,
 		};
 		let back = res!(Subscriber::from_dat(&sub.to_dat()));
 		assert_eq!(back, sub);

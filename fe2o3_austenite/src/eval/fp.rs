@@ -233,19 +233,22 @@ fn hash_scope(h: &mut Fingerprinter, s: &Scope) {
 	}
 }
 
-fn hash_closure(h: &mut Fingerprinter, c: &Closure) {
-	hash_opt(h, &c.name, |h, n| h.write_str(n));
-	h.write_usize(c.params.len());
-	for p in &c.params {
+/// The fingerprint of a closure: its name, parameters, body text, file and everything it captured.
+pub fn closure_fp(c: &Closure) -> Fingerprint {
+	let mut h = Fingerprinter::new();
+	hash_opt(&mut h, &c.name(), |h, n| h.write_str(n));
+	h.write_usize(c.params().len());
+	for p in c.params() {
 		match p {
 			Param::Pos(node)				=> { h.write_u8(0); h.write_str(&node.full_text()); }
-			Param::Named { name, default }	=> { h.write_u8(1); h.write_str(name); hash_value(h, default); }
-			Param::Sink(name)				=> { h.write_u8(2); hash_opt(h, name, |h, n| h.write_str(n)); }
+			Param::Named { name, default }	=> { h.write_u8(1); h.write_str(name); hash_value(&mut h, default); }
+			Param::Sink(name)				=> { h.write_u8(2); hash_opt(&mut h, name, |h, n| h.write_str(n)); }
 		}
 	}
-	h.write_str(&c.body.full_text());
-	h.write_u16(c.span.file.0);
-	hash_scope(h, &c.captured);
+	h.write_str(&c.body().full_text());
+	h.write_u16(c.span().file.0);
+	hash_scope(&mut h, c.captured());
+	h.finish()
 }
 
 pub fn hash_func(h: &mut Fingerprinter, f: &Func) {
@@ -253,7 +256,7 @@ pub fn hash_func(h: &mut Fingerprinter, f: &Func) {
 		// A native function is a fieldless enum, so its debug form is its identity.
 		Func::Native(n)		=> { h.write_u8(0); h.write_str(&fmt!("{:?}", n)); }
 		Func::Element(k)	=> { h.write_u8(1); h.write_u64(*k as u64); }
-		Func::Closure(c)	=> { h.write_u8(2); hash_closure(h, c); }
+		Func::Closure(c)	=> { h.write_u8(2); h.write_fingerprint(c.fingerprint()); }
 		Func::With(w)		=> { h.write_u8(3); hash_func(h, &w.0); hash_args(h, &w.1); }
 	}
 }
@@ -451,6 +454,48 @@ pub fn elem_fp(e: &Elem) -> Fingerprint {
 	}
 	hash_guards(&mut h, &e.guards);
 	h.write_bool(e.prepared);
+	h.finish()
+}
+
+// Does the value hold content, or code that makes it? Such a field is what an edit changes.
+fn holds_content(v: &Value) -> bool {
+	match v {
+		Value::Content(_) | Value::Func(_) | Value::Args(_) | Value::Module(_)	=> true,
+		Value::Array(a)															=> a.iter().any(holds_content),
+		Value::Dict(d)															=> d.iter().any(|(_, x)| holds_content(x)),
+		_																		=> false,
+	}
+}
+
+/// The shell of an element: its kind, label and the fields that hold no content, by id. Typing into the
+/// content it holds leaves its shell as it was, so a place keyed by the shell stays where it is.
+pub fn elem_shell_fp(e: &Elem) -> Fingerprint {
+	let mut h = Fingerprinter::new();
+	h.write_u8(3);
+	h.write_u64(e.kind as u64);
+	hash_label(&mut h, &e.label);
+	let mut fields: Vec<&(FieldId, Value)> = e.fields.iter().filter(|(_, v)| !holds_content(v)).collect();
+	fields.sort_by_key(|(id, _)| id.0);
+	h.write_usize(fields.len());
+	for (id, v) in fields {
+		h.write_u8(id.0);
+		hash_value(&mut h, v);
+	}
+	h.finish()
+}
+
+/// The shell of a sequence: its label alone, since it holds nothing but children.
+pub fn seq_shell_fp(s: &Sequence) -> Fingerprint {
+	let mut h = Fingerprinter::new();
+	h.write_u8(4);
+	hash_label(&mut h, &s.label);
+	h.finish()
+}
+
+/// The shell of styled content: nothing, since it holds a child and styles over it.
+pub fn styled_shell_fp() -> Fingerprint {
+	let mut h = Fingerprinter::new();
+	h.write_u8(5);
 	h.finish()
 }
 

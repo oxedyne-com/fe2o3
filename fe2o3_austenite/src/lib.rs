@@ -30,6 +30,7 @@
 
 pub mod bib;
 pub mod book;
+pub mod caches;
 pub mod compile;
 pub mod delta;
 pub mod diag;
@@ -53,6 +54,7 @@ pub mod mathtable;
 pub mod memo;
 pub mod page;
 pub mod plot;
+pub mod settings;
 pub mod syntax;
 pub mod table;
 pub mod theme;

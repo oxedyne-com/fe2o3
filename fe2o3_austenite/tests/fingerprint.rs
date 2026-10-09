@@ -355,3 +355,36 @@ fn synthesising_a_warm_heading_gives_a_fresh_fingerprint() -> Outcome<()> {
 	}
 	Ok(())
 }
+
+// A chain of functions in which each calls the one before it twice, through two names, so that the closure
+// tree a naive walk unfolds doubles at every level while the closures themselves stay few.
+fn chain(depth: usize, base: &str) -> String {
+	let mut s = format!("#let f0(x) = {}\n", base);
+	for i in 1..=depth {
+		s.push_str(&fmt!("#let a{i} = f{p}\n#let b{i} = f{p}\n#let f{i}(x) = a{i}(b{i}(x))\n", i = i, p = i - 1));
+	}
+	s.push_str(&fmt!("#metadata(f{})\n", depth));
+	s
+}
+
+// Evaluates and fingerprints on a thread of its own, so that a walk that never ends fails the test rather than
+// holding the run for ever.
+fn fp_within(src: String, secs: u64) -> Fingerprint {
+	let (tx, rx) = std::sync::mpsc::channel();
+	std::thread::spawn(move || {
+		let _ = tx.send(fp(&src).map_err(|e| fmt!("{}", e)));
+	});
+	match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+		Ok(Ok(f))	=> f,
+		Ok(Err(e))	=> panic!("the chain did not evaluate: {}", e),
+		Err(_)		=> panic!("fingerprinting a chain of shared closures took over {} s: a closure reached by many paths is walked once per path", secs),
+	}
+}
+
+#[test]
+fn closures_reached_by_many_paths_fingerprint_in_time_proportional_to_the_closures() {
+	let a = fp_within(chain(48, "x"), 20);
+	let b = fp_within(chain(48, "x + 1"), 20);
+	assert_ne!(a, b, "a change at the foot of the chain did not reach its head");
+	assert_eq!(a, fp_within(chain(48, "x"), 20), "two evaluations of one chain differ");
+}

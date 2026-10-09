@@ -34,6 +34,7 @@ use oxedyne_fe2o3_graphics::{
 		Path,
 	},
 	pdf::{
+		ColourOut,
 		OutlineItem,
 		PdfInfo,
 		PdfPage,
@@ -54,6 +55,42 @@ pub fn pdf_info(doc_info: &DocInfo) -> PdfInfo {
 		keywords:	doc_info.keywords.clone(),
 		creator:	Some(ENGINE_NAME.to_string()),
 		producer:	Some(ENGINE_NAME.to_string()),
+	}
+}
+
+/// How the sink writes its PDF. The default is what the evaluator's one-shot compile has always written:
+/// version 1.7, compressed streams, an outline, and an Info dictionary of the document's metadata with the
+/// engine named as `/Creator` and `/Producer`. The `watch` and `build` commands set each from a setting, and
+/// by default write no Info dictionary at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PdfOptions {
+	pub minor:		u8,			// the version header, 1.`minor`
+	pub compress:	bool,		// Flate on the streams
+	pub outline:	bool,		// bookmarks from the headings
+	pub doc_info:	bool,		// `/Title`, `/Author`, `/Subject` and `/Keywords` from `set document(..)`
+	pub engine_info:	bool,	// `/Creator` and `/Producer`
+	pub colour:		ColourOut,
+}
+
+impl Default for PdfOptions {
+	fn default() -> Self {
+		Self { minor: 7, compress: true, outline: true, doc_info: true, engine_info: true, colour: ColourOut::Rgb }
+	}
+}
+
+impl PdfOptions {
+	/// The Info dictionary these options ask for, none when no field is.
+	pub fn info(&self, doc_info: &DocInfo) -> Option<PdfInfo> {
+		let full = pdf_info(doc_info);
+		let info = PdfInfo {
+			title:		if self.doc_info { full.title } else { None },
+			author:		if self.doc_info { full.author } else { None },
+			subject:	if self.doc_info { full.subject } else { None },
+			keywords:	if self.doc_info { full.keywords } else { None },
+			creator:	if self.engine_info { full.creator } else { None },
+			producer:	if self.engine_info { full.producer } else { None },
+		};
+		if info == PdfInfo::default() { None } else { Some(info) }
 	}
 }
 

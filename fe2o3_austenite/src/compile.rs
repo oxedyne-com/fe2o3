@@ -14,6 +14,13 @@
 
 use crate::bib::Bibliography;
 use crate::book;
+use crate::caches::{
+	Budgets,
+	Caches,
+	Counters,
+	configuration,
+	sys_inputs,
+};
 use crate::doc::{
 	self,
 	Answer,
@@ -60,6 +67,7 @@ use crate::timings::{
 use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 use oxedyne_fe2o3_font::{
 	face::Role,
 	set::FontSet,
@@ -381,6 +389,7 @@ pub struct Evaluated {
 	pub blank:	bool,			// the final pass realised a body that sets no content ([`Engine::body`])
 	pub main:	PathBuf,		// the main file, where a diagnostic with no site of its own is reported
 	pub warm:	bool,			// the first pass began from a previous compile's introspector
+	pub counters:	Counters,	// what the session's caches did in this compile
 }
 
 /// Compiles `main_path` through the evaluator: load, evaluate once, then run the fixpoint, which streams
@@ -416,12 +425,13 @@ pub fn assemble_eval_timed<S: PageSink>(
 )
 	-> Outcome<Evaluated>
 {
-	assemble_eval_from(main_path, root, fonts, sink, timings, fuel, None)
+	assemble_eval_from(main_path, root, fonts, sink, timings, fuel, None, &mut Caches::default())
 }
 
 // As `assemble_eval_timed`, the first pass reading `warm` where there is one. It is set after the
 // evaluation, so that the evaluation sees what a cold compile's sees; what a warm start can change is the
-// first pass, whose reads the fixpoint checks as it checks every pass's.
+// first pass, whose reads the fixpoint checks as it checks every pass's. The engine holds `caches` for the
+// evaluation and gives them back, so that a compile that fails still leaves the session what it made.
 fn assemble_eval_from<S: PageSink>(
 	main_path:	&Path,
 	root:		&Path,
@@ -430,6 +440,7 @@ fn assemble_eval_from<S: PageSink>(
 	timings:	Option<Timings>,
 	fuel:		Option<u64>,
 	warm:		Option<Arc<Introspector>>,
+	caches:		&mut Caches,
 )
 	-> Outcome<Evaluated>
 {
@@ -441,6 +452,7 @@ fn assemble_eval_from<S: PageSink>(
 	engine.fonts = fonts;
 	engine.fuel = fuel;
 	engine.timings = timings;
+	std::mem::swap(caches, &mut engine.caches);
 	if let Some(t) = engine.timings.as_mut() {
 		t.leave();	// the load
 	}
@@ -458,7 +470,9 @@ fn assemble_eval_from<S: PageSink>(
 	// from what the body realised to in the pass that stood, never from the page count nor from the content
 	// as it was evaluated: a `context` that gives nothing is an element until it is resolved.
 	let blank = engine.body == Some(false);
-	Ok(Evaluated { engine, laid, blank, main: main_path, warm: started })
+	let counters = engine.caches.counters;
+	std::mem::swap(caches, &mut engine.caches);
+	Ok(Evaluated { engine, laid, blank, main: main_path, warm: started, counters })
 }
 
 // The modification times of the font directories and files a store has scanned, none for one that cannot
@@ -480,16 +494,40 @@ fn stamps(fonts: &FontStore) -> Vec<(PathBuf, Option<SystemTime>)> {
 /// usually after one pass in place of three. A compile that lays no pages keeps the last introspector, so
 /// an edit that breaks the document still leaves the next one a warm start. A font file that changes on
 /// disc renews the store before the next compile.
+///
+/// The session also keeps the [`Caches`], which a compile borrows through its engine and which a changed
+/// face set, `sys.inputs` or engine empties (see [`crate::caches`]). The host sets their byte budgets with
+/// [`Session::set_budgets`].
 #[derive(Debug, Default)]
 pub struct Session {
 	fonts:	FontStore,
 	stamp:	Vec<(PathBuf, Option<SystemTime>)>,	// the scanned fonts as they were when the book was built
 	intro:	Option<Arc<Introspector>>,
+	caches:	Caches,
 }
 
 impl Session {
 	pub fn new(fonts: FontStore) -> Self {
-		Self { fonts, stamp: Vec::new(), intro: None }
+		Self { fonts, stamp: Vec::new(), intro: None, caches: Caches::default() }
+	}
+
+	/// A session over `fonts` with the cache budgets the host has set.
+	pub fn with_budgets(fonts: FontStore, budgets: Budgets) -> Self {
+		let mut session = Self::new(fonts);
+		session.set_budgets(budgets);
+		session
+	}
+
+	/// The session's caches, for the counters and the configuration they were made under.
+	pub fn caches(&self) -> &Caches { &self.caches }
+
+	pub fn budgets(&self) -> Budgets { self.caches.budgets }
+
+	/// Sets the bytes each cache may hold from the next compile; the shaped-run cache takes its budget at
+	/// once, evicting down to it.
+	pub fn set_budgets(&mut self, budgets: Budgets) {
+		self.caches.budgets = budgets;
+		let _ = self.fonts.set_shape_budget(budgets.shapes);
 	}
 
 	pub fn fonts(&self) -> &FontStore { &self.fonts }
@@ -499,6 +537,7 @@ impl Session {
 	pub fn set_fonts(&mut self, fonts: FontStore) {
 		self.fonts	= fonts;
 		self.stamp	= Vec::new();
+		let _ = self.fonts.set_shape_budget(self.caches.budgets.shapes);
 	}
 
 	/// The introspector of the last compile that laid pages.
@@ -525,10 +564,23 @@ impl Session {
 		// Built here so that the engine's copy of the store shares the book, and what the compile parses and
 		// shapes stays with the session. A book that cannot be built fails again where the engine first
 		// needs a face, and is reported there.
-		let _ = self.fonts.book();
+		let _ = self.fonts.set_shape_budget(self.caches.budgets.shapes);
+		let faces = match self.fonts.book() {
+			Ok(book)	=> book.fingerprint(),
+			Err(_)		=> Fingerprint::default(),
+		};
 		self.stamp = stamps(&self.fonts);
+		self.caches.begin(configuration(faces, &sys_inputs(), engine_git_hash()));
 		let warm = if cold { None } else { self.intro.clone() };
-		let done = res!(assemble_eval_from(main_path, root, self.fonts.clone(), sink, timings, fuel, warm));
+		let done = assemble_eval_from(main_path, root, self.fonts.clone(), sink, timings, fuel, warm, &mut self.caches);
+		self.caches.end();
+		let mut done = res!(done);
+		if let Ok(book) = self.fonts.book() {
+			if let Ok(stats) = book.shape_stats() {
+				self.caches.counters.shapes	= stats;
+				done.counters.shapes		= stats;
+			}
+		}
 		if let Ok(laid) = &done.laid {
 			if laid.pages > 0 {
 				self.intro = Some(laid.intro.clone());

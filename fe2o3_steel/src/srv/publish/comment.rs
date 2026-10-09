@@ -33,6 +33,14 @@ use crate::srv::publish::{
 	Markup,
 	ai,
 	parse_markup,
+	rate::{
+		self,
+		Window,
+	},
+	store::{
+		self,
+		Edit,
+	},
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -931,13 +939,20 @@ pub fn set_state<
 )
 	-> Outcome<bool>
 {
-	let mut c = match res!(get(db, slug, id)) {
+	// One step under the write guard: a concurrent edit or moderation cannot be written over.
+	let found = res!(store::update(db, &key_of(slug, id), |old| -> Outcome<(Edit, Option<Comment>)> {
+		let mut c = match old {
+			Some(v)	=> res!(Comment::from_dat(&v)),
+			None	=> return Ok((Edit::Keep, None)),
+		};
+		c.state = state;
+		c.reason = reason;
+		Ok((Edit::Set(c.to_dat()), Some(c)))
+	}));
+	let c = match found {
 		Some(c)	=> c,
 		None	=> return Ok(false),
 	};
-	c.state = state;
-	c.reason = reason;
-	res!(put(db, &c));
 
 	if state == CommentState::Approved {
 		if let Some(h) = c.author.handle() {
@@ -1015,27 +1030,29 @@ pub fn set_trust<
 )
 	-> Outcome<()>
 {
-	let mut rec = res!(commenter(db, handle)).unwrap_or_else(|| Commenter {
-		handle:		handle.to_string(),
-		from:		None,
-		trusted:	false,
-		blocked:	false,
-		first_seen:	now.to_string(),
-	});
-	rec.trusted = trusted;
-	// Trust is granted to a commenter *as seen*, so a later comment must arrive the same way.
-	if trusted {
-		rec.from = from.map(|f| f.to_string());
-	}
-	// Trusting somebody who was blocked unblocks them: the admin's later decision is the operative
-	// one, and leaving both flags set would be a record that contradicts itself.
-	if trusted {
-		rec.blocked = false;
-	}
-	let (db_arc, user) = db;
-	let guard = lock_read!(db_arc);
-	res!(guard.insert(author_key(handle), rec.to_dat(), *user, None));
-	Ok(())
+	store::update(db, &author_key(handle), |old| -> Outcome<(Edit, ())> {
+		let mut rec = match old {
+			Some(v)	=> res!(Commenter::from_dat(&v)),
+			None	=> Commenter {
+				handle:		handle.to_string(),
+				from:		None,
+				trusted:	false,
+				blocked:	false,
+				first_seen:	now.to_string(),
+			},
+		};
+		rec.trusted = trusted;
+		// Trust is granted to a commenter *as seen*, so a later comment must arrive the same way.
+		if trusted {
+			rec.from = from.map(|f| f.to_string());
+		}
+		// Trusting somebody who was blocked unblocks them: the admin's later decision is the operative
+		// one, and leaving both flags set would be a record that contradicts itself.
+		if trusted {
+			rec.blocked = false;
+		}
+		Ok((Edit::Set(rec.to_dat()), ()))
+	})
 }
 
 pub fn set_blocked<
@@ -1052,21 +1069,23 @@ pub fn set_blocked<
 )
 	-> Outcome<()>
 {
-	let mut rec = res!(commenter(db, handle)).unwrap_or_else(|| Commenter {
-		handle:		handle.to_string(),
-		from:		None,
-		trusted:	false,
-		blocked:	false,
-		first_seen:	now.to_string(),
-	});
-	rec.blocked = blocked;
-	if blocked {
-		rec.trusted = false;
-	}
-	let (db_arc, user) = db;
-	let guard = lock_read!(db_arc);
-	res!(guard.insert(author_key(handle), rec.to_dat(), *user, None));
-	Ok(())
+	store::update(db, &author_key(handle), |old| -> Outcome<(Edit, ())> {
+		let mut rec = match old {
+			Some(v)	=> res!(Commenter::from_dat(&v)),
+			None	=> Commenter {
+				handle:		handle.to_string(),
+				from:		None,
+				trusted:	false,
+				blocked:	false,
+				first_seen:	now.to_string(),
+			},
+		};
+		rec.blocked = blocked;
+		if blocked {
+			rec.trusted = false;
+		}
+		Ok((Edit::Set(rec.to_dat()), ()))
+	})
 }
 
 
@@ -2123,7 +2142,7 @@ pub fn editable(c: &Comment, now_secs: u64) -> bool {
 /// which is lenient by design -- it reads "not a time at all" as *some* time, which was caught by the
 /// test below. A permissive read here would hand an unbounded edit window to any comment whose stamp
 /// was unreadable, so this accepts exactly the shape [`now_stamp`] writes and nothing else.
-fn parse_stamp_secs(s: &str) -> Option<u64> {
+pub(crate) fn parse_stamp_secs(s: &str) -> Option<u64> {
 	let b = s.as_bytes();
 	if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[13] != b':' || b[16] != b':' {
 		return None;
@@ -2184,20 +2203,22 @@ pub fn edit<
 )
 	-> Outcome<bool>
 {
-	let mut c = match res!(get(db, slug, id)) {
-		Some(c)	=> c,
-		None	=> return Ok(false),
-	};
 	if !valid_body(body) {
 		return Ok(false);
 	}
-	c.body = body.trim().to_string();
-	if c.state == CommentState::Approved {
-		c.state = CommentState::Pending;
-		c.reason = Some(fmt!("edited by its author after it was published"));
-	}
-	res!(put(db, &c));
-	Ok(true)
+	// One step under the write guard, so an approval racing the edit cannot write the old body back.
+	store::update(db, &key_of(slug, id), |old| -> Outcome<(Edit, bool)> {
+		let mut c = match old {
+			Some(v)	=> res!(Comment::from_dat(&v)),
+			None	=> return Ok((Edit::Keep, false)),
+		};
+		c.body = body.trim().to_string();
+		if c.state == CommentState::Approved {
+			c.state = CommentState::Pending;
+			c.reason = Some(fmt!("edited by its author after it was published"));
+		}
+		Ok((Edit::Set(c.to_dat()), true))
+	})
 }
 
 const OPEN_KEY: &str = "publish/comments-open";
@@ -2255,7 +2276,7 @@ pub fn set_comments_open<
 	Ok(())
 }
 
-const RATE_PREFIX: &str = "publish/comment-rate/";
+pub const RATE_PREFIX: &str = "publish/comment-rate/";
 
 
 /// Whether a sender may comment now, and the record of their having done so.
@@ -2267,7 +2288,8 @@ const RATE_PREFIX: &str = "publish/comment-rate/";
 /// Two bounds, because they stop different things. The interval stops a flood; the hourly count
 /// stops a slow drip that would otherwise never trip an interval at all. A sender with no address
 /// hash -- which should not happen, since the caller supplies one -- is not rate limited here, and
-/// is bounded by the per-post caps instead.
+/// is bounded by the per-post caps instead. The counter is [`rate::allow`], which keeps the
+/// read-and-write of the row under one write guard.
 pub fn rate_allows<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -2282,78 +2304,7 @@ pub fn rate_allows<
 )
 	-> Outcome<bool>
 {
-	rate_allows_at(db, RATE_PREFIX, from, interval, hourly)
-}
-
-/// As [`rate_allows`], under a caller's own key prefix.
-///
-/// One counter per thing being limited. The newsletter's sign-ups and a post's comments are
-/// different acts at different costs, and a reader who has just commented has not thereby spent
-/// their sign-up: sharing one bucket between them would make each limit depend on the other's
-/// traffic.
-pub fn rate_allows_at<
-	const UIDL: usize,
-	UID:	NumIdDat<UIDL>,
-	ENC:	Encrypter,
-	KH:	Hasher,
-	DB:	Database<UIDL, UID, ENC, KH>,
->(
-	db:		&(Arc<RwLock<DB>>, UID),
-	prefix:		&str,
-	from:		&str,
-	interval:	u64,
-	hourly:		u32,
-)
-	-> Outcome<bool>
-{
-	// Both off: the site has decided its readers share addresses, or that the per-post ceilings are
-	// bound enough. Nothing is read and nothing is written.
-	if interval == 0 && hourly == 0 {
-		return Ok(true);
-	}
-	let now = std::time::SystemTime::now()
-		.duration_since(std::time::UNIX_EPOCH)
-		.map(|d| d.as_secs())
-		.unwrap_or(0);
-	let key = dat!(fmt!("{}{}", prefix, from));
-
-	let (db_arc, user) = db;
-	let (last, count, window) = {
-		let guard = lock_read!(db_arc);
-		match res!(guard.get(&key, None)) {
-			Some((Dat::List(v), _)) if v.len() == 3 => {
-				let n = |i: usize| match v.get(i) {
-					Some(Dat::U64(x))	=> *x,
-					_			=> 0,
-				};
-				(n(0), n(1) as u32, n(2))
-			}
-			_ => (0, 0, 0),
-		}
-	};
-
-	// A new hour resets the count. The window is the hour the first of them landed in, not a
-	// rolling one: a rolling window needs every timestamp kept, and this needs three numbers.
-	let (count, window) = if now.saturating_sub(window) >= 3600 {
-		(0, now)
-	} else {
-		(count, window)
-	};
-
-	if (interval > 0 && now.saturating_sub(last) < interval)
-		|| (hourly > 0 && count >= hourly)
-	{
-		return Ok(false);
-	}
-
-	let guard = lock_read!(db_arc);
-	res!(guard.insert(
-		key,
-		Dat::List(vec![dat!(now), dat!((count + 1) as u64), dat!(window)]),
-		*user,
-		None,
-	));
-	Ok(true)
+	rate::allow(db, &fmt!("{}{}", RATE_PREFIX, from), &Window::hourly(interval, hourly))
 }
 
 const SECRET_KEY: &str = "publish/comment-secret";
@@ -2380,20 +2331,29 @@ pub fn site_secret<
 )
 	-> Outcome<Vec<u8>>
 {
-	let (db_arc, user) = db;
+	let key = dat!(SECRET_KEY);
+	// Almost every call finds the secret made, and a read guard is all that costs.
 	{
+		let (db_arc, _) = db;
 		let guard = lock_read!(db_arc);
-		if let Some((Dat::BU8(bytes), _)) = res!(guard.get(&dat!(SECRET_KEY), None)) {
+		if let Some((Dat::BU8(bytes), _)) = res!(guard.get(&key, None)) {
 			if bytes.len() == SECRET_LEN {
 				return Ok(bytes);
 			}
 		}
 	}
-	let mut fresh = vec![0u8; SECRET_LEN];
-	Rand::fill_u8(&mut fresh);
-	let guard = lock_read!(db_arc);
-	res!(guard.insert(dat!(SECRET_KEY), Dat::BU8(fresh.clone()), *user, None));
-	Ok(fresh)
+	// Two first callers can both reach here. The write guard lets one make the secret, and the other
+	// finds it made and returns the same bytes.
+	store::update(db, &key, |old| -> Outcome<(Edit, Vec<u8>)> {
+		if let Some(Dat::BU8(bytes)) = &old {
+			if bytes.len() == SECRET_LEN {
+				return Ok((Edit::Keep, bytes.clone()));
+			}
+		}
+		let mut fresh = vec![0u8; SECRET_LEN];
+		Rand::fill_u8(&mut fresh);
+		Ok((Edit::Set(Dat::BU8(fresh.clone())), fresh))
+	})
 }
 
 /// An ISO timestamp for now.

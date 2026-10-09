@@ -52,6 +52,7 @@ use oxedyne_fe2o3_jdat::{
     id::NumIdDat,
 };
 use oxedyne_fe2o3_net::{
+    addr::client_key,
     file::RequestPath,
     http::{
         client::{
@@ -997,6 +998,9 @@ impl<
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
     {
         let request_path = loc.path.as_string().to_string();
+        // Where a sign-up or a comment came from, as a limit counts it: an IPv6 client is its whole
+        // /64, since it can take a fresh address from that on every request.
+        let peer_key = client_key(&peer.ip()).to_string();
         // A one-click unsubscribe arrives as a POST carrying its token in the query, so this
         // handler needs the query as well as the path.
         let request_query = loc.query.clone();
@@ -1027,10 +1031,15 @@ impl<
             // always answers the same themed page whether or not the address was
             // already known -- so the form is never an oracle for the list.
             if let Some(cfg) = &publish {
+                // A post from another site is refused before anything is read: the sign-up, the
+                // comment, its edit and its preview are the writes a page elsewhere could aim a
+                // visitor's browser at. The one-click unsubscribe is not among them.
+                if let Some(refused) = res!(cfg.refuse_cross_site(&request_path, &req_headers, &id)) {
+                    return Ok(Some(refused));
+                }
                 if let Some(Subscription::Subscribe) = cfg.subscription_of(&request_path) {
-                    let peer_ip = peer.ip().to_string();
                     let resp = res!(publish_subscribe::handle_subscribe(
-                        cfg.as_ref(), db.as_ref(), &mail, &body, Some(&peer_ip), &id).await);
+                        cfg.as_ref(), db.as_ref(), &mail, &req_headers, &body, Some(&peer_key), &id).await);
                     return Ok(Some(resp));
                 }
                 // An unsubscribe by POST, which is what one-click means: the newsletter carries
@@ -1091,7 +1100,7 @@ impl<
                         let html = res!(publish_comment::preview(
                             dbh,
                             &source,
-                            Some(&peer.ip().to_string()),
+                            Some(&peer_key),
                             &secret,
                             cfg.comment_rate_secs,
                         ));
@@ -1129,10 +1138,10 @@ impl<
                                 name:       f("name"),
                                 email:      site_console::form_field(&body, "email"),
                                 body:       f("body"),
-                                honeypot:   f("website"),
+                                honeypot:   f(publish_subscribe::TRAP_FIELD),
                                 challenge:  f("challenge"),
                                 nonce:      f("nonce"),
-                                from:       Some(peer.ip().to_string()),
+                                from:       Some(peer_key.clone()),
                                 now:        publish_comment::now_stamp(),
                             };
                             // The site's AI, where it has set one up, so a stranger's first comment

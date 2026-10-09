@@ -450,7 +450,7 @@ fn to_json(v: &Value) -> String {
 			.collect::<Vec<_>>().join(",")),
 		Value::Content(c)	=> content_json(c),
 		Value::Func(f)		=> json_str(match f {
-			Func::Closure(c) if c.name.is_none()	=> "(..) => ..",
+			Func::Closure(c) if c.name().is_none()	=> "(..) => ..",
 			other									=> other.name().unwrap_or("?"),
 		}),
 		Value::Args(a)		=> {

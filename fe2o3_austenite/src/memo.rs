@@ -18,8 +18,9 @@
 //! the same footing every incremental compiler (Typst.ts included) rests a content cache on.
 //!
 //! **Residency and the memo's contract.** The memo holds authored nodes and rendered SVG, so it costs
-//! roughly the memory of one document copy. A two-generation sweep ([`Memo::sweep`]) drops any entry not
-//! touched in the last two compiles, bounding that to ~2x rather than growing without limit. The memo is
+//! roughly the memory of one document copy. A two-generation sweep ([`Memo::sweep`], the
+//! [`GenMap`](oxedyne_fe2o3_data::gen_map::GenMap) both caches are held in) drops any entry not touched in
+//! the last two compiles, bounding that to ~2x rather than growing without limit. The memo is
 //! valid only while the document's fonts, faces, page geometry and theme are unchanged -- those are
 //! folded into a single global fingerprint the caller supplies once per compile ([`Memo::begin`]); a
 //! change to any of them belongs in a fresh [`Memo`], not this one.
@@ -32,10 +33,9 @@ use crate::doc::{
 use crate::ir::Node;
 use crate::ledger::AnchorId;
 
+use oxedyne_fe2o3_data::gen_map::GenMap;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
-
-use std::collections::HashMap;
 
 /// The scalar authoring counters at a block boundary: the state a block enters under (its key) and the
 /// state it leaves (its value, restored on a cache hit). These are exactly the counters a block bakes
@@ -96,7 +96,6 @@ pub struct BlockEntry {
 	// The answers the block gave, each by its ask's place in the block's own asks (`doc::asks_of`), given
 	// again on every hit at the sites of the block served.
 	pub answers:		Vec<(usize, Answer)>,
-	last_gen:			u64,	// the generation this entry was last touched, for the two-generation sweep
 }
 
 impl BlockEntry {
@@ -114,7 +113,7 @@ impl BlockEntry {
 	)
 		-> Self
 	{
-		Self { consume, nodes, heads, index_occ, claim_occ, seen_add, counters_set, exit, answers, last_gen: 0 }
+		Self { consume, nodes, heads, index_occ, claim_occ, seen_add, counters_set, exit, answers }
 	}
 }
 
@@ -128,7 +127,6 @@ pub struct PageEntry {
 	pub body_ink:		String,
 	pub body_tspans:	String,
 	pub seen_text:		bool,
-	last_gen:			u64,
 }
 
 /// The document's incremental memo: the block-authoring and page-emit caches, the global fingerprint
@@ -136,10 +134,9 @@ pub struct PageEntry {
 /// two-generation sweep reads, and the hit/miss tallies the gate measures.
 #[derive(Default)]
 pub struct Memo {
-	blocks:		HashMap<Fingerprint, BlockEntry>,
-	pages:		HashMap<Fingerprint, PageEntry>,
+	blocks:		GenMap<Fingerprint, BlockEntry>,	// unbounded: the entries state no size
+	pages:		GenMap<Fingerprint, PageEntry>,
 	global_fp:	Fingerprint,	// fonts+faces+geometry+theme+refs+bib fingerprint; folded into every key
-	gen:		u64,
 	pub block_hits:		u64,
 	pub block_misses:	u64,
 	pub page_hits:		u64,
@@ -149,17 +146,18 @@ pub struct Memo {
 impl Memo {
 	pub fn new() -> Self { Self::default() }
 
-	/// Opens a compile generation: steps the generation counter (so this compile's touches are
+	/// Opens a compile generation: steps both caches' generation (so this compile's touches are
 	/// distinguishable from the last), resets the hit/miss tallies, and installs the configuration
 	/// fingerprint. A fingerprint that differs from the one the cached entries were built under clears
 	/// both caches, since every key was scoped to the old configuration.
 	pub fn begin(&mut self, global_fp: Fingerprint) {
-		if self.global_fp != global_fp && (!self.blocks.is_empty() || !self.pages.is_empty()) {
+		if self.global_fp != global_fp {
 			self.blocks.clear();
 			self.pages.clear();
 		}
 		self.global_fp	= global_fp;
-		self.gen		= self.gen.wrapping_add(1);
+		self.blocks.begin();
+		self.pages.begin();
 		self.block_hits		= 0;
 		self.block_misses	= 0;
 		self.page_hits		= 0;
@@ -183,9 +181,8 @@ impl Memo {
 	/// caches hold at most the working sets of the last two compiles -- roughly twice the live document,
 	/// never an unbounded accumulation of stale edits.
 	pub fn sweep(&mut self) {
-		let gen = self.gen;
-		self.blocks.retain(|_, e| gen.wrapping_sub(e.last_gen) < 2);
-		self.pages.retain(|_, e| gen.wrapping_sub(e.last_gen) < 2);
+		self.blocks.sweep();
+		self.pages.sweep();
 	}
 
 	// --- block authoring cache ---------------------------------------------------------------------
@@ -194,29 +191,26 @@ impl Memo {
 	/// The clone releases the borrow so the caller can splice the nodes into the authoring state; a
 	/// paragraph's node clone is far cheaper than re-shaping and re-breaking it.
 	pub fn block_lookup(&mut self, key: Fingerprint) -> Option<BlockEntry> {
-		let gen = self.gen;
-		match self.blocks.get_mut(&key) {
-			Some(e)	=> { e.last_gen = gen; self.block_hits += 1; Some(e.clone()) },
+		match self.blocks.get(&key) {
+			Some(e)	=> { self.block_hits += 1; Some(e.clone()) },
 			None	=> { self.block_misses += 1; None },
 		}
 	}
 
-	pub fn block_store(&mut self, key: Fingerprint, mut entry: BlockEntry) {
-		entry.last_gen = self.gen;
-		self.blocks.insert(key, entry);
+	pub fn block_store(&mut self, key: Fingerprint, entry: BlockEntry) {
+		self.blocks.insert(key, entry, 0);
 	}
 
 	// --- page emit cache ---------------------------------------------------------------------------
 
 	pub fn page_lookup(&mut self, key: Fingerprint) -> Option<PageEntry> {
-		let gen = self.gen;
-		match self.pages.get_mut(&key) {
-			Some(e)	=> { e.last_gen = gen; self.page_hits += 1; Some(e.clone()) },
+		match self.pages.get(&key) {
+			Some(e)	=> { self.page_hits += 1; Some(e.clone()) },
 			None	=> { self.page_misses += 1; None },
 		}
 	}
 
 	pub fn page_store(&mut self, key: Fingerprint, body_ink: String, body_tspans: String, seen_text: bool) {
-		self.pages.insert(key, PageEntry { body_ink, body_tspans, seen_text, last_gen: self.gen });
+		self.pages.insert(key, PageEntry { body_ink, body_tspans, seen_text }, 0);
 	}
 }

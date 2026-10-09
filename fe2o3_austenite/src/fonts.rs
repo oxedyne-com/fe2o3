@@ -32,6 +32,8 @@ use oxedyne_fe2o3_graphics::pdf_font::{
 	collection_face,
 	is_collection,
 };
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use oxedyne_fe2o3_font::face::{
 	FaceClass,
@@ -818,6 +820,7 @@ pub struct BookFace {
 	pub math:		bool,
 	pub metrics:	LayoutMetrics,	// font units
 	pub font:		Arc<Font>,		// a chain of this one face
+	bytes_fp:		Fingerprint,	// of the face's font file, taken once as the face is added
 }
 
 impl BookFace {
@@ -925,6 +928,7 @@ impl FontBook {
 		let (family, variant) = res!(describe(&class));
 		let key = family.to_lowercase();
 		let id = self.faces.len();
+		let bytes_fp = Fingerprint::of(face.bytes());
 		self.faces.push(BookFace {
 			family,
 			key:		key.clone(),
@@ -935,6 +939,7 @@ impl FontBook {
 			math:		class.math,
 			metrics,
 			font:		Arc::new(font),
+			bytes_fp,
 		});
 		self.families.entry(key).or_default().push(id);
 		Ok(id)
@@ -1015,6 +1020,19 @@ impl FontBook {
 	pub fn shape_stats(&self) -> Outcome<ShapeStats> {
 		let cache = lock_mutex!(self.shapes);
 		Ok(cache.stats())
+	}
+
+	/// A fingerprint of the face set: each face's family name and the bytes of its font file, in the order
+	/// the faces were added, which is the order selection breaks a tie in. A cache keyed on what a face
+	/// shapes or draws is valid only under the set it was made under.
+	pub fn fingerprint(&self) -> Fingerprint {
+		let mut f = Fingerprinter::new();
+		f.write_usize(self.faces.len());
+		for face in &self.faces {
+			f.write_str(&face.family);
+			f.write_fingerprint(face.bytes_fp);
+		}
+		f.finish()
 	}
 
 	pub fn len(&self) -> usize { self.faces.len() }

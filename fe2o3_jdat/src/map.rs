@@ -234,6 +234,71 @@ impl Dat {
         }
     }
 
+    /// As [`map_get`](Self::map_get), for a value that may be changed. Absent from anything but a map.
+    pub fn map_get_mut(&mut self, key: &Self) -> Outcome<Option<&mut Self>> {
+        match self {
+            Dat::OrdMap(m) => {
+                let mut found = m.iter_mut().filter(|(mk, _)| mk.dat() == key);
+                let first = found.next();
+                if found.next().is_some() {
+                    return Err(err!(
+                        "There are several entries with the same key {:?} in the OrdMap, \
+                        which is not allowed.", key;
+                    Invalid, Input, Exists));
+                }
+                Ok(first.map(|(_, v)| v))
+            },
+            Dat::Map(m) => Ok(m.get_mut(key)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Sets `val` in the map at the path `keys`, a key for each level of nesting, and returns the value it
+    /// replaced. A level that is absent is made as an empty map of the parent's kind, so setting
+    /// `["colour", "space"]` in an empty map gives `{ colour: { space: .. } }`. A level that is present but
+    /// is not a map is an error naming how far the path got, and nothing is changed by it.
+    pub fn map_put_at(&mut self, keys: &[Self], val: Self) -> Outcome<Option<Self>> {
+        let (key, rest) = match keys.split_first() {
+            Some(split) => split,
+            None => return Err(err!("A path into a map needs at least one key."; Input, Invalid, Missing)),
+        };
+        if rest.is_empty() {
+            return self.map_put(key.clone(), val);
+        }
+        match res!(self.map_get(key)) {
+            Some(Dat::Map(_)) | Some(Dat::OrdMap(_))    => (),
+            Some(other) => return Err(err!(
+                "The key {:?} holds a {:?}, not a map, so the path cannot go deeper than it.",
+                key, other.kind();
+            Input, Invalid, Mismatch)),
+            None => {
+                let child = match self {
+                    Dat::OrdMap(_)  => Dat::OrdMap(BTreeMap::new()),
+                    _               => Dat::Map(BTreeMap::new()),
+                };
+                res!(self.map_put(key.clone(), child));
+            },
+        }
+        match res!(self.map_get_mut(key)) {
+            Some(child) => child.map_put_at(rest, val),
+            None        => Err(err!("The key {:?} was set and is gone.", key; Bug, Missing)),
+        }
+    }
+
+    /// As [`map_put_at`](Self::map_put_at), the path a string of keys joined by dots, each a `Dat::Str`:
+    /// `"colour.space"` is `["colour", "space"]`. An empty key, from a leading, trailing or doubled dot, is
+    /// refused.
+    pub fn map_put_dotted(&mut self, path: &str, val: Self) -> Outcome<Option<Self>> {
+        let mut keys = Vec::new();
+        for k in path.split('.') {
+            if k.is_empty() {
+                return Err(err!("The path '{}' has an empty key.", path; Input, Invalid));
+            }
+            keys.push(Dat::Str(k.to_string()));
+        }
+        self.map_put_at(&keys, val)
+    }
+
     /// Raise an error if the dat is not a map or the key is not present, otherwise return
     /// the removed value.
     pub fn map_remove_must(&mut self, key: &Self) -> Outcome<Self> {

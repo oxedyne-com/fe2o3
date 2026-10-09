@@ -1497,7 +1497,7 @@ fn collect_place(engine: &mut Engine, elem: &Content, styles: &StyleChain, out: 
 	// A float is read where its `place` stands: its location when it has one, else one handed out now.
 	let mark = match elem.location() {
 		Some(l)	=> l.0,
-		None	=> engine.locator.locate(ElemKind::Place, elem.span()).0,
+		None	=> engine.locator.locate(ElemKind::Place, elem.fingerprint()).0,
 	};
 	if float {
 		out.push(Child::Mark(mark));
@@ -3403,7 +3403,7 @@ fn layout_stack(engine: &mut Engine, elem: &Content, styles: &StyleChain, region
 		if let Some(sp) = deferred {
 			s.spacing(sp, styles);
 		}
-		let place = places.as_mut().map(|l| l.next(content.kind().unwrap_or(ElemKind::Sequence), content.span()));
+		let place = places.as_mut().map(|l| l.next(content.kind().unwrap_or(ElemKind::Sequence), content.shell()));
 		res!(s.block(engine, place, &content, styles));
 		deferred = spacing;
 	}

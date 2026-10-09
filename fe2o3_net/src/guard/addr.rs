@@ -14,6 +14,8 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+use crate::addr::client_key;
+
 use oxedyne_fe2o3_core::{
     prelude::*,
     map::MapMut,
@@ -95,7 +97,7 @@ pub struct AddressLog<
     const N: usize,
     D: Clone + Debug + Default,
 > {
-    pub ip:             Option<IpAddr>,     // held so a snapshot need not reverse a shard key
+    pub ip:             Option<IpAddr>,     // the client key, held so a snapshot need not reverse a shard key
     pub state:          AddressState<N>,
     pub throttle_cnt:   u16,                // throttling episodes so far
     pub first_seen:     SystemTime,
@@ -211,7 +213,7 @@ pub struct AddressGuard<
     const N: usize, // Request timer ring length.
     D: Clone + Debug + Default,
 > {
-    // Per-address logs, keyed by a hash of the IP octets.
+    // Per-client logs, keyed by a hash of the client key (the IPv6 /64, not the full address).
     pub amap:           ShardMap<C, S, AddressLog<N, D>, M, H>,
     pub arps_max:       u64,         // maximum average requests per second in Monitor
     pub tint_min:       Duration,    // minimum interval between requests in Throttle
@@ -244,8 +246,11 @@ impl<
 >
     AddressGuard<C, M, H, S, N, D>
 {
+    // Every key goes through here, so a client is one bucket whichever of its addresses it
+    // uses: an IPv6 client holds a whole /64, and the keying in `client_key` is what makes a
+    // blacklist, a throttle and a concurrency cap hold against it.
     fn ip_bytes(addr: &IpAddr) -> Vec<u8> {
-        match addr {
+        match client_key(addr) {
             IpAddr::V4(a) => a.octets().to_vec(),
             IpAddr::V6(a) => a.octets().to_vec(),
         }
@@ -293,7 +298,7 @@ impl<
                 Some(c) => c,
                 None => {
                     let mut log = AddressLog::<N, D>::default();
-                    log.ip = Some(*addr);
+                    log.ip = Some(client_key(addr));
                     let c = log.conns.clone();
                     unlocked_map.insert(key, log);
                     c
@@ -358,7 +363,7 @@ impl<
         // run the caller's extra hook and return.
         if unlocked_map.get(&key).is_none() {
             let mut log = AddressLog::<N, D>::default();
-            log.ip          = Some(*addr);
+            log.ip          = Some(client_key(addr));
             log.first_seen  = now;
             log.last_seen   = now;
             log.total_reqs  = 1;
@@ -496,7 +501,7 @@ impl<
             Some(log) => log.state = AddressState::Whitelist,
             None => {
                 let mut log = AddressLog::<N, D>::default();
-                log.ip    = Some(*addr);
+                log.ip    = Some(client_key(addr));
                 log.state = AddressState::Whitelist;
                 unlocked_map.insert(key, log);
             }
@@ -518,7 +523,7 @@ impl<
             Some(log) => log.state = bl,
             None => {
                 let mut log = AddressLog::<N, D>::default();
-                log.ip    = Some(*addr);
+                log.ip    = Some(client_key(addr));
                 log.state = bl;
                 unlocked_map.insert(key, log);
             }
@@ -896,5 +901,62 @@ mod tests {
         assert_eq!(snap.entries.len(), 2);
         assert!(snap.entries.iter().any(|e| e.ip == a));
         assert!(snap.entries.iter().any(|e| e.ip == b));
+    }
+
+    #[test]
+    fn ipv6_addresses_in_one_slash_64_share_a_bucket() {
+        let guard = make_guard(100, 5);
+        let a: IpAddr = "2001:db8:1:2::1".parse().expect("a");
+        let b: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().expect("b");
+        guard.check(&a).expect("a");
+        guard.check(&b).expect("b");
+        let counts = guard.counts().expect("counts");
+        assert_eq!(counts.total, 1, "two addresses of one /64 were counted as two clients");
+    }
+
+    #[test]
+    fn ipv6_addresses_in_different_slash_64s_have_their_own_buckets() {
+        let guard = make_guard(100, 5);
+        let a: IpAddr = "2001:db8:1:2::1".parse().expect("a");
+        let b: IpAddr = "2001:db8:1:3::1".parse().expect("b");
+        guard.check(&a).expect("a");
+        guard.check(&b).expect("b");
+        let counts = guard.counts().expect("counts");
+        assert_eq!(counts.total, 2, "two /64s shared one bucket");
+    }
+
+    #[test]
+    fn a_blacklist_on_one_ipv6_address_holds_for_the_rest_of_its_slash_64() {
+        let guard = make_guard(100, 5);
+        let a: IpAddr = "2001:db8:1:2::1".parse().expect("a");
+        let b: IpAddr = "2001:db8:1:2:dead:beef:0:1".parse().expect("b");
+        guard.blacklist(&a).expect("blacklist");
+        match guard.check(&b).expect("check") {
+            GuardDecision::Blocked(BlacklistReason::Manual) => (),
+            other => panic!("a neighbour in the /64 got past the blacklist: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn an_ipv4_mapped_address_shares_a_bucket_with_its_ipv4() {
+        let guard = make_guard(100, 5);
+        let v4: IpAddr = Ipv4Addr::new(203, 0, 113, 7).into();
+        let mapped: IpAddr = "::ffff:203.0.113.7".parse().expect("mapped");
+        guard.check(&v4).expect("v4");
+        guard.check(&mapped).expect("mapped");
+        let counts = guard.counts().expect("counts");
+        assert_eq!(counts.total, 1, "one client over two families was counted twice");
+    }
+
+    #[test]
+    fn a_slash_64_holds_its_concurrency_cap_whatever_the_address() {
+        let guard = make_conn_guard(2);
+        let mut permits = Vec::new();
+        for n in 1..=4u16 {
+            let ip: IpAddr = format!("2001:db8:1:2::{:x}", n).parse().expect("ip");
+            permits.push(guard.acquire(&ip).expect("acquire"));
+        }
+        let admitted = permits.iter().filter(|p| p.is_some()).count();
+        assert_eq!(admitted, 2, "a /64 took {} connections against a cap of 2", admitted);
     }
 }
