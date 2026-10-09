@@ -63,7 +63,9 @@ static HEADS_HELD:       AtomicU64  = AtomicU64::new(0);      // stores that hav
 static SWEEP_HOLD:       AtomicBool = AtomicBool::new(false); // a sweep waits between its two scans
 static SWEEPS_HELD:      AtomicU64  = AtomicU64::new(0);      // sweeps that have reached the hold above
 static FAULT_RECORD_FAILS: AtomicBool = AtomicBool::new(false); // the fault record cannot be written
-static REPLAY_SYNC_FAILS_FOR: AtomicU64 = AtomicU64::new(0);   // file whose sync before replay fails, 0 none
+static REPLAY_SYNC_FAILS: AtomicBool = AtomicBool::new(false); // the flush before replay fails
+static REPLAY_FLUSH_WAY: AtomicU64 = AtomicU64::new(0);      // 0 as the kernel allows, 1 syncfs, 2 per file
+static REPLAY_FLUSHES:   AtomicU64  = AtomicU64::new(0);      // syncfs or file syncs made before replay
 static DURABILITY_MS:    AtomicU64  = AtomicU64::new(0);      // a store's durability timeout, when set
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
@@ -232,14 +234,49 @@ pub(crate) fn fault_record_fails() -> bool {
     FAULT_RECORD_FAILS.load(Ordering::SeqCst)
 }
 
-/// Makes the sync an open gives file `fnum` before replaying it fail, as a write-back error
-/// left by a crashed run would.
-pub fn set_replay_sync_failure_for(fnum: Option<u32>) {
-    REPLAY_SYNC_FAILS_FOR.store(fnum.map_or(0, u64::from), Ordering::SeqCst);
+/// Makes the flush an open gives the store's files before replaying them fail, whichever way it
+/// is made, as a write-back error left by a crashed run would.
+pub fn set_replay_sync_failure(on: bool) {
+    REPLAY_SYNC_FAILS.store(on, Ordering::SeqCst);
 }
 
-pub(crate) fn replay_sync_fails(fnum: u32) -> bool {
-    u64::from(fnum) == REPLAY_SYNC_FAILS_FOR.load(Ordering::SeqCst)
+pub(crate) fn replay_sync_fails() -> bool {
+    REPLAY_SYNC_FAILS.load(Ordering::SeqCst)
+}
+
+/// How the flush before replay is made.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplayFlush {
+    Kernel,     // `syncfs` where the kernel reports write-back errors through it, else per file
+    Syncfs,     // `syncfs` once per filesystem, wherever the platform has it
+    PerFile,    // a sync of each data and index file
+}
+
+/// Forces the way the flush before replay is made, so that a test can exercise both.
+pub fn set_replay_flush(way: ReplayFlush) {
+    let n = match way {
+        ReplayFlush::Kernel     => 0,
+        ReplayFlush::Syncfs     => 1,
+        ReplayFlush::PerFile    => 2,
+    };
+    REPLAY_FLUSH_WAY.store(n, Ordering::SeqCst);
+}
+
+pub(crate) fn replay_flush() -> ReplayFlush {
+    match REPLAY_FLUSH_WAY.load(Ordering::SeqCst) {
+        1 => ReplayFlush::Syncfs,
+        2 => ReplayFlush::PerFile,
+        _ => ReplayFlush::Kernel,
+    }
+}
+
+/// The `syncfs` calls and file syncs made by every flush before replay since the process began.
+pub fn replay_flushes() -> u64 {
+    REPLAY_FLUSHES.load(Ordering::SeqCst)
+}
+
+pub(crate) fn count_replay_flush() {
+    REPLAY_FLUSHES.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Makes the durability barriers of live file `fnum` fail, as `set_barrier_failure` does every

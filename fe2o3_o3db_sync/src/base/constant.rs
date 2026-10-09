@@ -80,13 +80,15 @@ pub const HASH_BYTES:                   usize = 8; // u64
 pub const CACHE_HASH_BYTES:             usize = 4; // u32
 
 // File size management.
-// When the total length of old values in a data file exceeds the following percentage of the
-// file's own length, garbage collection on the file is triggered.  The length is taken as no less
-// than the floor below, a fraction of the maximum data file length, so that a small file is not
-// rewritten for a few old bytes, and as no more than the maximum, so that a full file triggers
-// as it did when the basis was always the maximum (2026-10-10).
+// A sealed data file is collected once its old bytes pass the first percentage of the maximum
+// data file length, or reach the second of the file's own length (`OzoneConfig::gc_due`).  The
+// second catches a file a collection has already shrunk whose old-marking arrived late, which
+// the first could leave stranded for ever.  It is high so that a shrunk file is not collected
+// again for a few late old bytes: at 75 % a collection copies at most 25 bytes per 75 reclaimed,
+// where weighing a shrunk file at 30 % of its own length tripled small-file collections and
+// raised the collector's bytes per application byte from 0.92 to 1.30 (2026-10-10).
 pub const OLD_DATA_PERCENT_GC_TRIGGER:  f64 = 30.0;
-pub const GC_TRIGGER_FLOOR_FRAC_OF_MAX: f64 = 0.10;
+pub const OLD_SHARE_GC_TRIGGER:         f64 = 75.0;
 
 // File reading cache.
 pub const FILE_CACHE_EXPIRY_SECS:       u64 = 15*60; // 15 mins

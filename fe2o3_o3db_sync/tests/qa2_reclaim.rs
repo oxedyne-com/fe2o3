@@ -227,20 +227,24 @@ fn qa2_shrink_footprint_series_never() -> Outcome<()> {
     shrink_series("./test_db_qa2_shrink_never", false, 0)
 }
 
-// Sealed files still holding more old bytes than the collector lets stand once it is quiet: the
-// trigger's share of the file's own size, or of a tenth of the maximum for a smaller file.  Polled
-// for ten seconds, so that collections under way can finish.
+// Sealed files still holding more old bytes than the collector lets stand once it is quiet:
+// past the trigger's share of the maximum file length, or at the high share of the file's own
+// length that catches a shrunk file flagged old late.  Polled for ten seconds, so that
+// collections under way can finish.
 fn stranded(db: &TestDb, max: u64) -> Outcome<Vec<(u32, u64, usize)>> {
-    let floor = (max as f64 * constant::GC_TRIGGER_FLOOR_FRAC_OF_MAX) as usize;
     let mut found = Vec::new();
     for _ in 0..40 {
         found.clear();
         for (_, fmap) in res!(db.api().collect_file_states(scan_wait())) {
             for (fnum, fstat) in fmap.map() {
-                let basis = fstat.get_data_file_size().max(floor).min(max as usize) as f64;
-                let pct = 100.0 * fstat.get_old_sum() as f64 / basis;
-                if !fstat.is_live() && pct > constant::OLD_DATA_PERCENT_GC_TRIGGER {
-                    found.push((*fnum, fstat.get_old_sum(), fstat.get_data_file_size()));
+                let old = fstat.get_old_sum() as f64;
+                let size = fstat.get_data_file_size();
+                let of_max = 100.0 * old / max as f64;
+                let of_own = if size == 0 { 0.0 } else { 100.0 * old / size as f64 };
+                if !fstat.is_live() && (of_max > constant::OLD_DATA_PERCENT_GC_TRIGGER
+                    || of_own >= constant::OLD_SHARE_GC_TRIGGER)
+                {
+                    found.push((*fnum, fstat.get_old_sum(), size));
                 }
             }
         }

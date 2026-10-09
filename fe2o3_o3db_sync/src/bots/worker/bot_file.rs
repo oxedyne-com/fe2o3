@@ -714,11 +714,7 @@ impl<
         let plan = match self.states().get_state(fnum) {
             Ok(_) if stopped => Plan::Hold(Hold::Stopped),
             Ok(fstat) => {
-                let trigger = constant::OLD_DATA_PERCENT_GC_TRIGGER;
-                let oldfrac = self.cfg().old_percent(
-                    fstat.get_old_sum(),
-                    fstat.get_data_file_size(),
-                );
+                let due = self.cfg().gc_due(fstat.get_old_sum(), fstat.get_data_file_size());
                 if fstat.is_live() {
                     Plan::Hold(Hold::Live)
                 } else if unsynced {
@@ -731,7 +727,7 @@ impl<
                     Plan::Hold(Hold::Readers)
                 } else if !ordered && !(self.gc_on && self.gc_auto_active()) {
                     Plan::Declined
-                } else if !ordered && !((oldfrac > trigger) || fstat.is_all_data_old()) {
+                } else if !ordered && !(due || fstat.is_all_data_old()) {
                     Plan::Declined
                 } else {
                     // A sealed file may still have writes draining.  A record's bytes reach the

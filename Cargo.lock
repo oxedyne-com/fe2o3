@@ -3367,6 +3367,7 @@ dependencies = [
  "hostname",
  "humantime",
  "lazy_static",
+ "nix",
  "num_cpus",
  "oxedyne_fe2o3_bot",
  "oxedyne_fe2o3_core",

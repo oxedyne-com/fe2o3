@@ -191,16 +191,27 @@ impl OzoneConfig {
         }
     }
 
-    /// The old share of a data file, in percent, as the collector's trigger weighs it: against
-    /// the file's own length, held between a floor and the maximum data file length.  Old-marking
-    /// can arrive after a collection has rewritten a file, from a held discard, another file
-    /// bot or a retire, and a rewritten file is small.  Weighed against the maximum, the record
-    /// that arrived late could hold such a file under the trigger for ever.
-    pub fn old_percent(&self, old_sum: u64, dat_size: usize) -> f64 {
-        let max = self.data_file_max_bytes as f64;
-        let floor = max * constant::GC_TRIGGER_FLOOR_FRAC_OF_MAX;
-        let basis = (dat_size as f64).max(floor).min(max);
-        100.0 * (old_sum as f64) / basis
+    /// Does a sealed data file hold enough old bytes for the collector to take it?  Either they
+    /// pass `OLD_DATA_PERCENT_GC_TRIGGER` of the maximum data file length, the rule for a full
+    /// file, or reach `OLD_SHARE_GC_TRIGGER` of the file's own length.  Old-marking can arrive
+    /// after a collection has shrunk a file, from a held discard, another file bot or a retire,
+    /// and weighed only against the maximum such a file could stay under the trigger for ever.
+    pub fn gc_due(&self, old_sum: u64, dat_size: usize) -> bool {
+        self.old_percent(old_sum) > constant::OLD_DATA_PERCENT_GC_TRIGGER
+            || Self::old_share(old_sum, dat_size) >= constant::OLD_SHARE_GC_TRIGGER
+    }
+
+    /// Old bytes as a percentage of the maximum data file length.
+    pub fn old_percent(&self, old_sum: u64) -> f64 {
+        100.0 * (old_sum as f64) / (self.data_file_max_bytes as f64)
+    }
+
+    /// Old bytes as a percentage of the file's own length.
+    pub fn old_share(old_sum: u64, dat_size: usize) -> f64 {
+        match dat_size {
+            0 => 0.0,
+            n => 100.0 * (old_sum as f64) / (n as f64),
+        }
     }
 
     pub fn rest_chunk_size(&self)           -> usize { self.rest_chunk_bytes as usize }

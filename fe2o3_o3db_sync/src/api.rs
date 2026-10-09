@@ -1863,9 +1863,10 @@ impl<
                 info!(sync_log::stream(), " None"); 
             } else {
                 for (fnum, fstat) in fstates.map() {
-                    info!(sync_log::stream(), " {:10} {:?} old = {:.1}%",
+                    info!(sync_log::stream(), " {:10} {:?} old = {:.1}% of max, {:.1}% of own",
                         fnum, fstat,
-                        self.cfg().old_percent(fstat.get_old_sum(), fstat.get_data_file_size()),
+                        self.cfg().old_percent(fstat.get_old_sum()),
+                        OzoneConfig::old_share(fstat.get_old_sum(), fstat.get_data_file_size()),
                     );
                 }
             }

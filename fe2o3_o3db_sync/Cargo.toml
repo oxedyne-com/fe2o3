@@ -50,6 +50,10 @@ regex = "1.5"
 secrecy = "0.8.0"
 seahash = "4.0.1"
 
+# `syncfs`, so that an open flushes each filesystem once rather than every file.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["fs"] }
+
 [dev-dependencies]
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
 oxedyne_fe2o3_sys 				= { path = "../fe2o3_sys" }
