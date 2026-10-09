@@ -19,6 +19,7 @@ use oxedyne_fe2o3_graphics::icc::read::{
 	Space,
 };
 use oxedyne_fe2o3_graphics::icc::transform::{
+	bpc_forced,
 	Dev,
 	Intent,
 	Transform,
@@ -341,7 +342,8 @@ impl Settings {
 	///
 	/// The profiles, the intent and the black point apply when `colour.space` is `cmyk` or `grey`; the grey
 	/// profile only to `grey`, and the black only to `cmyk`. A value other than the default anywhere else
-	/// would be ignored, so it is refused.
+	/// would be ignored, so it is refused. A black point the output profile and intent override is refused when
+	/// the profiles are read, in [`Settings::pdf_options`].
 	pub fn check_built(&self, doc_dir: &Path) -> Outcome<()> {
 		let c = &self.colour;
 		let d = Colour::default();
@@ -401,6 +403,19 @@ impl Settings {
 		};
 		let bpc = c.black_point;
 		let rgb = res!(device("colour.rgb_profile", &c.rgb_profile, Space::Rgb, base));
+		// Every transform of a space ends in its own profile, so that profile and the intent alone say whether
+		// the black point setting is heard. Turned off where it is not, it is refused, as an ignored key is.
+		let unheard = |dst: &Dev, key: &str, name: &str| -> Outcome<()> {
+			match bpc_forced(dst, intent) {
+				Some(on) if bpc != Colour::default().black_point	=> Err(err!(
+					"The setting 'colour.black_point' = {} changes nothing at the intent \"{}\" into the profile of \
+					'{}' (\"{}\"), which {}. Leave it at its default.",
+					bpc, c.intent, key, name,
+					if on { "always compensates (version 4, perceptual or saturation)" } else { "never compensates" };
+					Input, Invalid)),
+				_													=> Ok(()),
+			}
+		};
 		let joined = |keys: &str, src: &Dev, dst: &Dev| -> Outcome<Arc<Transform>> {
 			match Transform::new(src, dst, intent, bpc) {
 				Ok(xf)	=> Ok(Arc::new(xf)),
@@ -409,11 +424,13 @@ impl Settings {
 		};
 		if c.space == "cmyk" {
 			let cmyk = res!(device("colour.cmyk_profile", &c.cmyk_profile, Space::Cmyk, base));
+			res!(unheard(&cmyk, "colour.cmyk_profile", &c.cmyk_profile));
 			let xf = res!(joined("'colour.rgb_profile' and 'colour.cmyk_profile'", &rgb, &cmyk));
 			let black = if c.black == "rich" { Black::Rich } else { Black::KOnly };
 			ColourOut::cmyk(xf, black)
 		} else {
 			let grey = res!(device("colour.grey_profile", &c.grey_profile, Space::Gray, base));
+			res!(unheard(&grey, "colour.grey_profile", &c.grey_profile));
 			let cmyk = res!(device("colour.cmyk_profile", &c.cmyk_profile, Space::Cmyk, base));
 			let xf = res!(joined("'colour.rgb_profile' and 'colour.grey_profile'", &rgb, &grey));
 			let cx = res!(joined("'colour.cmyk_profile' and 'colour.grey_profile'", &cmyk, &grey));

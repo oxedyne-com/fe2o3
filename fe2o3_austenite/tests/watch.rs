@@ -283,7 +283,29 @@ fn a_colour_key_that_the_space_does_not_read_is_refused_by_its_key() {
 	for arg in [
 		&["colour.space=native"][..], &["colour.space=rgb", "colour.black=k", "colour.black_point=true"],
 		&["colour.space=cmyk", "colour.black=rich", "colour.intent=relative", "colour.black_point=false"],
-		&["colour.space=grey", "colour.intent=saturation", "colour.black_point=false"],
+		&["colour.space=grey", "colour.intent=relative", "colour.black_point=false"],
+	] {
+		assert!(Plan::at(&d, Some(&main), &sets(arg), None).is_ok(), "{:?} is built", arg);
+	}
+}
+
+#[test]
+fn turning_off_a_black_point_compensation_that_every_transform_forces_is_refused_by_its_key() {
+	let (d, main) = project("forced-bpc", "");
+	// The built-in grey profile is version 4, into which perceptual and saturation always compensate, and the
+	// absolute intent never does: the setting would change nothing.
+	for intent in ["perceptual", "saturation", "absolute"] {
+		let i = format!("colour.intent={}", intent);
+		let m = why(Plan::at(&d, Some(&main), &sets(&["colour.space=grey", i.as_str(), "colour.black_point=false"]), None));
+		assert!(m.contains("colour.black_point") && m.contains(intent), "{}: {}", intent, m);
+	}
+	let m = why(Plan::at(&d, Some(&main), &sets(&["colour.space=cmyk", "colour.intent=absolute", "colour.black_point=false"]), None));
+	assert!(m.contains("colour.black_point"), "cmyk absolute: {}", m);
+	// The bundled CMYK profile is version 2, so perceptual compensates only when asked.
+	for arg in [
+		&["colour.space=cmyk", "colour.black_point=false"][..],
+		&["colour.space=grey", "colour.intent=relative", "colour.black_point=false"],
+		&["colour.space=grey", "colour.black_point=true"],
 	] {
 		assert!(Plan::at(&d, Some(&main), &sets(arg), None).is_ok(), "{:?} is built", arg);
 	}

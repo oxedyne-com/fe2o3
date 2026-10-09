@@ -217,8 +217,7 @@ impl Transform {
 					p.name, intent.tag(); Invalid, Input, Missing));
 			}
 		}
-		let bpc = intent != Intent::Absolute
-			&& (bpc || (dst.v4 && matches!(intent, Intent::Perceptual | Intent::Saturation)));
+		let bpc = bpc_forced(dst, intent).unwrap_or(bpc);
 		let mut scale = [1.0; 3];
 		let mut off = [0.0; 3];
 		if intent == Intent::Absolute {
@@ -373,6 +372,17 @@ impl Transform {
 	pub fn grid(&self) -> Outcome<&Grid> {
 		res!(self.shape(3, self.dst.channels()));
 		Ok(self.grid.get_or_init(|| Grid::build(self)))
+	}
+}
+
+/// The black point compensation a transform into `dst` at `intent` applies whatever it is asked, none when it
+/// does as it is asked. The absolute intent never compensates, and perceptual and saturation always compensate
+/// into a version 4 profile, as LittleCMS has it.
+pub fn bpc_forced(dst: &Dev, intent: Intent) -> Option<bool> {
+	match intent {
+		Intent::Absolute								=> Some(false),
+		Intent::Perceptual | Intent::Saturation if dst.v4	=> Some(true),
+		_												=> None,
 	}
 }
 
