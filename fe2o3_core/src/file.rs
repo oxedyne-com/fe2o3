@@ -110,7 +110,7 @@ pub enum SaveMode {
 /// byte a SIGKILL leaves the file empty for good, and a small state file that
 /// every later command parses is then refused for ever.
 ///
-/// The write lands on a sibling `<name>.<pid>.<n>.tmp`, where `n` counts saves
+/// The write lands on a hidden sibling `.<name>.<pid>.<n>.tmp`, where `n` counts saves
 /// across the whole process, so no other writer -- another process, or another
 /// thread of this one -- ever uses the same name. It is made with `create_new`
 /// (never `create` then `chmod`, which leaves a window at the process's default
@@ -126,7 +126,7 @@ pub enum SaveMode {
 /// the directory and not to the file, so a read-only file is replaced too.
 ///
 /// Once its own rename has landed, a save sweeps, best-effort, any
-/// `<name>.<digits>.<digits>.tmp` older than [`TMP_SWEEP_AGE`] that crashed
+/// `.<name>.<digits>.<digits>.tmp` (or the unhidden form older code wrote) older than [`TMP_SWEEP_AGE`] that crashed
 /// writers left beside `path`. A failed sweep never fails the save. A writer that
 /// stalls past that age between create and rename, or whose tmp a writer on
 /// older code removes, finds its tmp gone at the rename: it returns an error
@@ -139,21 +139,40 @@ pub fn save_atomic(
 )
     -> Outcome<()>
 {
-    replace_file(path, data, mode, TMP_SWEEP_AGE, false)
+    replace_file(path, mode, TMP_SWEEP_AGE, false, |f| {
+        res!(f.write_all(data));
+        Ok(())
+    })
+}
+
+/// As [`save_atomic`], with the bytes written by `write` into this call's own
+/// temporary file, so a large output can be streamed rather than gathered into
+/// one buffer first. An error from `write` removes the temporary and leaves
+/// `path` as it was.
+pub fn save_atomic_with<F>(
+    path:   &Path,
+    mode:   SaveMode,
+    write:  F,
+)
+    -> Outcome<()>
+    where F: FnOnce(&mut File) -> Outcome<()>
+{
+    replace_file(path, mode, TMP_SWEEP_AGE, false, write)
 }
 
 /// The one body of [`save_atomic`] and [`save_secret`]. `sweep_legacy` also
 /// removes `<name>.tmp`, a name only the secret saves ever wrote and which an
 /// ordinary neighbour could be using, and `sweep_age` lets a test put the sweep
 /// onto a live writer's file.
-fn replace_file(
+fn replace_file<F>(
     path:           &Path,
-    data:           &[u8],
     mode:           SaveMode,
     sweep_age:      Duration,
     sweep_legacy:   bool,
+    write:          F,
 )
     -> Outcome<()>
+    where F: FnOnce(&mut File) -> Outcome<()>
 {
     let name = res!(file_name_of(path));
     #[cfg(unix)]
@@ -177,7 +196,7 @@ fn replace_file(
             }
         }
     }
-    if let Err(e) = f.write_all(data) {
+    if let Err(e) = write(&mut f) {
         let _ = fs::remove_file(&tmp);
         return Err(err!(e,
             "Could not write the temporary file {:?}.", tmp;
@@ -242,7 +261,10 @@ pub(crate) fn save_secret_aged(
 )
     -> Outcome<()>
 {
-    replace_file(path, data, SaveMode::Owner, sweep_age, true)
+    replace_file(path, SaveMode::Owner, sweep_age, true, |f| {
+        res!(f.write_all(data));
+        Ok(())
+    })
 }
 
 /// Creates `path` and any missing parents, as `create_dir_all` does, but at
@@ -455,11 +477,13 @@ fn create_tmp(
 }
 
 /// The temporary name writer `n` of process `pid` gives file `name`:
-/// `<name>.<pid>.<n>.tmp`.
+/// `.<name>.<pid>.<n>.tmp`, hidden so that a listing or a sync tool that skips
+/// dot files never takes it for a file of the tree.
 fn tmp_name(name: &OsStr, pid: u32, n: u64) -> OsString {
     // Built as an `OsString`, not via `to_string_lossy`, so a non-UTF-8 file
     // name is not mangled into one that could collide with another file's.
-    let mut tmp = name.to_os_string();
+    let mut tmp = OsString::from(".");
+    tmp.push(name);
     tmp.push(fmt!(".{}.{}.tmp", pid, n));
     tmp
 }
@@ -471,11 +495,16 @@ fn legacy_tmp_name(name: &OsStr) -> OsString {
     tmp
 }
 
-/// Is `entry` strictly `<name>.<digits>.<digits>.tmp`, a writer's temporary
-/// file for file `name`?
+/// Is `entry` strictly `.<name>.<digits>.<digits>.tmp`, a writer's temporary
+/// file for file `name`, or the same without the dot, as older code named it?
 fn is_tmp_of(entry: &OsStr, name: &OsStr) -> bool {
     let digits = |p: &[u8]| !p.is_empty() && p.iter().all(u8::is_ascii_digit);
-    let mid = entry.as_encoded_bytes()
+    let bytes = entry.as_encoded_bytes();
+    let unhidden = match bytes.strip_prefix(b".") {
+        Some(rest) if rest.starts_with(name.as_encoded_bytes()) => rest,
+        _ => bytes,
+    };
+    let mid = unhidden
         .strip_prefix(name.as_encoded_bytes())
         .and_then(|r| r.strip_prefix(b"."))
         .and_then(|r| r.strip_suffix(b".tmp"));
@@ -492,7 +521,7 @@ fn is_tmp_of(entry: &OsStr, name: &OsStr) -> bool {
 }
 
 /// Removes, best-effort, what crashed writers of file `name` left beside `path`:
-/// each `<name>.<pid>.<n>.tmp` at least `sweep_age` old, and when `legacy` the
+/// each `.<name>.<pid>.<n>.tmp`, hidden or not, at least `sweep_age` old, and when `legacy` the
 /// `<name>.tmp` of the old secret saves. A live writer's file is younger than
 /// any sensible bound, so it is left alone. Nothing here can fail a save that has
 /// already landed.
@@ -767,6 +796,7 @@ mod tests {
             ("key.tmp",         false,  true),
             ("key.1.2.tmp",     true,   true),
             ("key.3.4.tmp",     false,  false),
+            (".key.1.2.tmp",    true,   true),
             ("key.x.tmp",       true,   false),
             ("key.1.2.3.tmp",   true,   false),
             ("key.1.2.tmp.bak", true,   false),
@@ -1450,6 +1480,9 @@ mod tests {
             ("data.tmp",        true,   false),
             ("data.1.2.tmp",    true,   true),
             ("data.3.4.tmp",    false,  false),
+            (".data.1.2.tmp",   true,   true),
+            (".data.3.4.tmp",   false,  false),
+            ("..data.1.2.tmp",  true,   false),
             ("other.1.2.tmp",   true,   false),
         ];
         for (name, aged, _) in cases {
@@ -1507,6 +1540,137 @@ mod tests {
         if names != ["link", "target"] {
             return Err(err!("A save left {:?} in the directory, not just the two files.", names;
                 Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// A writer's temporary is hidden, so a directory listing, or a sync tool
+    /// that skips dot files, never takes it for a file of the tree.
+    #[test]
+    fn test_save_atomic_temporary_name_is_hidden() -> Outcome<()> {
+        let tmp = tmp_name(OsStr::new("book.pdf"), 7, 3);
+        if tmp != OsStr::new(".book.pdf.7.3.tmp") {
+            return Err(err!("The temporary of book.pdf was named {:?}, not .book.pdf.7.3.tmp.", tmp;
+                Test, Mismatch));
+        }
+        if !is_tmp_of(&tmp, OsStr::new("book.pdf")) || !is_tmp_of(OsStr::new("book.pdf.7.3.tmp"), OsStr::new("book.pdf")) {
+            return Err(err!("A hidden temporary, or one an older writer left unhidden, was not \
+                recognised as a temporary of book.pdf."; Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    // The names left in `dir`, sorted.
+    fn names_in(dir: &Path) -> Outcome<Vec<String>> {
+        let mut names: Vec<String> = Vec::new();
+        for entry in res!(fs::read_dir(dir)) {
+            names.push(res!(entry).file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// A write that fails part way, as a full disk does, removes its temporary
+    /// and leaves the file as it was.
+    #[test]
+    fn test_save_atomic_with_a_failed_write_leaves_no_temporary_and_the_file_as_it_was() -> Outcome<()> {
+        let dir = scratch_path("atomic_failed_write");
+        res!(fs::create_dir(&dir));
+        let outcome = failed_write(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        outcome
+    }
+
+    fn failed_write(dir: &Path) -> Outcome<()> {
+        let file = dir.join("data");
+        res!(fs::write(&file, b"old bytes"));
+        let r = save_atomic_with(&file, SaveMode::Keep, |f| {
+            res!(f.write_all(b"half of the new"));
+            Err(err!("No space left on device."; Test, IO))
+        });
+        if r.is_ok() {
+            return Err(err!("A save whose write failed reported success."; Test, Mismatch));
+        }
+        if res!(fs::read(&file)) != b"old bytes" {
+            return Err(err!("A failed save changed {:?}.", file; Test, Mismatch));
+        }
+        let names = res!(names_in(dir));
+        if names != ["data"] {
+            return Err(err!("A failed save left {:?} in the directory.", names; Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// A rename that fails, here onto a directory that is not empty, removes
+    /// the temporary it would have moved.
+    #[test]
+    fn test_save_atomic_with_a_failed_rename_leaves_no_temporary() -> Outcome<()> {
+        let dir = scratch_path("atomic_failed_rename");
+        res!(fs::create_dir(&dir));
+        let outcome = failed_rename(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        outcome
+    }
+
+    fn failed_rename(dir: &Path) -> Outcome<()> {
+        let held = dir.join("held");
+        res!(fs::create_dir(&held));
+        res!(fs::write(held.join("inner"), b"kept"));
+        if save_atomic(&held, b"new bytes", SaveMode::Keep).is_ok() {
+            return Err(err!("A save over a directory that is not empty reported success."; Test, Mismatch));
+        }
+        let names = res!(names_in(dir));
+        if names != ["held"] || res!(fs::read(held.join("inner"))) != b"kept" {
+            return Err(err!("A failed rename left {:?} in the directory.", names; Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// A writer held part way through its write is untouched by a second
+    /// writer of the same path that starts and finishes meanwhile: each
+    /// renames a whole file of its own, and the later rename wins whole.
+    #[test]
+    fn test_save_atomic_with_a_writer_held_mid_write_is_untouched_by_a_second() -> Outcome<()> {
+        let dir = scratch_path("atomic_held");
+        res!(fs::create_dir(&dir));
+        let outcome = held_mid_write(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        outcome
+    }
+
+    fn held_mid_write(dir: &Path) -> Outcome<()> {
+        let file = dir.join("out.pdf");
+        let (mid, go) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+        let slow = {
+            let (file, mid, go) = (file.clone(), mid.clone(), go.clone());
+            thread::spawn(move || save_atomic_with(&file, SaveMode::Keep, |f| {
+                res!(f.write_all(b"slow first half, "));
+                mid.wait();
+                go.wait();
+                res!(f.write_all(b"slow second half"));
+                Ok(())
+            }))
+        };
+        mid.wait();
+        let fast = save_atomic(&file, b"fast, whole", SaveMode::Keep);
+        let between = fs::read(&file);
+        go.wait();
+        let slow = match slow.join() {
+            Ok(r)   => r,
+            Err(_)  => return Err(err!("The slow writer panicked."; Test, Bug)),
+        };
+        res!(fast);
+        res!(slow);
+        if res!(between) != b"fast, whole" {
+            return Err(err!("While the slow writer was held, the file did not hold the fast \
+                writer's whole bytes."; Test, Mismatch));
+        }
+        if res!(fs::read(&file)) != b"slow first half, slow second half" {
+            return Err(err!("After both writers, the file did not hold the later writer's whole bytes."; Test, Mismatch));
+        }
+        let names = res!(names_in(dir));
+        if names != ["out.pdf"] {
+            return Err(err!("Two writers left {:?} in the directory.", names; Test, Mismatch));
         }
         Ok(())
     }
