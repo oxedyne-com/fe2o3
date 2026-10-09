@@ -167,34 +167,8 @@ impl<
                         // an "unexpected" error.
                         OzoneMsg::Value(Value::Complete(Some((dat, meta)), postgc)) |
                         OzoneMsg::Value(Value::Chunk(Some((dat, meta)), _, postgc)) => {
-                            // A deletion is stored as a tombstone value under the deleted key, and
-                            // the reader finds it exactly as it finds any other value.  A key whose
-                            // newest value is a tombstone has no value, so say so here, once, for
-                            // every caller: a deleted key reads as absent, indistinguishable from
-                            // one that was never written.  The tombstone is deliberately left
-                            // unencrypted so that it can be recognised without a key.
-                            if let Dat::Usr(kind, _) = &dat {
-                                if *kind == id::usr_kind_id_deleted() {
-                                    return Ok((None, postgc));
-                                }
-                            }
-                            let or_is_some = match or {
-                                Some(or) => or.is_some(),
-                                None => false,
-                            };
-                            if enc.is_none() && !or_is_some {
-                                return Ok((Some((dat, meta)), postgc));
-                            }
-                            let val = try_extract_dat!(dat, BU8, BU16, BU32, BU64);
-                            let plain = res!(enc.or_decrypt(&val, or));
-                            match Dat::from_bytes(&plain) {
-                                Err(e) => return Err(err!(e,
-                                    "Could not form a Dat from the value bytes, \
-                                    this could be due to the use of an encryption scheme \
-                                    differing from the one provided ({}).", enc.or_debug(or);
-                                    Decode, Bytes)),
-                                Ok((dat, _)) => return Ok((Some((dat, meta)), postgc)),
-                            }
+                            let dat = res!(decode_stored(dat, enc, or));
+                            Ok((dat.map(|dat| (dat, meta)), postgc))
                         },
                         OzoneMsg::Value(Value::Complete(None, _)) |
                         OzoneMsg::Value(Value::Chunk(None, ..)) => Ok((None, false)),
@@ -521,7 +495,8 @@ impl<
                 self.heard = Instant::now();
             },
             OzoneMsg::KeyExists(_) |
-            OzoneMsg::KeyChunkExists(..) => {
+            OzoneMsg::KeyChunkExists(..) |
+            OzoneMsg::HeadInserted(..) => {
                 self.acks.push(msg);
                 self.heard = Instant::now();
             },
@@ -591,5 +566,42 @@ impl Wait {
             max_wait,
             check_interval: Duration::default(),
         }
+    }
+}
+
+/// A stored value as its writer gave it: `None` for the deleted marker, else the value,
+/// decrypted when a scheme is set.  The tombstone is deliberately left unencrypted so that it can
+/// be recognised without a key.
+pub(crate) fn decode_stored<ENC: Encrypter>(
+    dat:    Dat,
+    enc:    &EncrypterDefAlt<EncryptionScheme, ENC>,
+    or:     Option<&Override<EncryptionScheme, ENC>>,
+)
+    -> Outcome<Option<Dat>>
+{
+    // A deletion is stored as a tombstone value under the deleted key, and the reader finds it
+    // exactly as it finds any other value.  A key whose newest value is a tombstone has no value,
+    // so say so here, once, for every caller: a deleted key reads as absent, indistinguishable
+    // from one that was never written.
+    if let Dat::Usr(kind, _) = &dat {
+        if *kind == id::usr_kind_id_deleted() {
+            return Ok(None);
+        }
+    }
+    let or_is_some = match or {
+        Some(or) => or.is_some(),
+        None => false,
+    };
+    if enc.is_none() && !or_is_some {
+        return Ok(Some(dat));
+    }
+    let val = try_extract_dat!(dat, BU8, BU16, BU32, BU64);
+    let plain = res!(enc.or_decrypt(&val, or));
+    match Dat::from_bytes(&plain) {
+        Err(e) => Err(err!(e,
+            "Could not form a Dat from the value bytes, this could be due to the use of an \
+            encryption scheme differing from the one provided ({}).", enc.or_debug(or);
+            Decode, Bytes)),
+        Ok((dat, _)) => Ok(Some(dat)),
     }
 }

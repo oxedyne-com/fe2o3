@@ -9,6 +9,14 @@
 //! reached ~19 GB.  [`sweep_orphans`] reclaims them in place, against a live store, without downtime
 //! or a second store.
 //!
+//! Since 2026-10-10 (Ozone run 2) a store retires the chunk set its head displaced once that head
+//! is durable, so an overwrite or a delete no longer leaves orphans behind it.  The sweep is needed
+//! only for three cases, none of them a loss: a crash between a head and its retire, a head whose
+//! entry was not confirmed, and a store that stopped waiting before its head landed.  Someone must
+//! still run it for those.  A set whose store is in progress is held in the database's pending
+//! sets, in the memory of the process that writes, so the sweep must run in that process
+//! (`OzoneApi` on the open store), never as a second process on the same store.
+//!
 //! The sweep is the in-place counterpart of [`crate::migrate`]: the migration copies the live set
 //! into a fresh store and achieves zero residue (no orphans, no tombstones, no empty file states)
 //! but needs the store stopped and twice the disk transiently; the sweep runs online and reclaims

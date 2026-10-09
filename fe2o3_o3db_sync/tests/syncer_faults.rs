@@ -424,12 +424,22 @@ fn slowly_failing_disk_answers_waiting_writes_together(every_n: u32) -> Outcome<
         thread::sleep(Duration::from_millis(5));
     }
     let counted = hooks::barriers_failed();
-    let mut resps = Vec::new();
+    // A store waits on its own bunch key (D2, 2026-10-10), so each is sent from a thread of its
+    // own for the writes to arrive together.
+    let mut puts = Vec::new();
     for i in 0..SLOW_WRITES {
-        resps.push(res!(db.api().store(key(50 + i), dat!(50 + i), Uid::default())));
+        let db = db.clone();
+        puts.push(thread::spawn(move || db.api().store(key(50 + i), dat!(50 + i), Uid::default())));
     }
     let mut told = 0;
-    for resp in resps {
+    for put in puts {
+        let resp = match put.join() {
+            Ok(resp) => res!(resp),
+            Err(_) => {
+                let _ = db.close(); // the check has failed already, and says why
+                return Err(err!("A writer's thread panicked."; Test, Thread));
+            },
+        };
         let n = match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
             OzoneMsg::Chunks(n) => n,
             msg => {

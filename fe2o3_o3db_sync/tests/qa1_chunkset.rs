@@ -23,6 +23,10 @@ use oxedyne_fe2o3_o3db_sync::{
         constant,
     },
     comm::response::Wait,
+    data::cache::{
+        CacheEntry,
+        is_chunk_key,
+    },
     sweep,
     test::{
         hooks,
@@ -147,7 +151,9 @@ fn child(mode: &str, dir: &str, t: Option<u128>) -> Outcome<String> {
     if let Some(t) = t { cmd.env("QA1_T", fmt!("{}", t)); }
     let out = res!(cmd.output());
     let so = String::from_utf8_lossy(&out.stdout).to_string();
-    let lines: Vec<&str> = so.lines().filter(|l| l.starts_with("QA1 ")).collect();
+    // The harness prints `test qa1_child ... ` with no newline, so the child's first line
+    // follows it on the same line.
+    let lines: Vec<&str> = so.lines().filter_map(|l| l.find("QA1 ").map(|i| &l[i..])).collect();
     Ok(fmt!("status={:?}\n{}", out.status.code(), lines.join("\n")))
 }
 
@@ -247,9 +253,108 @@ fn qa1_child() -> Outcome<()> {
             println!("QA1 aborting");
             std::process::abort();
         },
-        // A put whose bunch key times out at the store and lands later.
+        // Overwritten chunked values, then a collection killed between its new data file and
+        // its new index file.
+        "collect_crash" => {
+            let db = res!(start_collecting(&dir, true));
+            for round in 0..6u8 {
+                for i in 0..4u8 {
+                    res!(db.insert(dat!(fmt!("crash {}", i)), val(1_100, round * 16 + i), Uid::default(), None));
+                }
+            }
+            res!(db.delete(&dat!("crash 3"), Uid::default(), None));
+            res!(db.api().settle_for_test(Duration::from_secs(20)));
+            hooks::set_commit_delay(Duration::from_secs(30));
+            let db2 = db.clone();
+            let _gc = thread::spawn(move || db2.api().compact_now(Duration::from_secs(60)).map(|_| ()));
+            thread::sleep(Duration::from_millis(2_500));
+            println!("QA1 aborting");
+            std::process::abort();
+        },
         _ => return Err(err!("Unknown QA1_MODE {}.", mode; Test, Invalid)),
     }
+    Ok(())
+}
+
+fn start_collecting(dir: &str, wipe: bool) -> Outcome<TestDb> {
+    let mut c = res!(cfg());
+    c.data_file_max_bytes = 4_000;
+    c.num_wbots_per_zone  = 1;
+    log_set_level!("error");
+    if wipe {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    res!(std::fs::create_dir_all(dir));
+    let root = res!(Path::new(dir).canonicalize());
+    let db = res!(setup::start_db(root, Some(c), schemes(), None, true, wipe));
+    res!(db.api().activate_gc(false));
+    Ok(db)
+}
+
+// Live chunk records, tombstones aside, and the chunks the current heads name.
+fn chunk_bound(db: &TestDb, keys: &[Dat]) -> Outcome<(usize, usize)> {
+    res!(db.api().settle_for_test(Duration::from_secs(20)));
+    let mut live = 0;
+    for (_, cache) in res!(db.api().collect_caches(scan_wait())) {
+        let tombs = cache.tomb_tracker().tombs();
+        for (k, e) in cache.map() {
+            if is_chunk_key(k) && matches!(e, CacheEntry::LocatedValue(..)) && !tombs.contains_key(k) {
+                live += 1;
+            }
+        }
+    }
+    let mut named = 0;
+    for k in keys {
+        if let Some(t) = res!(head(db, k)) {
+            named += t[3] as usize;
+        }
+    }
+    Ok((live, named))
+}
+
+// A process killed mid-collection, between its new data file and its new index file: every key
+// reads its last value whole after a restart, before and after the sweep, verify is clean, and
+// the next overwrites leave no more live chunks than the heads name.
+#[test]
+fn qa1_kill_mid_collection() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_qa1_collect_crash";
+    let out = res!(child("collect_crash", dir, None));
+    let mut bad = Vec::new();
+    if !out.contains("QA1 aborting") { bad.push(fmt!("child did not reach the crash: {}", out)); }
+    let keys: Vec<Dat> = (0..4).map(|i| dat!(fmt!("crash {}", i))).collect();
+    let want = |i: usize| if i == 3 { fmt!("none") } else { fmt!("1100/{}", 5 * 16 + i) };
+    let reads = |db: &TestDb| -> Vec<String> { keys.iter()
+        .map(|k| match describe(&db.get(k, None)) { d if d == "tomb" => fmt!("none"), d => d }).collect() };
+    let wanted: Vec<String> = (0..4).map(want).collect();
+    let db = res!(start_collecting(dir, false));
+    let got = reads(&db);
+    if got != wanted { bad.push(fmt!("restart read {:?} want {:?}", got, wanted)); }
+    let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));
+    if !v.clean() { bad.push(fmt!("verify {}", v.summary(4))); }
+    let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+    let swept = reads(&db);
+    if swept != wanted { bad.push(fmt!("after sweep read {:?}", swept)); }
+    for (i, k) in keys.iter().enumerate() {
+        res!(db.insert(k.clone(), val(1_100, 0xC0 + i as u8), Uid::default(), None));
+    }
+    for _ in 0..3 {
+        res!(db.api().settle_for_test(Duration::from_secs(20)));
+        res!(db.api().compact_now(Duration::from_secs(60)));
+    }
+    let (live, named) = res!(chunk_bound(&db, &keys));
+    if live != named { bad.push(fmt!("live chunks {} against {} named", live, named)); }
+    res!(db.close());
+    let db = res!(start_collecting(dir, false));
+    let last = reads(&db);
+    let lasts: Vec<String> = (0..4).map(|i| fmt!("1100/{}", 0xC0 + i)).collect();
+    if last != lasts { bad.push(fmt!("final restart read {:?}", last)); }
+    let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));
+    if !v.clean() { bad.push(fmt!("verify end {}", v.summary(4))); }
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    println!("QA1 collect crash sweep_orphans={} {}", report.orphans_found, out.replace('\n', " | "));
+    assert!(bad.is_empty(), "{:#?}", bad);
     Ok(())
 }
 
@@ -258,7 +363,6 @@ fn qa1_child() -> Outcome<()> {
 // one wins: is the middle set left for the sweep?  Counts rounds with orphans after both settle.
 
 #[test]
-#[ignore = "run 2: Q1-3"]
 fn qa1_overlap_orphans() -> Outcome<()> {
     let _lock = lock();
     let dir = "./test_db_qa1_overlap";

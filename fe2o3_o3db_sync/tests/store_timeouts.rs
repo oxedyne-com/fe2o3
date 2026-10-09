@@ -204,9 +204,14 @@ fn durability_deadline_reports_written() -> Outcome<()> {
     cfg.sync_on_write = true;
     let db = res!(open(&root, cfg));
 
+    // The store waits on its own bunch key (D2, 2026-10-10), so the deadline that expires is its
+    // own, which it passes on to the caller.
     hooks::set_barrier_delay(delay);
+    hooks::set_durability_timeout(Some(durability));
     let begun = Instant::now();
-    let resp = res!(db.api().store(key(9), dat!(9u8), Uid::default()));
+    let resp = db.api().store(key(9), dat!(9u8), Uid::default());
+    hooks::set_durability_timeout(None);
+    let resp = res!(resp);
     let n = match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
         OzoneMsg::Chunks(n) => n,
         msg => return Err(err!("Expected the record count, received {:?}.", msg;

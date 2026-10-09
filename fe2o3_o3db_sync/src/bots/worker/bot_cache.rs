@@ -7,9 +7,14 @@ use crate::{
             worker_deps::*,
         },
     },
+    comm::msg::{
+        Displaced,
+        HeadTicket,
+    },
     data::{
         cache::{
             Cache,
+            Superseded,
             ValueOrLocation,
             is_chunk_key,
         },
@@ -198,8 +203,8 @@ impl<
                             };
                             self.result(&result);
                         },
-                        OzoneMsg::Insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed) => {
-                            let result = self.insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed);
+                        OzoneMsg::Insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed, head) => {
+                            let result = self.insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed, head);
                             self.result(&result);
                         },
                         // READ
@@ -335,6 +340,7 @@ impl<
         meta:       Meta<UIDL, UID>,
         resp_w1:    Responder<UIDL, UID, ENC, KH>,
         unconfirmed: Option<Error<ErrTag>>,
+        head:       Option<HeadTicket>,
     )
         -> Outcome<()>
     {
@@ -347,16 +353,18 @@ impl<
             true    => Some((key.clone(), meta.clone())),
             false   => None,
         };
-        let floc_old_opt = match self.cache.insert(
-            key,
-            val,
-            floc,
-            meta,
-        ) {
-            Ok(floc_old_opt) => floc_old_opt,
+        let inserted = if head.is_some() && hooks::head_insert_fails() {
+            Err(err!("A store's head could not be entered in the cache (test::hooks)."; Data, Write))
+        } else {
+            self.cache.insert(key, val, cind, floc, meta)
+        };
+        let sup = match inserted {
+            Ok(sup) => sup,
             Err(e) => {
                 // The caller is waiting on this answer.  Only logged, a failure here reached it
-                // as an expired durability deadline, which says the write is on its way.
+                // as an expired durability deadline, which says the write is on its way.  A
+                // store's head keeps its set held: the record is in the files and comes back at
+                // the next replay naming it.
                 let e = err!(e,
                     "{}: A written record could not be entered in the cache.", self.ozid();
                     Data, Write, Unconfirmed);
@@ -366,17 +374,34 @@ impl<
         };
 
         if let Some((k, m)) = noted {
-            self.cache.note(&k, cind, &floc_new, &m, &floc_old_opt);
+            self.cache.note(&k, cind, &floc_new, &m, &sup);
         }
+        let floc_old_opt = sup.old();
         let key_present = floc_old_opt.is_some();
         
         // [13] Inform the caller of successful file write and cache insertion, or of the barrier
         // that failed after the write: told here, the caller can read its write back once it
-        // hears, as it can a confirmed one.
-        match (unconfirmed, cind) {
-            (Some(e), _)        => self.respond(Err(e), &resp_w1),
-            (None, Some(cind))  => self.respond(Ok(OzoneMsg::KeyChunkExists(key_present, cind)), &resp_w1),
-            (None, None)        => self.respond(Ok(OzoneMsg::KeyExists(key_present)), &resp_w1),
+        // hears, as it can a confirmed one.  A store's head is answered with what it displaced,
+        // which the store retires by, and its set is released: the head is in the cache now, so
+        // the orphan sweep sees the set live, and on the unconfirmed road as well.
+        match (unconfirmed, head) {
+            (Some(e), head) => {
+                self.respond(Err(e), &resp_w1);
+                self.release_set(&head);
+            },
+            (None, Some(ticket)) => {
+                let displaced = match sup {
+                    Superseded::None                    => Displaced::Nothing,
+                    Superseded::Offered { .. }          => Displaced::Itself,
+                    Superseded::Cached { meta, prior, .. } => Displaced::Record { meta, prior },
+                };
+                self.respond(Ok(OzoneMsg::HeadInserted(cind, displaced)), &resp_w1);
+                self.release_set(&Some(ticket));
+            },
+            (None, None) => match cind {
+                Some(cind)  => self.respond(Ok(OzoneMsg::KeyChunkExists(key_present, cind)), &resp_w1),
+                None        => self.respond(Ok(OzoneMsg::KeyExists(key_present)), &resp_w1),
+            },
         }
         self.respond(Ok(OzoneMsg::Finish), &resp_w1);
 
@@ -393,6 +418,14 @@ impl<
         }));
 
         Ok(())
+    }
+
+    fn release_set(&self, head: &Option<HeadTicket>) {
+        if let Some(HeadTicket { set: Some(id) }) = head {
+            if let Ok(mut held) = self.api().chans().pending_sets().lock() {
+                held.remove(id);
+            }
+        }
     }
 
     pub fn read(

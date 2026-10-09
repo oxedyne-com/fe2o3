@@ -117,6 +117,7 @@ pub use pending::{
     Event,
     PendingStore,
 };
+pub(crate) use pending::SetHold;
 
 // How a store began: complete, or with answers still to come.
 pub enum Begun<const UIDL: usize, UID: NumIdDat<UIDL>, ENC: Encrypter, KH: Hasher> {
@@ -136,6 +137,14 @@ pub(crate) fn write_stamp() -> Outcome<Timestamp> {
     if let Some(t) = hooks::stale_stamp() {
         return Ok(Timestamp::new(t.as_secs(), t.subsec_nanos()));
     }
+    retire_stamp()
+}
+
+/// The stamp of a retire's tombstones, which follow the head that displaced their set and so
+/// every record of it.  The stale-stamp hook models a write stamped before it landed, not the
+/// retire sent after it landed: stamped stale too, a tombstone tied its chunk's stamp and lost
+/// or won by file place, so the losing put's chunks were retired only some of the time.
+pub(crate) fn retire_stamp() -> Outcome<Timestamp> {
     let clock = match hooks::fixed_stamp() {
         Some(t) => t,
         None    => *res!(Timestamp::now()),
@@ -246,18 +255,16 @@ impl<
         self.ozone_key(res!(k.as_bytes()), schms2)
     }
     
-    /// The chunk set identifier of one chunked write: a hash of the key, the write's stamp and
-    /// a fresh random nonce.  A chunk key is `Tup5u64([set_id, index, length, count, size])`, so
-    /// no write ever addresses a chunk an earlier write used, a value's chunks are immutable until
-    /// retired, and its bunch key changes on every write (B1, B2, 2026-10-09).  The nonce keeps two
-    /// puts of one key in one clock tick, or after a clock step back, apart (~2^-64); the key and
-    /// stamp make an identifier traceable to its write and disjoint from the legacy family.
-    pub fn chunk_set_id(kbuf: &[u8], stamp: &Timestamp, nonce: u64) -> u64 {
-        let secs = stamp.secs().to_be_bytes();
-        let nanos = stamp.nanos().to_be_bytes();
+    /// The chunk set identifier of one chunked write: a hash of the key and a fresh random
+    /// nonce.  A chunk key is `Tup5u64([set_id, index, length, count, size])`, so no write ever
+    /// addresses a chunk an earlier write used, a value's chunks are immutable until retired, and
+    /// its bunch key changes on every write (B1, B2, 2026-10-09).  The nonce keeps two puts of one
+    /// key apart (~2^-64).  The stamp is left out (D3, 2026-10-10) so that the set is held before
+    /// the write is stamped, which the orphan sweep's epoch relies on.
+    pub fn chunk_set_id(kbuf: &[u8], nonce: u64) -> u64 {
         let nonce = nonce.to_be_bytes();
         Self::fold_set_id(HashScheme::new_seahash()
-            .hash(&[kbuf, &secs, &nanos, &nonce], constant::CHUNK_SET_ID_SALT)
+            .hash(&[kbuf, &nonce], constant::CHUNK_SET_ID_SALT)
             .as_hashform())
     }
 
@@ -570,13 +577,16 @@ impl<
         -> Outcome<Begun<UIDL, UID, ENC, KH>>
     {
         // Every write has a chunk set of its own, so a store over a chunked value leaves the old
-        // chunks live under keys of their own.  They are retired once the new value is durable,
+        // chunks live under keys of their own.  They are retired once the new head is durable,
         // and not before: retired first, a crash would leave the old bunch key naming chunks that
-        // are gone, and a reader would find them gone while that key is still current.  A store
-        // of the deleted marker, the road the distributed adapters erase by, is no different.
+        // are gone, and a reader would find them gone while that key is still current.  What is
+        // retired is the set of the record the head displaced, as the cache bot answers it; the
+        // value read here stands in only for a displaced head whose bytes are not resident.  A
+        // store of the deleted marker, the road the distributed adapters erase by, is no
+        // different.
         let old = res!(self.chunk_set_of(&k, schms2));
         let (kbuf, vbuf) = res!(Encode::encode_dat(k.clone(), v));
-        let (msgs, datkeys) = res!(self.prepare_write_keyed(kbuf, vbuf, user, schms2, resp.clone(), None));
+        let (msgs, datkeys, hold) = res!(self.prepare_write_keyed(kbuf, vbuf, user, schms2, resp.clone(), None));
         let nchunks = msgs.len();
         // Every tombstone this store sends is stamped with the store's own time (see
         // `tombstone_chunk_key_at`).
@@ -585,7 +595,8 @@ impl<
             res!(resp.send(OzoneMsg::Chunks(nchunks)));
         }
         let (head, chunks) = res!(Self::head_and_chunks(msgs));
-        let mut pending = res!(PendingStore::new(self, k, old, &datkeys, meta, schms2, resp, head, chunks));
+        let mut pending = res!(PendingStore::new(
+            self, k, old, &datkeys, hold, true, meta, schms2, resp, head, chunks));
         if res!(pending.start(self)) {
             return Ok(Begun::Done(nchunks));
         }
@@ -633,7 +644,11 @@ impl<
         if resp.is_some() {
             res!(resp.send(OzoneMsg::Chunks(nchunks)));
         }
-        let mut pending = res!(PendingStore::new(self, k, None, &[], meta, schms2, resp, head, chunks));
+        // Unticketed: its set is not its own, and a second legacy value of one length would
+        // otherwise retire the shared set under its own live head.
+        let hold = res!(SetHold::new(self.chans().pending_sets(), None));
+        let mut pending = res!(PendingStore::new(
+            self, k, None, &[], hold, false, meta, schms2, resp, head, chunks));
         if !res!(pending.start(self)) {
             res!(pending.run(self));
         }
@@ -681,12 +696,14 @@ impl<
     )
         -> Outcome<Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>>
     {
-        let (msgs, _) = res!(self.prepare_write_keyed(k, vbuf, user, schms2, resp, set_id_override));
+        let (msgs, _, _) = res!(self.prepare_write_keyed(k, vbuf, user, schms2, resp, set_id_override));
         Ok(msgs)
     }
 
     /// `prepare_write`, and with the messages the keys of the records they write beyond the main
-    /// key: the bunch key and then each chunk's, none for a value that is not chunked.
+    /// key: the bunch key and then each chunk's, none for a value that is not chunked, and the
+    /// hold on a fresh chunk set.  The set is held before the write is stamped, so a chunk the
+    /// orphan sweep finds stamped before its epoch was held before it, and is spared.
     fn prepare_write_keyed(
         &self,
         k:          Vec<u8>,
@@ -696,7 +713,7 @@ impl<
         resp:       Responder<UIDL, UID, ENC, KH>,
         set_id_override: Option<u64>,
     )
-        -> Outcome<(Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>, Vec<Dat>)>
+        -> Outcome<(Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>, Vec<Dat>, SetHold)>
     {
         if vbuf.len() == 0 {
             return Err(err!(
@@ -729,19 +746,22 @@ impl<
         let mut msgs = Vec::new();
         let mut keys = Vec::new();
         let mut meta = Meta::new(user);
-        meta.time = res!(write_stamp());
 
         // 4. Package the value, breaking into chunks if it is too big.
         if vbuf.len() >= chunk_threshold {
             let chunker = OzoneConfig::chunker(chunk_config);
             // 4.1 Chunk data.
             let (chunks, chunk_state) = res!(chunker.chunk(&vbuf));
-            // A chunk set of the write's own.  A forced identifier (tests only) reproduces an
-            // earlier build's values.
-            let set_id = match set_id_override {
-                Some(id)    => id,
-                None        => Self::chunk_set_id(&kbuf, &meta.time, Rand::rand_u64()),
+            // A chunk set of the write's own, held and then stamped (Q1-5).  A forced identifier
+            // (tests only) reproduces an earlier build's values, and is not held.
+            let (set_id, hold) = match set_id_override {
+                Some(id)    => (id, res!(SetHold::new(self.chans().pending_sets(), None))),
+                None        => {
+                    let id = Self::chunk_set_id(&kbuf, Rand::rand_u64());
+                    (id, res!(SetHold::new(self.chans().pending_sets(), Some(id))))
+                },
             };
+            meta.time = res!(write_stamp());
             let datkeys = res!(chunker.keys(set_id, &chunk_state));
             keys = datkeys.clone();
             
@@ -785,8 +805,10 @@ impl<
                     *ccbwind.zind(),
                 ));
             }
+            Ok((msgs, keys, hold))
         } else {
             // 3.1 No chunking, just a single block of data.
+            meta.time = res!(write_stamp());
             if encryption_on {
                 vbuf = res!(Dat::wrap_bytes_var(vbuf));
             }
@@ -804,8 +826,8 @@ impl<
                 )),
                 *cbwind.zind(),
             ));
+            Ok((msgs, keys, res!(SetHold::new(self.chans().pending_sets(), None))))
         }
-        Ok((msgs, keys))
     }
 
     /// This is the write dispatch method, where `WriterBots` are chosen randomly.  Callers must
@@ -864,14 +886,15 @@ impl<
             meta,
             cbpind,
             resp,
+            head: None,
         })
     }
 
-    /// Deletes `k` by writing a tombstone over it.  A delete is a store with no chunks: over a
-    /// chunked value it waits for its tombstone to be durable, reads the key back, and only then
-    /// retires the value's chunks, if the key no longer names them.  A chunk tombstone that fails
-    /// after that is logged and its chunk left to the orphan sweep, as for a store, and does not
-    /// fail the delete.
+    /// Deletes `k` by writing a tombstone over it.  A delete is a store with no chunks: its
+    /// tombstone is the head, and once that is durable the delete retires the chunk set of the
+    /// record it displaced, if that record was a chunked value's bunch key.  A chunk tombstone
+    /// that fails after that is logged and its chunk left to the orphan sweep, as for a store,
+    /// and does not fail the delete.
     pub fn delete_using_responder(
         &self,
         k:          &Dat,
@@ -882,7 +905,8 @@ impl<
         -> Outcome<()>
     {
         // 0. The chunked value being deleted, if any, read before the delete is stamped, as a
-        //    store reads what it replaces.
+        //    store reads what it replaces.  It is used only when the displaced head's bytes are
+        //    not resident and its metadata agrees.
         let pred = res!(self.chunk_set_of(k, schms2));
 
         // 1. Stamp the delete once.  A delete removes what existed when it began: its tombstone,
@@ -911,11 +935,13 @@ impl<
             self.schemes().checksummer().clone(),
         ));
 
-        // 4. Publish it, then retire.  Without a chunked predecessor the tombstone goes out with
-        //    the caller's responder and nothing is awaited here.
+        // 4. Publish it, then retire.  Every head waits here for the cache bot's answer of what
+        //    it displaced, chunked predecessor or not, and retires that record's set if it names
+        //    one.
         hooks::trace(hooks::Step::Sent);
+        let hold = res!(SetHold::new(self.chans().pending_sets(), None));
         let mut pending = res!(PendingStore::new(
-            self, k.clone(), pred, &[], meta, schms2, resp, (msg, *cbwind.zind()), Vec::new()));
+            self, k.clone(), pred, &[], hold, true, meta, schms2, resp, (msg, *cbwind.zind()), Vec::new()));
         if !res!(pending.start(self)) {
             res!(pending.run(self));
         }

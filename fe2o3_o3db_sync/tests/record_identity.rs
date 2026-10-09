@@ -278,8 +278,8 @@ fn reanchor_moves_only_the_record_the_cache_names() -> Outcome<()> {
     thread::sleep(Duration::from_millis(2));
     let newer = Meta { time: res!(Timestamp::now()), user: Uid::default() };
     let at = |start: u64| FileLocation { fnum: 1, start, klen: 30, vlen: 100 };
-    res!(cache.insert(k.clone(), None, at(260), older.clone()));
-    res!(cache.insert(k.clone(), None, at(390), newer.clone()));
+    res!(cache.insert(k.clone(), None, None, at(260), older.clone()));
+    res!(cache.insert(k.clone(), None, None, at(390), newer.clone()));
     // The collection carries both, the older to 0 and the newer to 130.
     if let Some(was) = cache.reanchor(&k, &at(0), &older) {
         return Err(err!(

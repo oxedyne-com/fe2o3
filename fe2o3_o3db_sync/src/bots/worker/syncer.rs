@@ -326,8 +326,8 @@ impl<
             // ever reclaim them.
             let insert = match (&synced, insert) {
                 (Ok(()), insert) => insert,
-                (Err(e), OzoneMsg::Insert(k, v, c, f, i, m, r, _)) =>
-                    OzoneMsg::Insert(k, v, c, f, i, m, r, Some(Self::written(e.clone()))),
+                (Err(e), OzoneMsg::Insert(k, v, c, f, i, m, r, _, t)) =>
+                    OzoneMsg::Insert(k, v, c, f, i, m, r, Some(Self::written(e.clone())), t),
                 // Not an insert, so nothing the cache bot would answer with: told from here.
                 (Err(e), other) => {
                     Self::tell(&resp, e.clone());

@@ -3,8 +3,10 @@
 //! Reclaims the orphaned chunk-data records a churned store leaks -- chunk records left behind when
 //! a chunked value was overwritten at a new geometry, or, on a pre-fix build, on any overwrite --
 //! by tombstoning each orphaned chunk key so the running collector reclaims its bytes.  Unlike the
-//! migration, this runs against a LIVE store with garbage collection ON and needs no second store
-//! and no downtime.
+//! migration, this runs with garbage collection ON and needs no second store.  This binary opens
+//! the store itself, so whatever else serves the store (the gateway) must be stopped while it
+//! runs: never two processes on one store.  A server that wants no downtime calls
+//! `sweep::sweep_orphans` on its own open store instead.
 //!
 //! ```ignore
 //! cargo run -p oxedyne_fe2o3_o3db_sync --example o3db_sweep -- \
@@ -22,7 +24,7 @@
 //!   proven orphaned.
 //! - The key is read from the path given at runtime.  It is NEVER hardcoded and there is NO default:
 //!   a missing or wrong-sized key aborts the run.
-//! - `--skew-secs` guards concurrent writers: only chunk records stamped more than this many seconds
+//! - `--skew-secs` guards writers of the same process: only chunk records stamped more than this many seconds
 //!   before the sweep started are retired.  The default is deliberately generous.  Pass `0` only for
 //!   a store nothing is writing.
 //!

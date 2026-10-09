@@ -226,13 +226,20 @@ fn garbage_is_collected_when_the_last_write_lands() -> Outcome<()> {
     // before it wait on their barrier.  The collection is held until the file has been measured.
     hooks::set_barrier_delay(HOLD);
     hooks::set_collect_delay(HOLD);
-    let mut resps = Vec::new();
+    // A store waits on its own bunch key (D2, 2026-10-10), so each is sent from a thread of its
+    // own for the fillers to arrive together.
+    let mut puts = Vec::new();
     for i in 0..NFILL {
-        resps.push(res!(db.api().store(filler(i), value(i, VALUE_BYTES), Uid::default())));
+        let db = db.clone();
+        puts.push(thread::spawn(move || db.api().store(filler(i), value(i, VALUE_BYTES), Uid::default())));
     }
     // Measured once sealed, while its last records still wait on their barrier.
     let sealed = res!(wait_until_sealed(&root, &f1));
-    for resp in resps {
+    for put in puts {
+        let resp = match put.join() {
+            Ok(resp) => res!(resp),
+            Err(_) => return Err(err!("A filler's thread panicked."; Test, Thread)),
+        };
         res!(resp.recv_store_ack());
     }
     hooks::set_barrier_delay(Duration::ZERO);

@@ -899,7 +899,7 @@ fn no_tombstone_drops_before_replay_done() -> Outcome<()> {
     let meta = |s: u64| Meta::<{ UID_LEN }, Uid> { time: Timestamp::new(s, 0), user: Uid::default() };
     let floc = |f: u32| FileLocation { fnum: f, start: 0, klen: k.len() as u64, vlen: 10 };
     let put = |cache: &mut C, cind: Option<usize>, f: u32, s: u64| -> Outcome<()> {
-        let sup = res!(cache.insert(k.clone(), None, floc(f), meta(s)));
+        let sup = res!(cache.insert(k.clone(), None, cind, floc(f), meta(s)));
         cache.note(&k, cind, &floc(f), &meta(s), &sup);
         Ok(())
     };
@@ -920,5 +920,153 @@ fn no_tombstone_drops_before_replay_done() -> Outcome<()> {
     let last = res!(cache.records_gone(2, &[res!(RecordDigest::new(&k, &meta(2)))]));
     assert_eq!(last.len(), 1, "the tombstone did not drop once its last older record went");
     assert_eq!(current(&cache), None, "the dropped tombstone is still in the cache");
+    Ok(())
+}
+
+// Run 2 (2026-10-10): a store retires the set of the head it displaced, whatever order
+// overlapping puts and deletes land in, so live chunk records are bounded by the current heads
+// with no sweep.
+
+// Live chunk records, tombstones aside.
+fn live_chunks(db: &TestDb) -> Outcome<usize> {
+    res!(db.api().settle_for_test(Duration::from_secs(20)));
+    let mut n = 0;
+    for (_, cache) in res!(db.api().collect_caches(scan_wait())) {
+        let tombs = cache.tomb_tracker().tombs();
+        for (k, e) in cache.map() {
+            if is_chunk_key(k) && matches!(e, CacheEntry::LocatedValue(..)) && !tombs.contains_key(k) {
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
+// Chunks the current heads name.
+fn named(db: &TestDb, keys: &[Dat]) -> Outcome<usize> {
+    let mut n = 0;
+    for k in keys {
+        if let Some(t) = res!(head(db, k)) {
+            n += t[3] as usize;
+        }
+    }
+    Ok(n)
+}
+
+fn whole_or_none(r: &Outcome<Option<(Dat, Meta<{ UID_LEN }, Uid>)>>) -> bool {
+    match r {
+        Ok(None)                        => true,
+        Ok(Some((Dat::Usr(..), _)))     => true, // a tombstone
+        Ok(Some((v, _)))                => whole(v, &[VLEN]),
+        Err(_)                          => false,
+    }
+}
+
+// Puts B, A and C and a delete of each key, staggered and slowed so that they overlap.
+fn overlap_round(db: &TestDb, keys: &[Dat], r: usize, bad: &mut Vec<String>) -> Outcome<()> {
+    hooks::set_chunk_insert_delay(Duration::from_millis(40));
+    let mut ops = Vec::new();
+    for (i, k) in keys.iter().enumerate() {
+        // The delete lands third in even rounds and last in odd ones.
+        let del_at = if r % 2 == 0 { 30 } else { 45 };
+        for (j, (at, put)) in [(0u64, true), (15, true), (del_at, false), (75 - del_at, true)].into_iter().enumerate() {
+            let (db, k) = (db.clone(), k.clone());
+            let seed = ((r * 16 + i * 4 + j) % 251) as u8;
+            ops.push(thread::spawn(move || {
+                thread::sleep(Duration::from_millis(at));
+                let res = match put {
+                    true    => db.insert(k, val(VLEN, seed), Uid::default(), None).map(|_| ()),
+                    false   => db.delete(&k, Uid::default(), None).map(|_| ()),
+                };
+                res.map_err(|e| fmt!("{}", e))
+            }));
+        }
+    }
+    for _ in 0..4 {
+        for k in keys {
+            let got = db.get(k, None);
+            if !whole_or_none(&got) {
+                bad.push(fmt!("round {}: a read mid-round was not whole: {:?}", r,
+                    got.map(|o| o.map(|(d, _)| fmt!("{:?}", d).chars().take(80).collect::<String>()))));
+            }
+        }
+        pause(Duration::from_millis(20));
+    }
+    for op in ops {
+        match op.join() {
+            Ok(Ok(()))  => (),
+            Ok(Err(e))  => bad.push(fmt!("round {}: {}", r, e.chars().take(200).collect::<String>())),
+            Err(_)      => bad.push(fmt!("round {}: an op panicked", r)),
+        }
+    }
+    hooks::set_chunk_insert_delay(Duration::ZERO);
+    for k in keys {
+        let got = db.get(k, None);
+        if !whole_or_none(&got) {
+            bad.push(fmt!("round {}: {:?} does not read whole after the round", r, k));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn overlapping_writes_leave_no_live_orphan() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_set_overlap_bound";
+    let keys: Vec<Dat> = (0..3).map(|i| dat!(fmt!("overlap bound {}", i))).collect();
+    let mut bad = Vec::new();
+    let db = res!(start_gc(dir, true));
+    for r in 0..20 {
+        res!(overlap_round(&db, &keys, r, &mut bad));
+    }
+    // A round can end in a delete, so every key is given a value before the restart: each then
+    // replays a head whose bytes are not resident, which the first write over it displaces.
+    for (i, k) in keys.iter().enumerate() {
+        res!(db.insert(k.clone(), val(VLEN, 0xA0 + i as u8), Uid::default(), None));
+    }
+    res!(quiet(&db));
+    let (live1, named1) = (res!(live_chunks(&db)), res!(named(&db, &keys)));
+    res!(db.close());
+    let db = res!(start_gc(dir, false));
+    for r in 20..22 {
+        res!(overlap_round(&db, &keys, r, &mut bad));
+    }
+    res!(quiet(&db));
+    let (live2, named2) = (res!(live_chunks(&db)), res!(named(&db, &keys)));
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    msg!("overlap bound: live {} named {}, after a restart live {} named {}", live1, named1, live2, named2);
+    assert!(bad.is_empty(), "{:#?}", bad);
+    assert_eq!(live1, named1, "live chunk records against those the current heads name");
+    assert_eq!(live2, named2, "after a restart, live chunk records against those the current heads name");
+    Ok(())
+}
+
+// Two forced values under one legacy set, of one length: the second overwrites the first's
+// chunks in place, and its head must retire nothing, or it retires its own chunks.
+#[test]
+fn forced_legacy_overwrite_retires_nothing() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_set_forced_legacy";
+    let db = res!(start(dir, res!(cfg()), true));
+    let k = dat!("forced legacy");
+    let (kbuf, _, _) = res!(db.api().ozone_key_dat(&k, None));
+    let legacy = OzoneApi::<{ UID_LEN }, Uid, (), HashScheme, HashScheme, ChecksumScheme>::legacy_chunk_set_id(&kbuf);
+    for seed in [1u8, 2] {
+        let resp = db.api().responder();
+        res!(db.api().store_dat_using_responder_forcing_set_id(
+            k.clone(), val(1_100, seed), Uid::default(), None, resp.clone(), legacy));
+        res!(resp.recv_store_ack());
+    }
+    let live = res!(db.get(&k, None)).map(|(v, _)| v);
+    res!(db.close());
+    let db = res!(start(dir, res!(cfg()), false));
+    let after = res!(db.get(&k, None)).map(|(v, _)| v);
+    let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(live == Some(val(1_100, 2)), "the second forced value does not read whole live");
+    assert!(after == Some(val(1_100, 2)), "the second forced value does not read whole after a restart");
+    assert!(v.clean(), "verify after restart: {}", v.summary(4));
     Ok(())
 }

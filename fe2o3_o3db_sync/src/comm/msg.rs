@@ -26,6 +26,7 @@ use crate::{
         cache::{
             Cache,
             MetaLocation,
+            Prior,
         },
         core::{
             Key,
@@ -63,6 +64,24 @@ use oxedyne_fe2o3_jdat::{
 use std::{
     collections::BTreeMap,
 };
+
+/// Marks the head of a value sent by a `PendingStore`, and hands over the chunk set it holds,
+/// for the writer or the cache bot to release once the head's fate is known.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HeadTicket {
+    pub set: Option<u64>,
+}
+
+/// What a store's head displaced in the cache, which is what the store retires by.
+#[derive(Clone, Debug)]
+pub enum Displaced<
+    const UIDL: usize,
+    UID: NumIdDat<UIDL>,
+> {
+    Nothing,                                        // the key held no record
+    Itself,                                         // a newer record was already cached
+    Record { meta: Meta<UIDL, UID>, prior: Prior }, // the cached record, now old
+}
 
 #[derive(Clone, Debug)]
 pub enum OzoneMsg<
@@ -152,6 +171,7 @@ pub enum OzoneMsg<
         Meta<UIDL, UID>,
         Responder<UIDL, UID, ENC, KH>,
         Option<Error<ErrTag>>, // written, but its barrier failed: the caller's answer
+        Option<HeadTicket>,    // a store's head, answered with what it displaced
     ),
     NewLiveFile(Option<FileNum>, Responder<UIDL, UID, ENC, KH>), // Explicit file number for init, None for routine new file.
     NextLiveFile(Responder<UIDL, UID, ENC, KH>), // A routine request by a wbot to the zbot for the next live file.
@@ -176,6 +196,7 @@ pub enum OzoneMsg<
         meta:       Meta<UIDL, UID>,
         cbpind:     usize,
         resp:       Responder<UIDL, UID, ENC, KH>,
+        head:       Option<HeadTicket>,
     },
     // Respond
     Chunks(usize), // Number of chunks.
@@ -190,6 +211,7 @@ pub enum OzoneMsg<
     Error(Error<ErrTag>),
     Files(ZoneInd, BTreeMap<String, FileEntry>),
     GcCacheUpdateResponse(Vec<(FileLocation, RecordDigest)>), // re-anchored, from where
+    HeadInserted(Option<usize>, Displaced<UIDL, UID>), // a ticketed head's answer: its chunk index, what it displaced
     KeyExists(bool),
     KeyChunkExists(bool, usize), // includes chunk index
     Ok,

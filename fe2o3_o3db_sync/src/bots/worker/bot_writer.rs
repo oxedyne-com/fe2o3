@@ -12,6 +12,7 @@ use crate::{
             worker_deps::*,
         },
     },
+    comm::msg::HeadTicket,
     file::{
         core::FileType,
         floc::{
@@ -159,6 +160,7 @@ impl<
                             meta,
                             cbpind,
                             resp: resp_w1,
+                            head,
                         } => {
                             let resp = resp_w1.clone();
                             if let Err(e) = self.write(
@@ -169,6 +171,7 @@ impl<
                                 meta,
                                 cbpind,
                                 resp_w1,
+                                head,
                             ) {
                                 // The caller is waiting on this answer.  Only logged, a failure
                                 // here reached it as a responder timeout that named no cause.
@@ -280,19 +283,30 @@ impl<
         meta:       Meta<UIDL, UID>,
         cbpind:     usize, // cbot pool index
         resp_w1:    Responder<UIDL, UID, ENC, KH>,
+        head:       Option<HeadTicket>,
     )
         -> Outcome<()>
     {
+        // A store's head hands its chunk set's hold over with it.  It is released here only when
+        // nothing reached the data file; once the record is there it comes back at the next
+        // replay, so the hold lasts until the cache bot has it, or for the life of the process.
         // A record appended now could be neither confirmed nor withdrawn, so a writer whose syncer
         // has stopped refuses it before anything reaches the files.  Appended first, it was
         // reported failed and came back at the next start (2026-09-23).
         if !self.syncer.is_running() {
+            self.release_set(&head);
             return Err(err!(
                 "{}: The durability barrier thread has stopped, so the write was refused before \
                 anything was written.", self.ozid();
                 Thread, Missing, Write));
         }
-        let start = res!(self.write_to_file(FileType::Data, vec![&kbyts[..], &vstored[..]]));
+        let start = match self.write_to_file(FileType::Data, vec![&kbyts[..], &vstored[..]]) {
+            Ok(start) => start,
+            Err(e) => {
+                self.release_set(&head);
+                return Err(e);
+            },
+        };
 
         // Define the location.
         let sfloc = res!(StoredFileLocation::new(
@@ -320,6 +334,7 @@ impl<
         kbyts.drain(..constant::CACHE_HASH_BYTES); // remove data pathway hash used to identify cbot
         kbyts.truncate(klen_cache); // remove metadata
         let resp = resp_w1.clone();
+        let ticketed = head.is_some();
         let insert = OzoneMsg::Insert(
             kbyts,
             Some(vstored),
@@ -329,9 +344,15 @@ impl<
             meta,
             resp_w1, // The cbot responds to the caller.
             None,
+            head,
         );
         let policy = SyncPolicy::of(self.cfg());
-        if let Err(e) = self.syncer.hand(Handed::Record { cbot, insert, resp, policy }) {
+        let handed = if ticketed && hooks::head_hand_fails() {
+            Err(err!("A store's head could not be handed to the syncer (test::hooks)."; Thread, Write))
+        } else {
+            self.syncer.hand(Handed::Record { cbot, insert, resp, policy })
+        };
+        if let Err(e) = handed {
             // The syncer stopped after the check above, and the record is in the files.
             return Err(err!(e,
                 "{}: The record is written, but the durability barrier thread stopped before it \
@@ -340,6 +361,15 @@ impl<
         }
 
         Ok(())
+    }
+
+    // A store's head that never reached the data file will not land, so its set is free.
+    fn release_set(&self, head: &Option<HeadTicket>) {
+        if let Some(HeadTicket { set: Some(id) }) = head {
+            if let Ok(mut held) = self.api().chans().pending_sets().lock() {
+                held.remove(id);
+            }
+        }
     }
 
     /// Hands the syncer the live pair every record from here on is appended to.  It syncs through

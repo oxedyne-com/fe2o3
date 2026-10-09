@@ -40,7 +40,7 @@ static READ_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a reade
 static TOMB_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk tombstone
 static CHUNK_DELAY_MS:   AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk
 static LIST_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a directory's listing and its opens
-static RETIRE_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before a store reads its key back to retire
+static RETIRE_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before a store retires what its head displaced
 static SUP_PANICS:       AtomicBool = AtomicBool::new(false); // the supervisor panics starting up
 static BARRIER_FAILS:    AtomicBool = AtomicBool::new(false); // every durability barrier fails
 static BARRIERS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
@@ -52,6 +52,9 @@ static COLLECTS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the s
 static COLLECT_FAILS_FOR: AtomicU64 = AtomicU64::new(u64::MAX); // collections of this one file fail
 static DIR_SYNC_FAILS:   AtomicBool = AtomicBool::new(false); // the directory sync after a collection's data rename fails
 static COMPACT_FAILS:    AtomicBool = AtomicBool::new(false); // the zone bots cannot pass on a compaction order
+static HEAD_INSERT_FAILS: AtomicBool = AtomicBool::new(false); // a cache bot cannot enter a store's head
+static HEAD_HAND_FAILS:  AtomicBool = AtomicBool::new(false); // a writer cannot hand a written head to its syncer
+static DURABILITY_MS:    AtomicU64  = AtomicU64::new(0);      // a store's durability timeout, when set
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
 /// of a busy disk's writes would be held.
@@ -131,9 +134,8 @@ pub fn set_list_delay(d: Duration) {
     LIST_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
 
-/// Holds a store this long once its head is durable and before it reads its key back to choose the
-/// chunk set to retire, so that a read can be made while a delete or an overwrite is between the
-/// two.
+/// Holds a store this long once its head is durable and before it retires the chunk set its head
+/// displaced, so that a read can be made while a delete or an overwrite is between the two.
 pub fn set_retire_delay(d: Duration) {
     RETIRE_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
@@ -201,6 +203,38 @@ pub fn set_compact_failure(on: bool) {
 /// How many collections `set_collect_failure` has failed so far.
 pub fn collections_failed() -> u64 {
     COLLECTS_FAILED.load(Ordering::Relaxed)
+}
+
+/// Makes every cache bot fail to enter the head of a store, after its record is written.
+pub fn set_head_insert_failure(on: bool) {
+    HEAD_INSERT_FAILS.store(on, Ordering::Relaxed);
+}
+
+pub(crate) fn head_insert_fails() -> bool {
+    HEAD_INSERT_FAILS.load(Ordering::Relaxed)
+}
+
+/// Makes every writer fail to hand a store's head to its syncer once the record is in the files,
+/// as a syncer that stopped between the writer's check and the hand-off would.
+pub fn set_head_hand_failure(on: bool) {
+    HEAD_HAND_FAILS.store(on, Ordering::Relaxed);
+}
+
+pub(crate) fn head_hand_fails() -> bool {
+    HEAD_HAND_FAILS.load(Ordering::Relaxed)
+}
+
+/// Shortens how long a store waits on the disk for each of its steps.  `None` restores the
+/// default.
+pub fn set_durability_timeout(d: Option<Duration>) {
+    DURABILITY_MS.store(d.map(millis).unwrap_or(0), Ordering::Relaxed);
+}
+
+pub(crate) fn durability_timeout() -> Option<Duration> {
+    match DURABILITY_MS.load(Ordering::Relaxed) {
+        0   => None,
+        ms  => Some(Duration::from_millis(ms)),
+    }
 }
 
 pub(crate) fn compact_fails() -> bool {
