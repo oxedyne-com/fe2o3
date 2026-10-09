@@ -66,7 +66,7 @@ use std::{
 
 
 const EXT:          &str    = "ndjson";
-const STAMP_LEN:    usize   = 16;               // `YYYYMMDDTHHMMSSZ`
+pub(crate) const STAMP_LEN: usize = 16;               // `YYYYMMDDTHHMMSSZ`
 const DAY_MS:       u64     = 86_400_000;
 const MALFORMED:    &str    = "(malformed row)";
 
