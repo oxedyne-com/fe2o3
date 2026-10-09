@@ -175,6 +175,22 @@ impl<
     )
         -> Outcome<bool>
     {
+        // A failure to send the next step, the bunch key among them, is the caller's to hear:
+        // left to the bot's log, a caller already told `Written` waited out the durability
+        // deadline and was then told its records were in the files (A3 QA m1, 2026-10-09).
+        match self.take_in(api, msg) {
+            Err(e)  => self.fail(api, e),
+            done    => done,
+        }
+    }
+
+    fn take_in<PR: Hasher, CS: Checksummer>(
+        &mut self,
+        api:    &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
+        msg:    OzoneMsg<UIDL, UID, ENC, KH>,
+    )
+        -> Outcome<bool>
+    {
         // The chunks' answers are passed to the caller as they come, and not when the last is
         // in: its deadlines measure silence, and a chunk that is written but not yet readable
         // is not silence.  The bunch key's follow from its own writer.

@@ -40,19 +40,29 @@ use rand::Rng;
 
 const FINISH_CHECK_INTERVAL: Duration = Duration::from_millis(5); // finer than CHECK_INTERVAL: a close waits on it
 
-// The order in which a close finishes each zone's workers.  A stage is sent its `Finish` only
-// once every worker of the stage before it has ended, since those are the ones that send it work
-// and wait on its answers.  Finished together, a read or collection still queued behind the
-// `Finish` of its reader or collector met a cache bot that had already ended, and waited out
-// `BOT_REQUEST_TIMEOUT` for an answer nobody would send; and a record a syncer released late, a
-// failed barrier's error among them, reached a cache bot that had ended, so its caller waited out
-// the durability deadline (2026-09-24).
-const FINISH_ORDER: [&[WorkerType]; 4] = [
-    &[WorkerType::Reader, WorkerType::Scan, WorkerType::InitGarbage],   // ask the others
-    &[WorkerType::Writer],                                              // release to the caches
-    &[WorkerType::Cache],                                               // tell the file bots
-    &[WorkerType::File],
+// The order in which a close finishes the bots.  A stage is sent its `Finish` only once every bot
+// of the stage before it has ended, since those are the ones that send it work and wait on its
+// answers.  Finished together, a read or collection still queued behind the `Finish` of its reader
+// or collector met a cache bot that had already ended, and waited out `BOT_REQUEST_TIMEOUT` for an
+// answer nobody would send; and a record a syncer released late, a failed barrier's error among
+// them, reached a cache bot that had ended, so its caller waited out the durability deadline
+// (2026-09-24).  The server bots come first: a chunked put's bunch key is sent by its server bot
+// only once the chunks are readable, so with the writers finished alongside the servers, a put
+// accepted before the close was told `Written` and then lost (A3 QA M2, 2026-10-09).
+const FINISH_ORDER: [FinishStage; 5] = [
+    FinishStage::Servers,                                                                       // see every put in hand through
+    FinishStage::Workers(&[WorkerType::Reader, WorkerType::Scan, WorkerType::InitGarbage]),    // ask the others
+    FinishStage::Workers(&[WorkerType::Writer]),                                               // release to the caches
+    FinishStage::Workers(&[WorkerType::Cache]),                                                // tell the file bots
+    FinishStage::Workers(&[WorkerType::File]),
 ];
+
+/// A stage of a close, in `FINISH_ORDER`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FinishStage {
+    Servers,
+    Workers(&'static [WorkerType]),
+}
 
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -571,30 +581,27 @@ impl<
         Ok(())
     }
 
-    /// Sends a `Finish` to every bot but the supervisor: the servers first, then each zone's
-    /// workers stage by stage in `FINISH_ORDER`, then the zone bots and the config bot.  Before
-    /// each stage it waits until `ended` says every worker of the stage before it has ended.  It
+    /// Sends a `Finish` to every bot but the supervisor: stage by stage in `FINISH_ORDER`, the
+    /// servers and then each zone's workers, then the zone bots and the config bot.  Before each
+    /// stage it waits until `ended` says every bot of the stage before it has ended.  It
     /// stops waiting at `until` and returns the stage it was waiting on, already finished, for
     /// `finish_from` to carry on from; `None` once every bot has been sent its `Finish`.
-    pub fn finish_all<F: Fn(&[WorkerType]) -> bool>(
+    pub fn finish_all<F: Fn(FinishStage) -> bool>(
         &self,
         ended:  F,
         until:  Instant,
     )
         -> Outcome<Option<usize>>
     {
-        // Starve servers.
-        res!(self.sbots.send_to_all(OzoneMsg::Finish));
-        warn!(sync_log::stream(), "Shutdown: Completion request sent to server, finishing the \
-            other bots in order, waiting up to {:?} for them.",
-            until.saturating_duration_since(Instant::now()));
+        warn!(sync_log::stream(), "Shutdown: Finishing the bots in order, waiting up to {:?} for \
+            them.", until.saturating_duration_since(Instant::now()));
         res!(self.finish_stage(0));
         self.finish_from(0, ended, until)
     }
 
     /// Carries on the `finish_all` that stopped waiting on `stage`.  An `ended` that is always
     /// true finishes everything left at once.
-    pub fn finish_from<F: Fn(&[WorkerType]) -> bool>(
+    pub fn finish_from<F: Fn(FinishStage) -> bool>(
         &self,
         stage:  usize,
         ended:  F,
@@ -630,8 +637,13 @@ impl<
     }
 
     fn finish_stage(&self, stage: usize) -> Outcome<()> {
-        for zone in &self.zwbots {
-            res!(zone.finish(FINISH_ORDER[stage]));
+        match FINISH_ORDER[stage] {
+            FinishStage::Servers => {
+                res!(self.sbots.finish_all());
+            },
+            FinishStage::Workers(typs) => for zone in &self.zwbots {
+                res!(zone.finish(typs));
+            },
         }
         Ok(())
     }

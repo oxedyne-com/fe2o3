@@ -35,6 +35,7 @@ use crate::{
             worker_deps::*,
         },
     },
+    comm::channels::FinishStage,
     test::hooks,
 };
 
@@ -1038,7 +1039,7 @@ impl<
         -> Outcome<()>
     {
         warn!(sync_log::stream(), "{}: Shutdown requested by {}, commencing...", self.label(), requester);
-        let ended = |typs: &[WorkerType]| self.handles().ended(typs);
+        let ended = |stage: FinishStage| self.handles().stage_ended(stage);
         let begun = Instant::now();
         let left = self.chans().finish_all(&ended, begun + constant::SHUTDOWN_MAX_WAIT);
         thread::sleep(Duration::from_secs(1));
@@ -1057,7 +1058,7 @@ impl<
                     finished without waiting for them.", self.ozid(), stage,
                     constant::CONTROL_REQUEST_TIMEOUT;
                     Thread, Timeout));
-                left = res!(self.chans().finish_from(stage, |_: &[WorkerType]| true, Instant::now()));
+                left = res!(self.chans().finish_from(stage, |_: FinishStage| true, Instant::now()));
             }
         }
         if unfinished {
