@@ -504,11 +504,23 @@ fn the_open_cuts_to_the_marks() -> Outcome<()> {
     assert!(!root.join(constant::FAULT_FILENAME).exists(), "the fault record outlived the cut");
     let q = zdir(&root, &c, 0).join(constant::QUARANTINE_DIR);
     assert!(res!(fs::read_dir(&q)).count() > 0, "the cut tail was not quarantined");
+    let held = |q: &Path| -> Outcome<Vec<(PathBuf, u64)>> {
+        let mut v = Vec::new();
+        for e in res!(fs::read_dir(q)) {
+            let p = res!(e).path();
+            v.push((p.clone(), size(&p)));
+        }
+        v.sort();
+        Ok(v)
+    };
+    let evidence = res!(held(&q));
     res!(fs::write(root.join(constant::FAULT_FILENAME), &fault));
     let db = res!(open(&root, &c, false));
     assert_eq!(read(&db, &k), "300/2");
     res!(db.close());
     assert_eq!(lens(&root), after, "a second cut over a replanted fault record changed a length");
+    // A file already at its mark has nothing to cut, so the first cut's evidence stands.
+    assert_eq!(res!(held(&q)), evidence, "a second cut rewrote the quarantined tails");
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }

@@ -227,6 +227,31 @@ fn qa2_shrink_footprint_series_never() -> Outcome<()> {
     shrink_series("./test_db_qa2_shrink_never", false, 0)
 }
 
+// Sealed files still holding more old bytes than the collector lets stand once it is quiet: the
+// trigger's share of the file's own size, or of a tenth of the maximum for a smaller file.  Polled
+// for ten seconds, so that collections under way can finish.
+fn stranded(db: &TestDb, max: u64) -> Outcome<Vec<(u32, u64, usize)>> {
+    let floor = (max as f64 * constant::GC_TRIGGER_FLOOR_FRAC_OF_MAX) as usize;
+    let mut found = Vec::new();
+    for _ in 0..40 {
+        found.clear();
+        for (_, fmap) in res!(db.api().collect_file_states(scan_wait())) {
+            for (fnum, fstat) in fmap.map() {
+                let basis = fstat.get_data_file_size().max(floor).min(max as usize) as f64;
+                let pct = 100.0 * fstat.get_old_sum() as f64 / basis;
+                if !fstat.is_live() && pct > constant::OLD_DATA_PERCENT_GC_TRIGGER {
+                    found.push((*fnum, fstat.get_old_sum(), fstat.get_data_file_size()));
+                }
+            }
+        }
+        if found.is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Ok(found)
+}
+
 // `sync_on_write`, else `interval_ms`, else no periodic barrier at all.
 fn shrink_series(dir: &str, sync_on_write: bool, interval_ms: u64) -> Outcome<()> {
     let _lock = lock();
@@ -256,6 +281,7 @@ fn shrink_series(dir: &str, sync_on_write: bool, interval_ms: u64) -> Outcome<()
             samples.push((i, dir_len(&root), tombs));
         }
     }
+    let left = res!(stranded(&db, 16_000));
     let rep = res!(db.api().compact_now(Duration::from_secs(60)));
     let root = res!(Path::new(dir).canonicalize());
     let compacted = dir_len(&root);
@@ -265,6 +291,7 @@ fn shrink_series(dir: &str, sync_on_write: bool, interval_ms: u64) -> Outcome<()
         println!("QA2 shrink {} after {:3}: dir {:6} bytes, tombstones held {}", dir, s.0, s.1, s.2);
     }
     println!("QA2 shrink compacted: {} bytes, {:?}", compacted, rep);
+    assert!(left.is_empty(), "{}: sealed files left over the trigger (file, old, size): {:?}", dir, left);
     let w10 = samples[0].1;
     let mx = samples.iter().map(|s| s.1).max().unwrap_or(0);
     let late: Vec<u64> = samples[10..].iter().map(|s| s.1).collect();
