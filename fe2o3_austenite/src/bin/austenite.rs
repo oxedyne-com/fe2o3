@@ -12,7 +12,9 @@
 //!
 //! Usage: `austenite <SOURCE.typ> [OUTPUT_DIR]` (default output `austenite-out`), or
 //! `austenite --watch <SOURCE.typ> [OUTPUT_DIR]` to recompile on every change to the root, its includes,
-//! its `config.typ`, or its assets.
+//! its `config.typ`, or its assets. `austenite watch` and `austenite build` compile through the evaluator
+//! under the settings of an `austenite.jdat`; `austenite --eval --watch` is an alias of `watch` with no
+//! settings file.
 
 use oxedyne_fe2o3_austenite::{
 	compile,
@@ -570,39 +572,25 @@ fn print_eval_done(job: &EvalJob, stats: &EvalStats) {
 		job.source, stats.pages, stats.passes, stats.bytes, stats.secs, job.out_dir);
 }
 
-/// `--eval --watch`: compiles through the evaluator, then again whenever a file the last compile read
-/// changes ([`watch::run_read`]). The rebuilds share one session, so each starts warm from the introspector
-/// of the one before and keeps the parsed fonts; the status line says `warm, 1 pass` or `cold, 3 passes`. The watched set is the evaluator's own record of what it asked for, so an
-/// import, an include, an image, a data file, a package file or a font under `--font-path` each rebuilds, and
-/// a file the document does not use never does. Each rebuild prints one status line, the page count and the
-/// wall, with the `skipped:` line folded on; one that fails prints why and leaves the last good
-/// `document.pdf` in place.
+/// `--eval --watch`: an alias of `austenite watch` with no settings file, so that a script written for it
+/// keeps working. The positional output directory becomes `output = "<dir>/document.pdf"`, taken from the
+/// working directory; `--root`, each `--font-path`, `--strict`, `--diag-summary` and `--timings` become
+/// their settings; the viewer and the figure rendering are off, as the caller has its own. Nothing else
+/// of a settings file applies, so a `austenite.jdat` above the source is not read.
 fn watch_eval(job: EvalJob) -> Outcome<()> {
-	// Brisk enough to feel live, cheap enough to leave the cores to the compile.
-	let interval = Duration::from_millis(400);
-	println!("[austenite] watching {} -> {}/ (Ctrl-C to stop)", job.source, job.out_dir);
-	let mut session = eval_session(&job);
-	watch::run_read(
-		move || {
-			let mut read = Vec::new();
-			match compile_eval(&job, &mut session, false, true, &mut read) {
-				Ok(stats)	=> {
-					let mut line = fmt!("[austenite] {} -> {} page(s), {:.2}s, {}, {} pass{} -> {}/",
-						job.source, stats.pages, stats.secs,
-						if stats.warm { "warm" } else { "cold" },
-						stats.passes, if stats.passes == 1 { "" } else { "es" }, job.out_dir);
-					if let Some(skip) = &stats.skip {
-						line.push_str("; ");
-						line.push_str(skip);
-					}
-					println!("{}", line);
-					(Ok(()), read)
-				},
-				Err(e)		=> (Err(e), read),
-			}
-		},
-		interval,
-	)
+	let cwd = res!(std::env::current_dir());
+	let bare = watch::Bare {
+		source:			PathBuf::from(&job.source),
+		out_dir:		PathBuf::from(&job.out_dir),
+		root:			job.root.as_ref().map(PathBuf::from),
+		fonts:			job.font_paths.iter().map(PathBuf::from).collect(),
+		strict:			job.strict,
+		diag_summary:	job.diag_summary,
+		timings:		job.timings_out.as_ref().map(PathBuf::from),
+		timings_fine:	job.timings_fine,
+	};
+	let run = res!(watch::Run::bare(&cwd, &bare));
+	run.run()
 }
 
 /// Reads the arguments of `watch` and `build`: the source, each `--set key=value`, `--cold` and `--timings FILE`.

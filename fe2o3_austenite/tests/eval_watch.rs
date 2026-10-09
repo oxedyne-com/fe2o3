@@ -329,3 +329,19 @@ fn strict_and_the_root_are_honoured_in_the_watch() {
 		"under --strict a warning that refuses the compile fails the rebuild, and says so");
 	assert!(w.quiet(SETTLE), "with no status line");
 }
+
+#[test]
+fn the_alias_writes_where_it_is_told_and_reads_no_settings_file() {
+	let dir = project("alias");
+	std::fs::create_dir_all(dir.join("sub")).expect("a subdirectory");
+	write(&dir.join("sub/main.typ"), "#import \"/lib.typ\": word\n#word\n");
+	// A settings file `austenite watch` would obey: another place for the PDF, and its colour space.
+	write(&dir.join("austenite.jdat"), "{\"output\": \"elsewhere.pdf\", \"colour\": {\"space\": \"cmyk\"}}");
+	let w = Watch::run(&dir, &["--root", "."], "sub/main.typ", &[]);
+	assert!(w.status(FIRST).is_some(), "the first build prints a status line");
+	let bytes = pdf(&dir);
+	assert!(bytes.starts_with(b"%PDF-1.7"), "the PDF is in the output directory named from the working directory");
+	assert!(!bytes.windows(10).any(|w| w == b"DeviceCMYK"), "the settings file is not read");
+	assert!(!dir.join("sub/out").exists() && !dir.join("sub/elsewhere.pdf").exists() && !dir.join("elsewhere.pdf").exists(),
+		"nothing is written beside the source or where the file says");
+}

@@ -15,6 +15,7 @@ use oxedyne_fe2o3_austenite::settings::{
 };
 use oxedyne_fe2o3_austenite::watch::{
 	self,
+	Bare,
 	Plan,
 	Run,
 	Spec,
@@ -615,4 +616,90 @@ fn watch_warm_off_compiles_cold_every_time() {
 	later();
 	write(&main, &source(9, "edited"));
 	assert!(!built(run.tick().expect("tick two")).warm);
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE ALIAS                                                                  │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+// What `--eval --watch SRC OUT` hands the plan, with nothing else asked.
+fn bare(source: &str, out: &str) -> Bare {
+	Bare {
+		source:			PathBuf::from(source),
+		out_dir:		PathBuf::from(out),
+		root:			None,
+		fonts:			Vec::new(),
+		strict:			false,
+		diag_summary:	false,
+		timings:		None,
+		timings_fine:	false,
+	}
+}
+
+// A settings file above the source that a bare run would obey in every particular, were it read.
+const LOUD: &str = "{\"output\": \"elsewhere.pdf\", \"strict\": true, \"colour\": {\"space\": \"cmyk\"}, \
+	\"pdf\": {\"version\": \"1.5\"}}";
+
+#[test]
+fn a_bare_plan_reads_no_settings_file_and_takes_its_paths_from_the_working_directory() {
+	let d = dir("bare_plan");
+	write(&d.join("sub").join("doc.typ"), &source(2, "q"));
+	write(&d.join("sub").join("figs").join("one.typ"), "x");
+	write(&d.join(settings::FILE), LOUD);
+	let p = Plan::bare(&d, &bare("sub/doc.typ", "out")).expect("a bare plan");
+	assert!(p.file.is_none(), "no settings file is found, though one stands above the source");
+	assert_eq!((p.settings.colour.space.as_str(), p.settings.strict, p.settings.pdf.version.as_str()), ("native", false, "1.7"));
+	assert_eq!(p.spec.out, d.join("out").join("document.pdf"), "the directory is the working directory's, not the source's");
+	assert_eq!(p.spec.root, d.join("sub"), "the source's directory is the root");
+	assert!(!p.settings.view.open && p.settings.viewer().is_none(), "no viewer opens");
+	assert!(!p.settings.figs.render, "a figures directory beside the document is not refused");
+	assert!(p.settings.fonts.is_empty(), "no font directory but the ones named");
+	let mut named = bare("sub/doc.typ", "/elsewhere");
+	named.root = Some(PathBuf::from("."));
+	named.fonts = vec![PathBuf::from("fonts"), PathBuf::from("/abs/fonts")];
+	named.diag_summary = true;
+	named.timings_fine = true;
+	let q = Plan::bare(&d, &named).expect("a bare plan with its flags");
+	assert_eq!(q.spec.out, PathBuf::from("/elsewhere/document.pdf"), "an absolute directory stands");
+	assert_eq!(std::fs::canonicalize(&q.spec.root).expect("the root"), d, "--root is taken from the working directory");
+	assert_eq!(q.settings.fonts, vec![d.join("fonts").display().to_string(), "/abs/fonts".to_string()]);
+	assert!(q.spec.diag_summary && q.spec.timings_fine);
+}
+
+#[test]
+fn a_bare_run_neither_reads_nor_watches_a_settings_file() {
+	let d = dir("bare_run");
+	let main = d.join("main.typ");
+	write(&main, &source(9, "q"));
+	write(&d.join(settings::FILE), LOUD);
+	later();
+	let mut run = Run::bare(&d, &bare("main.typ", "out")).expect("a bare run");
+	built(run.tick().expect("tick one"));
+	let out = d.join("out").join("document.pdf");
+	let first = std::fs::read(&out).expect("the PDF in the output directory");
+	assert!(first.starts_with(b"%PDF-1.7"), "the file above is not read");
+	assert!(!has(&first, "/DeviceCMYK"), "and its colour space is not applied");
+	assert!(!d.join("elsewhere.pdf").exists() && !d.join("main.pdf").exists(), "nothing is written beside the source");
+	assert!(matches!(run.tick().expect("tick two"), Tick::Idle), "nothing changed");
+	later();
+	write(&d.join(settings::FILE), &conf("\"pdf\": {\"version\": \"1.5\"}"));
+	assert!(matches!(run.tick().expect("tick three"), Tick::Idle), "an edit of the settings file is not seen");
+	later();
+	write(&main, &source(9, "edited"));
+	assert!(built(run.tick().expect("tick four")).warm, "an edit of the source compiles warm: no settings reload");
+	assert!(std::fs::read(&out).expect("the PDF").starts_with(b"%PDF-1.7"), "still the defaults");
+}
+
+#[test]
+fn the_same_file_read_by_a_watch_is_applied() {
+	// The foil of the cases above: were the file read, its colour space would be in the PDF.
+	let d = dir("bare_foil");
+	let main = d.join("main.typ");
+	write(&main, &source(2, "q"));
+	write(&d.join(settings::FILE), &conf("\"colour\": {\"space\": \"cmyk\"}"));
+	later();
+	let mut run = run_of(&main, &[]);
+	built(run.tick().expect("tick one"));
+	assert!(has(&std::fs::read(d.join("main.pdf")).expect("the PDF"), "/DeviceCMYK"), "the CMYK group is written");
 }

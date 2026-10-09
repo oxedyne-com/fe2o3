@@ -72,36 +72,6 @@ where
 	}
 }
 
-/// As [`run`], for a build that reports the files it read, which are then the watched set: the loop
-/// rebuilds when any of them changes and for no other cause. The set is whatever the last build read, so a
-/// build that failed still watches what it got as far as reading, and mending a file it stopped at is seen.
-///
-/// The snapshot a build is compared against is the one taken before it began, for the files known then, so
-/// a file saved while a long build runs is built again. A file the build was the first to read has no such
-/// snapshot, so one saved since the build began, by its time, is built again too.
-pub fn run_read<F>(mut build: F, interval: Duration) -> Outcome<()>
-where
-	F: FnMut() -> (Outcome<()>, Vec<PathBuf>),
-{
-	let mut set:	Vec<PathBuf>					= Vec::new();
-	let mut seen:	BTreeMap<PathBuf, SystemTime>	= BTreeMap::new();
-	let mut first	= true;
-	loop {
-		if first || snapshot(&set) != seen {
-			first = false;
-			let before = snapshot(&set);
-			let began = SystemTime::now();
-			let (result, files) = build();
-			if let Err(e) = result {
-				eprintln!("[austenite] {}", e.plain());
-			}
-			seen = carry(&set, &files, &before, &snapshot(&files), began);
-			set = files;
-		}
-		std::thread::sleep(interval);
-	}
-}
-
 // The snapshot to compare the next tick with, over the build's files: `before` for each path of the set
 // the build began with, and `after` for a path it read for the first time, unless that was saved since the
 // build `began`, when it gets the epoch so that the next tick sees a change. A path of the old set that did
@@ -288,6 +258,22 @@ pub struct Plan {
 	pub file:		Option<PathBuf>,
 	pub spec:		Spec,
 	base:			PathBuf,	// the directory the root, the document and the fonts are named from
+	bare:			bool,		// made by `bare`: no settings file is read or watched
+}
+
+/// What `austenite --eval --watch` is given, in place of a settings file: the source, the directory the PDF
+/// goes into as `document.pdf`, `--root`, each `--font-path`, `--strict`, `--diag-summary`, `--timings FILE`
+/// and `--timings-fine`.
+#[derive(Clone, Debug)]
+pub struct Bare {
+	pub source:			PathBuf,
+	pub out_dir:		PathBuf,
+	pub root:			Option<PathBuf>,	// default the source's directory
+	pub fonts:			Vec<PathBuf>,
+	pub strict:			bool,
+	pub diag_summary:	bool,
+	pub timings:		Option<PathBuf>,
+	pub timings_fine:	bool,
 }
 
 impl Plan {
@@ -320,6 +306,35 @@ impl Plan {
 			None	=> if settings.document.is_empty() { res!(settings::select_document(&base)) } else { base.join(&settings.document) },
 		};
 		let main = res!(std::fs::canonicalize(&main));
+		Self::settle(settings, file, base, main, timings)
+	}
+
+	/// The plan of `austenite --eval --watch`, which looks for no settings file: every setting at its default
+	/// but for the viewer and the figure rendering, which are off because the caller that wants either has its
+	/// own, and the few that `bare` carries. A relative path of `bare` is taken from `cwd`.
+	pub fn bare(cwd: &Path, bare: &Bare) -> Outcome<Self> {
+		let main = res!(std::fs::canonicalize(cwd.join(&bare.source)));
+		let mut settings = Settings::default();
+		settings.view.open		= false;
+		settings.figs.render	= false;
+		settings.strict			= bare.strict;
+		if bare.diag_summary {
+			settings.diagnostics = "summary".to_string();
+		}
+		settings.fonts	= bare.fonts.iter().map(|f| cwd.join(f).display().to_string()).collect();
+		settings.root	= match &bare.root {
+			Some(r)	=> cwd.join(r).display().to_string(),
+			None	=> main.parent().map(|d| d.display().to_string()).unwrap_or_default(),
+		};
+		settings.output	= cwd.join(&bare.out_dir).join("document.pdf").display().to_string();
+		let mut plan = res!(Self::settle(settings, None, cwd.to_path_buf(), main, bare.timings.as_deref()));
+		plan.spec.timings_fine	= bare.timings_fine;
+		plan.bare				= true;
+		Ok(plan)
+	}
+
+	// The plan for settings already read, a canonical `main`, and the `base` the root and the profiles are named from.
+	fn settle(settings: Settings, file: Option<PathBuf>, base: PathBuf, main: PathBuf, timings: Option<&Path>) -> Outcome<Self> {
 		let doc_dir = main.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| base.clone());
 		res!(settings.check_built(&doc_dir));
 		let root = if settings.root.is_empty() { base.clone() } else { base.join(&settings.root) };
@@ -333,7 +348,7 @@ impl Plan {
 			timings_fine:	false,
 			pdf:			res!(settings.pdf_options(&base)),
 		};
-		Ok(Self { settings, file, spec, base })
+		Ok(Self { settings, file, spec, base, bare: false })
 	}
 
 	/// A session over the font directories the settings name, relative to the root.
@@ -345,9 +360,12 @@ impl Plan {
 		Session::new(fonts)
 	}
 
-	// Where the settings file is, or would be if made: beside the document root.
-	fn settings_path(&self) -> PathBuf {
-		self.file.clone().unwrap_or_else(|| self.base.join(settings::FILE))
+	// Where the settings file is, or would be if made: beside the document root. None for a bare plan, which has none.
+	fn settings_path(&self) -> Option<PathBuf> {
+		if self.bare {
+			return None;
+		}
+		Some(self.file.clone().unwrap_or_else(|| self.base.join(settings::FILE)))
 	}
 }
 
@@ -388,15 +406,26 @@ pub struct Run {
 impl Run {
 	pub fn new(source: Option<PathBuf>, sets: Vec<String>, cold: bool, timings: Option<PathBuf>) -> Outcome<Self> {
 		let plan = res!(Plan::new(source.as_deref(), &sets, timings.as_deref()));
+		Ok(Self::over(plan, source, sets, cold, timings))
+	}
+
+	/// The loop of `austenite --eval --watch`: the plan of [`Plan::bare`], which no settings file shapes or
+	/// reloads.
+	pub fn bare(cwd: &Path, bare: &Bare) -> Outcome<Self> {
+		let plan = res!(Plan::bare(cwd, bare));
+		Ok(Self::over(plan, None, Vec::new(), false, None))
+	}
+
+	fn over(plan: Plan, source: Option<PathBuf>, sets: Vec<String>, cold: bool, timings: Option<PathBuf>) -> Self {
 		let session = plan.session();
-		Ok(Self {
+		Self {
 			source, sets, timings, cold, plan, session,
 			set:		Vec::new(),
 			seen:		BTreeMap::new(),
 			first:		true,
 			cold_next:	false,
 			viewed:		false,
-		})
+		}
 	}
 
 	pub fn plan(&self) -> &Plan { &self.plan }
@@ -407,22 +436,23 @@ impl Run {
 		if !self.first && before == self.seen {
 			return Ok(Tick::Idle);
 		}
-		let sf = self.plan.settings_path();
-		if !self.first && before.get(&sf) != self.seen.get(&sf) {
-			match Plan::new(self.source.as_deref(), &self.sets, self.timings.as_deref()) {
-				Ok(plan)	=> {
-					self.session.set_fonts(plan.session().fonts().clone());
-					self.plan = plan;
-					self.cold_next = true;
-				},
-				Err(e)		=> {
-					// The old settings stand; the file is seen as it is now, so the error is told once.
-					match before.get(&sf) {
-						Some(t)	=> { self.seen.insert(sf, *t); },
-						None	=> { self.seen.remove(&sf); },
-					}
-					return Ok(Tick::Failed(e.plain()));
-				},
+		if let Some(sf) = self.plan.settings_path() {
+			if !self.first && before.get(&sf) != self.seen.get(&sf) {
+				match Plan::new(self.source.as_deref(), &self.sets, self.timings.as_deref()) {
+					Ok(plan)	=> {
+						self.session.set_fonts(plan.session().fonts().clone());
+						self.plan = plan;
+						self.cold_next = true;
+					},
+					Err(e)		=> {
+						// The old settings stand; the file is seen as it is now, so the error is told once.
+						match before.get(&sf) {
+							Some(t)	=> { self.seen.insert(sf, *t); },
+							None	=> { self.seen.remove(&sf); },
+						}
+						return Ok(Tick::Failed(e.plain()));
+					},
+				}
 			}
 		}
 		let began = SystemTime::now();
@@ -430,10 +460,11 @@ impl Run {
 		self.cold_next = false;
 		let mut read = Vec::new();
 		let result = compile_pdf(&self.plan.spec, &mut self.session, cold, true, &mut read);
-		let sf = self.plan.settings_path();
 		let mut files = read;
-		if !files.contains(&sf) {
-			files.push(sf);
+		if let Some(sf) = self.plan.settings_path() {
+			if !files.contains(&sf) {
+				files.push(sf);
+			}
 		}
 		self.seen = carry(&self.set, &files, &before, &snapshot(&files), began);
 		self.set = files;
