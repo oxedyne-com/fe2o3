@@ -20,6 +20,7 @@ use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_graphics::{
 	colour::Ink,
 	path::Path,
+	pixmap::Tone,
 };
 
 use std::sync::Arc;
@@ -261,6 +262,7 @@ pub struct RasterImage {
 	pub width:	usize,		// samples across
 	pub height:	usize,		// samples down
 	pub rgba:	Vec<u8>,	// width * height * 4 straight-RGBA bytes, top row first
+	pub tone:	Tone,		// grey when the source file held grey alone
 }
 
 /// A hint from an `image(...)` or `padded-image(...)` call for how large to draw a figure: a fraction of

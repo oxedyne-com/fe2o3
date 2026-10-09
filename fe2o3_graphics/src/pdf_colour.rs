@@ -3,15 +3,20 @@
 //! A [`ColourOut`] says what a file holds. `Native` writes each ink in its own space and `Rgb` lowers
 //! every ink to sRGB, which is what every file written before an ink knew its space holds. `Cmyk` and
 //! `Grey` convert: each fill, stroke and text colour reaches the file in the output space, and each
-//! raster is taken as sRGB and converted through an ICC [`Transform`], so that nothing in the file is
+//! colour raster is taken as sRGB and converted through an ICC [`Transform`], so that nothing in the file is
 //! written as `rg`, `RG` or `/DeviceRGB`.
+//!
+//! A `/DeviceGray` value is a subset of every output space, as Ghostscript keeps it: a grey ink, and a raster
+//! whose source held grey alone, reach a grey output unchanged.
 //!
 //! # Black
 //!
 //! Under [`Black::KOnly`] a grey ink, and an RGB ink whose three channels are equal, is written as `g`
 //! or `G`, which a CMYK device prints with the black ink alone, so that text and rules set in black
 //! carry no cyan, magenta or yellow. [`Black::Rich`] sends the same inks through the transform, which
-//! gives the profile's own rich black. A CMYK ink is kept as it is under `Cmyk`.
+//! gives the profile's own rich black. A CMYK ink is kept as it is under `Cmyk`. A raster from a grey source
+//! ([`Tone::Grey`]) is written as `/DeviceGray` under K only and goes through the transform under a rich black,
+//! as a grey ink does.
 //!
 //! # Images
 //!
@@ -25,6 +30,7 @@
 
 use crate::colour::Ink;
 use crate::icc::transform::Transform;
+use crate::pixmap::Tone;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::{
@@ -147,6 +153,7 @@ impl ColourOut {
 				},
 			},
 			Self::Grey { xf, cmyk, .. }	=> match ink {
+				Ink::Grey { .. }			=> ink,
 				Ink::Cmyk { c, m, y, k, a }	=> {
 					let v = res!(cmyk.cmyk_to_grey([c as f64, m as f64, y as f64, k as f64]));
 					Ink::Grey { v, a }
@@ -157,17 +164,22 @@ impl ColourOut {
 	}
 
 	/// Converts a raster of packed 8-bit sRGB, returning its channel count and its samples, or none in a mode that
-	/// writes a raster as it comes. A raster seen before, through the same transform, is read from the cache.
-	pub fn image(&self, rgb: &[u8], iw: usize, ih: usize) -> Outcome<Option<(usize, Arc<Vec<u8>>)>> {
-		let (xf, images, chans) = match self {
-			Self::Cmyk { xf, images, .. }	=> (xf, images, 4),
-			Self::Grey { xf, images, .. }	=> (xf, images, 1),
-			_								=> return Ok(None),
+	/// writes a raster as it comes. A raster seen before, through the same transform, is read from the cache. A
+	/// raster of `Tone::Grey`, whose three samples are equal, is kept as one channel of grey except under a rich
+	/// black.
+	pub fn image(&self, rgb: &[u8], iw: usize, ih: usize, tone: Tone) -> Outcome<Option<(usize, Arc<Vec<u8>>)>> {
+		let (xf, images, chans, keep) = match self {
+			Self::Cmyk { xf, images, black }	=> (xf, images, 4, *black == Black::KOnly),
+			Self::Grey { xf, images, .. }		=> (xf, images, 1, true),
+			_									=> return Ok(None),
 		};
 		if rgb.len() != iw * ih * 3 {
 			return Err(err!(
 				"An image of {} by {} samples holds {} bytes of RGB, not the {} it should.",
 				iw, ih, rgb.len(), iw * ih * 3; Invalid, Input, Size));
+		}
+		if tone == Tone::Grey && keep {
+			return Ok(Some((1, Arc::new(rgb.iter().step_by(3).copied().collect()))));
 		}
 		let mut f = Fingerprinter::new();
 		f.write_usize(iw);

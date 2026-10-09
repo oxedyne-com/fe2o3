@@ -245,7 +245,7 @@ fn draw_graphic(
 				// image XObject, straight RGB with a soft mask only when a sample is translucent.
 				let (rgb, alpha) = crate::image::split_rgba(image);
 				out.image(
-					rgb, alpha, image.width, image.height,
+					rgb, alpha, image.tone, image.width, image.height,
 					ox + *x as f64, oy + *y as f64, *w as f64, *h as f64);
 			},
 		}

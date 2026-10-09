@@ -32,6 +32,16 @@ use std::path::Path as FilePath;
 // A 16k by 16k image sits just under it.
 pub const MAX_PIXELS: usize = 1 << 28;
 
+/// What the source of a decoded raster held, which its RGBA no longer shows: grey samples alone (a one-channel
+/// JPEG, or a PNG of grey with or without alpha), or colour. A writer that converts for print keeps a grey
+/// source on the black ink.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Tone {
+	Grey,
+	#[default]
+	Colour,
+}
+
 /// A rectangular buffer of RGBA pixels, eight bits per channel, with straight alpha.
 ///
 /// The layout is row-major, four bytes per pixel, which is what a PNG wants and what a GPU or a
@@ -385,6 +395,10 @@ impl Pixmap {
 		png::decode(buf)
 	}
 
+	pub fn from_png_toned(buf: &[u8]) -> Outcome<(Self, Tone)> {
+		png::decode_toned(buf)
+	}
+
 	pub fn save_png<P: AsRef<FilePath>>(&self, path: P) -> Outcome<()> {
 		let buf = res!(self.to_png());
 		res!(std::fs::write(path.as_ref(), &buf));
@@ -403,6 +417,10 @@ impl Pixmap {
 
 	pub fn from_jpeg(buf: &[u8]) -> Outcome<Self> {
 		jpeg::decode(buf)
+	}
+
+	pub fn from_jpeg_toned(buf: &[u8]) -> Outcome<(Self, Tone)> {
+		jpeg::decode_toned(buf)
 	}
 
 	pub fn save_jpeg<P: AsRef<FilePath>>(&self, path: P) -> Outcome<()> {

@@ -224,7 +224,7 @@ mod tests {
 					}
 				},
 				SvgOp::Text { .. } => {},
-				SvgOp::Image { rgba, iw, ih, x, y, w, h } => {
+				SvgOp::Image { rgba, iw, ih, x, y, w, h, .. } => {
 					if iw == 0 || ih == 0 || w <= 0.0 || h <= 0.0 {
 						continue;
 					}

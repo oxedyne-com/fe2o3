@@ -1649,7 +1649,7 @@ fn crop_centred(image: &RasterImage, fw: f64, fh: f64, tw: f64, th: f64) -> (Ras
 		let row = (y * image.width + x0) * 4;
 		rgba.extend_from_slice(&image.rgba[row..row + cw * 4]);
 	}
-	(RasterImage { width: cw, height: ch, rgba }, tw, th)
+	(RasterImage { width: cw, height: ch, rgba, tone: image.tone }, tw, th)
 }
 
 // An SVG's ops under `t`: paths and rasters mapped, live text shaped under the element's styles.
@@ -1684,11 +1684,11 @@ fn svg_ops(engine: &mut Engine, styles: &StyleChain, ops: Vec<SvgOp>, t: GTransf
 					out.push(DrawOp::Fill { path: res!(o.transform(&place)), colour: colour.into() });
 				}
 			},
-			SvgOp::Image { rgba, iw, ih, x, y, w, h } => {
+			SvgOp::Image { rgba, tone, iw, ih, x, y, w, h } => {
 				let p0 = t.apply(Pt::new(x, y));
 				let p1 = t.apply(Pt::new(x + w, y + h));
 				out.push(DrawOp::Image {
-					image:	Arc::new(RasterImage { width: iw, height: ih, rgba }),
+					image:	Arc::new(RasterImage { width: iw, height: ih, rgba, tone }),
 					x:		p0.x,
 					y:		p0.y,
 					w:		p1.x - p0.x,

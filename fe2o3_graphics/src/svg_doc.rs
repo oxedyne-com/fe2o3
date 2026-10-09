@@ -44,6 +44,7 @@ use crate::path::{
 	Pt,
 	Seg,
 };
+use crate::pixmap::Tone;
 use crate::stroke::{
 	Cap,
 	Dash,
@@ -87,6 +88,7 @@ pub enum SvgOp {
 	// A decoded raster and the rectangle it fills, top-left (x, y), w wide and h tall, in the picture frame.
 	Image {
 		rgba:	Vec<u8>,	// straight RGBA, row-major, top row first
+		tone:	Tone,		// whether the embedded file held grey alone
 		iw:		usize,		// image pixel width
 		ih:		usize,		// image pixel height
 		x:		f32,
@@ -686,22 +688,15 @@ fn emit_image(elem: &Elem, ctx: &Transform, ops: &mut Vec<SvgOp>) -> Outcome<()>
 		Ok(b)	=> b,
 		Err(_)	=> return Ok(()),
 	};
-	let iw;
-	let ih;
-	let rgba;
-	if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-		let pm = res!(crate::pixmap::Pixmap::from_png(&bytes));
-		iw = pm.width();
-		ih = pm.height();
-		rgba = pm.into_data();
+	let (pm, tone) = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+		res!(crate::pixmap::Pixmap::from_png_toned(&bytes))
 	} else if bytes.starts_with(&[0xFF, 0xD8]) {
-		let pm = res!(crate::pixmap::Pixmap::from_jpeg(&bytes));
-		iw = pm.width();
-		ih = pm.height();
-		rgba = pm.into_data();
+		res!(crate::pixmap::Pixmap::from_jpeg_toned(&bytes))
 	} else {
 		return Ok(());	// neither PNG nor JPEG by its magic bytes
-	}
+	};
+	let (iw, ih) = (pm.width(), pm.height());
+	let rgba = pm.into_data();
 
 	let x = first_number(elem.attr("x"));
 	let y = first_number(elem.attr("y"));
@@ -715,6 +710,7 @@ fn emit_image(elem: &Elem, ctx: &Transform, ops: &mut Vec<SvgOp>) -> Outcome<()>
 	let p1		= local.apply(Pt::new(x + w, y + h));
 	ops.push(SvgOp::Image {
 		rgba,
+		tone,
 		iw,
 		ih,
 		x:	p0.x.min(p1.x),

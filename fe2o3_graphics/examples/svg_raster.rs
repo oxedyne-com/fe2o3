@@ -82,7 +82,7 @@ fn main() -> Outcome<()> {
 				// Half coverage, so the marker reads as a placeholder rather than as rendered text.
 				res!(pm.stroke_path(&rule, &t, colour.with_coverage(0.5), None, &pen));
 			},
-			SvgOp::Image { rgba, iw, ih, x, y, w, h } => {
+			SvgOp::Image { rgba, iw, ih, x, y, w, h, .. } => {
 				if iw == 0 || ih == 0 || w <= 0.0 || h <= 0.0 {
 					continue;
 				}

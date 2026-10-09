@@ -147,6 +147,7 @@ use crate::timings::{
 	PageRec,
 };
 
+use oxedyne_fe2o3_graphics::pixmap::Tone;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::collections::VecDeque;
@@ -643,10 +644,11 @@ impl Walk for ShapedText {
 
 impl Walk for RasterImage {
 	fn mix(&self, fp: &mut Fp) {
-		let RasterImage { width, height, rgba } = self;
+		let RasterImage { width, height, rgba, tone } = self;
 		width.mix(fp);
 		height.mix(fp);
 		fp.bytes(rgba);
+		(*tone == Tone::Grey).mix(fp);
 	}
 }
 

@@ -157,24 +157,24 @@ fn decode_raster(path: &Path) -> Outcome<RasterImage> {
 		Ok(b)	=> b,
 		Err(e)	=> return Err(err!(e, "Could not read the image file {:?}.", path; File, Read)),
 	};
-	let pm = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-		res!(Pixmap::from_png(&bytes))
+	let (pm, tone) = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+		res!(Pixmap::from_png_toned(&bytes))
 	} else if bytes.starts_with(&[0xFF, 0xD8]) {
-		res!(Pixmap::from_jpeg(&bytes))
+		res!(Pixmap::from_jpeg_toned(&bytes))
 	} else {
 		let ext = path.extension()
 			.and_then(|e| e.to_str())
 			.unwrap_or("")
 			.to_lowercase();
 		match ext.as_str() {
-			"png"			=> res!(Pixmap::from_png(&bytes)),
-			"jpg" | "jpeg"	=> res!(Pixmap::from_jpeg(&bytes)),
+			"png"			=> res!(Pixmap::from_png_toned(&bytes)),
+			"jpg" | "jpeg"	=> res!(Pixmap::from_jpeg_toned(&bytes)),
 			_ => return Err(err!(
 				"The image {:?} is neither PNG nor JPEG by its bytes or its extension.", path;
 				Input, Invalid)),
 		}
 	};
-	Ok(RasterImage { width: pm.width(), height: pm.height(), rgba: pm.into_data() })
+	Ok(RasterImage { width: pm.width(), height: pm.height(), rgba: pm.into_data(), tone })
 }
 
 /// Splits straight RGBA into the packed RGB the image XObject and `<image>` writers want, and a grey
@@ -261,16 +261,16 @@ pub fn detect_format(data: &[u8]) -> Outcome<ImageFormat> {
 pub fn decode(data: &[u8], format: ImageFormat) -> Outcome<Decoded> {
 	match format {
 		ImageFormat::Png | ImageFormat::Jpg => {
-			let pm = match format {
-				ImageFormat::Png	=> res!(Pixmap::from_png(data)),
-				_					=> res!(Pixmap::from_jpeg(data)),
+			let (pm, tone) = match format {
+				ImageFormat::Png	=> res!(Pixmap::from_png_toned(data)),
+				_					=> res!(Pixmap::from_jpeg_toned(data)),
 			};
 			let dpi = match format {
 				ImageFormat::Png	=> png_dpi(data),
 				_					=> jpeg_dpi(data),
 			}.unwrap_or(72.0);
 			let (w, h) = (pm.width(), pm.height());
-			let image = RasterImage { width: w, height: h, rgba: pm.into_data() };
+			let image = RasterImage { width: w, height: h, rgba: pm.into_data(), tone };
 			Ok(Decoded::Raster {
 				image,
 				width_pt:	w as f64 * 72.0 / dpi,

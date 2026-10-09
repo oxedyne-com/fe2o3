@@ -3341,9 +3341,9 @@ fn svg_graphic(
 				res!(bake_svg_text(
 					&mut ops, fonts.clone(), &text, &local, &t, x, y, size, anchor, italic, bold, colour));
 			},
-			SvgOp::Image { rgba, iw, ih, x, y, w: iwd, h: ihd } => {
+			SvgOp::Image { rgba, tone, iw, ih, x, y, w: iwd, h: ihd } => {
 				// The raster's placement rectangle is in the picture frame; the same factor scales it.
-				let img = RasterImage { width: iw, height: ih, rgba };
+				let img = RasterImage { width: iw, height: ih, rgba, tone };
 				ops.push(DrawOp::Image {
 					image:	Arc::new(img),
 					x:		x * s,

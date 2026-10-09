@@ -21,7 +21,10 @@ pub use crate::{
 		Polyline,
 		Pt,
 	},
-	pixmap::Pixmap,
+	pixmap::{
+		Pixmap,
+		Tone,
+	},
 	png::{
 		Animation,
 		Delay,

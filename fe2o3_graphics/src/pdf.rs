@@ -37,6 +37,7 @@ use crate::path::{
 	Pt,
 	Seg,
 };
+use crate::pixmap::Tone;
 use crate::transform::Transform;
 
 pub use crate::pdf_colour::{
@@ -81,7 +82,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// One drawn shape: a path and how it is painted, or a raster image placed in a rectangle. Fill and
 /// stroke are the two the typesetter needs for vector ink -- glyphs and rules fill, a held-open
 /// reservation strokes; `Image` embeds a decoded raster (a figure's photograph or diagram) as an image
-/// XObject, its samples straight RGB with an optional grey soft mask for translucency.
+/// XObject, its samples straight RGB with an optional grey soft mask for translucency, and the tone of its
+/// source, which a converting mode reads to keep a grey raster grey.
 #[derive(Clone, Debug)]
 pub enum Draw {
 	Fill {
@@ -96,6 +98,7 @@ pub enum Draw {
 	Image {
 		rgb:	Vec<u8>,			// packed RGB, iw*ih*3, row-major, top row first
 		alpha:	Option<Vec<u8>>,	// packed grey soft mask, iw*ih, present only when a pixel is translucent
+		tone:	Tone,				// grey when the source held grey alone, its RGB then three equal samples
 		iw:		usize,				// image width in samples
 		ih:		usize,				// image height in samples
 		x:		f64,				// placement rectangle, engine frame (top-left, y down), points
@@ -209,7 +212,8 @@ impl PdfPage {
 
 	/// Places a decoded raster in the rectangle at top-left `(x, y)`, `w` wide and `h` tall, in the
 	/// engine's y-down point frame. `rgb` is `iw * ih * 3` straight-RGB samples, top row first; `alpha`,
-	/// when given, is the matching `iw * ih` grey soft mask that carries any translucency. The image is
+	/// when given, is the matching `iw * ih` grey soft mask that carries any translucency. `tone` is the source's,
+	/// so that a converting mode writes a grey source as `/DeviceGray`, as it writes a grey ink. The image is
 	/// scaled to fill the rectangle, so the caller sizes the rectangle to the image's aspect if it wants
 	/// no distortion.
 	#[allow(clippy::too_many_arguments)]
@@ -217,6 +221,7 @@ impl PdfPage {
 		&mut self,
 		rgb:	Vec<u8>,
 		alpha:	Option<Vec<u8>>,
+		tone:	Tone,
 		iw:		usize,
 		ih:		usize,
 		x:		f64,
@@ -224,7 +229,7 @@ impl PdfPage {
 		w:		f64,
 		h:		f64,
 	) {
-		self.draws.push(Draw::Image { rgb, alpha, iw, ih, x, y, w, h });
+		self.draws.push(Draw::Image { rgb, alpha, tone, iw, ih, x, y, w, h });
 	}
 
 	/// Adds a glyph placed at pen `(x, y)` -- `x` the left, `y` the baseline, in the engine's top-left,
@@ -820,10 +825,10 @@ impl<W: Write> PdfStream<W> {
 		// written straight after the image object that references it.
 		let mut idx = 0;
 		for d in &page.draws {
-			if let Draw::Image { rgb, alpha, iw, ih, .. } = d {
+			if let Draw::Image { rgb, alpha, tone, iw, ih, .. } = d {
 				let (image_obj, smask_obj) = img_objs[idx];
 				idx += 1;
-				match res!(self.colour_out.image(rgb, *iw, *ih)) {
+				match res!(self.colour_out.image(rgb, *iw, *ih, *tone)) {
 					Some((chans, data))	=> res!(self.write_image(image_obj, &data, chans, *iw, *ih, smask_obj)),
 					None				=> res!(self.write_image(image_obj, rgb, 3, *iw, *ih, smask_obj)),
 				}

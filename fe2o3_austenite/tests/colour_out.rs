@@ -25,13 +25,17 @@ use oxedyne_fe2o3_graphics::icc::transform::{
 	Intent,
 	Transform,
 };
+use oxedyne_fe2o3_graphics::jpeg;
 use oxedyne_fe2o3_graphics::pdf::{
 	Black,
 	ColourOut,
 	PdfPage,
 	PdfWriter,
 };
-use oxedyne_fe2o3_graphics::pixmap::Pixmap;
+use oxedyne_fe2o3_graphics::pixmap::{
+	Pixmap,
+	Tone,
+};
 
 use std::path::{
 	Path,
@@ -64,6 +68,13 @@ const PICS: &str = "\
 #set page(width: 120pt, height: 120pt, margin: 8pt)
 #image(\"pic.png\", width: 24pt)
 #image(\"soft.png\", width: 24pt)
+";
+
+// A page of two pictures whose sources hold one channel: an `L` PNG and a one-component JPEG.
+const GREYS: &str = "\
+#set page(width: 120pt, height: 120pt, margin: 8pt)
+#image(\"grey.png\", width: 24pt)
+#image(\"grey.jpg\", width: 24pt)
 ";
 
 struct ModeSink {
@@ -139,7 +150,65 @@ fn project(name: &str, src: &str) -> Outcome<PathBuf> {
 		}
 	}
 	res!(std::fs::write(dir.join("soft.png"), res!(soft.to_png())));
+	res!(std::fs::write(dir.join("grey.png"), grey_png(8, 8, |x, y| (16 * x + 12 * y) as u8)));
+	let mut ramp = res!(Pixmap::filled(16, 16, Rgba::opaque(0, 0, 0)));
+	for y in 0..16 {
+		for x in 0..16 {
+			let v = (15 * x + y) as u8;
+			ramp.set_pixel(x, y, Rgba::opaque(v, v, v));
+		}
+	}
+	let opts = jpeg::Options { quality: 90, chroma: jpeg::Chroma::Full, grey: true };
+	res!(std::fs::write(dir.join("grey.jpg"), res!(jpeg::encode_with(&ramp, &opts))));
 	Ok(dir)
+}
+
+// An eight-bit, one-channel (`L`) PNG of `w` by `h` samples, its scanlines stored rather than deflated.
+fn grey_png(w: usize, h: usize, v: impl Fn(usize, usize) -> u8) -> Vec<u8> {
+	let mut raw = Vec::with_capacity(h * (w + 1));
+	for y in 0..h {
+		raw.push(0);
+		for x in 0..w {
+			raw.push(v(x, y));
+		}
+	}
+	// A zlib stream of one stored block, then the Adler-32 of the data.
+	let n = raw.len() as u16;
+	let mut z = vec![0x78, 0x01, 0x01];
+	z.extend_from_slice(&n.to_le_bytes());
+	z.extend_from_slice(&(!n).to_le_bytes());
+	z.extend_from_slice(&raw);
+	let (mut a, mut b) = (1u32, 0u32);
+	for c in &raw {
+		a = (a + *c as u32) % 65521;
+		b = (b + a) % 65521;
+	}
+	z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+	let mut ihdr = Vec::with_capacity(13);
+	ihdr.extend_from_slice(&(w as u32).to_be_bytes());
+	ihdr.extend_from_slice(&(h as u32).to_be_bytes());
+	ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);	// eight bits, grey, then the only methods there are
+	let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+	for (kind, data) in [(b"IHDR", ihdr), (b"IDAT", z), (b"IEND", Vec::new())] {
+		out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+		let from = out.len();
+		out.extend_from_slice(kind);
+		out.extend_from_slice(&data);
+		let crc = crc32(&out[from..]);
+		out.extend_from_slice(&crc.to_be_bytes());
+	}
+	out
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+	let mut c = !0u32;
+	for b in bytes {
+		c ^= *b as u32;
+		for _ in 0..8 {
+			c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+		}
+	}
+	!c
 }
 
 fn written(name: &str, src: &str, mode: ColourOut) -> Outcome<Written> {
@@ -247,6 +316,8 @@ fn grey_mode_writes_every_surface_as_grey() -> Outcome<()> {
 		return Err(err!("grey mode: no `g` or no `G`:\n{}", w.content; Test));
 	}
 	present(&w, &["/ColorSpace /DeviceGray", "/SMask", "/Group << /S /Transparency /CS /DeviceGray /I true >>"], "grey")?;
+	// A grey ink is a /DeviceGray value already, so it is kept to the digit, as Ghostscript keeps it.
+	present(&w, &["0 g\n", "0.25 g\n", "0.5 g\n", "0.75 G\n"], "grey")?;
 	if w.whole.contains("/DeviceRGB") || w.whole.contains("/DeviceCMYK") {
 		return Err(err!("grey mode: the file names a colour space besides /DeviceGray"; Test));
 	}
@@ -263,6 +334,32 @@ fn native_and_rgb_modes_add_no_transparency_group_and_keep_rgb_images() -> Outco
 		present(&w, &["/ColorSpace /DeviceRGB"], name)?;
 	}
 	Ok(())
+}
+
+// Do the image XObjects number `n`, each named in `space`?
+fn images_are(w: &Written, space: &str, n: usize, mode: &str) -> Outcome<()> {
+	let all = w.whole.matches("/Subtype /Image").count();
+	let named = w.whole.matches(&format!("/ColorSpace {}", space)).count();
+	if all != n || named != n {
+		return Err(err!("{} mode: {} images, {} of them {}, where {} of {} were wanted", mode, all, named, space, n, space; Test));
+	}
+	Ok(())
+}
+
+#[test]
+fn a_raster_from_a_grey_source_stays_grey_unless_a_rich_black_is_asked_for() -> Outcome<()> {
+	// Under K only an `L` PNG and a one-component JPEG are each a /DeviceGray image, printed with the black ink
+	// alone, as a grey ink is.
+	let w = res!(written("greys-cmyk", GREYS, res!(cmyk_mode(Black::KOnly))));
+	images_are(&w, "/DeviceGray", 2, "cmyk")?;
+	// A rich black sends them through the profile, as it sends a grey ink.
+	let w = res!(written("greys-rich", GREYS, res!(cmyk_mode(Black::Rich))));
+	images_are(&w, "/DeviceCMYK", 2, "cmyk rich")?;
+	let w = res!(written("greys-grey", GREYS, res!(grey_mode())));
+	images_are(&w, "/DeviceGray", 2, "grey")?;
+	// Native and rgb write the samples as they were decoded, as before.
+	let w = res!(written("greys-native", GREYS, ColourOut::Native));
+	images_are(&w, "/DeviceRGB", 2, "native")
 }
 
 #[test]
@@ -283,8 +380,10 @@ fn a_flat_ink_is_taken_by_the_mode_and_a_neutral_is_exactly_neutral() -> Outcome
 		Ink::Cmyk { c, m, y, .. }	=> assert!(c + m + y > 0.0, "a rich neutral holds no cyan, magenta or yellow"),
 		other						=> return Err(err!("rich sent a neutral to {:?}", other; Test)),
 	}
-	// Under grey every ink is a grey, and a CMYK ink is read in its own profile.
+	// Under grey every ink is a grey, and a CMYK ink is read in its own profile. A grey ink is kept as it is.
 	let g = res!(grey_mode());
+	let luma = Ink::Grey { v: 0.37, a: 255 };
+	assert_eq!(res!(g.ink(luma)), luma, "grey output re-toned a grey ink");
 	for ink in [mid, Ink::Cmyk { c: 1.0, m: 0.0, y: 0.0, k: 0.0, a: 255 }, Ink::Rgb(Rgba::opaque(255, 0, 0))] {
 		match res!(g.ink(ink)) {
 			Ink::Grey { .. }	=> (),
@@ -292,8 +391,8 @@ fn a_flat_ink_is_taken_by_the_mode_and_a_neutral_is_exactly_neutral() -> Outcome
 		}
 	}
 	// Native and rgb convert nothing.
-	assert!(res!(ColourOut::Native.image(&[0; 12], 2, 2)).is_none());
-	assert!(res!(ColourOut::Rgb.image(&[0; 12], 2, 2)).is_none());
+	assert!(res!(ColourOut::Native.image(&[0; 12], 2, 2, Tone::Colour)).is_none());
+	assert!(res!(ColourOut::Rgb.image(&[0; 12], 2, 2, Tone::Colour)).is_none());
 	Ok(())
 }
 
@@ -301,16 +400,31 @@ fn a_flat_ink_is_taken_by_the_mode_and_a_neutral_is_exactly_neutral() -> Outcome
 fn a_raster_comes_out_with_one_channel_in_grey_and_four_in_cmyk() -> Outcome<()> {
 	// A white and a black pixel, a red, and a mid grey.
 	let px = [255u8, 255, 255, 0, 0, 0, 255, 0, 0, 128, 128, 128];
-	let (n, c) = res!(res!(res!(cmyk_mode(Black::KOnly)).image(&px, 2, 2)).ok_or_else(|| err!("no CMYK raster"; Test)));
+	let (n, c) = res!(res!(res!(cmyk_mode(Black::KOnly)).image(&px, 2, 2, Tone::Colour)).ok_or_else(|| err!("no CMYK raster"; Test)));
 	assert_eq!((n, c.len()), (4, 16));
 	assert!(c[..4].iter().all(|v| *v < 12), "white carries ink: {:?}", &c[..4]);
 	assert!(c[4..8].iter().any(|v| *v > 200), "black carries none: {:?}", &c[4..8]);
-	let (n, c) = res!(res!(res!(grey_mode()).image(&px, 2, 2)).ok_or_else(|| err!("no grey raster"; Test)));
+	let (n, c) = res!(res!(res!(grey_mode()).image(&px, 2, 2, Tone::Colour)).ok_or_else(|| err!("no grey raster"; Test)));
 	assert_eq!((n, c.len()), (1, 4));
 	assert!(c[0] > 245 && c[1] < 10, "white and black: {:?}", c);
 	assert!(c[3] > 100 && c[3] < 160, "the mid grey: {}", c[3]);
 	// A raster whose length is not its size is refused.
-	assert!(cmyk_mode(Black::KOnly).and_then(|m| m.image(&px[..11], 2, 2)).is_err());
+	assert!(cmyk_mode(Black::KOnly).and_then(|m| m.image(&px[..11], 2, 2, Tone::Colour)).is_err());
+	Ok(())
+}
+
+#[test]
+fn a_raster_of_grey_tone_keeps_its_samples_unless_a_rich_black_is_asked_for() -> Outcome<()> {
+	// White, black, and two greys, each with its three samples equal, as a grey source decodes.
+	let px = [255u8, 255, 255, 0, 0, 0, 94, 94, 94, 200, 200, 200];
+	for (name, mode) in [("cmyk", res!(cmyk_mode(Black::KOnly))), ("grey", res!(grey_mode()))] {
+		let (n, c) = res!(res!(mode.image(&px, 2, 2, Tone::Grey)).ok_or_else(|| err!("{}: no raster", name; Test)));
+		assert_eq!((n, c.as_slice()), (1, &[255u8, 0, 94, 200][..]), "{}", name);
+	}
+	let (n, c) = res!(res!(res!(cmyk_mode(Black::Rich)).image(&px, 2, 2, Tone::Grey)).ok_or_else(|| err!("no rich raster"; Test)));
+	assert_eq!(n, 4);
+	assert!(c[4..7].iter().any(|v| *v > 50), "a rich black holds no cyan, magenta or yellow: {:?}", &c[4..8]);
+	assert!(res!(ColourOut::Native.image(&px, 2, 2, Tone::Grey)).is_none());
 	Ok(())
 }
 
