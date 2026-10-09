@@ -818,7 +818,7 @@ pub async fn read_line<S: AsyncRead + Unpin>(
     loop {
         let n = match stream.read(&mut byte).await {
             Ok(n) => n,
-            Err(e) => return Err(err!(e, "Reading SMTP line byte."; IO, Network, Read)),
+            Err(e) => return Err(crate::tls::wire_fault(e, fmt!("Reading SMTP line byte"), false)),
         };
         if n == 0 {
             if buf.is_empty() {

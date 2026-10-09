@@ -12,6 +12,9 @@
 //! onto this module without its clients or its reader noticing. `Gates::daimond` holds Daimond's
 //! numbers; `Gates::default` holds the retention the test site wants instead.
 //!
+//! `shot::Shots` is the picture half: a device asked for a picture of its screen answers with a
+//! PNG or a reason, under a rate floor, a size cap and an age of seven days.
+//!
 //! With the `async` feature, `tap::Tap` is a tap on a websocket's messages (`crate::ws::tap`)
 //! that files what a caller's filter keeps as rows of a `Sink`.
 //!
@@ -25,6 +28,7 @@
 pub mod chunk;
 pub mod redact;
 pub mod row;
+pub mod shot;
 pub mod sink;
 #[cfg(feature = "async")]
 pub mod tap;
@@ -50,6 +54,14 @@ pub use row::{
     compact,
     Entry,
     Row,
+};
+pub use shot::{
+    Answer,
+    Ask,
+    Filed,
+    ShotGates,
+    ShotRefusal,
+    Shots,
 };
 pub use sink::{
     is_stamp,

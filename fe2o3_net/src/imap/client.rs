@@ -14,6 +14,29 @@
 //! - `CAPABILITY`, `LIST`, `SELECT`/`EXAMINE`, `UID SEARCH`, `UID FETCH`,
 //!   `UID STORE`, `APPEND`, `LOGOUT`.
 //!
+//! A failure says what kind it is in its tags, so a caller explaining it to a
+//! person reads the tags and never the words, which for a dropped connection
+//! and a refused certificate both mention TLS (D-20261006-09):
+//!
+//! - `Unauthorised`: the credential was refused, or password login is disabled.
+//! - `NotFound`: the mailbox does not exist (a `NO` to `SELECT`/`EXAMINE`).
+//! - `Unreachable`: nothing would take the connection.
+//! - `Interrupted`: the connection dropped, or the server said it was briefly
+//!   unavailable. A fresh attempt may succeed; [`is_interrupted`] asks.
+//! - `Security` with `Init`: a certificate was not accepted in the handshake.
+//! - `Timeout`: the server went quiet past the per-IO deadline.
+//!
+//! A dropped connection is met with one fresh one, once per client
+//! ([`ImapConfig::retries`]): the client reconnects, logs in again, re-opens the
+//! mailbox it had open, and repeats the command, so the caller sees only the
+//! answer. Only commands that change nothing are repeated: `CAPABILITY`,
+//! `LOGIN`, `AUTHENTICATE`, `LIST`, `SELECT`/`EXAMINE`, `UID SEARCH`, `UID FETCH`
+//! (which peeks). `UID STORE` and `APPEND` are never repeated, because whether a
+//! dropped write took effect cannot be known. A mailbox re-opened under a new
+//! `UIDVALIDITY` has renumbered its messages, and the retry refuses with
+//! `Mismatch` rather than answer a UID question on the wrong numbering. A
+//! timeout is not retried, so the worst case stays one deadline per IO.
+//!
 //! What it does not do: `IDLE`, `CONDSTORE`, `QRESYNC`, compression. A
 //! caller wanting to know what changed polls, which is what a caller
 //! without a long-lived socket has to do anyway.
@@ -64,6 +87,11 @@ use std::{
     time::Duration,
 };
 
+use secrecy::{
+    ExposeSecret,
+    SecretString,
+};
+
 use tokio::{
     io::{
         AsyncBufReadExt,
@@ -84,6 +112,10 @@ pub const IMAP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
 // A server announcing a 4 GB literal is either broken or hostile, and either way
 // the client should not try to allocate for it.
 pub const MAX_LITERAL_BYTES: usize = 64 * 1024 * 1024;
+
+// One fresh connection per client for a dropped one. A second drop is the server's or the
+// network's state, not chance, and the caller is told.
+pub const IMAP_CLIENT_RETRIES: u8 = 1;
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -113,6 +145,7 @@ pub struct ImapConfig {
     // crate::addr::resolve_public), and then connect to that address -- not re-resolve the name
     // and hope for the same answer twice. This field is how it does the last part.
     pub addr:       Option<SocketAddr>,
+    pub retries:    u8,         // fresh connections a client may make for dropped ones
 }
 
 impl ImapConfig {
@@ -125,7 +158,14 @@ impl ImapConfig {
             security,
             timeout:  IMAP_CLIENT_TIMEOUT,
             addr:     None,
+            retries:  IMAP_CLIENT_RETRIES,
         }
+    }
+
+    /// Zero turns the retry of a dropped connection off.
+    pub fn with_retries(mut self, retries: u8) -> Self {
+        self.retries = retries;
+        self
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -304,6 +344,32 @@ pub struct ImapClient {
     caps:       Vec<String>,    // as last advertised, upper-cased
     timeout:    Duration,       // per IO, from the config
     host:       String,         // kept for error messages and the TLS upgrade
+    // How to stand the conversation up again after a drop.
+    cfg:        ImapConfig,
+    tls_cfg:    Arc<ClientConfig>,
+    auth:       Option<Auth>,   // as last accepted
+    opened:     Option<Opened>, // the mailbox last opened
+    retries:    u8,             // fresh connections left
+}
+
+/// The credential a reconnect logs in with again. Held as a secret, so it is wiped on drop and
+/// never printed.
+enum Auth {
+    Login   { user: String, pass: SecretString },
+    XOAuth2 { user: String, token: SecretString },
+}
+
+/// The mailbox a reconnect re-opens, and the numbering its UIDs were read under.
+struct Opened {
+    name:           String,
+    read_only:      bool,           // as asked: `EXAMINE` rather than `SELECT`
+    uid_validity:   Option<u32>,    // None until an open has answered
+}
+
+/// Is this a transient failure -- a dropped connection, a server briefly unavailable -- that a
+/// fresh attempt may cure?
+pub fn is_interrupted(e: &Error<ErrTag>) -> bool {
+    e.tags().contains(&ErrTag::Interrupted)
 }
 
 impl ImapClient {
@@ -322,15 +388,38 @@ impl ImapClient {
     )
         -> Outcome<Self>
     {
+        let mut left = cfg.retries;
+        loop {
+            match Self::open(cfg, tls_cfg.clone()).await {
+                Ok(mut c) => {
+                    c.retries = left;
+                    return Ok(c);
+                },
+                Err(e) if left > 0 && is_interrupted(&e) => {
+                    warn!("IMAP {}: the connection dropped while opening, trying once more: {}",
+                        cfg.host, e);
+                    left -= 1;
+                },
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// One attempt at a connection, with no retry of its own.
+    async fn open(
+        cfg:        &ImapConfig,
+        tls_cfg:    Arc<ClientConfig>,
+    )
+        -> Outcome<Self>
+    {
         let addr = match cfg.addr {
             Some(a) => a.to_string(),
             None    => fmt!("{}:{}", cfg.host, cfg.port),
         };
         let plain = match timeout(cfg.timeout, TcpStream::connect(&addr)).await {
             Ok(Ok(s))  => s,
-            Ok(Err(e)) => return Err(err!(e,
-                "Connecting to IMAP server {}.", addr;
-                IO, Network)),
+            Ok(Err(e)) => return Err(tls::dial_fault(e,
+                fmt!("Connecting to IMAP server {}", addr))),
             Err(_)     => return Err(err!(
                 "Timeout connecting to IMAP server {}.", addr;
                 IO, Network, Timeout)),
@@ -349,6 +438,11 @@ impl ImapClient {
             caps:    Vec::new(),
             timeout: cfg.timeout,
             host:    cfg.host.clone(),
+            cfg:     cfg.clone(),
+            tls_cfg: tls_cfg.clone(),
+            auth:    None,
+            opened:  None,
+            retries: 0,
         };
 
         // The greeting: an untagged OK, PREAUTH or BYE. It may carry a
@@ -371,7 +465,7 @@ impl ImapClient {
             res!(client.starttls(tls_cfg).await);
         }
         if client.caps.is_empty() {
-            res!(client.capability().await);
+            res!(client.capability_once().await);
         }
         Ok(client)
     }
@@ -380,7 +474,7 @@ impl ImapClient {
     /// sent yet, and if the upgrade fails they never will be.
     async fn starttls(&mut self, tls_cfg: Arc<ClientConfig>) -> Outcome<()> {
         if self.caps.is_empty() {
-            res!(self.capability().await);
+            res!(self.capability_once().await);
         }
         if !self.has_cap("STARTTLS") {
             return Err(err!(
@@ -413,7 +507,7 @@ impl ImapClient {
         // Capabilities before and after TLS are allowed to differ, and the
         // pre-TLS set must not be trusted: re-ask.
         self.caps.clear();
-        res!(self.capability().await);
+        res!(self.capability_once().await);
         Ok(())
     }
 
@@ -444,7 +538,19 @@ impl ImapClient {
     /// entry left in the list is a capability the client believes in and
     /// the server has withdrawn.
     pub async fn capability(&mut self) -> Outcome<&[String]> {
+        let resp = res!(self.read_command("CAPABILITY").await);
+        self.take_capabilities(&resp);
+        Ok(&self.caps)
+    }
+
+    /// As [`Self::capability`] with no retry, for use inside a conversation still being stood up.
+    async fn capability_once(&mut self) -> Outcome<()> {
         let resp = res!(self.command("CAPABILITY").await);
+        self.take_capabilities(&resp);
+        Ok(())
+    }
+
+    fn take_capabilities(&mut self, resp: &Response) {
         let mut caps: Vec<String> = Vec::new();
         for line in &resp.untagged {
             caps.extend(parse_capabilities(&line.text));
@@ -452,7 +558,6 @@ impl ImapClient {
         caps.sort();
         caps.dedup();
         self.caps = caps;
-        Ok(&self.caps)
     }
 
     /// Does the server advertise this capability? Compared case-insensitively.
@@ -463,6 +568,26 @@ impl ImapClient {
 
     /// For a consumer mailbox the password is an app password, not the account password.
     pub async fn login(&mut self, user: &str, pass: &str) -> Outcome<()> {
+        let auth = Auth::Login {
+            user: user.to_string(),
+            pass: SecretString::new(pass.to_string()),
+        };
+        match self.login_once(user, pass).await {
+            Ok(()) => {
+                self.auth = Some(auth);
+                Ok(())
+            },
+            Err(e) if self.may_retry(&e) => {
+                // The reconnect logs in with what it is given, which is this.
+                self.auth = Some(auth);
+                res!(self.reopen(e).await);
+                Ok(())
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn login_once(&mut self, user: &str, pass: &str) -> Outcome<()> {
         if self.has_cap("LOGINDISABLED") {
             return Err(err!(
                 "IMAP server {} has disabled password login on this \
@@ -474,13 +599,32 @@ impl ImapClient {
         let resp = res!(self.command_hushed(&cmd, "LOGIN").await);
         self.absorb_capabilities_from(&resp);
         if self.caps.is_empty() {
-            res!(self.capability().await);
+            res!(self.capability_once().await);
         }
         Ok(())
     }
 
     /// SASL `XOAUTH2`, the mechanism the large providers require of a registered application.
     pub async fn authenticate_xoauth2(&mut self, user: &str, token: &str) -> Outcome<()> {
+        let auth = Auth::XOAuth2 {
+            user:  user.to_string(),
+            token: SecretString::new(token.to_string()),
+        };
+        match self.xoauth2_once(user, token).await {
+            Ok(()) => {
+                self.auth = Some(auth);
+                Ok(())
+            },
+            Err(e) if self.may_retry(&e) => {
+                self.auth = Some(auth);
+                res!(self.reopen(e).await);
+                Ok(())
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn xoauth2_once(&mut self, user: &str, token: &str) -> Outcome<()> {
         if !self.has_cap("AUTH=XOAUTH2") {
             return Err(err!(
                 "IMAP server {} does not offer XOAUTH2.", self.host;
@@ -491,7 +635,7 @@ impl ImapClient {
         let resp = res!(self.command_hushed(&cmd, "AUTHENTICATE XOAUTH2").await);
         self.absorb_capabilities_from(&resp);
         if self.caps.is_empty() {
-            res!(self.capability().await);
+            res!(self.capability_once().await);
         }
         Ok(())
     }
@@ -507,7 +651,7 @@ impl ImapClient {
         } else {
             fmt!("LIST {} {}", quoted(reference), quoted(pattern))
         };
-        let resp = res!(self.command(&cmd).await);
+        let resp = res!(self.read_command(&cmd).await);
         let mut out = Vec::new();
         for line in &resp.untagged {
             if let Some(mb) = res!(parse_list_line(line)) {
@@ -528,6 +672,35 @@ impl ImapClient {
     }
 
     async fn select_impl(&mut self, mailbox: &str, read_only: bool) -> Outcome<MailboxStatus> {
+        // A new open starts a new numbering, so no earlier UIDVALIDITY binds it.
+        self.opened = Some(Opened {
+            name:           mailbox.to_string(),
+            read_only,
+            uid_validity:   None,
+        });
+        let st = match self.select_once(mailbox, read_only).await {
+            Ok(st) => st,
+            Err(e) if self.may_retry(&e) => {
+                match res!(self.reopen(e).await) {
+                    Some(st) => st,
+                    None     => return Err(err!(
+                        "The reconnect to {} did not re-open '{}'.", self.host, mailbox;
+                        Bug, Missing)),
+                }
+            },
+            Err(e) => {
+                // A failed open leaves no mailbox open (RFC 3501 6.3.1).
+                self.opened = None;
+                return Err(e);
+            },
+        };
+        if let Some(o) = self.opened.as_mut() {
+            o.uid_validity = Some(st.uid_validity);
+        }
+        Ok(st)
+    }
+
+    async fn select_once(&mut self, mailbox: &str, read_only: bool) -> Outcome<MailboxStatus> {
         let verb = if read_only { "EXAMINE" } else { "SELECT" };
         let cmd  = fmt!("{} {}", verb, quoted(mailbox));
         let resp = res!(self.command(&cmd).await);
@@ -552,7 +725,7 @@ impl ImapClient {
     /// `SINCE 01-Jan-2026`.
     pub async fn uid_search(&mut self, criteria: &str) -> Outcome<Vec<u32>> {
         let cmd  = fmt!("UID SEARCH {}", criteria);
-        let resp = res!(self.command(&cmd).await);
+        let resp = res!(self.read_command(&cmd).await);
         let mut uids: Vec<u32> = Vec::new();
         for line in &resp.untagged {
             let up = line.text.to_uppercase();
@@ -580,8 +753,9 @@ impl ImapClient {
         if uids.is_empty() {
             return Ok(Vec::new());
         }
+        // `BODY.PEEK`, so a repeat changes nothing and is safe after a drop.
         let cmd  = fmt!("UID FETCH {} {}", uid_set(uids), what.items());
-        let resp = res!(self.command(&cmd).await);
+        let resp = res!(self.read_command(&cmd).await);
         let mut out: Vec<FetchedMessage> = Vec::new();
         for line in &resp.untagged {
             if let Some(msg) = res!(parse_fetch_line(line)) {
@@ -659,6 +833,71 @@ impl ImapClient {
         Ok(())
     }
 
+    // ── Retry ────────────────────────────────────────────────────
+
+    /// May this failure be met with a fresh connection?
+    fn may_retry(&self, e: &Error<ErrTag>) -> bool {
+        self.retries > 0 && is_interrupted(e)
+    }
+
+    /// A command that changes nothing on the server, so that after a drop it is asked again on a
+    /// fresh connection.
+    async fn read_command(&mut self, cmd: &str) -> Outcome<Response> {
+        match self.command(cmd).await {
+            Err(e) if self.may_retry(&e) => {
+                res!(self.reopen(e).await);
+                self.command(cmd).await
+            },
+            other => other,
+        }
+    }
+
+    /// Spend a retry: stand the conversation up again on a fresh connection -- connected, logged
+    /// in and with the same mailbox open -- and carry on with it. The status of the re-opened
+    /// mailbox, where one was open, is returned.
+    async fn reopen(&mut self, cause: Error<ErrTag>) -> Outcome<Option<MailboxStatus>> {
+        self.retries = self.retries.saturating_sub(1);
+        warn!("IMAP {}: the connection dropped, trying once more on a fresh one: {}",
+            self.host, cause);
+
+        // The server took this conversation a moment ago, so a fresh connection that cannot be
+        // made says nothing new about it: the drop is the fault, and the caller hears that rather
+        // than an "unreachable" that would send them checking a name and port that worked.
+        let mut fresh = match Self::open(&self.cfg, self.tls_cfg.clone()).await {
+            Ok(c)  => c,
+            Err(e) => {
+                warn!("IMAP {}: the fresh connection failed too: {}", self.host, e);
+                return Err(cause);
+            },
+        };
+        match &self.auth {
+            Some(Auth::Login { user, pass }) =>
+                res!(fresh.login_once(user, pass.expose_secret()).await),
+            Some(Auth::XOAuth2 { user, token }) =>
+                res!(fresh.xoauth2_once(user, token.expose_secret()).await),
+            None => (),
+        }
+        let mut status = None;
+        if let Some(o) = &self.opened {
+            let st = res!(fresh.select_once(&o.name, o.read_only).await);
+            if let Some(v) = o.uid_validity {
+                if st.uid_validity != v {
+                    return Err(err!(
+                        "IMAP {}: '{}' re-opened after a dropped connection under UIDVALIDITY {} \
+                        where it was {}, so its messages were renumbered and the UIDs in hand \
+                        name others. Read it again from scratch.",
+                        self.host, o.name, st.uid_validity, v;
+                        IO, Network, Mismatch));
+                }
+            }
+            status = Some(st);
+        }
+        self.stream = fresh.stream.take();
+        self.tag    = fresh.tag;
+        self.caps   = std::mem::take(&mut fresh.caps);
+        Ok(status)
+    }
+
     // ── Command plumbing ─────────────────────────────────────────
 
     fn next_tag(&mut self) -> String {
@@ -711,9 +950,7 @@ impl ImapClient {
             let (status, text) = res!(parse_completion(rest));
             return match status {
                 Status::Ok => Ok(Response { untagged, text }),
-                Status::No => Err(err!(
-                    "IMAP server refused {}: {}", label, text;
-                    IO, Network, Invalid)),
+                Status::No => Err(refusal(label, &text)),
                 Status::Bad => Err(err!(
                     "IMAP server rejected {} as malformed: {}", label, text;
                     IO, Network, Wire)),
@@ -745,18 +982,16 @@ impl ImapClient {
         let w = res!(self.stream_mut()).get_mut();
         match timeout(deadline, w.write_all(bytes)).await {
             Ok(Ok(()))  => (),
-            Ok(Err(e))  => return Err(err!(e,
-                "Writing to IMAP server {}.", host;
-                IO, Network, Write)),
+            Ok(Err(e))  => return Err(tls::wire_fault(e,
+                fmt!("Writing to IMAP server {}", host), true)),
             Err(_)      => return Err(err!(
                 "Timeout writing to IMAP server {}.", host;
                 IO, Network, Timeout)),
         }
         match timeout(deadline, w.flush()).await {
             Ok(Ok(()))  => Ok(()),
-            Ok(Err(e))  => Err(err!(e,
-                "Flushing to IMAP server {}.", host;
-                IO, Network, Write)),
+            Ok(Err(e))  => Err(tls::wire_fault(e,
+                fmt!("Flushing to IMAP server {}", host), true)),
             Err(_)      => Err(err!(
                 "Timeout flushing to IMAP server {}.", host;
                 IO, Network, Timeout)),
@@ -790,9 +1025,8 @@ impl ImapClient {
             let rd       = res!(self.stream_mut());
             match timeout(deadline, rd.read_exact(&mut buf)).await {
                 Ok(Ok(_))  => (),
-                Ok(Err(e)) => return Err(err!(e,
-                    "Reading a {}-byte literal from IMAP server {}.", n, host;
-                    IO, Network, Read)),
+                Ok(Err(e)) => return Err(tls::wire_fault(e,
+                    fmt!("Reading a {}-byte literal from IMAP server {}", n, host), false)),
                 Err(_)     => return Err(err!(
                     "Timeout reading a {}-byte literal from IMAP server {}.",
                     n, host;
@@ -811,9 +1045,8 @@ impl ImapClient {
         let rd       = res!(self.stream_mut());
         let n = match timeout(deadline, rd.read_until(b'\n', &mut buf)).await {
             Ok(Ok(n))  => n,
-            Ok(Err(e)) => return Err(err!(e,
-                "Reading from IMAP server {}.", host;
-                IO, Network, Read)),
+            Ok(Err(e)) => return Err(tls::wire_fault(e,
+                fmt!("Reading from IMAP server {}", host), false)),
             Err(_)     => return Err(err!(
                 "Timeout reading from IMAP server {}.", host;
                 IO, Network, Timeout)),
@@ -821,7 +1054,7 @@ impl ImapClient {
         if n == 0 {
             return Err(err!(
                 "IMAP server {} closed the connection.", host;
-                IO, Network, Read));
+                IO, Network, Read, Interrupted));
         }
         while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
             buf.pop();
@@ -1014,6 +1247,26 @@ fn parse_completion(rest: &str) -> Outcome<(Status, String)> {
             Invalid, Input, Decode)),
     };
     Ok((status, text))
+}
+
+/// A `NO`, tagged by what it refused. The RFC 5530 response code says why where the server gives
+/// one; otherwise the command does: a `NO` to `LOGIN` is a refused credential, and a `NO` to
+/// `SELECT` or `EXAMINE` a mailbox that cannot be opened.
+fn refusal(label: &str, text: &str) -> Error<ErrTag> {
+    let up = text.to_uppercase();
+    if up.contains("[UNAVAILABLE]") {
+        err!("IMAP server refused {} for now: {}", label, text; IO, Network, Interrupted)
+    } else if up.contains("[AUTHENTICATIONFAILED]")
+        || up.contains("[AUTHORIZATIONFAILED]")
+        || label == "LOGIN"
+        || label.starts_with("AUTHENTICATE")
+    {
+        err!("IMAP server refused {}: {}", label, text; IO, Network, Unauthorised)
+    } else if up.contains("[NONEXISTENT]") || label == "SELECT" || label == "EXAMINE" {
+        err!("IMAP server refused {}: {}", label, text; IO, Network, NotFound)
+    } else {
+        err!("IMAP server refused {}: {}", label, text; IO, Network, Invalid)
+    }
 }
 
 /// Pull capability names out of `* CAPABILITY ...` or a `[CAPABILITY ...]`
@@ -1292,6 +1545,17 @@ mod tests {
     )
         -> Outcome<(SocketAddr, Transcript)>
     {
+        scripted_seq(vec![(greeting, script)]).await
+    }
+
+    /// As [`scripted`], but one session per entry, each served on the next connection accepted, so
+    /// a client that reconnects meets the next script. Each accepted connection logs a
+    /// `<connection N>` marker, counting from one.
+    async fn scripted_seq(
+        sessions:   Vec<(&'static str, Vec<&'static str>)>,
+    )
+        -> Outcome<(SocketAddr, Transcript)>
+    {
         let listener = res!(TcpListener::bind("127.0.0.1:0").await
             .map_err(|e| err!(e, "Binding the scripted IMAP server."; IO, Network)));
         let addr = res!(listener.local_addr()
@@ -1301,10 +1565,14 @@ mod tests {
         let log = seen.clone();
 
         tokio::spawn(async move {
+          for (n, (greeting, script)) in sessions.into_iter().enumerate() {
             let (sock, _) = match listener.accept().await {
                 Ok(x)  => x,
                 Err(_) => return,
             };
+            if let Ok(mut g) = log.lock() {
+                g.push(fmt!("<connection {}>", n + 1));
+            }
             let (r, mut w) = sock.into_split();
             let mut rd = BufReader::new(r);
 
@@ -1314,7 +1582,7 @@ mod tests {
             while let Some(reply) = script.next() {
                 let mut buf: Vec<u8> = Vec::with_capacity(256);
                 match rd.read_until(b'\n', &mut buf).await {
-                    Ok(0) | Err(_) => return,
+                    Ok(0) | Err(_) => break,
                     Ok(_)          => (),
                 }
                 while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
@@ -1336,7 +1604,7 @@ mod tests {
                     if let Some(n) = trailing_literal_len(&cmd) {
                         let mut lit = vec![0u8; n];
                         if rd.read_exact(&mut lit).await.is_err() {
-                            return;
+                            break;
                         }
                         let mut tail = Vec::new();
                         let _ = rd.read_until(b'\n', &mut tail).await;
@@ -1349,11 +1617,12 @@ mod tests {
                                 let _ = w.write_all(
                                     done.replace("%T%", &tag).as_bytes()).await;
                             },
-                            None => return,
+                            None => break,
                         }
                     }
                 }
             }
+          }
         });
 
         Ok((addr, seen))
@@ -1365,9 +1634,18 @@ mod tests {
             .with_timeout(Duration::from_secs(10))
     }
 
+    /// What the client sent, without the connection markers.
     fn lines_of(t: &Transcript) -> Outcome<Vec<String>> {
         match t.lock() {
-            Ok(g)  => Ok(g.clone()),
+            Ok(g)  => Ok(g.iter().filter(|l| !l.starts_with("<connection ")).cloned().collect()),
+            Err(_) => Err(err!("The server's transcript was poisoned."; Lock, Poisoned)),
+        }
+    }
+
+    /// How many connections the server accepted.
+    fn connections_of(t: &Transcript) -> Outcome<usize> {
+        match t.lock() {
+            Ok(g)  => Ok(g.iter().filter(|l| l.starts_with("<connection ")).count()),
             Err(_) => Err(err!("The server's transcript was poisoned."; Lock, Poisoned)),
         }
     }
@@ -1637,13 +1915,19 @@ mod tests {
     async fn test_a_closed_connection_is_named_00() -> Outcome<()> {
         let (addr, _) = res!(scripted(GREET, vec![]).await);
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
-        let msg = match c.select("INBOX").await {
-            Err(e) => fmt!("{}", e),
+        // The one retry finds nothing listening, and the caller still hears the hang-up, not an
+        // "unreachable" server that took the first connection.
+        let e = match c.select("INBOX").await {
+            Err(e) => e,
             Ok(_)  => return Err(err!(
                 "A closed connection was reported as a SELECT."; Test, Invalid)),
         };
+        let msg = fmt!("{}", e);
         req!(true, msg.contains("closed the connection"),
             "the error did not say the server hung up: {}", msg);
+        req!(true, is_interrupted(&e), "a hang-up was not tagged Interrupted: {:?}", e.tags());
+        req!(false, e.tags().contains(&ErrTag::Unreachable),
+            "a hang-up was called unreachable: {:?}", e.tags());
         Ok(())
     }
 
@@ -2011,4 +2295,190 @@ mod tests {
         assert!(FetchWhat::Full.items().contains("BODY.PEEK[]"));
         assert!(!FetchWhat::Full.items().contains("BODY[]"));
     }
+
+    // ── Faults are tagged, and a dropped read is tried once more ──
+
+    const LOGIN_OK:   &str = "%T% OK LOGIN completed\r\n";
+    const EXAMINE_7:  &str = "* 2 EXISTS\r\n* OK [UIDVALIDITY 7] UIDs valid\r\n\
+                              * OK [UIDNEXT 5] next\r\n%T% OK [READ-ONLY] EXAMINE completed\r\n";
+    const EXAMINE_8:  &str = "* 2 EXISTS\r\n* OK [UIDVALIDITY 8] UIDs valid\r\n\
+                              * OK [UIDNEXT 5] next\r\n%T% OK [READ-ONLY] EXAMINE completed\r\n";
+    const SEARCH_3_4: &str = "* SEARCH 3 4\r\n%T% OK SEARCH completed\r\n";
+
+    /// A server that says nothing and hangs up, which is what a dropped connection looks like from
+    /// the client's side.
+    const DROP: (&str, Vec<&str>) = ("", Vec::new());
+
+    /// The connection drops under a `UID SEARCH`. The client opens a fresh one, logs in again,
+    /// re-opens the mailbox and asks again, and the caller sees only the answer.
+    #[tokio::test]
+    async fn test_a_dropped_read_is_retried_once_on_a_fresh_connection_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted_seq(vec![
+            (GREET, vec![LOGIN_OK, EXAMINE_7]),
+            (GREET, vec![LOGIN_OK, EXAMINE_7, SEARCH_3_4]),
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.login(USER, PASS).await);
+        res!(c.examine("INBOX").await);
+        let uids = res!(c.uid_search("UID 1:*").await);
+        req!(vec![3u32, 4], uids, "the retried search lost its answer");
+        req!(2, res!(connections_of(&seen)), "the drop was not met with one fresh connection");
+        let lines = res!(lines_of(&seen));
+        req!(2, lines.iter().filter(|l| l.contains("EXAMINE \"INBOX\"")).count(),
+            "the mailbox was not re-opened before the retry: {:?}", lines);
+        Ok(())
+    }
+
+    /// One retry, not a loop: a second drop reaches the caller, tagged as a dropped connection,
+    /// and no third connection is made.
+    #[tokio::test]
+    async fn test_a_second_drop_surfaces_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted_seq(vec![
+            (GREET, vec![LOGIN_OK, EXAMINE_7]),
+            (GREET, vec![LOGIN_OK, EXAMINE_7]),
+            (GREET, vec![LOGIN_OK, EXAMINE_7, SEARCH_3_4]),
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.login(USER, PASS).await);
+        res!(c.examine("INBOX").await);
+        match c.uid_search("UID 1:*").await {
+            Ok(u)  => return Err(err!(
+                "A second drop was papered over with a third connection: {:?}", u; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Interrupted),
+                "a dropped connection was not tagged Interrupted: {:?}", e.tags()),
+        }
+        req!(2, res!(connections_of(&seen)), "the retry was not bounded at one");
+        Ok(())
+    }
+
+    /// A drop before the greeting is a drop like any other, and `connect` is tried once more.
+    #[tokio::test]
+    async fn test_a_drop_at_the_greeting_is_retried_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted_seq(vec![
+            DROP,
+            (GREET, vec![LOGIN_OK]),
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.login(USER, PASS).await);
+        req!(2, res!(connections_of(&seen)));
+        Ok(())
+    }
+
+    /// A mailbox re-opened under a different UIDVALIDITY has renumbered its messages, so a UID
+    /// read on the old numbering would fetch the wrong ones. The retry refuses rather than answer.
+    #[tokio::test]
+    async fn test_a_changed_uidvalidity_is_not_papered_over_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted_seq(vec![
+            (GREET, vec![LOGIN_OK, EXAMINE_7]),
+            (GREET, vec![LOGIN_OK, EXAMINE_8, SEARCH_3_4]),
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.login(USER, PASS).await);
+        res!(c.examine("INBOX").await);
+        match c.uid_search("UID 1:*").await {
+            Ok(u)  => return Err(err!(
+                "A search across a UIDVALIDITY change was answered: {:?}", u; Test, Invalid)),
+            Err(e) => {
+                req!(true, e.tags().contains(&ErrTag::Mismatch),
+                    "the renumbering was not called a mismatch: {:?}", e.tags());
+                req!(false, e.tags().contains(&ErrTag::Interrupted),
+                    "a renumbered mailbox read as a dropped connection: {:?}", e.tags());
+            },
+        }
+        Ok(())
+    }
+
+    /// A write is not repeated: whether a dropped `UID STORE` took effect cannot be known, so the
+    /// drop goes to the caller and no second connection is made.
+    #[tokio::test]
+    async fn test_a_dropped_write_is_not_retried_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted_seq(vec![
+            (GREET, vec![LOGIN_OK, "* 2 EXISTS\r\n* OK [UIDVALIDITY 7] ok\r\n%T% OK SELECT done\r\n"]),
+            (GREET, vec![LOGIN_OK, EXAMINE_7, "%T% OK STORE done\r\n"]),
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.login(USER, PASS).await);
+        res!(c.select("INBOX").await);
+        match c.uid_store_flags(&[3], FlagOp::Add, &["\\Seen"]).await {
+            Ok(())  => return Err(err!("A dropped STORE was reported done."; Test, Invalid)),
+            Err(e)  => req!(true, e.tags().contains(&ErrTag::Interrupted),
+                "the dropped STORE was not tagged Interrupted: {:?}", e.tags()),
+        }
+        req!(1, res!(connections_of(&seen)), "a write was retried");
+        Ok(())
+    }
+
+    /// A refused password is the user's to fix, so it says so in its tags, and it is not retried.
+    #[tokio::test]
+    async fn test_a_refused_login_is_tagged_unauthorised_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted_seq(vec![
+            (GREET, vec!["%T% NO [AUTHENTICATIONFAILED] Invalid credentials\r\n"]),
+            (GREET, vec![LOGIN_OK]),
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        match c.login(USER, PASS).await {
+            Ok(())  => return Err(err!("A refused LOGIN was a success."; Test, Invalid)),
+            Err(e)  => req!(true, e.tags().contains(&ErrTag::Unauthorised),
+                "a refused LOGIN was not tagged Unauthorised: {:?}", e.tags()),
+        }
+        req!(1, res!(connections_of(&seen)), "a refused LOGIN was retried");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_a_missing_mailbox_is_tagged_not_found_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted_seq(vec![
+            (GREET, vec![LOGIN_OK, "%T% NO [NONEXISTENT] Unknown Mailbox\r\n"]),
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.login(USER, PASS).await);
+        match c.examine("Nope").await {
+            Ok(_)  => return Err(err!("A missing mailbox was opened."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::NotFound),
+                "a missing mailbox was not tagged NotFound: {:?}", e.tags()),
+        }
+        Ok(())
+    }
+
+    /// Nothing listening is not a dropped connection: there was never one to drop.
+    #[tokio::test]
+    async fn test_a_closed_port_is_tagged_unreachable_00() -> Outcome<()> {
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding a port to close."; IO, Network)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading its address."; IO, Network)));
+        drop(listener);
+        match ImapClient::connect(&cfg(addr)).await {
+            Ok(_)  => return Err(err!("A closed port answered."; Test, Invalid)),
+            Err(e) => {
+                req!(true, e.tags().contains(&ErrTag::Unreachable),
+                    "a refused connection was not tagged Unreachable: {:?}", e.tags());
+                req!(false, e.tags().contains(&ErrTag::Interrupted),
+                    "a refused connection read as a dropped one: {:?}", e.tags());
+            },
+        }
+        Ok(())
+    }
+
+    /// A server that accepts and hangs up before the TLS handshake finishes has dropped the
+    /// connection. That is not a certificate fault, and must not be tagged as one.
+    #[tokio::test]
+    async fn test_a_drop_in_the_tls_handshake_is_not_a_certificate_fault_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted_seq(vec![DROP, DROP]).await);
+        let cfg = ImapConfig::new(fmt!("localhost"), addr.port(), Security::ImplicitTls)
+            .with_addr(addr)
+            .with_timeout(Duration::from_secs(10));
+        match ImapClient::connect(&cfg).await {
+            Ok(_)  => return Err(err!("A dropped handshake made a client."; Test, Invalid)),
+            Err(e) => {
+                req!(true, e.tags().contains(&ErrTag::Interrupted),
+                    "a dropped handshake was not tagged Interrupted: {:?}", e.tags());
+                req!(false, e.tags().contains(&ErrTag::Security),
+                    "a dropped handshake was tagged as a security fault: {:?}", e.tags());
+            },
+        }
+        req!(2, res!(connections_of(&seen)), "the dropped handshake was not tried once more");
+        Ok(())
+    }
+
 }
