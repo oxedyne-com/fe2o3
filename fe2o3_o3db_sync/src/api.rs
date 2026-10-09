@@ -167,6 +167,11 @@ pub(crate) fn raise_stamp_floor(t: &Timestamp) -> Outcome<()> {
     Ok(())
 }
 
+/// The latest stamp this process has given or replayed, in nanoseconds since the epoch.
+pub(crate) fn stamp_floor() -> u64 {
+    LAST_STAMP.load(Ordering::SeqCst)
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CompactReport {
     pub files_collected:    usize,  // files a collection was started on
@@ -1863,9 +1868,13 @@ impl<
         }
     }
 
-    /// The heads pinned in every cache, summed over the zones, as last reported by each cache bot
-    /// (every `zone_state_update_interval`).  Set against the caches' limit, it is the headroom
-    /// left before every insert with a value jettisons the rest.
+    /// The heads pinned in every cache, summed over the zones, as last reported by each cache bot.
+    /// Set against the caches' limit, it is the headroom left before every insert with a value
+    /// jettisons the rest.  The figure travels two reporting hops, cache bot to zone bot to
+    /// supervisor, each of which can wait up to about two `zone_state_update_interval`s, so it can
+    /// lag by about four intervals, some 20 s at the default.  It counts resident head bytes only:
+    /// replay enters records without their bytes, so it reads 0 after every restart until heads
+    /// are written again, however many chunked values the store holds.
     pub fn pinned_heads(&self, wait: Wait) -> Outcome<PinnedHeads> {
         let mut sum = PinnedHeads::default();
         for zs in res!(self.ozone_state(wait)) {

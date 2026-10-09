@@ -764,6 +764,7 @@ impl<
     /// took longer -- a starved machine spawning a few dozen threads -- left it holding channels no
     /// bot reads, and its first request timed out on nothing.  It now waits on `OzoneMsg::Ready`.
     fn bring_up(&mut self) -> Outcome<()> {
+        let t0 = Instant::now();
         res!(self.start_db());
         hooks::supervisor_panic();
 
@@ -816,7 +817,35 @@ impl<
             }
         }
 
+        // 4. A zone is ready once its replayed records are queued, not applied.  A cache bot
+        //    answers a ping only after every insert ahead of it, so once each has, `start`
+        //    returning means every record on disk is in the caches, and no get or ping after it
+        //    waits behind the replay.
+        let queued = begun.elapsed();
+        let pong = Responder::new(Some(self.ozid()));
+        let mut owed = 0;
+        for z in 0..nz {
+            let cbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Cache, &ZoneInd::new(z)));
+            owed += res!(cbots.send_to_all(OzoneMsg::Ping(self.ozid().clone(), pong.clone())));
+        }
+        let drain = Instant::now();
+        for _ in 0..owed {
+            let left = constant::CONTROL_REQUEST_TIMEOUT.saturating_sub(begun.elapsed());
+            match res!(pong.recv_timeout(left)) {
+                OzoneMsg::Pong(id, _) => info!(sync_log::stream(),
+                    "{}: {} drained its replay {} ms after the zones were ready.",
+                    self.ozid(), id, drain.elapsed().as_millis()),
+                m => return Err(err!(
+                    "{}: Received {:?}, expecting a cache bot to answer the replay drain ping.",
+                    self.ozid(), m;
+                    Channel, Unexpected)),
+            }
+        }
+
         res!(self.chan_out.send(OzoneMsg::Ready));
+        info!(sync_log::stream(), "{}: Ready after {} ms: zones replayed and queued {} ms after the trigger, \
+            {} cache bots drained in {} ms.", self.label(), t0.elapsed().as_millis(),
+            queued.as_millis(), owed, drain.elapsed().as_millis());
         info!(sync_log::stream(), "{}: Ozone database start up complete.", self.label());
         Ok(())
     }

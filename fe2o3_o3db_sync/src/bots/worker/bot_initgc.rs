@@ -247,6 +247,7 @@ impl<
     )
         -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>>
     {
+        hooks::replay_file_delay();
         let (_, file) = res!(self.zdir().open_ozone_file(
             fnum,
             typ,

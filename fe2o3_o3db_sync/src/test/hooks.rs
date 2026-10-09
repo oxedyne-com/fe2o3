@@ -36,6 +36,7 @@ static FORWARD_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before a supers
 static SCHEDULE_DELAY_MS: AtomicU64 = AtomicU64::new(0);      // before a received supersession is handled
 static SCHEDULES_HELD:   AtomicU64  = AtomicU64::new(0);      // handled after the hold above
 static INSERT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before each cache bot insert
+static REPLAY_FILE_MS:   AtomicU64  = AtomicU64::new(0);      // before an igbot replays a file at start
 static READ_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a reader's pin and its read
 static TOMB_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk tombstone
 static CHUNK_DELAY_MS:   AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk
@@ -116,6 +117,12 @@ pub fn set_read_delay(d: Duration) {
 /// shutdown's time can run out with written records still queued at it.
 pub fn set_insert_delay(d: Duration) {
     INSERT_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Holds an init garbage bot this long before it replays each file at start, as a large file on a
+/// slow disk would, so that replay is still being queued for a while after the zones begin.
+pub fn set_replay_file_delay(d: Duration) {
+    REPLAY_FILE_MS.store(millis(d), Ordering::Relaxed);
 }
 
 /// Holds a cache bot this long before it enters a chunk of a value, as a chunk's writer behind a
@@ -325,6 +332,10 @@ pub(crate) fn read_delay() {
 
 pub(crate) fn insert_delay() {
     pause(&INSERT_DELAY_MS);
+}
+
+pub(crate) fn replay_file_delay() {
+    pause(&REPLAY_FILE_MS);
 }
 
 /// A chunk tombstone is written under the chunk's part key as a whole record, so its key is a

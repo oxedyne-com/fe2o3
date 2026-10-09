@@ -551,21 +551,30 @@ impl<
         res!(self.fwd_msg_to_pool(&WorkerType::Cache, OzoneMsg::SetCacheSizeLimit(zcfg.cache_size_lim)));
         self.zdir = zdir.clone();
         res!(self.broadcast(OzoneMsg::ZoneDir(*self.zind(), zdir)));
+        let t0 = Instant::now();
         let shards = res!(self.survey_files());
+        let surveyed = t0.elapsed();
+        let nfiles: usize = shards.iter().map(|s| s.map().len()).sum();
         // Replay always runs.  `init_caches` returns only once every file has been walked, so
         // the stamp floor is raised past every stamp on disk before the zone answers, and the
         // database is not ready (`bring_up`) until every zone has.
-        res!(self.init_caches(shards));
-        // Every record on disk is now in the caches, behind which this arrives, so a chunk
-        // tombstone that superseded nothing there shadows nothing.
+        let (by_index, by_data) = res!(self.init_caches(shards));
+        // Every record on disk is now queued to the caches, behind which this arrives, so a
+        // chunk tombstone that superseded nothing there shadows nothing.
         res!(self.fwd_msg_to_pool(&WorkerType::Cache, OzoneMsg::ReplayDone));
+        let floor = crate::api::stamp_floor();
+        info!(sync_log::stream(), "{}: Zone {}: {} files surveyed in {} ms, {} replayed from their \
+            index and {} from their data queued in a further {} ms, stamp floor {}.{:09} s.",
+            self.ozid(), self.zind, nfiles, surveyed.as_millis(), by_index, by_data,
+            t0.elapsed().saturating_sub(surveyed).as_millis(),
+            floor / 1_000_000_000, floor % 1_000_000_000);
         Ok(())
     }
 
     /// Survey the existing data and index files and send the file state maps to the zone file bots.
     pub fn survey_files(&mut self) -> Outcome<Vec<FileStateMap>> {
     
-        info!(sync_log::stream(), "{}: Surveying {} files...", self.ozid(), self.zind());
+        info!(sync_log::stream(), "{}: Surveying the files of zone {}...", self.ozid(), self.zind());
     
         let mut shards = Vec::new();
         let nf = self.cfg().num_fbots_per_zone();
@@ -688,6 +697,8 @@ impl<
 
         // 9. Set the directory size for the zone.
         self.size = dir_size;
+        info!(sync_log::stream(), "{}: Surveyed {} files in zone {}.", self.ozid(),
+            shards.iter().map(|s| s.map().len()).sum::<usize>(), self.zind());
 
         Ok(shards)
     }
@@ -785,11 +796,12 @@ impl<
         &mut self,
         shards: Vec<FileStateMap>,
     )
-        -> Outcome<()>
+        -> Outcome<(usize, usize)>
     {
         // 1. Prepare to make a bunch of requests to InitGarbageBots.
         let resp = Responder::new(Some(self.ozid()));
         let mut bot_requests = 0;
+        let mut by_data = 0; // files replayed from the data file alone
 
         for mut shard in shards {
 
@@ -853,6 +865,7 @@ impl<
                                 Channel, Write));
                         } else {
                             bot_requests += 1;
+                            by_data += 1;
                         }
                     },
                     Present::Solo(FileType::Index) => {
@@ -889,6 +902,6 @@ impl<
             }
         }
 
-        Ok(())
+        Ok((bot_requests - by_data, by_data))
     }
 }
