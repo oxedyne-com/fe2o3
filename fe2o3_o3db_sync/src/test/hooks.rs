@@ -44,6 +44,7 @@ static RETIRE_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before a store 
 static SUP_PANICS:       AtomicBool = AtomicBool::new(false); // the supervisor panics starting up
 static BARRIER_FAILS:    AtomicBool = AtomicBool::new(false); // every durability barrier fails
 static BARRIERS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
+static BARRIER_FAILS_FOR: AtomicU64 = AtomicU64::new(u64::MAX); // barriers of this one live file fail
 static SYNCER_STOPS:     AtomicBool = AtomicBool::new(false); // syncers stop after their next batch
 static SYNCERS_STOPPED:  AtomicU64  = AtomicU64::new(0);      // stopped by the switch above
 static PAIR_HAND_FAILS:  AtomicBool = AtomicBool::new(false); // new live pairs cannot be handed over
@@ -54,6 +55,10 @@ static DIR_SYNC_FAILS:   AtomicBool = AtomicBool::new(false); // the directory s
 static COMPACT_FAILS:    AtomicBool = AtomicBool::new(false); // the zone bots cannot pass on a compaction order
 static HEAD_INSERT_FAILS: AtomicBool = AtomicBool::new(false); // a cache bot cannot enter a store's head
 static HEAD_HAND_FAILS:  AtomicBool = AtomicBool::new(false); // a writer cannot hand a written head to its syncer
+static HEAD_HOLD:        AtomicBool = AtomicBool::new(false); // a store waits before it sends its head
+static HEADS_HELD:       AtomicU64  = AtomicU64::new(0);      // stores that have reached the hold above
+static SWEEP_HOLD:       AtomicBool = AtomicBool::new(false); // a sweep waits between its two scans
+static SWEEPS_HELD:      AtomicU64  = AtomicU64::new(0);      // sweeps that have reached the hold above
 static DURABILITY_MS:    AtomicU64  = AtomicU64::new(0);      // a store's durability timeout, when set
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
@@ -150,6 +155,52 @@ pub fn set_supervisor_panic(on: bool) {
 /// write-back errors would, and counts each barrier it fails.
 pub fn set_barrier_failure(on: bool) {
     BARRIER_FAILS.store(on, Ordering::Relaxed);
+}
+
+/// Holds every chunked store, its chunks durable and in the cache, before it sends its head, until
+/// the hold is lifted, so that a test can write between the two.  `heads_held` counts the stores
+/// that have reached it.
+pub fn set_head_hold(on: bool) {
+    HEAD_HOLD.store(on, Ordering::SeqCst);
+}
+
+pub fn heads_held() -> u64 {
+    HEADS_HELD.load(Ordering::SeqCst)
+}
+
+pub(crate) fn head_hold() {
+    if HEAD_HOLD.load(Ordering::SeqCst) {
+        HEADS_HELD.fetch_add(1, Ordering::SeqCst);
+        while HEAD_HOLD.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+/// Holds every orphan sweep between its scan of the live keys and its scan of the chunks, until
+/// the hold is lifted, so that a test can make a whole store between the two.  `sweeps_held`
+/// counts the sweeps that have reached it.
+pub fn set_sweep_hold(on: bool) {
+    SWEEP_HOLD.store(on, Ordering::SeqCst);
+}
+
+pub fn sweeps_held() -> u64 {
+    SWEEPS_HELD.load(Ordering::SeqCst)
+}
+
+pub(crate) fn sweep_hold() {
+    if SWEEP_HOLD.load(Ordering::SeqCst) {
+        SWEEPS_HELD.fetch_add(1, Ordering::SeqCst);
+        while SWEEP_HOLD.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+/// Makes the durability barriers of live file `fnum` fail, as `set_barrier_failure` does every
+/// barrier, so that a test can fail the writes to a file of their own while every other syncs.
+pub fn set_barrier_failure_for(fnum: Option<u32>) {
+    BARRIER_FAILS_FOR.store(fnum.map(u64::from).unwrap_or(u64::MAX), Ordering::Relaxed);
 }
 
 /// How many durability barriers `set_barrier_failure` has failed so far.
@@ -342,8 +393,9 @@ pub(crate) fn dir_sync_fails() -> bool {
 }
 
 /// Is the disk to fail this sync?  Counted when it is.
-pub(crate) fn sync_fails() -> bool {
-    let fails = BARRIER_FAILS.load(Ordering::Relaxed);
+pub(crate) fn sync_fails(fnum: u32) -> bool {
+    let fails = BARRIER_FAILS.load(Ordering::Relaxed)
+        || u64::from(fnum) == BARRIER_FAILS_FOR.load(Ordering::Relaxed);
     if fails {
         BARRIERS_FAILED.fetch_add(1, Ordering::Relaxed);
     }

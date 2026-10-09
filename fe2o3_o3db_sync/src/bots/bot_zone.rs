@@ -5,6 +5,7 @@ use crate::{
         constant,
         index::ZoneInd,
     },
+    data::cache::PinnedHeads,
     bots::{
         base::bot_deps::*,
         worker::{
@@ -60,6 +61,7 @@ pub struct Resource {
 #[derive(Clone, Debug, Default)]
 pub struct ZoneState {
     pub caches: Vec<Resource>,
+    pub heads:  Vec<PinnedHeads>, // per cache, as last reported with its size
     pub files:  Vec<Resource>,
 }
 
@@ -212,7 +214,7 @@ impl<
                     self.respond(result.map(|()| OzoneMsg::Ok), &resp);
                 },
                 // WORK
-                OzoneMsg::CacheSize(b, size, ancillary_size) => {
+                OzoneMsg::CacheSize(b, size, ancillary_size, pins) => {
                     if b+1 > self.zone_state().caches.len() {
                         self.error(err!(
                             "{}: The BotPoolInd for a cache size update, {}, exceeds the \
@@ -227,6 +229,9 @@ impl<
                                     ancillary_size,
                                     time,
                                 };
+                                if let Some(h) = self.zone_state_mut().heads.get_mut(b) {
+                                    *h = pins;
+                                }
                             },
                         }
                     }
@@ -541,6 +546,7 @@ impl<
         -> Outcome<()>
     {
         self.zone_state_mut().caches = vec![Resource::default(); zcfg.ncbots];
+        self.zone_state_mut().heads = vec![PinnedHeads::default(); zcfg.ncbots];
         self.zone_state_mut().files = vec![Resource::default(); zcfg.nfbots];
         res!(self.fwd_msg_to_pool(&WorkerType::Cache, OzoneMsg::SetCacheSizeLimit(zcfg.cache_size_lim)));
         self.zdir = zdir.clone();

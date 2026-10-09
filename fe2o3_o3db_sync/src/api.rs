@@ -40,6 +40,7 @@ use crate::{
             Cache,
             CacheEntry,
             KeyVal,
+            PinnedHeads,
             is_chunk_key,
         },
         choose::ChooseCache,
@@ -1860,6 +1861,19 @@ impl<
                 "{}: Unexpected response to {}: {:?}", self.ozid(), emsg, msg;
                 Channel)),
         }
+    }
+
+    /// The heads pinned in every cache, summed over the zones, as last reported by each cache bot
+    /// (every `zone_state_update_interval`).  Set against the caches' limit, it is the headroom
+    /// left before every insert with a value jettisons the rest.
+    pub fn pinned_heads(&self, wait: Wait) -> Outcome<PinnedHeads> {
+        let mut sum = PinnedHeads::default();
+        for zs in res!(self.ozone_state(wait)) {
+            for h in &zs.heads {
+                sum.add(h);
+            }
+        }
+        Ok(sum)
     }
 
     /// Ping the bots for proof of life.

@@ -168,7 +168,7 @@ fn sweep_spares_chunks_of_a_put_in_flight() -> Outcome<()> {
         thread::spawn(move || db.insert(k, v, Uid::default(), None).map(|_| ()).map_err(|e| fmt!("{}", e)))
     };
     pause(Duration::from_millis(400));
-    let report = sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO);
+    let report = sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait());
     let put = match put.join() { Ok(r) => r, Err(_) => Err(fmt!("panicked")) };
     hooks::set_chunk_insert_delay(Duration::ZERO);
     let got = db.get(&k, None);
@@ -177,7 +177,7 @@ fn sweep_spares_chunks_of_a_put_in_flight() -> Outcome<()> {
     let report = res!(report);
     msg!("sweep mid-put: {}", report.summary().replace('\n', " | "));
     assert!(put.is_ok(), "the put failed: {:?}", put);
-    assert!(report.skipped_recent > 0, "the sweep saw none of the put's chunks, so it proved nothing");
+    assert!(report.skipped_pending > 0, "the sweep saw none of the put's chunks, so it proved nothing");
     assert_eq!(report.orphans_found, 0, "the sweep took the chunks of a put in flight for orphans");
     assert!(matches!(&got, Ok(Some((g, _))) if *g == v), "the put does not read back whole: {:?}",
         got.map(|o| o.map(|(d, _)| fmt!("{:?}", d).chars().take(120).collect::<String>())));
@@ -204,7 +204,7 @@ fn losing_concurrent_put_retires_its_own_chunks() -> Outcome<()> {
         hooks::set_stale_stamp(None);
         res!(lost);
         let before = res!(db.get(&k, None)).map(|(v, _)| v);
-        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
         res!(db.close());
         let db = res!(start(dir, res!(cfg()), false));
         let after = res!(db.get(&k, None)).map(|(v, _)| v);
@@ -342,7 +342,7 @@ fn equal_stamps_pick_one_record_live_and_after_restart() -> Outcome<()> {
         }
         let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));
         if !v.clean() { bad.push(fmt!("round {} restarted verify: {}", round, v.summary(4))); }
-        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
         if report.orphans_found != 0 {
             bad.push(fmt!("round {} sweep: {}", round, report.summary().replace('\n', " | ")));
         }
@@ -435,7 +435,7 @@ fn store_never_retires_its_own_live_chunks_under_load() -> Outcome<()> {
         res!(db.close());
         let db = res!(start(dir, c.clone(), false));
         res!(check(&db, &keys, &lens, "restarted", &mut bad));
-        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
         msg!("load: {}", report.summary().replace('\n', " | "));
         res!(check(&db, &keys, &lens, "swept", &mut bad));
         res!(db.close());
@@ -866,7 +866,7 @@ fn legacy_tombstone_waits_for_every_older_record() -> Outcome<()> {
     res!(db.close());
     let db = res!(start_gc(dir, false));
     let restarted = census(&db);
-    let report = sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO);
+    let report = sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait());
     let gone = db.api().fetch_chunks(&Dat::Tup5u64(old), None).is_err();
     hooks::set_collect_fails_for(None);
     let rep = quiet(&db);
@@ -899,7 +899,7 @@ fn no_tombstone_drops_before_replay_done() -> Outcome<()> {
     let meta = |s: u64| Meta::<{ UID_LEN }, Uid> { time: Timestamp::new(s, 0), user: Uid::default() };
     let floc = |f: u32| FileLocation { fnum: f, start: 0, klen: k.len() as u64, vlen: 10 };
     let put = |cache: &mut C, cind: Option<usize>, f: u32, s: u64| -> Outcome<()> {
-        let sup = res!(cache.insert(k.clone(), None, cind, floc(f), meta(s)));
+        let sup = res!(cache.insert(k.clone(), None, cind, floc(f), meta(s), true));
         cache.note(&k, cind, &floc(f), &meta(s), &sup);
         Ok(())
     };

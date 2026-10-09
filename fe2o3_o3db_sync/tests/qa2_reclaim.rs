@@ -189,7 +189,7 @@ fn qa2_bg_gc_overwrite_bounded() -> Outcome<()> {
     // Restart: replay drops the lone ones; the store must be the same three values.
     let db = res!(start(dir, res!(cfg_b()), true, false));
     let after = res!(census(&db, dir));
-    let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+    let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
     let mut fin2 = Vec::new();
     for k in &keys {
         fin2.push(res!(db.get(k, None)).map(|(v, _)| whole(&v)).unwrap_or(false));
@@ -282,7 +282,7 @@ fn qa2_restart_cycles_no_resurrection() -> Outcome<()> {
                 bad.push(fmt!("cycle {}: retired set {:?} reads again", cycle, h));
             }
         }
-        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
         if report.orphans_found != 0 {
             bad.push(fmt!("cycle {}: {} orphans after restart", cycle, report.orphans_found));
         }

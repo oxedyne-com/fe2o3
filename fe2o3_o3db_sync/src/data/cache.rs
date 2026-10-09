@@ -76,7 +76,11 @@ pub enum Superseded<
     UID: NumIdDat<UIDL>,
 > {
     None,
-    Offered { floc: FileLocation, rid: RecordDigest }, // the offered record lost
+    Offered {                                           // the offered record lost
+        floc:       FileLocation,
+        rid:        RecordDigest,
+        confirmed:  bool,                               // is the winner durable?
+    },
     Cached {                                            // the cached record was displaced
         floc:   FileLocation,
         rid:    RecordDigest,
@@ -95,7 +99,7 @@ impl<
     pub fn old(&self) -> Option<(FileLocation, RecordDigest)> {
         match self {
             Self::None                          => None,
-            Self::Offered { floc, rid }         |
+            Self::Offered { floc, rid, .. }     |
             Self::Cached { floc, rid, .. }      => Some((floc.clone(), rid.clone())),
         }
     }
@@ -119,6 +123,7 @@ pub struct MetaLocation<
     meta: Meta<UIDL, UID>,
     floc: FileLocation,
     head: bool, // a bunch key, whose bytes stay resident
+    conf: bool, // confirmed durable, or replayed
 }
 
 impl<
@@ -131,6 +136,7 @@ impl<
     pub fn meta_move(self)      -> Meta<UIDL, UID>  { self.meta }
     pub fn file_location(&self) -> &FileLocation    { &self.floc }
     pub fn file_number(&self)   -> FileNum          { self.floc.file_number() }
+    pub fn confirmed(&self)     -> bool             { self.conf }
 
     pub fn new_start_position(&mut self, new_start: u64) {
         self.floc.start = new_start
@@ -187,6 +193,33 @@ pub enum CacheEntry<
     Deleted(Meta<UIDL, UID>),
 }
 
+/// The heads a cache holds with their bytes, which count toward its size but are never jettisoned.
+/// As they near the limit, every insert with a value jettisons all the other values.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PinnedHeads {
+    pub count:  usize,
+    pub bytes:  usize, // as counted toward the cache size
+}
+
+impl PinnedHeads {
+    pub fn add(&mut self, other: &Self) {
+        self.count = self.count.saturating_add(other.count);
+        self.bytes = self.bytes.saturating_add(other.bytes);
+    }
+
+    fn pin(&mut self, vsize: usize) -> Outcome<()> {
+        self.count = try_add!(&self.count, 1);
+        self.bytes = try_add!(&self.bytes, vsize);
+        Ok(())
+    }
+
+    fn unpin(&mut self, vsize: usize) -> Outcome<()> {
+        self.count = try_sub!(&self.count, 1);
+        self.bytes = try_sub!(&self.bytes, vsize);
+        Ok(())
+    }
+}
+
 /// A central goal of Ozone is to hold as much data as possible in volatile memory in zone caches.
 #[derive(Clone, Debug, Default)]
 pub struct Cache<
@@ -200,6 +233,7 @@ pub struct Cache<
     cwt:    CacheWriteTracker,
     csizes: CacheSizes<UIDL, UID>,
     tombs:  TombTracker<UIDL, UID>,
+    pins:   PinnedHeads,
 }
 
 /// Does the key name a chunk, a `Dat::Tup5u64` and nothing more?  A user key of that form is
@@ -315,6 +349,7 @@ impl<
     /// Getter for ancillary data structures size in bytes.
     pub fn get_ancillary_size(&self) -> usize { self.cwt.size + self.tombs.size }
     pub fn tomb_tracker(&self) -> &TombTracker<UIDL, UID> { &self.tombs }
+    pub fn pinned_heads(&self) -> PinnedHeads { self.pins }
     /// Getter for cache size limit in bytes.
     pub fn get_lim(&self) -> usize { self.lim }
     /// Getter for a reference to the cache map.
@@ -337,7 +372,9 @@ impl<
 
     /// Insert key, value and location into the cache.  A record with chunk index 0 is a bunch
     /// key, the head of a chunked value: its bytes stay resident, out of the write tracker, so
-    /// that the head it displaces can be reported with the set it named.
+    /// that the head it displaces can be reported with the set it named.  A record whose sync
+    /// failed is entered `confirmed: false`, so that a record it beats is not told the winner
+    /// will be there after a restart.
     ///
     /// Returns which copy of the key is now superseded, for the caller to schedule for garbage
     /// collection: usually the copy the cache held, but when the offered copy is the older of the
@@ -349,6 +386,7 @@ impl<
         cind:   Option<usize>,
         floc:   FileLocation,
         meta:   Meta<UIDL, UID>,
+        conf:   bool,
     )
         -> Outcome<Superseded<UIDL, UID>>
     {
@@ -409,28 +447,35 @@ impl<
                         self.ozid.clone(), kbyts, floc, meta.time, mloc.meta.time,
                     );
                     let rid = res!(RecordDigest::new(&kbyts, &meta));
-                    return Ok(Superseded::Offered { floc, rid });
+                    return Ok(Superseded::Offered { floc, rid, confirmed: mloc.conf });
                 }
                 // 2.2 It does, insert the new info and return the old.  The old value's bytes
                 //     belong to the old record, so they leave with it: a head's are moved into
                 //     the report, and any other's dropped.  The tracker follows the four
                 //     transitions: non-head to head removes the entry, head to non-head with
                 //     bytes inserts one, head to head has none, non-head to non-head updates.
-                let old_mloc = mem::replace(mloc, MetaLocation { meta, floc, head });
+                let old_mloc = mem::replace(mloc, MetaLocation { meta, floc, head, conf });
                 let rid = res!(RecordDigest::new(&kbyts, old_mloc.meta()));
                 let old_val = val2.take();
                 if let Some(v2) = &old_val {
-                    self.size = try_sub!(&self.size, res!(Self::valsize(v2.len())));
+                    let vsize = res!(Self::valsize(v2.len()));
+                    self.size = try_sub!(&self.size, vsize);
+                    if old_mloc.head {
+                        res!(self.pins.unpin(vsize));
+                    }
                 }
                 if !old_mloc.head && old_val.is_some() {
                     res!(self.cwt.remove(&kbyts));
                 }
                 if let Some(v) = val {
                     let vlen = v.len();
-                    if !head {
+                    let vsize = res!(Self::valsize(vlen));
+                    if head {
+                        res!(self.pins.pin(vsize));
+                    } else {
                         res!(self.cwt.insert(res!(Timestamp::now()), &kbyts, vlen));
                     }
-                    self.size = try_add!(&self.size, res!(Self::valsize(vlen)));
+                    self.size = try_add!(&self.size, vsize);
                     *val2 = Some(v);
                 }
                 let prior = match (old_mloc.head, old_val) {
@@ -451,10 +496,13 @@ impl<
                 match &val {
                     Some(v) => {
                         let vlen = v.len();
-                        if !head {
+                        let vsize = res!(Self::valsize(vlen));
+                        if head {
+                            res!(self.pins.pin(vsize));
+                        } else {
                             res!(self.cwt.insert(res!(Timestamp::now()), &kbyts, vlen));
                         }
-                        self.size = try_add!(&self.size, res!(Self::valsize(vlen)));
+                        self.size = try_add!(&self.size, vsize);
                     },
                     None => (),
                 }
@@ -462,6 +510,7 @@ impl<
                     meta,
                     floc,
                     head,
+                    conf,
                 };
                 self.map.insert(kbyts, CacheEntry::LocatedValue(mloc, val));
                 self.size = try_add!(&self.size, klen);
@@ -476,6 +525,7 @@ impl<
     fn valsize(len: usize) -> Outcome<usize> {
         Ok(try_add!(&Self::MLOC_SIZE, len))
     }
+
 
     /// Records what an insert of a chunk key superseded, and whether the key now holds a
     /// tombstone, the insert of `floc_new` carrying no chunk index.  Nothing is dropped here.
@@ -568,15 +618,19 @@ impl<
 
     /// Removes the entry of `k` if it is still the record stamped `meta`.
     pub fn remove(&mut self, k: &[u8], meta: &Meta<UIDL, UID>) -> Outcome<bool> {
-        let vlen = match self.map.get(k) {
+        let (vlen, head) = match self.map.get(k) {
             Some(CacheEntry::LocatedValue(mloc, val)) if mloc.meta == *meta =>
-                val.as_ref().map(|v| v.len()),
+                (val.as_ref().map(|v| v.len()), mloc.head),
             _ => return Ok(false),
         };
         self.map.remove(k);
         self.size = try_sub!(&self.size, k.len());
         if let Some(vlen) = vlen {
-            self.size = try_sub!(&self.size, res!(Self::valsize(vlen)));
+            let vsize = res!(Self::valsize(vlen));
+            self.size = try_sub!(&self.size, vsize);
+            if head {
+                res!(self.pins.unpin(vsize));
+            }
         }
         res!(self.cwt.remove(k));
         Ok(true)
@@ -593,7 +647,7 @@ impl<
     {
         match self.map.get_mut(k) {
             Some(CacheEntry::LocatedValue(mloc, _)) => {
-                *mloc = MetaLocation { meta, floc, head: mloc.head };
+                *mloc = MetaLocation { meta, floc, head: mloc.head, conf: mloc.conf };
                 Ok(())
             },
             Some(CacheEntry::Deleted(_)) => Err(err!(

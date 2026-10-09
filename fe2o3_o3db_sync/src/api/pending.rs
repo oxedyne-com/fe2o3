@@ -82,7 +82,7 @@ impl SetHold {
     pub(crate) fn new(sets: &PendingSets, id: Option<u64>) -> Outcome<Self> {
         if let Some(id) = id {
             let mut held = lock_mutex!(sets);
-            held.insert(id);
+            held.hold(id);
         }
         Ok(Self { sets: sets.clone(), id })
     }
@@ -93,7 +93,7 @@ impl SetHold {
     fn release(&mut self) {
         if let Some(id) = self.id.take() {
             if let Ok(mut held) = self.sets.lock() {
-                held.remove(&id);
+                held.release(&id);
             }
         }
     }
@@ -362,6 +362,9 @@ impl<
     )
         -> Outcome<bool>
     {
+        if self.set.is_some() {
+            hooks::head_hold();
+        }
         let mut head = match self.head.take() {
             Some(head) => head,
             None => return Err(err!("A store in progress has no bunch key left to send."; Bug, Missing)),
@@ -418,6 +421,9 @@ impl<
             None                        => None, // unticketed
             Some(Displaced::Nothing)    => None,
             Some(Displaced::Itself)     => self.set.clone(),
+            // The winner may never land, and then this is the key's value: the cache bot keeps
+            // the set held, and a restart's replay settles it.
+            Some(Displaced::ItselfUnconfirmed) => None,
             Some(Displaced::Record { meta, prior }) => match prior {
                 Prior::NotHead      => None,
                 Prior::Head(bytes)  => match self.decode_head(api, &bytes) {

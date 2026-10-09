@@ -191,8 +191,8 @@ fn qa1_child() -> Outcome<()> {
                 describe(&db.get(&dat!("k3"), None)),
                 describe(&db.get(&dat!("k4"), None)),
                 stamp_of(&db, &dat!("k1")));
-            let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
-            println!("QA1 sweep orphans_found={} skipped_recent={}", report.orphans_found, report.skipped_recent);
+            let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
+            println!("QA1 sweep orphans_found={} skipped_pending={}", report.orphans_found, report.skipped_pending);
             res!(db.close());
             let db = res!(start(&dir, res!(cfg()), false));
             println!("QA1 restarted k1={} k2={:?} k3={}",
@@ -332,7 +332,7 @@ fn qa1_kill_mid_collection() -> Outcome<()> {
     if got != wanted { bad.push(fmt!("restart read {:?} want {:?}", got, wanted)); }
     let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));
     if !v.clean() { bad.push(fmt!("verify {}", v.summary(4))); }
-    let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+    let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
     let swept = reads(&db);
     if swept != wanted { bad.push(fmt!("after sweep read {:?}", swept)); }
     for (i, k) in keys.iter().enumerate() {
@@ -386,7 +386,7 @@ fn qa1_overlap_orphans() -> Outcome<()> {
         if rb.is_err() || ra.is_err() { bad.push(fmt!("round {}: puts {:?} {:?}", r, rb, ra)); }
         let got = describe(&db.get(&k, None));
         if !(got == "1100/160" || got == "1100/176") { bad.push(fmt!("round {}: read {}", r, got)); }
-        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
         if report.orphans_found > 0 { rounds_with_orphans += 1; orphan_total += report.orphans_found; }
         let after = describe(&db.get(&k, None));
         if after != got { bad.push(fmt!("round {}: after sweep read {} (was {})", r, after, got)); }
@@ -469,7 +469,7 @@ fn puts_deletes(dir: &str, cache_lim: Option<usize>, iters: usize) -> Outcome<(V
         let db = res!(start(dir, c.clone(), false));
         let rest = describe(&db.get(&k, None));
         if rest != live { bad.push(fmt!("it {} restart read {} but live read {}", it, rest, live)); }
-        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
         orphans += report.orphans_found;
         let swept = describe(&db.get(&k, None));
         if swept != live { bad.push(fmt!("it {} after sweep read {} but live read {}", it, swept, live)); }
@@ -562,7 +562,7 @@ fn legacy_crash(mode: &str, dir: &str) -> Outcome<Vec<String>> {
     if got != want { bad.push(fmt!("{}: restart read {} want {}", mode, got, want)); }
     let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));
     if !v.clean() { bad.push(fmt!("{}: verify {}", mode, v.summary(4))); }
-    let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+    let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait()));
     let swept = describe(&db.get(&k, None));
     if swept != want { bad.push(fmt!("{}: after sweep read {}", mode, swept)); }
     res!(db.insert(k.clone(), val(1_100, 3), Uid::default(), None));
@@ -617,7 +617,7 @@ fn qa1_unconfirmed_head_that_lands() -> Outcome<()> {
     hooks::set_barrier_failure(false);
     hooks::set_chunk_insert_delay(Duration::ZERO);
     let live = describe(&db.get(&k, None));
-    let report = sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO);
+    let report = sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait());
     let swept = describe(&db.get(&k, None));
     let _ = db.close();
     let db = res!(start(dir, res!(cfg()), false));

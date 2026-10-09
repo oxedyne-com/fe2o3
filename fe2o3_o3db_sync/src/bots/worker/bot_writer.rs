@@ -367,7 +367,7 @@ impl<
     fn release_set(&self, head: &Option<HeadTicket>) {
         if let Some(HeadTicket { set: Some(id) }) = head {
             if let Ok(mut held) = self.api().chans().pending_sets().lock() {
-                held.remove(id);
+                held.release(id);
             }
         }
     }
@@ -393,7 +393,7 @@ impl<
                 "{}: The live index file {:?} is not open.", self.ozid(), lpair.ind.path;
                 Bug, Missing)),
         };
-        self.syncer.hand(Handed::Pair(dat, ind))
+        self.syncer.hand(Handed::Pair(lpair.fnum, dat, ind))
     }
 
     /// Takes the live file the zone assigned at start-up, new or partly written.

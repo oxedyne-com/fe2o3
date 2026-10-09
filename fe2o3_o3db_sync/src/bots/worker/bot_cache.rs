@@ -14,6 +14,7 @@ use crate::{
     data::{
         cache::{
             Cache,
+            Prior,
             Superseded,
             ValueOrLocation,
             is_chunk_key,
@@ -32,7 +33,10 @@ use oxedyne_fe2o3_iop_db::api::Meta;
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::Ordering,
+    },
     time::Instant,
 };
 
@@ -121,6 +125,7 @@ impl<
                                 self.wind().b(),
                                 self.cache().get_size(),
                                 self.cache().get_ancillary_size(),
+                                self.cache().pinned_heads(),
                             )
                         ) {
                             self.result(&Err(err!(e,
@@ -356,7 +361,7 @@ impl<
         let inserted = if head.is_some() && hooks::head_insert_fails() {
             Err(err!("A store's head could not be entered in the cache (test::hooks)."; Data, Write))
         } else {
-            self.cache.insert(key, val, cind, floc, meta)
+            self.cache.insert(key, val, cind, floc, meta, unconfirmed.is_none())
         };
         let sup = match inserted {
             Ok(sup) => sup,
@@ -373,11 +378,37 @@ impl<
             },
         };
 
+        // A record beaten or displaced by one whose sync failed is not old: the winner may never
+        // reach the disk, and then the loser is the key's value after a restart, whose replay
+        // settles which landed.  Until then its bytes are not collected, a set it names is not
+        // an orphan, and a tombstone over it is not dropped.
+        let unsettled = match &sup {
+            Superseded::None                    => false,
+            Superseded::Offered { confirmed, .. } => !*confirmed,
+            Superseded::Cached { .. }           => unconfirmed.is_some(),
+        };
         if let Some((k, m)) = noted {
-            self.cache.note(&k, cind, &floc_new, &m, &sup);
+            match unsettled {
+                true    => self.cache.note(&k, cind, &floc_new, &m, &Superseded::None),
+                false   => self.cache.note(&k, cind, &floc_new, &m, &sup),
+            }
         }
-        let floc_old_opt = sup.old();
-        let key_present = floc_old_opt.is_some();
+        let key_present = sup.old().is_some();
+        let floc_old_opt = match unsettled {
+            true    => None,
+            false   => sup.old(),
+        };
+        // A displaced head names a set only the store's schemes can read, so the sweep is told
+        // it cannot know the live sets until a restart.  A beaten head's set is simply kept held.
+        let shadowed = match &sup {
+            Superseded::Cached { prior: Prior::Head(_), .. } |
+            Superseded::Cached { prior: Prior::HeadUnread, .. } => unsettled,
+            _                                                   => false,
+        };
+        if shadowed {
+            self.api().chans().unsettled_heads().fetch_add(1, Ordering::SeqCst);
+        }
+        let beaten = unsettled && matches!(sup, Superseded::Offered { .. });
         
         // [13] Inform the caller of successful file write and cache insertion, or of the barrier
         // that failed after the write: told here, the caller can read its write back once it
@@ -387,16 +418,24 @@ impl<
         match (unconfirmed, head) {
             (Some(e), head) => {
                 self.respond(Err(e), &resp_w1);
-                self.release_set(&head);
+                if !beaten {
+                    self.release_set(&head);
+                }
             },
             (None, Some(ticket)) => {
+                // A store retires its own set only against a winner that will be there after a
+                // restart: one whose sync failed may never reach the disk, and then this head is
+                // the key's value again.
                 let displaced = match sup {
-                    Superseded::None                    => Displaced::Nothing,
-                    Superseded::Offered { .. }          => Displaced::Itself,
-                    Superseded::Cached { meta, prior, .. } => Displaced::Record { meta, prior },
+                    Superseded::None                                => Displaced::Nothing,
+                    Superseded::Offered { confirmed: true, .. }     => Displaced::Itself,
+                    Superseded::Offered { confirmed: false, .. }    => Displaced::ItselfUnconfirmed,
+                    Superseded::Cached { meta, prior, .. }          => Displaced::Record { meta, prior },
                 };
                 self.respond(Ok(OzoneMsg::HeadInserted(cind, displaced)), &resp_w1);
-                self.release_set(&Some(ticket));
+                if !beaten {
+                    self.release_set(&Some(ticket));
+                }
             },
             (None, None) => match cind {
                 Some(cind)  => self.respond(Ok(OzoneMsg::KeyChunkExists(key_present, cind)), &resp_w1),
@@ -423,7 +462,7 @@ impl<
     fn release_set(&self, head: &Option<HeadTicket>) {
         if let Some(HeadTicket { set: Some(id) }) = head {
             if let Ok(mut held) = self.api().chans().pending_sets().lock() {
-                held.remove(id);
+                held.release(id);
             }
         }
     }

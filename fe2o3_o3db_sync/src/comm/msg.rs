@@ -26,6 +26,7 @@ use crate::{
         cache::{
             Cache,
             MetaLocation,
+            PinnedHeads,
             Prior,
         },
         core::{
@@ -79,7 +80,8 @@ pub enum Displaced<
     UID: NumIdDat<UIDL>,
 > {
     Nothing,                                        // the key held no record
-    Itself,                                         // a newer record was already cached
+    Itself,                                         // a newer confirmed record was already cached
+    ItselfUnconfirmed,                              // a newer record whose sync failed was cached
     Record { meta: Meta<UIDL, UID>, prior: Prior }, // the cached record, now old
 }
 
@@ -92,7 +94,7 @@ pub enum OzoneMsg<
 > {
     None,
     // Advise
-    CacheSize(usize, usize, usize),
+    CacheSize(usize, usize, usize, PinnedHeads),
     SetCacheSizeLimit(usize),
     Channels(BotChannels<UIDL, UID, ENC, KH>, Responder<UIDL, UID, ENC, KH>),
     ChannelsReceived(OzoneBotId),

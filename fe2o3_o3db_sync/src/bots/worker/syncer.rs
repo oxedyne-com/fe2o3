@@ -19,6 +19,7 @@ use crate::{
         msg::OzoneMsg,
         response::Responder,
     },
+    file::floc::FileNum,
     test::hooks,
 };
 
@@ -86,7 +87,7 @@ pub enum Handed<
     ENC:    Encrypter,
     KH:     Hasher,
 > {
-    Pair(File, File),   // data, index
+    Pair(FileNum, File, File),  // number, data, index
     Record {
         cbot:   Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
         insert: OzoneMsg<UIDL, UID, ENC, KH>,
@@ -184,7 +185,7 @@ struct Barrier<
     label:      String,
     rx:         Receiver<Handed<UIDL, UID, ENC, KH>>,
     queue:      VecDeque<Handed<UIDL, UID, ENC, KH>>,
-    pair:       Option<(File, File)>,
+    pair:       Option<(FileNum, File, File)>,
     policy:     SyncPolicy,         // the latest record's
     dirty:      bool,               // the pair holds records no barrier has covered
     since:      u32,                // records released since the last barrier
@@ -253,13 +254,13 @@ impl<
             }
             while let Some(item) = self.queue.pop_front() {
                 match item {
-                    Handed::Pair(dat, ind) => {
+                    Handed::Pair(fnum, dat, ind) => {
                         // Sealing is unconditional, whatever the policy: a file that is no
                         // longer live is durable before anything written after it is released.
                         if self.dirty {
                             self.barrier_or_log();
                         }
-                        self.pair = Some((dat, ind));
+                        self.pair = Some((fnum, dat, ind));
                     },
                     Handed::Record { cbot, insert, resp, policy } =>
                         self.records(cbot, insert, resp, policy),
@@ -358,18 +359,18 @@ impl<
     }
 
     fn sync_pair(&self) -> Outcome<()> {
-        if let Some((dat, ind)) = &self.pair {
+        if let Some((fnum, dat, ind)) = &self.pair {
             hooks::barrier_delay();
-            if let Err(e) = Self::sync(dat) {
+            if let Err(e) = Self::sync(*fnum, dat) {
                 return Err(err!(e,
-                    "{}: sync_data on the live data file failed, so records written to it are not \
-                    confirmed durable.", self.label;
+                    "{}: sync_data on live data file {} failed, so records written to it are not \
+                    confirmed durable.", self.label, fnum;
                     IO, File, Write));
             }
-            if let Err(e) = Self::sync(ind) {
+            if let Err(e) = Self::sync(*fnum, ind) {
                 return Err(err!(e,
-                    "{}: sync_data on the live index file failed, so records written to it are \
-                    not confirmed durable.", self.label;
+                    "{}: sync_data on live index file {} failed, so records written to it are \
+                    not confirmed durable.", self.label, fnum;
                     IO, File, Write));
             }
         }
@@ -378,8 +379,8 @@ impl<
 
     /// `File::sync_data`, or the failure a test has asked for (`test::hooks`).  A barrier stops at
     /// its first failed sync, so a barrier the hook fails is counted once.
-    fn sync(file: &File) -> std::io::Result<()> {
-        if hooks::sync_fails() {
+    fn sync(fnum: FileNum, file: &File) -> std::io::Result<()> {
+        if hooks::sync_fails(fnum) {
             return Err(std::io::Error::other(
                 "the disk failed the sync (test::hooks::set_barrier_failure)"));
         }

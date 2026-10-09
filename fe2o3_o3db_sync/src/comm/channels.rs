@@ -34,6 +34,7 @@ use std::{
     sync::{
         Arc,
         Mutex,
+        atomic::AtomicUsize,
     },
     time::{
         Duration,
@@ -404,10 +405,62 @@ impl OzoneMsgCount {
     }
 }
 
-/// The chunk set identifiers of the chunked stores in progress in one database, which the orphan
-/// sweep must not retire.  Shared by every clone of the database's `BotChannels`, the one thing
-/// all its bots and handles derive from.
-pub type PendingSets = Arc<Mutex<HashSet<u64>>>;
+/// The chunk sets of one database's chunked stores in progress, which the orphan sweep must not
+/// retire.  Shared by every clone of the database's `BotChannels`, the one thing all its bots and
+/// handles derive from.
+pub type PendingSets = Arc<Mutex<SetRegistry>>;
+
+/// The sets held from the draw of their id until their head's outcome is final, and, while a
+/// sweep watches, every set let go since it began.  A store that starts and finishes between two
+/// looks of a sweep is still seen by the second, so the sweep needs no clock to spare it.
+#[derive(Debug, Default)]
+pub struct SetRegistry {
+    held:       HashSet<u64>,
+    watches:    usize,          // sweeps in progress
+    released:   HashSet<u64>,   // let go while a sweep watched
+}
+
+impl SetRegistry {
+    pub fn hold(&mut self, id: u64) {
+        self.held.insert(id);
+    }
+
+    pub fn release(&mut self, id: &u64) {
+        if self.held.remove(id) && self.watches > 0 {
+            self.released.insert(*id);
+        }
+    }
+
+    /// Is no set held?
+    pub fn is_empty(&self) -> bool { self.held.is_empty() }
+
+    pub fn is_held(&self, id: &u64) -> bool { self.held.contains(id) }
+
+    /// Begins a watch: until the matching `unwatch`, every set held now or later is in `watched`.
+    pub fn watch(&mut self) {
+        self.watches = self.watches.saturating_add(1);
+    }
+
+    pub fn unwatch(&mut self) {
+        self.watches = self.watches.saturating_sub(1);
+        if self.watches == 0 {
+            self.released.clear();
+        }
+    }
+
+    /// The sets held now, with those let go during a watch.
+    pub fn watched(&self) -> HashSet<u64> {
+        let mut all = self.held.clone();
+        all.extend(self.released.iter().copied());
+        all
+    }
+}
+
+/// How many heads in this process were displaced in a cache by a record whose sync failed.  Each
+/// may be the key's value again after a restart, and its chunk set cannot be named without the
+/// store's schemes, so the orphan sweep refuses while any is counted.  Only a restart, whose
+/// replay settles which records landed, clears it.
+pub type UnsettledHeads = Arc<AtomicUsize>;
 
 /// Channels for all bots in all zones.  Rather than sharing references to these channels, clone them.  Unlike `bots::base::handles::BotHandles`, this includes the `Supervisor`.
 #[derive(Clone, Debug)]
@@ -424,6 +477,7 @@ pub struct BotChannels<
     sbots:  ChannelPool<UIDL, UID, ENC, KH>,
     sup:    Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     sets:   PendingSets,
+    shadow: UnsettledHeads,
 }
 
 impl<
@@ -448,11 +502,13 @@ impl<
             cfg:    simplex(),
             sbots:  ChannelPool::new(&PoolType::Server, cfg.num_sbots()),
             sup:    simplex(),
-            sets:   Arc::new(Mutex::new(HashSet::new())),
+            sets:   Arc::new(Mutex::new(SetRegistry::default())),
+            shadow: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     pub fn pending_sets(&self) -> &PendingSets { &self.sets }
+    pub fn unsettled_heads(&self) -> &UnsettledHeads { &self.shadow }
 
     /// Returns channels for all worker pools, for the given zone.
     pub fn get_all_workers_in_zone(

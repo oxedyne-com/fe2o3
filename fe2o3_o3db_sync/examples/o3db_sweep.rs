@@ -10,7 +10,7 @@
 //!
 //! ```ignore
 //! cargo run -p oxedyne_fe2o3_o3db_sync --example o3db_sweep -- \
-//!     --source ./o3db --key ./keys/db/at_rest [--scan-secs 600] [--skew-secs 5]
+//!     --source ./o3db --key ./keys/db/at_rest [--scan-secs 600]
 //! ```
 //!
 //! The scheme parameterisation here MUST match the store's own: this binary is wired for the
@@ -24,9 +24,6 @@
 //!   proven orphaned.
 //! - The key is read from the path given at runtime.  It is NEVER hardcoded and there is NO default:
 //!   a missing or wrong-sized key aborts the run.
-//! - `--skew-secs` guards writers of the same process: only chunk records stamped more than this many seconds
-//!   before the sweep started are retired.  The default is deliberately generous.  Pass `0` only for
-//!   a store nothing is writing.
 //! - The store is locked by whichever process opens it, so this binary refuses a store the gateway
 //!   holds, and says so.
 //!
@@ -86,14 +83,12 @@ fn run() -> Outcome<()> {
         check_interval: constant::CHECK_INTERVAL,
     };
     info!(
-        "Sweeping orphaned chunk records (scan deadline {}s, epoch skew {}s)...",
-        args.scan_secs, args.skew_secs);
+        "Sweeping orphaned chunk records (scan deadline {}s)...", args.scan_secs);
     let report = res!(sweep::sweep_orphans(
         db.api(),
         Uid::default(),
         None,
         scan_wait,
-        Duration::from_secs(args.skew_secs),
     ));
 
     if report.orphans_retired != report.orphans_found {
@@ -123,9 +118,9 @@ fn run() -> Outcome<()> {
         100.0
     };
     println!(
-        "\nDONE: {} orphaned chunk records retired, {} skipped as too recent to be sure.\n\
+        "\nDONE: {} orphaned chunk records retired, {} skipped as held by a store.\n\
         Data bytes {} -> {} ({:.2}% of the pre-sweep footprint) after a {}s settle.",
-        report.orphans_retired, report.skipped_recent,
+        report.orphans_retired, report.skipped_pending,
         report.bytes_before, bytes_after, pct, GC_SETTLE_SECS);
 
     Ok(())
@@ -159,7 +154,6 @@ struct Args {
     source:     PathBuf,
     key_path:   PathBuf,
     scan_secs:  u64,
-    skew_secs:  u64,
 }
 
 impl Args {
@@ -167,7 +161,6 @@ impl Args {
         let mut source:     Option<PathBuf> = None;
         let mut key_path:   Option<PathBuf> = None;
         let mut scan_secs:  u64 = 600;
-        let mut skew_secs:  u64 = 5;
 
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -180,15 +173,9 @@ impl Args {
                         "--scan-secs must be a whole number of seconds, got {:?}.", v;
                         Invalid, Input)));
                 },
-                "--skew-secs" => {
-                    let v = res!(next(&mut it, "--skew-secs"));
-                    skew_secs = res!(v.parse::<u64>().map_err(|_| err!(
-                        "--skew-secs must be a whole number of seconds, got {:?}.", v;
-                        Invalid, Input)));
-                },
                 other => return Err(err!(
                     "Unrecognised argument {:?}. Usage: --source DIR --key PATH \
-                    [--scan-secs N] [--skew-secs N].", other;
+                    [--scan-secs N].", other;
                     Invalid, Input)),
             }
         }
@@ -196,7 +183,6 @@ impl Args {
             source:     res!(source.ok_or_else(||   err!("Missing --source DIR.";   Missing, Input))),
             key_path:   res!(key_path.ok_or_else(|| err!("Missing --key PATH.";     Missing, Input))),
             scan_secs,
-            skew_secs,
         })
     }
 }

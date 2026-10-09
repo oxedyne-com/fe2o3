@@ -5,15 +5,14 @@
 //! geometry -- or, for a value written under a pre-fix random ticket, any overwrite -- leaves the old
 //! chunk records under keys no live bunch key names.  Supersession-based collection never reaches
 //! them: they are orphans.  `sweep_orphans` tombstones each orphaned chunk key so the running
-//! collector reclaims its bytes, guarding against concurrent writers with an epoch on the record
-//! timestamp.
+//! collector reclaims its bytes, sparing every set a store held while it ran.
 //!
 //! `sweep_reclaims_orphans` seeds a store with random-ticket orphans, geometry-change orphans, dead
 //! tombstones, a live chunked value and live unchunked values, shows the orphan bytes do not
 //! self-reclaim, sweeps, and insists the footprint drops sharply while every live value reads back
 //! byte-identical, the tombstones are left untouched, and the store is self-consistent across a
 //! restart.  `concurrency_is_safe` runs a writer creating fresh chunked values during the sweep and
-//! insists the epoch guard engaged (`skipped_recent > 0`) and every concurrent value survived
+//! insists every seeded orphan was retired and every concurrent value survived
 //! byte-identical -- the proof that a value written during the sweep is never mistaken for an orphan.
 //!
 //! These tests force chunking with an explicit, prod-like threshold (not the drifting dev default),
@@ -242,8 +241,7 @@ fn sweep_reclaims_orphans(
     // Let the collector fully settle: it reclaims every legitimately superseded record (old bunch
     // keys, same-geometry overwrites), then has nothing left to do, because an orphaned chunk set is
     // exactly what supersession can never reach. The settled footprint therefore still holds the
-    // orphan bytes -- the teeth below confirm the sweep then finds them. Settling also ages the
-    // orphans well past the epoch skew.
+    // orphan bytes -- the teeth below confirm the sweep then finds them.
     let before = res!(settle_footprint(db_root));
     test!(sync_log::stream(), "sweep: {} data bytes at the settled pre-sweep baseline.", before);
 
@@ -253,7 +251,6 @@ fn sweep_reclaims_orphans(
         user,
         schms2,
         scan_wait(),
-        Duration::from_secs(2),
     ));
     test!(sync_log::stream(), "sweep: {}", report.summary().replace('\n', " | "));
 
@@ -375,8 +372,8 @@ fn check_live_values(
     Ok(())
 }
 
-/// A writer creating fresh chunked values during the sweep proves the online claim: the epoch guard
-/// must skip values written after the sweep started (`skipped_recent > 0`), and every concurrently
+/// A writer creating fresh chunked values during the sweep proves the online claim: the set watch
+/// must spare values written while the sweep runs, and every concurrently
 /// written value must survive byte-identical.  A version of the sweep that retired a fresh value's
 /// chunks would be the catastrophic bug this rules out.
 fn concurrency_is_safe(
@@ -400,16 +397,12 @@ fn concurrency_is_safe(
         true,
     )));
 
-    const EPOCH_SKEW_SECS: u64 = 3;
-
-    // Seed geometry-change orphans and age them well past the skew: these are the genuine, settled
-    // orphans the sweep must retire.
+    // Seed geometry-change orphans: genuine, settled orphans the sweep must retire.
     let n_geo = 12usize;
     for k in 0..n_geo {
         res!(db.insert(dat!(fmt!("cgeo:{:03}", k)), value_of(k as u8, VALUE_BYTES), user, schms2));
         res!(store_without_reclaim(&db, dat!(fmt!("cgeo:{:03}", k)), value_of(k as u8, SMALL_BYTES), user, schms2));
     }
-    thread::sleep(Duration::from_secs(EPOCH_SKEW_SECS + 3)); // age past the skew
 
     // A writer thread hammering fresh chunked values under new keys, with its own schemes so it
     // borrows nothing from this frame.  These are values written concurrently with the sweep; none
@@ -436,10 +429,8 @@ fn concurrency_is_safe(
     });
 
     // Let the writer get going, then -- immediately before the sweep -- overwrite some chunked
-    // values at a new geometry.  Their OLD chunk sets become genuine orphans, but they are younger
-    // than the skew, so the epoch guard must DEFER them (count them skipped_recent, not retire them):
-    // this is exactly the hazard of a value overwritten just as the sweep starts, and it makes the
-    // guard fire deterministically rather than relying on a scan-timing window.
+    // values at a new geometry.  Their old chunk sets are orphans the moment the overwrite lands,
+    // however recent, and the sweep retires them while leaving the new values whole.
     let n_recent = 6usize;
     for k in 0..n_recent {
         res!(db.insert(dat!(fmt!("recent:{:03}", k)), value_of(k as u8, VALUE_BYTES), user, schms2));
@@ -454,7 +445,6 @@ fn concurrency_is_safe(
         user,
         schms2,
         scan_wait(),
-        Duration::from_secs(EPOCH_SKEW_SECS),
     ));
 
     // Keep writing a touch longer, then stop and join.
@@ -467,24 +457,15 @@ fn concurrency_is_safe(
 
     test!(sync_log::stream(), "sweep/concurrent: {}", report.summary().replace('\n', " | "));
 
-    // The online-safety proof: the epoch guard deferred the recently overwritten values' old chunks
-    // rather than retiring them.  Without the guard these recent orphans would have been retired.
-    if report.skipped_recent == 0 {
-        return Err(err!(
-            "The epoch guard never engaged (skipped_recent == 0): a value overwritten just before \
-            the sweep had its old chunks treated as retirable. The online safety guard is not being \
-            applied.";
+    // Every seeded orphan, the ones made just before the sweep included, is retired: no clock
+    // defers an orphan.
+    if report.orphans_found < n_geo + n_recent {
+        return Err(err!("The concurrency sweep found {} orphans, but {} orphaned sets were seeded.",
+            report.orphans_found, n_geo + n_recent;
             Test, Invalid, Data));
     }
 
-    // The aged seeded orphans should have been retired.
-    if report.orphans_found == 0 {
-        return Err(err!("The concurrency sweep found no orphans, but aged orphans were seeded.";
-            Test, Invalid, Data));
-    }
-
-    // The recently overwritten values read back as their current (small) value, byte-identical: the
-    // guard deferred their old chunks without touching the live value.
+    // The recently overwritten values read back as their current (small) value, byte-identical.
     for k in 0..n_recent {
         let want = value_of(k as u8, SMALL_BYTES);
         match res!(db.get(&dat!(fmt!("recent:{:03}", k)), schms2)) {
@@ -518,8 +499,8 @@ fn concurrency_is_safe(
         }
     }
     test!(sync_log::stream(),
-        "sweep/concurrent: {} fresh values all intact, {} skipped by the epoch guard.",
-        total, report.skipped_recent);
+        "sweep/concurrent: {} fresh values all intact, {} skipped as held by a store.",
+        total, report.skipped_pending);
 
     // Recover the store for a clean shutdown (the writer's Arc clone is dropped after the join).
     match Arc::try_unwrap(db) {
