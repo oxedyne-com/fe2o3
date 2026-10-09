@@ -36,6 +36,7 @@ pub mod glob;
 pub mod highlight;
 pub mod html;
 pub mod lines;
+pub mod lineset;
 pub mod doc;
 pub mod pattern;
 pub mod regex;
