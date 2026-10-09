@@ -351,9 +351,26 @@ fn in_math(n: &SyntaxNode) -> bool {
 	}
 }
 
+// The names a closure body mentions as variables. The field of a field access and the key of a named
+// argument are not variables, so `it.body` does not capture a `body` of the enclosing function: a closure's
+// fingerprint holds what it captured, and the whole document in a captured `body` would move the location
+// of every context that mentions the word, whatever was typed anywhere in the document.
 fn collect_idents(n: &SyntaxNode, out: &mut HashSet<String>) {
 	match n.kind() {
 		SyntaxKind::Ident | SyntaxKind::MathIdent	=> { out.insert(n.text().to_string()); }
+		SyntaxKind::FieldAccess						=> if let Some(t) = first_expr(n) {
+			collect_idents(t, out);
+		},
+		SyntaxKind::Named							=> {
+			let mut key = true;
+			for c in n.children() {
+				if key && c.kind() == SyntaxKind::Ident {
+					key = false;
+					continue;
+				}
+				collect_idents(c, out);
+			}
+		},
 		_ => for c in n.children() {
 			collect_idents(c, out);
 		},

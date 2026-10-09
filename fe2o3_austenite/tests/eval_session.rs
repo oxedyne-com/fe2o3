@@ -131,14 +131,22 @@ fn a_compile_that_lays_no_pages_keeps_the_last_introspector() {
 
 // Numbered sections under an outline, each with a paragraph that reads the heading counter where it stands and
 // refers to the next section. Section 3 holds the same read in a table cell, a list item, a stack child and a
-// block, so that each way of laying a body out gives its content a place. `site` is the one place a word is
-// mistyped ("teh" for "the", the same width); `extra` adds a paragraph to section 1.
+// block, so that each way of laying a body out gives its content a place. The whole document is the `body` of a
+// template whose heading rule reads the counter in a context that mentions `it.body`, a field and not the
+// template's `body`: the context must not carry the document in its fingerprint, or a letter typed anywhere
+// would move the location of every heading's context. `site` is the one place a word is mistyped ("teh" for
+// "the", the same width); `extra` adds a paragraph to section 1.
 const SITES: usize = 5;
 
 fn numbered(site: Option<usize>, extra: bool) -> String {
 	let w = |k: usize| if site == Some(k) { "teh" } else { "the" };
 	let mut s = String::from("#set page(width: 220pt, height: 600pt, margin: 16pt)\n#set text(size: 9pt)\n\
-		#set heading(numbering: \"1.\")\n#outline()\n");
+		#set heading(numbering: \"1.\")\n\
+		#let wrap(body) = {\n\
+			show heading: it => [#it#context { let t = it.body; counter(heading).display() }]\n\
+			body\n\
+		}\n\
+		#show: wrap\n#outline()\n");
 	for i in 0..6 {
 		s.push_str(&format!("\n= Section {} <s{}>\n\n", i, i));
 		s.push_str(&format!("Paragraph {} says {} here, in section #context counter(heading).display(), and points to @s{}.\n",
