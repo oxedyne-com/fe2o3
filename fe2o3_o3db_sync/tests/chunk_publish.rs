@@ -9,11 +9,15 @@ mod gc_pair;
 
 use gc_pair::*;
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+    channels::Recv,
+    prelude::*,
+};
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_o3db_sync::{
     base::cfg::OzoneConfig,
+    comm::msg::OzoneMsg,
     test::{
         hooks,
         setup::{
@@ -51,10 +55,10 @@ fn lock() -> MutexGuard<'static, ()> {
 const HOLD:     Duration = Duration::from_millis(250); // a slow chunk
 const VALUES:   usize = 6;                             // stored in turn
 
-fn cfg() -> Outcome<OzoneConfig> {
+fn cfg(cbots: u16) -> Outcome<OzoneConfig> {
     let mut c = res!(setup::default_cfg());
     c.num_zones             = 1;
-    c.num_cbots_per_zone    = 8; // so that a bunch key often has a cache bot to itself
+    c.num_cbots_per_zone    = cbots; // so that a bunch key often has a cache bot to itself
     c.num_fbots_per_zone    = 1;
     c.num_wbots_per_zone    = 2;
     c.zone_overrides        = BTreeMap::new();
@@ -69,19 +73,22 @@ fn big(seed: u8) -> Dat {
 }
 
 fn open(dir: &str) -> Outcome<TestDb> {
+    open_with(dir, 8)
+}
+
+fn open_with(dir: &str, cbots: u16) -> Outcome<TestDb> {
     log_set_level!("error");
     let _ = std::fs::remove_dir_all(dir);
     res!(std::fs::create_dir_all(dir));
     let root = res!(Path::new(dir).canonicalize());
-    setup::start_db(root, Some(res!(cfg())), schemes(), None, false, true)
+    setup::start_db(root, Some(res!(cfg(cbots))), schemes(), None, false, true)
 }
 
 // A reader that comes while the chunks of a new value are slow to become readable finds no value
 // yet, or the whole one, and never a bunch key over chunks that are not there.  A cache bot
 // enters its records in turn, so a bunch key queued behind a held chunk at the same cache bot is
 // held with it; several values are stored over many cache bots so that some bunch key has one to
-// itself.  They are stored in turn: a server bot waits for the chunks of the store it is at, and
-// a queue of held stores would run past a request's deadline.
+// itself.  They are stored in turn here; `concurrent_chunked_puts_do_not_queue` stores them at once.
 #[test]
 fn bunch_key_is_not_readable_before_its_chunks() -> Outcome<()> {
     let _lock = lock();
@@ -181,6 +188,113 @@ fn unconfirmed_chunks_publish_no_bunch_key() -> Outcome<()> {
     match res!(db.get(&key(0), None)) {
         Some((v, _)) => assert_eq!(v, value(0, 9), "the value beside it changed"),
         None => return Err(err!("The value beside it is gone."; Test, Missing)),
+    }
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+// A caller is told its records are written without waiting for the chunks to become readable.  The
+// answers of a write are counted against deadlines of silence, 6 s for each record to be written
+// and far longer for the disk to make them durable.  The chunks' answers, and the bunch key's
+// that waits behind them, were first reported only once the chunks were readable, so a disk
+// slower than 6 s (an fsync on a loaded machine) failed a put with "0 of 8 records were confirmed
+// written" although nothing was wrong (A3 round 2a, `chunk_leak` under load).
+#[test]
+fn chunks_are_reported_written_while_they_are_held() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_publish_told";
+    let db = res!(open(dir));
+    let k = dat!("chunks told early");
+    let hold = Duration::from_millis(2_500);
+
+    hooks::set_chunk_insert_delay(hold);
+    let begun = Instant::now();
+    let resp = res!(db.api().put(k.clone(), big(5), Uid::default(), None));
+    let chan = match resp.channel() {
+        Some(chan) => chan,
+        None => return Err(err!("A put returned a responder without a channel."; Test, Missing)),
+    };
+    let (mut records, mut written, mut told) = (0usize, 0usize, None);
+    while told.is_none() && begun.elapsed() < Duration::from_secs(10) {
+        match chan.recv_timeout(Duration::from_millis(50)) {
+            Recv::Result(Ok(OzoneMsg::Chunks(n))) => records = n,
+            Recv::Result(Ok(OzoneMsg::Written)) => {
+                written += 1;
+                if records > 0 && written == records { // every record, the bunch key included
+                    told = Some(begun.elapsed());
+                }
+            },
+            _ => (),
+        }
+    }
+    hooks::set_chunk_insert_delay(Duration::ZERO);
+    let told = match told {
+        Some(t) => t,
+        None => return Err(err!(
+            "The caller of a put of {} records was told {} written in 10 s.", records, written;
+            Test, Missing)),
+    };
+    msg!("the caller was told {} records written after {:?}; the hook holds each chunk for {:?}.",
+        written, told, hold);
+    // The chunks are held for 2.5 s each, so a caller told only when they are readable hears
+    // nothing for at least that long.
+    assert!(told < hold, "the caller was told its records were written only after {:?}, when the \
+        chunks became readable", told);
+    // The put goes on to complete.
+    let end = Instant::now();
+    loop {
+        match res!(db.get(&k, None)) {
+            Some((v, _)) => { assert_eq!(v, big(5), "the stored value reads back changed"); break; },
+            None if end.elapsed() < Duration::from_secs(30) => thread::sleep(Duration::from_millis(50)),
+            None => return Err(err!("The put never completed."; Test, Missing)),
+        }
+    }
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
+// Chunked puts do not queue behind one another for the disk.  A server bot that waited through
+// its put's chunks held one put each, so twelve at once against the two server bots made the
+// last of a queue wait, with chunks held for 1.5 s, past the 6 s a request is given to be
+// counted (A3 round 2a).  Twelve over two bots leave one with six, whatever the choice: at
+// 1.5 s a put, the last would be reached after 7.5 s.
+#[test]
+fn concurrent_chunked_puts_do_not_queue() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_publish_many";
+    let db = res!(open_with(dir, 32));
+    let nputs = 12usize;
+    let hold = Duration::from_millis(1_500);
+
+    hooks::set_chunk_insert_delay(hold);
+    let begun = Instant::now();
+    let workers: Vec<_> = (0..nputs).map(|i| {
+        let db = db.clone();
+        thread::spawn(move || {
+            db.insert(dat!(fmt!("many {}", i)), big(i as u8), Uid::default(), None)
+                .map(|_| ()).map_err(|e| fmt!("{}", e))
+        })
+    }).collect();
+    let mut failed = Vec::new();
+    for (i, w) in workers.into_iter().enumerate() {
+        match w.join() {
+            Ok(Ok(())) => (),
+            Ok(Err(e)) => failed.push((i, e.chars().take(200).collect::<String>())),
+            Err(_) => failed.push((i, fmt!("the thread panicked"))),
+        }
+    }
+    let took = begun.elapsed();
+    hooks::set_chunk_insert_delay(Duration::ZERO);
+    msg!("{} chunked puts at once took {:?}; {} failed.", nputs, took, failed.len());
+    assert!(failed.is_empty(), "concurrent chunked puts failed: {:?}", failed);
+    for i in 0..nputs {
+        match res!(db.get(&dat!(fmt!("many {}", i)), None)) {
+            Some((v, _)) => assert_eq!(v, big(i as u8), "a stored value reads back changed"),
+            None => return Err(err!("Chunked put {} reported success but its value is gone.", i;
+                Test, Missing)),
+        }
     }
     res!(db.close());
     let _ = std::fs::remove_dir_all(dir);

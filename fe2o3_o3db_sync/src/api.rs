@@ -100,6 +100,20 @@ use std::{
 
 
 // What `OzoneApi::compact_now` did.
+mod pending;
+
+pub use pending::{
+    next_event,
+    Event,
+    PendingStore,
+};
+
+// How a store began: complete, or with answers still to come.
+pub enum Begun<const UIDL: usize, UID: NumIdDat<UIDL>, ENC: Encrypter, KH: Hasher> {
+    Done(usize),                                // records in all
+    Pending(PendingStore<UIDL, UID, ENC, KH>),
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CompactReport {
     pub files_collected:    usize,  // files a collection was started on
@@ -469,6 +483,31 @@ impl<
     )
         -> Outcome<usize>
     {
+        match res!(self.begin_store(k, v, user, schms2, resp)) {
+            Begun::Done(nchunks)        => Ok(nchunks),
+            Begun::Pending(pending)     => {
+                let nchunks = pending.nchunks();
+                res!(pending.run(self));
+                Ok(nchunks)
+            },
+        }
+    }
+
+    /// Begins a store as `store_dat_using_responder` describes, and returns without waiting for
+    /// the chunks of a chunked value to become readable.  A store that has more to wait for comes
+    /// back as a `PendingStore`, which the caller advances one answer at a time with
+    /// `PendingStore::advance`, so that a server bot can take other requests meanwhile.  The
+    /// caller's answers are sent as the store goes.
+    pub fn begin_store(
+        &self,
+        k:      Dat,
+        v:      Dat,
+        user:   UID,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+        resp:   Responder<UIDL, UID, ENC, KH>,
+    )
+        -> Outcome<Begun<UIDL, UID, ENC, KH>>
+    {
         // A store of the deleted marker is a delete by another road, the one the distributed
         // adapters erase by, and it supersedes only the bunch key.  The chunks of a chunked value
         // live under keys of their own, so they are retired here, as `delete` retires them, or
@@ -477,9 +516,9 @@ impl<
         // Any other store over a chunked value leaves the old chunks live too, unless the new value
         // writes the very keys they have.  A chunk key carries the length, count and size of its
         // value as well as the set identifier, so a value of another length shares none of them,
-        // and the ordinary supersession never reaches them.  They are retired here, once the new
-        // value is durable (below), and not before: retired first, a crash would leave the old
-        // bunch key naming chunks that are gone.
+        // and the ordinary supersession never reaches them.  They are retired once the new value
+        // is durable, and not before: retired first, a crash would leave the old bunch key naming
+        // chunks that are gone.
         let old = if deleted { None } else { res!(self.chunk_set_of(&k, schms2)) };
         let (kbuf, vbuf) = res!(Encode::encode_dat(k.clone(), v));
         let (msgs, datkeys) = res!(self.prepare_write_keyed(kbuf, vbuf, user, schms2, resp.clone(), None));
@@ -487,166 +526,43 @@ impl<
         // Every tombstone this store sends is stamped with the store's own time (see
         // `tombstone_chunk_key_at`).
         let meta = res!(Self::write_meta(&msgs));
+        if deleted {
+            // The marker goes out beside the tombstones of the chunks it leaves, and their
+            // answers are awaited once all are sent.  It is one record and has no chunks of its
+            // own to wait for.
+            let retiring = res!(self.reclaim_chunks_on_delete(&k, &meta, schms2));
+            if resp.is_some() {
+                res!(resp.send(OzoneMsg::Chunks(nchunks)));
+            }
+            res!(self.store_bytes(msgs));
+            if let Some((pkey, waits)) = retiring {
+                if let Err(e) = self.await_retired(&k, &pkey, waits) {
+                    let e = err!(e,
+                        "{}: Deleting {:?}: its tombstones were sent together, and the bunch \
+                        key may have been deleted although a chunk was not confirmed retired.  \
+                        The delete can be repeated while the bunch key is live, and chunks \
+                        left behind wait for the orphan sweep.",
+                        self.ozid(), k;
+                        Write);
+                    if resp.is_none() {
+                        return Err(e);
+                    }
+                    res!(resp.send(OzoneMsg::Error(e)));
+                }
+            }
+            return Ok(Begun::Done(nchunks));
+        }
         let stale = match &old {
             Some(pkey) => Self::chunk_keys_of(pkey).into_iter().any(|ck| !datkeys.contains(&ck)),
             None => false,
         };
-        let pkey = match old {
-            Some(pkey) if stale => pkey,
-            _ => {
-                // The marker goes out beside the tombstones of the chunks it leaves, and their
-                // answers are awaited once all are sent.
-                let retiring = if deleted {
-                    res!(self.reclaim_chunks_on_delete(&k, &meta, schms2))
-                } else {
-                    None
-                };
-                if resp.is_some() {
-                    res!(resp.send(OzoneMsg::Chunks(nchunks)));
-                }
-                let (head, chunks) = res!(Self::head_and_chunks(msgs));
-                if !res!(self.store_chunks_first(chunks, &resp)) {
-                    return Ok(nchunks);
-                }
-                res!(self.store_bytes(vec![head]));
-                if let Some((pkey, waits)) = retiring {
-                    if let Err(e) = self.await_retired(&k, &pkey, waits) {
-                        let e = err!(e,
-                            "{}: Deleting {:?}: its tombstones were sent together, and the bunch \
-                            key may have been deleted although a chunk was not confirmed retired.  \
-                            The delete can be repeated while the bunch key is live, and chunks \
-                            left behind wait for the orphan sweep.",
-                            self.ozid(), k;
-                            Write);
-                        if resp.is_none() {
-                            return Err(e);
-                        }
-                        res!(resp.send(OzoneMsg::Error(e)));
-                    }
-                }
-                return Ok(nchunks);
-            },
-        };
-
-        // The write is answered to a responder of our own, so that the old chunks can be retired
-        // between its durability and the caller's answer.  The caller is then given the same
-        // answers it would have had from the writers.
-        if resp.is_some() {
-            res!(resp.send(OzoneMsg::Chunks(nchunks)));
+        let pkey = if stale { old } else { None };
+        let (head, chunks) = res!(Self::head_and_chunks(msgs));
+        let mut pending = PendingStore::new(self, k, pkey, datkeys, meta, schms2, resp, head, chunks);
+        if res!(pending.start(self)) {
+            return Ok(Begun::Done(nchunks));
         }
-        let (mut head, chunks) = res!(Self::head_and_chunks(msgs));
-        if !res!(self.store_chunks_first(chunks, &resp)) {
-            return Ok(nchunks);
-        }
-        let own = self.responder();
-        if let (OzoneMsg::Write { resp, .. }, _) = &mut head {
-            *resp = own.clone();
-        }
-        res!(self.store_bytes(vec![head]));
-        let acks = own.recv_write_acks(
-            1,
-            constant::USER_REQUEST_TIMEOUT,
-            constant::DURABILITY_TIMEOUT,
-        );
-        match acks {
-            Err(e) => {
-                // Passed on with its tags, as the writers would have sent it.
-                if resp.is_none() {
-                    return Err(e);
-                }
-                res!(resp.send(OzoneMsg::Error(e)));
-            },
-            Ok(acks) => {
-                if let Err(e) = self.retire_chunks(&k, &pkey, &datkeys, &meta, schms2) {
-                    // The new value is stored and durable; the old chunks are left to the orphan
-                    // sweep, and the caller is not told its write failed.
-                    warn!(sync_log::stream(),
-                        "{}: The value stored at {:?} is durable, but the chunks of the value it \
-                        replaced were not all retired, and wait for the orphan sweep: {}",
-                        self.ozid(), k, e);
-                }
-                if resp.is_some() {
-                    res!(resp.send(OzoneMsg::Written));
-                    for ack in acks {
-                        res!(resp.send(ack));
-                    }
-                }
-            },
-        }
-        Ok(nchunks)
-    }
-
-    // Stores the chunks of a chunked value and waits until every one is written, durable and
-    // readable.  Records are made readable one at a time, each when its own writer's barrier
-    // completes, so a bunch key sent beside its chunks was readable for as long as the slowest
-    // chunk took, and a reader in that window found a key whose chunks were "not found" (A3 round
-    // 2a, 2026-10-09; 115 broken reads in one run on a loaded disk).  The bunch key goes after
-    // this returns true, so that a reader finds the value it replaces, or none, until the value
-    // that names its chunks has all of them.  The chunks' answers are passed to `resp` as they
-    // stand, and the bunch key's follow from its own writer.
-    //
-    // Returns false when a chunk failed.  The caller has then been told, in `resp`, that the
-    // write failed and not that it is `Unconfirmed`, since nothing of the value will be published;
-    // the chunks that did land have no bunch key and wait for the orphan sweep.  Without a
-    // `resp`, the failure is the returned error.
-    fn store_chunks_first(
-        &self,
-        chunks: Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>,
-        resp:   &Responder<UIDL, UID, ENC, KH>,
-    )
-        -> Outcome<bool>
-    {
-        let n = chunks.len();
-        if n == 0 {
-            return Ok(true);
-        }
-        let own = self.responder();
-        let mut chunks = chunks;
-        for (msg, _) in chunks.iter_mut() {
-            if let OzoneMsg::Write { resp, .. } = msg {
-                *resp = own.clone();
-            }
-        }
-        res!(self.store_bytes(chunks));
-        match own.recv_write_acks(
-            n,
-            constant::USER_REQUEST_TIMEOUT,
-            constant::DURABILITY_TIMEOUT,
-        ) {
-            Ok(acks) => {
-                if resp.is_some() {
-                    for _ in 0..n {
-                        res!(resp.send(OzoneMsg::Written));
-                    }
-                    for ack in acks {
-                        res!(resp.send(ack));
-                    }
-                }
-                Ok(true)
-            },
-            Err(e) => {
-                // A new error, not a wrapper: the tags of a chain are all reported, and the
-                // `Unconfirmed` of a chunk that was written but not confirmed would say a write
-                // that publishes nothing may yet land.
-                let e = if e.tags().contains(&ErrTag::Timeout) {
-                    err!("{}: Storing a chunked value, its {} chunks were not all written and \
-                        readable in time, so its bunch key was not written and nothing was \
-                        stored.  Chunks that landed wait for the orphan sweep: {}",
-                        self.ozid(), n, e;
-                        Write, Timeout)
-                } else {
-                    err!("{}: Storing a chunked value, a chunk failed, so its bunch key was not \
-                        written and nothing was stored.  Chunks that landed wait for the orphan \
-                        sweep: {}", self.ozid(), e;
-                        Write)
-                };
-                if resp.is_none() {
-                    return Err(e);
-                }
-                res!(resp.send(OzoneMsg::Error(e)));
-                Ok(false)
-            },
-        }
+        Ok(Begun::Pending(pending))
     }
 
     // The record that publishes a prepared write, which is the bunch key of a chunked value and
@@ -678,7 +594,7 @@ impl<
         -> Outcome<usize>
     {
         let msgs = res!(self.prepare_write_dat(
-            k,
+            k.clone(),
             v,
             user,
             schms2,
@@ -686,12 +602,11 @@ impl<
             Some(set_id),
         ));
         let nchunks = msgs.len();
-        if resp.is_some() {
-            res!(resp.send(OzoneMsg::Chunks(nchunks)));
-        }
+        let meta = res!(Self::write_meta(&msgs));
         let (head, chunks) = res!(Self::head_and_chunks(msgs));
-        if res!(self.store_chunks_first(chunks, &resp)) {
-            res!(self.store_bytes(vec![head]));
+        let mut pending = PendingStore::new(self, k, None, Vec::new(), meta, schms2, resp, head, chunks);
+        if !res!(pending.start(self)) {
+            res!(pending.run(self));
         }
         Ok(nchunks)
     }
@@ -1010,7 +925,7 @@ impl<
             Some(pkey)  => pkey,
             None        => return Ok(None), // Not chunked, or the key is absent: nothing extra to reclaim.
         };
-        let waits = res!(self.send_retires(&pkey, &[], meta, schms2));
+        let waits = res!(self.send_retires(&pkey, &[], meta, schms2, None));
         Ok(Some((pkey, waits)))
     }
 
@@ -1045,32 +960,17 @@ impl<
         ])).collect()
     }
 
-    /// Tombstones the chunk records of the value `pkey` names, except those under the keys in
-    /// `keep`, and waits until each is answered.  Every tombstone is sent before any is waited
-    /// for, so the chunks retire together.
-    fn retire_chunks(
-        &self,
-        k:      &Dat,
-        pkey:   &PartKey,
-        keep:   &[Dat],
-        meta:   &Meta<UIDL, UID>,
-        schms2: Option<&RestSchemesOverride<ENC, KH>>,
-    )
-        -> Outcome<()>
-    {
-        let waits = res!(self.send_retires(pkey, keep, meta, schms2));
-        self.await_retired(k, pkey, waits)
-    }
-
     /// Sends a tombstone for each chunk record of the value `pkey` names, except those under the
     /// keys in `keep`, and returns the responder to wait on for each, with the chunk's number.
-    /// Each has its own responder so that a failure names its chunk.
+    /// Each has its own responder so that a failure names its chunk, unless `shared` is given, in
+    /// which case every tombstone answers to it.
     fn send_retires(
         &self,
         pkey:   &PartKey,
         keep:   &[Dat],
         meta:   &Meta<UIDL, UID>,
         schms2: Option<&RestSchemesOverride<ENC, KH>>,
+        shared: Option<&Responder<UIDL, UID, ENC, KH>>,
     )
         -> Outcome<Vec<(u64, Responder<UIDL, UID, ENC, KH>)>>
     {
@@ -1079,7 +979,10 @@ impl<
             if keep.contains(&ck) {
                 continue;
             }
-            let resp = self.responder();
+            let resp = match shared {
+                Some(resp) => resp.clone(),
+                None => self.responder(),
+            };
             res!(self.tombstone_chunk_key_at(&ck, meta.clone(), schms2, resp.clone()));
             waits.push(((i + 1) as u64, resp));
         }

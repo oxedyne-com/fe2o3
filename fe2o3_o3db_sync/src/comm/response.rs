@@ -299,52 +299,23 @@ impl<
             Some(chan) => chan,
             None => return Err(err!("This responder does not have a channel."; Channel, Missing)),
         };
-        let mut heard = Instant::now(); // the last answer, or the call
-        let mut written = 0;
-        let mut acks = Vec::with_capacity(n);
-        while acks.len() < n {
-            let deadline = if written < n { liveness } else { durability };
-            let left = deadline.saturating_sub(heard.elapsed());
+        let mut wait = AckWait::new(n, liveness, durability);
+        while !wait.is_done() {
+            let left = wait.left();
             if left.is_zero() {
-                if written < n {
-                    return Err(err!(
-                        "{} of {} records of this write were confirmed written, and the writer \
-                        holding the rest has said nothing for {:?}, so whether they land is not \
-                        known.", written, n, liveness;
-                        Channel, Timeout));
-                }
-                return Err(err!(
-                    "All {} records of this write were written, but {} of them were not \
-                    confirmed durable, the disk having completed nothing for {:?}.  The write \
-                    has not failed: its records are in the store's files and become durable, \
-                    and readable, when the disk completes them, unless the machine stops first.",
-                    n, n - acks.len(), durability;
-                    Write, Timeout, Unconfirmed));
+                return Err(wait.expired());
             }
             match chan.recv_timeout(left) {
                 Recv::Empty => (), // Out of time, which the next pass reports.
                 Recv::Result(Err(e)) => return Err(err!(e,
                     "Could not read from responder channel.";
                     Channel, Read)),
-                Recv::Result(Ok(msg)) => match msg {
-                    OzoneMsg::Written => {
-                        written += 1;
-                        heard = Instant::now();
-                    },
-                    OzoneMsg::KeyExists(_) |
-                    OzoneMsg::KeyChunkExists(..) => {
-                        acks.push(msg);
-                        heard = Instant::now();
-                    },
-                    OzoneMsg::Finish => (),
-                    OzoneMsg::Error(e) => return Err(e),
-                    msg => return Err(err!(
-                        "Expected the answer to a write, received {:?}.", msg;
-                        Channel, Unexpected)),
-                },
+                // Passed on as it is: the tags of an answer are the caller's only way to tell a
+                // write that landed unconfirmed from one that did not.
+                Recv::Result(Ok(msg)) => { ok!(wait.feed(msg)); },
             }
         }
-        Ok(acks)
+        Ok(wait.into_acks())
     }
 
     /// Collect replies within a given time.
@@ -494,6 +465,94 @@ impl Default for Wait {
             check_interval: constant::CHECK_INTERVAL,
         }
     }
+}
+
+/// The answers to `n` records written under one responder, taken one message at a time, so that
+/// a bot with other work to do can wait on them without blocking (`Responder::recv_write_acks`
+/// is this in a loop).  The deadlines are those of `recv_write_acks`, which describes them.
+pub struct AckWait<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+> {
+    n:          usize,
+    written:    usize,
+    acks:       Vec<OzoneMsg<UIDL, UID, ENC, KH>>,
+    heard:      Instant, // the last answer, or the start
+    liveness:   Duration,
+    durability: Duration,
+}
+
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+>
+    AckWait<UIDL, UID, ENC, KH>
+{
+    pub fn new(n: usize, liveness: Duration, durability: Duration) -> Self {
+        Self {
+            n,
+            written:    0,
+            acks:       Vec::with_capacity(n),
+            heard:      Instant::now(),
+            liveness,
+            durability,
+        }
+    }
+
+    /// Have all the final answers arrived?
+    pub fn is_done(&self) -> bool { self.acks.len() >= self.n }
+
+    /// The time left before the silence that fails the wait, zero once it has run out.
+    pub fn left(&self) -> Duration {
+        let deadline = if self.written < self.n { self.liveness } else { self.durability };
+        deadline.saturating_sub(self.heard.elapsed())
+    }
+
+    /// Takes in one message from the responder's channel, and says whether every answer is now
+    /// in.  An error a writer sent is returned as it stands.
+    pub fn feed(&mut self, msg: OzoneMsg<UIDL, UID, ENC, KH>) -> Outcome<bool> {
+        match msg {
+            OzoneMsg::Written => {
+                self.written += 1;
+                self.heard = Instant::now();
+            },
+            OzoneMsg::KeyExists(_) |
+            OzoneMsg::KeyChunkExists(..) => {
+                self.acks.push(msg);
+                self.heard = Instant::now();
+            },
+            OzoneMsg::Finish => (),
+            OzoneMsg::Error(e) => return Err(e),
+            msg => return Err(err!(
+                "Expected the answer to a write, received {:?}.", msg;
+                Channel, Unexpected)),
+        }
+        Ok(self.is_done())
+    }
+
+    /// The error for a wait whose silence has run out.
+    pub fn expired(&self) -> Error<ErrTag> {
+        if self.written < self.n {
+            return err!(
+                "{} of {} records of this write were confirmed written, and the writer \
+                holding the rest has said nothing for {:?}, so whether they land is not \
+                known.", self.written, self.n, self.liveness;
+                Channel, Timeout);
+        }
+        err!(
+            "All {} records of this write were written, but {} of them were not \
+            confirmed durable, the disk having completed nothing for {:?}.  The write \
+            has not failed: its records are in the store's files and become durable, \
+            and readable, when the disk completes them, unless the machine stops first.",
+            self.n, self.n - self.acks.len(), self.durability;
+            Write, Timeout, Unconfirmed)
+    }
+
+    pub fn into_acks(self) -> Vec<OzoneMsg<UIDL, UID, ENC, KH>> { self.acks }
 }
 
 impl Wait {

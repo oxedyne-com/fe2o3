@@ -29,6 +29,36 @@ pub use flume::{
     RecvTimeoutError,
 };
 
+/// Waits until a message is waiting on any of the receivers, or until `timeout` has run out when
+/// one is given, and returns the position of the receiver it came from.  `None` says the time ran
+/// out first.  Nothing is polled: the caller sleeps until a sender wakes it, so a bot with several
+/// channels to watch can block on all of them at once.
+pub fn recv_any<M: 'static>(
+    rxs:        &[&Receiver<M>],
+    timeout:    Option<Duration>,
+)
+    -> Outcome<Option<(usize, M)>>
+{
+    let mut sel = flume::Selector::new();
+    for (i, rx) in rxs.iter().enumerate() {
+        sel = sel.recv(*rx, move |r| (i, r));
+    }
+    let (i, r) = match timeout {
+        Some(d) => match sel.wait_timeout(d) {
+            Ok(got) => got,
+            Err(_)  => return Ok(None),
+        },
+        None => sel.wait(),
+    };
+    match r {
+        Ok(m)   => Ok(Some((i, m))),
+        Err(e)  => Err(err!(e,
+            "While waiting on {} channels, the one at position {} was found disconnected.",
+            rxs.len(), i;
+            Channel, Read)),
+    }
+}
+
 pub fn full_duplex<M>() -> FullDuplex<M> {
     FullDuplex (
         simplex(),
