@@ -290,7 +290,6 @@ fn run_case(case: Case) -> Outcome<()> {
     cfg.data_file_max_bytes     = 4_000;
     cfg.rest_chunk_threshold    = 1_500;
     cfg.rest_chunk_bytes        = 64;
-    cfg.init_load_caches        = true;
     cfg.sync_on_write           = true;
     cfg.zone_overrides          = DaticleMap::new();
 
@@ -442,7 +441,6 @@ fn read_during_compaction() -> Outcome<()> {
     cfg.data_file_max_bytes     = 4_000;
     cfg.rest_chunk_threshold    = 1_500;
     cfg.rest_chunk_bytes        = 64;
-    cfg.init_load_caches        = true;
     cfg.sync_on_write           = true;
     cfg.zone_overrides          = DaticleMap::new();
 
@@ -680,7 +678,6 @@ fn delete_during_compaction() -> Outcome<()> {
     cfg.data_file_max_bytes     = 4_000;
     cfg.rest_chunk_threshold    = 1_500;
     cfg.rest_chunk_bytes        = 64;
-    cfg.init_load_caches        = true;
     cfg.sync_on_write           = true;
     cfg.zone_overrides          = DaticleMap::new();
 

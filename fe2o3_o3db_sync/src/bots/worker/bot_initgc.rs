@@ -430,6 +430,7 @@ impl<
         //    actually performs any garbage collection, so instead of choosing randomly, we
         //    allocate each bot to an exclusive fraction of files based on their number.
         for (kbyts, cind, floc, ilen, meta, chash) in found {
+            res!(crate::api::raise_stamp_floor(&meta.time));
             let cbwind = ChooseCache::<PR>::choose_cbot_select(
                 alias::ChooseHashUint::from_be_bytes(chash),
                 self.cfg().num_zones,
@@ -644,6 +645,7 @@ impl<
                     //    bot we advise actually performs any garbage collection, so instead of
                     //    choosing randomly, we allocate each bot to an exclusive fraction of files
                     //    based on their number.
+                    res!(crate::api::raise_stamp_floor(&meta.time));
                     let cind = key.index();
                     let kbyts = key.into_bytes();
                     let chash = res!(<alias::ChooseHash>::try_from(

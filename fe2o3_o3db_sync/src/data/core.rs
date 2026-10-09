@@ -89,9 +89,9 @@ impl Encode {
         // the cache tells a newer write from an older one at a key: a tombstone sent after the
         // write it retires for, and stamped again as it was framed, would outrank a newer value
         // of the same key (A3 round 2a, `retire_does_not_erase_a_newer_value`).  A record with
-        // no time is stamped now.
+        // no time is stamped now, through the store's clock.
         if kv.meta.time == Timestamp::default() {
-            res!(kv.stamp_time_now());
+            kv.meta.time = res!(crate::api::write_stamp());
         }
         let KeyVal { key, val, chash, meta, cbpind } = kv;
         // [1.1] Assemble the StoredKey, StoredValue and StoredIndex to be written to file.

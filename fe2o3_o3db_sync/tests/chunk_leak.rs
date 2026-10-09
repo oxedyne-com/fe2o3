@@ -280,13 +280,12 @@ fn delete_reclaims_chunks(
 /// Repeatedly overwriting a chunked value with a smaller (still chunked) one must reach a bounded
 /// steady state, not grow with the overwrite count.
 ///
-/// A chunk key encodes the value's geometry (its length and part count) as well as the key-derived
-/// set_id, so an overwrite that *changes* the geometry -- a grow or a shrink across a chunk
-/// boundary -- writes its chunks under different keys and does not supersede the prior geometry's
-/// chunks: that one prior value leaks and is left for the offline orphan sweep.  But overwrites at
-/// the *same* geometry share chunk keys and reclaim normally, so a run of same-size overwrites is
-/// bounded regardless of length.  This test shrinks once and then holds the smaller size, and
-/// insists the steady state after many small overwrites is no worse than after a few.
+/// Every chunked write has a chunk set of its own, and the store retires the set its key no longer
+/// names, so each overwrite's predecessor, of whatever size, is reclaimed by the collector.  This
+/// test shrinks once and then holds the smaller size, and insists the settled footprint after many
+/// small overwrites is no worse than after a few.  Each reading is taken once `compact_now` finds
+/// nothing more to collect, so it measures what is left, not how far the background collector
+/// happened to have got (QA 2, Q2-1).
 fn shrink_is_bounded(
     db_root:     &PathBuf,
     cfg:         &oxedyne_fe2o3_o3db_sync::base::cfg::OzoneConfig,
@@ -319,23 +318,29 @@ fn shrink_is_bounded(
             Test, Invalid, Configuration));
     }
 
-    // Warm up to a steady state at the smaller geometry, measure, then run three times as many
-    // more overwrites and measure again.  Same-size overwrites share chunk keys, so the collector
-    // reclaims each prior small value: past the warm-up the footprint must not grow with the
-    // count.  Comparing two post-warm-up points (rather than an early point against a late one)
-    // isolates a genuine linear leak from the one-off ramp to steady state and the single big
-    // value leaked at the shrink transition.
+    // Collect until a pass collects nothing, then measure.
+    let quiet = || -> Outcome<u64> {
+        for _ in 0..6 {
+            res!(db.api().settle_for_test(Duration::from_secs(20)));
+            let r = res!(db.compact_now(Duration::from_secs(60)));
+            if r.files_collected == 0 && r.files_deleted == 0 {
+                break;
+            }
+        }
+        zone_data_bytes(db_root)
+    };
+
+    // Warm up at the smaller size, measure, then run three times as many more overwrites and
+    // measure again.  Past the warm-up the settled footprint must not grow with the count.
     for i in 2..=11 {
         res!(db.insert(key.clone(), value_of(i as u8, SMALL_BYTES), user, schms2));
     }
-    thread::sleep(Duration::from_secs(3));
-    let after_warm = res!(zone_data_bytes(db_root));
+    let after_warm = res!(quiet());
 
     for i in 12..=41 {
         res!(db.insert(key.clone(), value_of(i as u8, SMALL_BYTES), user, schms2));
     }
-    thread::sleep(Duration::from_secs(3));
-    let after_more = res!(zone_data_bytes(db_root));
+    let after_more = res!(quiet());
 
     match res!(db.get(&key, schms2)) {
         Some((got, _)) => if got != value_of(41, SMALL_BYTES) {

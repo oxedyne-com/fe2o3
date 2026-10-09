@@ -126,11 +126,12 @@ pub enum Begun<const UIDL: usize, UID: NumIdDat<UIDL>, ENC: Encrypter, KH: Hashe
 
 static LAST_STAMP: AtomicU64 = AtomicU64::new(0); // nanoseconds since the epoch, latest write stamp
 
-/// The stamp of a write: the clock, or one nanosecond past the latest stamp this process gave
-/// when the clock has not moved on.  The cache keeps the first of two records of a key with one
-/// stamp, and a restart the first it replays, which need not be the same, so two writes of a key
-/// in one clock tick, or after the clock stepped back, would otherwise end on different values
-/// before and after a restart.  One process serves a store, so its stamps are a total order.
+/// The stamp of a record: a hybrid logical clock, the wall clock or one nanosecond past the
+/// latest stamp this process gave or replayed, whichever is later.  Replay raises the floor to
+/// every stamp it reads (`raise_stamp_floor`) before `start` returns, so no record written after
+/// an open is stamped at or below one already on disk, even when the clock stepped back across
+/// the restart.  Every record, tombstones included, is stamped here.  Two records of one key
+/// with one stamp are still ordered, by `data::cache::supersedes`.
 pub(crate) fn write_stamp() -> Outcome<Timestamp> {
     if let Some(t) = hooks::stale_stamp() {
         return Ok(Timestamp::new(t.as_secs(), t.subsec_nanos()));
@@ -147,6 +148,13 @@ pub(crate) fn write_stamp() -> Outcome<Timestamp> {
     };
     let n = now.max(prev.saturating_add(1));
     Ok(Timestamp::new(n / 1_000_000_000, (n % 1_000_000_000) as u32))
+}
+
+/// Raise the stamp floor to a replayed record's stamp, so the next `write_stamp` is later.
+pub(crate) fn raise_stamp_floor(t: &Timestamp) -> Outcome<()> {
+    let n = try_into!(u64, t.as_nanos());
+    LAST_STAMP.fetch_max(n, Ordering::SeqCst);
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

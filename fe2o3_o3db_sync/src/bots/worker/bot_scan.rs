@@ -4,9 +4,13 @@ use crate::{
         base::bot_deps::*,
         worker::worker_deps::*,
     },
+    data::cache::supersedes,
     file::{
         core::FileAccess,
-        floc::FileNum,
+        floc::{
+            FileLocation,
+            FileNum,
+        },
         stored::{
             StoredIndex,
             StoredKey,
@@ -201,7 +205,7 @@ impl<
         // whichever happened to be walked last: a chunk-data record later superseded by a
         // Complete tombstone must classify as the tombstone, or the inverse scan would emit a
         // chunk key a delete has already begun reclaiming.
-        let mut live: HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>)>
+        let mut live: HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>, FileLocation)>
             = HashMap::new();
         let mut short: Vec<Shortfall> = Vec::new();
 
@@ -241,7 +245,7 @@ impl<
 
         let mut out: Vec<(Dat, Dat, Meta<UIDL, UID>)> =
             Vec::with_capacity(live.len());
-        for (_kbyts, (kdat, meta, cind)) in live.into_iter() {
+        for (_kbyts, (kdat, meta, cind, _floc)) in live.into_iter() {
             // A chunk-data record has a chunk index >= 1.  The default scan keeps the main user
             // keys (Complete, and the bunch key at index 0) and elides those; `chunk_data_only`
             // inverts it, keeping only the chunk-data keys.
@@ -271,7 +275,7 @@ impl<
 
     fn scan_pass(
         &mut self,
-        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>)>,
+        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>, FileLocation)>,
     )
         -> Outcome<Vec<Shortfall>>
     {
@@ -339,7 +343,7 @@ impl<
     fn scan_walk_ind_file(
         &mut self,
         fnum: FileNum,
-        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>)>,
+        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>, FileLocation)>,
     )
         -> Outcome<u64>
     {
@@ -380,9 +384,9 @@ impl<
                     (skey.into_key(), meta)
                 },
             };
-            // 2. Skip the matching StoredIndex. We do not need the
-            //    location -- we are not reading values in v1.
-            match StoredIndex::read(
+            // 2. Read the matching StoredIndex, for the record's location, which breaks a
+            //    tie of stamps.  We do not read values in v1.
+            let floc = match StoredIndex::read(
                 &mut reader,
                 fnum,
                 self.api().schemes().checksummer().clone(),
@@ -403,8 +407,9 @@ impl<
                     // them out here would make every chunked value look
                     // like an under-count.
                     covered += sindex.keyval_len();
+                    sindex.ref_file_location().clone()
                 },
-            }
+            };
 
             // 3. Record the chunk index so the caller can classify on the newest record.
             //    `Complete` keys have no index, a bunch key is index 0, and a chunk-data
@@ -426,14 +431,13 @@ impl<
                 },
             };
 
-            // 5. Insert into the live map, keeping the newer stamp of two records of a key as
-            //    the cache does.  File order is not stamp order: a zone's writers append to
-            //    files of their own, so a tombstone can sit in a lower-numbered file than the
-            //    record it retires, and order alone revived that record (2026-10-09).  Of two
-            //    records with one stamp the later occurrence is kept.
+            // 5. Insert into the live map, keeping of two records of a key the one the cache
+            //    keeps, by `supersedes`.  Walk order is not stamp order: a zone's writers append
+            //    to files of their own, so a tombstone can sit in a lower-numbered file than the
+            //    record it retires, and walk order alone revived that record (2026-10-09).
             match live.get(&kbyts) {
-                Some((_, held, _)) if held.time > meta.time => (),
-                _ => { live.insert(kbyts, (kdat, meta, cind)); },
+                Some((_, held, _, hloc)) if !supersedes(&meta.time, &floc, &held.time, hloc) => (),
+                _ => { live.insert(kbyts, (kdat, meta, cind, floc)); },
             }
         }
         Ok(covered)

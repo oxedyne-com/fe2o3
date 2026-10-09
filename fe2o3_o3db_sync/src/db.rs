@@ -49,7 +49,6 @@ use oxedyne_fe2o3_core::{
 use oxedyne_fe2o3_jdat::{
     prelude::*,
     cfg::Config,
-    file::JdatMapFile,
     id::NumIdDat,
 };
 use oxedyne_fe2o3_namex::id::{
@@ -195,11 +194,11 @@ impl<
 
         let cfg_path = OzoneConfig::config_path(&db_root);
         let mut cfg = if cfg_path.is_file() {
-            res!(<OzoneConfig as JdatMapFile>::load(&cfg_path))
+            res!(OzoneConfig::load_file(&cfg_path))
         } else {
             match cfg_opt {
                 Some(cfg) => {
-                    res!(cfg.save(&cfg_path, "  ", true));
+                    res!(cfg.write_config_file(&db_root));
                     warn!(sync_log::stream(), 
                         "Configuration file {:?} saved, using default configuration provided.",
                         cfg_path,

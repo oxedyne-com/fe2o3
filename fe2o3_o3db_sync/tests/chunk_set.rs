@@ -286,6 +286,111 @@ fn two_puts_one_clock_tick_settle_alike_across_a_restart() -> Outcome<()> {
     Ok(())
 }
 
+// Two records of a key with one stamp: the cache, replay and the scan pick the same one, by place
+// (`supersedes`), so a key reads the same whole value live and after a restart, the live set
+// verifies, and the put that lost left nothing for the sweep.  Each key's two puts are made in
+// turn from a thread of its own, so the two writers interleave across the keys.
+#[test]
+fn equal_stamps_pick_one_record_live_and_after_restart() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_set_equal";
+    let lens = [1_100usize];
+    let keys: Vec<Dat> = (0..12u8).map(|i| dat!(fmt!("equal {}", i))).collect();
+    let mut bad = Vec::new();
+    for round in 0..4u8 {
+        let db = res!(start(dir, res!(cfg()), true));
+        hooks::set_stale_stamp(Some(*res!(Timestamp::now())));
+        let ws: Vec<_> = keys.iter().enumerate().map(|(i, k)| {
+            let (db, k) = (db.clone(), k.clone());
+            let seed = round.wrapping_mul(64).wrapping_add((i as u8).wrapping_mul(2));
+            thread::spawn(move || -> Vec<String> {
+                let mut errs = Vec::new();
+                for j in 0..2u8 {
+                    if let Err(e) = db.insert(k.clone(), val(1_100, seed.wrapping_add(j)), Uid::default(), None) {
+                        errs.push(fmt!("{}", e).chars().take(200).collect::<String>());
+                    }
+                }
+                errs
+            })
+        }).collect();
+        for w in ws {
+            match w.join() {
+                Ok(errs) => for e in errs { bad.push(fmt!("round {} put: {}", round, e)); },
+                Err(_) => bad.push(fmt!("round {} put panicked", round)),
+            }
+        }
+        hooks::set_stale_stamp(None);
+        let mut live = Vec::new();
+        for k in &keys {
+            let got = res!(db.get(k, None)).map(|(v, _)| v);
+            if !matches!(&got, Some(v) if whole(v, &lens)) {
+                bad.push(fmt!("round {} live {:?}: not whole", round, k));
+            }
+            live.push(got);
+        }
+        let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));
+        if !v.clean() { bad.push(fmt!("round {} live verify: {}", round, v.summary(4))); }
+        res!(db.close());
+        let db = res!(start(dir, res!(cfg()), false));
+        for (k, want) in keys.iter().zip(&live) {
+            match db.get(k, None) {
+                Ok(got) => if got.map(|(v, _)| v) != *want {
+                    bad.push(fmt!("round {} {:?}: the restart reads another value than live", round, k));
+                },
+                Err(e) => bad.push(fmt!("round {} {:?}: after the restart: {}", round, k, e)),
+            }
+        }
+        let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));
+        if !v.clean() { bad.push(fmt!("round {} restarted verify: {}", round, v.summary(4))); }
+        let report = res!(sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait(), Duration::ZERO));
+        if report.orphans_found != 0 {
+            bad.push(fmt!("round {} sweep: {}", round, report.summary().replace('\n', " | ")));
+        }
+        res!(db.close());
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(bad.is_empty(), "equal stamps did not settle on one record:\n{}", bad.join("\n"));
+    Ok(())
+}
+
+// With one writer a zone's records lie in write order, so of two puts of a key with one stamp the
+// later is the later place and must be the value read, live and after a restart.  The interleaved
+// test above catches a split between the paths only when replay happens to read in another order;
+// this one catches a tie broken by anything but place every time.
+#[test]
+fn equal_stamps_one_writer_later_put_wins() -> Outcome<()> {
+    let _lock = lock();
+    let dir = "./test_db_chunk_set_equal_one";
+    let mut c = res!(cfg());
+    c.num_wbots_per_zone = 1;
+    let keys: Vec<Dat> = (0..6u8).map(|i| dat!(fmt!("equal one {}", i))).collect();
+    let db = res!(start(dir, c.clone(), true));
+    hooks::set_stale_stamp(Some(*res!(Timestamp::now())));
+    for (i, k) in keys.iter().enumerate() {
+        for j in 0..2u8 {
+            res!(db.insert(k.clone(), val(1_100, (i as u8) * 2 + j), Uid::default(), None));
+        }
+    }
+    hooks::set_stale_stamp(None);
+    let mut bad = Vec::new();
+    for (i, k) in keys.iter().enumerate() {
+        if res!(db.get(k, None)).map(|(v, _)| v) != Some(val(1_100, (i as u8) * 2 + 1)) {
+            bad.push(fmt!("live {:?}: not the later put", k));
+        }
+    }
+    res!(db.close());
+    let db = res!(start(dir, c, false));
+    for (i, k) in keys.iter().enumerate() {
+        if res!(db.get(k, None)).map(|(v, _)| v) != Some(val(1_100, (i as u8) * 2 + 1)) {
+            bad.push(fmt!("restarted {:?}: not the later put", k));
+        }
+    }
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(bad.is_empty(), "a tie of stamps was not broken by place:\n{}", bad.join("\n"));
+    Ok(())
+}
+
 // The riskiest surface: a store reads its key back once its bunch key is durable and retires its
 // own set if the key names another.  Under many concurrent chunked overwrites of a few keys, with
 // slow file reads, no store may retire the set its key ends up naming: every key's current head

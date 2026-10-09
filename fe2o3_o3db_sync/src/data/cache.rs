@@ -41,6 +41,22 @@ impl CacheId {
     }
 }
 
+/// Does the record stamped `t1` at `f1` supersede the record of the same key stamped `t2` at
+/// `f2`?  The later stamp wins, and between equal stamps the later place, by file number then
+/// offset.  This is a total order on the records of one key, and collection keeps it, because a
+/// collected record keeps its file number and its order among the records of its file.  The
+/// cache, replay and the scan all decide by it, so they pick the same winner.
+pub fn supersedes(
+    t1: &Timestamp,
+    f1: &FileLocation,
+    t2: &Timestamp,
+    f2: &FileLocation,
+)
+    -> bool
+{
+    (t1, f1.fnum, f1.start) > (t2, f2.fnum, f2.start)
+}
+
 /// Contains the value itself, or its location. Used for cache retrieval.
 #[derive(Clone, Debug)]
 pub enum ValueOrLocation<
@@ -117,17 +133,6 @@ pub struct KeyVal<
     pub chash:  alias::ChooseHash,
     pub meta:   Meta<UIDL, UID>,
     pub cbpind: usize
-}
-
-impl<
-    const UIDL: usize,
-    UID: NumIdDat<UIDL>,
->
-    KeyVal<UIDL, UID>
-{
-    pub fn stamp_time_now(&mut self) -> Outcome<()> {
-        self.meta.stamp_time_now()
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -343,17 +348,15 @@ impl<
         // 2. See if the key already exists.
         match self.map.get_mut(&kbyts) {
             Some(CacheEntry::LocatedValue(mloc, val2)) => {
-                // 2.1 Only insert if the given data is newer.  The cache keeps the newer
-                //     copy, which makes the copy just offered the superseded one, so its
-                //     location is what goes back for flagging as old.  Returning nothing
-                //     here would leave that copy marked current in its file state forever,
-                //     and its bytes would never be reclaimable.  A copy at the location
-                //     already cached is the same record arriving twice, not a supersession,
-                //     and must be left alone.
-                if meta.time <= mloc.meta.time {
-                    if floc == *mloc.file_location() {
-                        return Ok(None);
-                    }
+                // 2.1 Only insert if the given record supersedes the cached one.  Otherwise
+                //     the offered copy is the superseded one, so its location goes back for
+                //     flagging as old; returning nothing would leave it marked current in its
+                //     file state forever, never reclaimable.  A copy at the location already
+                //     cached is the same record arriving twice, not a supersession.
+                if floc == *mloc.file_location() {
+                    return Ok(None);
+                }
+                if !supersedes(&meta.time, &floc, &mloc.meta.time, mloc.file_location()) {
                     trace!(sync_log::stream(),
                         "{:?}: The value offered for key = {:?} at {:?} is stamped {:?}, \
                         no newer than the cached {:?}, so the offered copy is superseded.",

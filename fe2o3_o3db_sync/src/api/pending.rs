@@ -389,7 +389,7 @@ impl<
             if cur != Some(own.set_id()) {
                 // A newer put or a delete won: these chunks are named by nothing.
                 let mut tmeta = self.meta.clone();
-                tmeta.time = Self::later(&res!(Timestamp::now()), &Self::just_after(&self.meta.time));
+                tmeta.time = Self::later(&res!(crate::api::write_stamp()), &Self::just_after(&self.meta.time));
                 retiring.push((own.clone(), tmeta));
             }
         }

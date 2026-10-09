@@ -21,7 +21,6 @@ pub fn default_cfg() -> Outcome<OzoneConfig> {
         bytes_before_hashing:           32,
         // Caches
         cache_size_limit_bytes:         100_000_000,
-        init_load_caches:               true,
         // Files
         data_file_max_bytes:            2_000,//1_000_000,
         // Chunking

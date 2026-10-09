@@ -3,7 +3,6 @@
     (str|"cache_size_limit_bytes"): (u64|100000000),
     (str|"data_file_max_bytes"): (u64|1000000),
     (str|"format_version"): (u8|2),
-    (str|"init_load_caches"): (true),
     (str|"num_cbots_per_zone"): (u16|2),
     (str|"num_fbots_per_zone"): (u16|2),
     (str|"num_igbots_per_zone"): (u16|2),
