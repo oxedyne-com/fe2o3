@@ -249,10 +249,19 @@ fn reader_during_the_retire_finds_a_whole_value() -> Outcome<()> {
             (n_old, n_new, bad)
         })
     };
+    let prior = match res!(s.db.api().get_head_wait(&k, None)) {
+        Some((Dat::Tup5u64(t), _)) => t,
+        other => return Err(err!("No chunked head before the overwrite: {:?}", other; Test, Missing)),
+    };
     hooks::set_chunk_tombstone_delay(Duration::from_millis(400));
     let put = s.put(&k, 9, TWO);
+    // The old chunks are retired by the cache bot after the put returns, so the reader goes on
+    // until they are gone.
+    let retired = wait_until(Duration::from_secs(20),
+        || s.db.api().fetch_chunks(&Dat::Tup5u64(prior), None).is_err());
     hooks::set_chunk_tombstone_delay(Duration::ZERO);
     done.store(true, Ordering::Relaxed);
+    assert!(retired, "the old chunks were never retired");
     let (n_old, n_new, bad) = match seen.join() {
         Ok(t) => t,
         Err(_) => return Err(err!("The reader thread panicked."; Test, Invalid)),

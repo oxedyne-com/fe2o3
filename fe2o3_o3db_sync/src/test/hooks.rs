@@ -41,7 +41,9 @@ static READ_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a reade
 static TOMB_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk tombstone
 static CHUNK_DELAY_MS:   AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk
 static LIST_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a directory's listing and its opens
-static RETIRE_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before a store retires what its head displaced
+static RETIRE_DROPS:     AtomicBool = AtomicBool::new(false); // a durable head's retire is never sent
+static RETIRES_DROPPED:  AtomicU64  = AtomicU64::new(0);      // dropped by the switch above
+static OWED_DROPS:       AtomicBool = AtomicBool::new(false); // a held discard's barrier request is lost
 static SUP_PANICS:       AtomicBool = AtomicBool::new(false); // the supervisor panics starting up
 static BARRIER_FAILS:    AtomicBool = AtomicBool::new(false); // every durability barrier fails
 static BARRIERS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
@@ -148,10 +150,25 @@ pub fn set_list_delay(d: Duration) {
     LIST_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
 
-/// Holds a store this long once its head is durable and before it retires the chunk set its head
-/// displaced, so that a read can be made while a delete or an overwrite is between the two.
-pub fn set_retire_delay(d: Duration) {
-    RETIRE_DELAY_MS.store(millis(d), Ordering::Relaxed);
+/// Drops the retire of the chunk set a durable head displaced, as a crash between the two would.
+/// The cache bot that would send it goes on serving; `retires_dropped` counts the drops.
+pub fn set_retire_drop(on: bool) {
+    RETIRE_DROPS.store(on, Ordering::SeqCst);
+}
+
+pub fn retires_dropped() -> u64 {
+    RETIRES_DROPPED.load(Ordering::SeqCst)
+}
+
+/// Loses every barrier request a held discard makes, as a crash between the hold and the barrier
+/// it owes would, so a test can hold the window open: only the policy, a seal, `sync_now` or a
+/// close moves a mark.
+pub fn set_owed_drop(on: bool) {
+    OWED_DROPS.store(on, Ordering::SeqCst);
+}
+
+pub(crate) fn owed_dropped() -> bool {
+    OWED_DROPS.load(Ordering::SeqCst)
 }
 
 /// Makes the supervisor panic once it has brought the bots up, before the database is ready, as a
@@ -379,8 +396,12 @@ pub(crate) fn list_delay() {
     pause(&LIST_DELAY_MS);
 }
 
-pub(crate) fn retire_delay() {
-    pause(&RETIRE_DELAY_MS);
+pub(crate) fn retire_dropped() -> bool {
+    let on = RETIRE_DROPS.load(Ordering::SeqCst);
+    if on {
+        RETIRES_DROPPED.fetch_add(1, Ordering::SeqCst);
+    }
+    on
 }
 
 pub(crate) fn supervisor_panic() {

@@ -16,7 +16,7 @@ use crate::{
     },
     comm::{
         channels::Cut,
-        msg::HeadTicket,
+        msg::StoreRole,
     },
     file::{
         core::FileType,
@@ -165,7 +165,7 @@ impl<
                             meta,
                             cbpind,
                             resp: resp_w1,
-                            head,
+                            role,
                         } => {
                             let resp = resp_w1.clone();
                             if let Err(e) = self.write(
@@ -176,7 +176,7 @@ impl<
                                 meta,
                                 cbpind,
                                 resp_w1,
-                                head,
+                                role,
                             ) {
                                 // The caller is waiting on this answer.  Only logged, a failure
                                 // here reached it as a responder timeout that named no cause.
@@ -202,6 +202,10 @@ impl<
                                     self.ozid();
                                     Thread, Write)), &resp);
                             }
+                        },
+                        OzoneMsg::SyncOwed => {
+                            let result = self.syncer.hand(Handed::SyncOwed);
+                            self.result(&result);
                         },
                         //OzoneMsg::Delete(kv, resp_w1) => {
                         //    let result = self.write(kv, resp_w1);
@@ -235,6 +239,7 @@ impl<
     {
         let shared = Shared {
             zone:   args.wind.z(),
+            bot:    args.wind.b(),
             root:   args.api.db_root().to_path_buf(),
             marks:  args.api.chans().marks().clone(),
             fault:  args.api.chans().fault().clone(),
@@ -318,7 +323,7 @@ impl<
         meta:       Meta<UIDL, UID>,
         cbpind:     usize, // cbot pool index
         resp_w1:    Responder<UIDL, UID, ENC, KH>,
-        head:       Option<HeadTicket>,
+        role:       Option<StoreRole<UIDL, UID, ENC, KH>>,
     )
         -> Outcome<()>
     {
@@ -329,7 +334,7 @@ impl<
         // has stopped refuses it before anything reaches the files.  Appended first, it was
         // reported failed and came back at the next start (2026-09-23).
         if !self.syncer.is_running() {
-            self.release_set(&head);
+            self.release_set(&role);
             return Err(err!(
                 "{}: The durability barrier thread has stopped, so the write was refused before \
                 anything was written.", self.ozid();
@@ -337,7 +342,7 @@ impl<
         }
         // A failed barrier has stopped the store: nothing appended now could ever be proven.
         if let Some(fault) = self.api().chans().fault().get() {
-            self.release_set(&head);
+            self.release_set(&role);
             return Err(err!(
                 "{}: The store stopped writing after a failed sync at {:?} ({}), so the write was \
                 refused.  Restart the store; it recovers from the disk.",
@@ -347,7 +352,7 @@ impl<
         let start = match self.write_to_file(FileType::Data, vec![&kbyts[..], &vstored[..]]) {
             Ok(start) => start,
             Err(e) => {
-                self.release_set(&head);
+                self.release_set(&role);
                 return Err(e);
             },
         };
@@ -379,7 +384,7 @@ impl<
         kbyts.drain(..constant::CACHE_HASH_BYTES); // remove data pathway hash used to identify cbot
         kbyts.truncate(klen_cache); // remove metadata
         let resp = resp_w1.clone();
-        let ticketed = head.is_some();
+        let ticketed = matches!(role, Some(StoreRole::Head(_)));
         let insert = OzoneMsg::Insert(
             kbyts,
             Some(vstored),
@@ -389,7 +394,7 @@ impl<
             meta,
             resp_w1, // The cbot responds to the caller.
             None,
-            head,
+            role,
         );
         let policy = SyncPolicy::of(self.cfg());
         let handed = if ticketed && hooks::head_hand_fails() {
@@ -409,10 +414,10 @@ impl<
     }
 
     // A store's head that never reached the data file will not land, so its set is free.
-    fn release_set(&self, head: &Option<HeadTicket>) {
-        if let Some(HeadTicket { set: Some(id) }) = head {
+    fn release_set(&self, role: &Option<StoreRole<UIDL, UID, ENC, KH>>) {
+        if let Some(id) = role.as_ref().and_then(|r| r.set()) {
             if let Ok(mut held) = self.api().chans().pending_sets().lock() {
-                held.release(id);
+                held.release(&id);
             }
         }
     }
@@ -533,6 +538,15 @@ impl<
     }
 
     fn new_live_pair(&mut self) -> Outcome<(FileNum, u64)> {
+        // A stopped store takes no new file: nothing could prove it, and the fault's cut list
+        // names the files as they stood.
+        if let Some(fault) = self.api().chans().fault().get() {
+            return Err(err!(
+                "{}: The store stopped writing after a failed sync at {:?} ({}), so no new live \
+                file was opened.  Restart the store; it recovers from the disk.",
+                self.ozid(), fault.when, fault.error;
+                Write, Fatal));
+        }
         let fnum_old = self.lpair().fnum;
         // A writer given no incomplete file at start-up has none until its first write, so it
         // has nothing to seal and its first file is registered as one taken over at start-up is.
@@ -750,6 +764,9 @@ impl<
                     // Retain the corrupted index data, it will be detected and dealt
                     // with on re-start.
                 }
+                // The index end feeds the durable mark: left stale, a fault cut the live index
+                // back to where it began.
+                self.lpair_mut().ind.size += bytes_written as u64;
                 Ok(start)
             },
         }

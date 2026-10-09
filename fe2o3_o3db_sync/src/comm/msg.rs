@@ -30,7 +30,6 @@ use crate::{
             Cache,
             MetaLocation,
             PinnedHeads,
-            Prior,
         },
         core::{
             Key,
@@ -62,6 +61,7 @@ use oxedyne_fe2o3_iop_db::api::{
 use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::{
     Dat,
+    chunk::PartKey,
     id::NumIdDat,
 };
 
@@ -69,23 +69,49 @@ use std::{
     collections::BTreeMap,
 };
 
-/// Marks the head of a value sent by a `PendingStore`, and hands over the chunk set it holds,
-/// for the writer or the cache bot to release once the head's fate is known.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct HeadTicket {
-    pub set: Option<u64>,
+/// What a record sent by a `PendingStore` is to its store, which says how the cache bot answers.
+#[derive(Clone, Debug)]
+pub enum StoreRole<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+> {
+    Chunk,                                  // answered once a barrier covers it (R1)
+    Head(HeadTicket<UIDL, UID, ENC, KH>),   // answered at insert
 }
 
-/// What a store's head displaced in the cache, which is what the store retires by.
+/// A store's head.  It hands over the chunk set the store holds, released at insert, and carries
+/// what the cache bot needs to retire the set the head displaces once the winner is durable.
 #[derive(Clone, Debug)]
-pub enum Displaced<
+pub struct HeadTicket<
     const UIDL: usize,
-    UID: NumIdDat<UIDL>,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
 > {
-    Nothing,                                        // the key held no record
-    Itself,                                         // a newer confirmed record was already cached
-    ItselfUnconfirmed,                              // a newer record whose sync failed was cached
-    Record { meta: Meta<UIDL, UID>, prior: Prior }, // the cached record, now old
+    pub set:    Option<u64>,                        // the hold handed over
+    pub own:    Option<PartKey>,                    // the store's own chunk set
+    pub pred:   Option<(PartKey, Meta<UIDL, UID>)>, // the value read before the store began
+    pub schms2: Option<RestSchemesOverride<ENC, KH>>,
+    pub tmeta:  Meta<UIDL, UID>,                    // the store's metadata, restamped to retire
+}
+
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+>
+    StoreRole<UIDL, UID, ENC, KH>
+{
+    /// The chunk set hold a head hands over, if any.
+    pub fn set(&self) -> Option<u64> {
+        match self {
+            Self::Chunk     => None,
+            Self::Head(t)   => t.set,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -133,6 +159,7 @@ pub enum OzoneMsg<
     Settle(Responder<UIDL, UID, ENC, KH>),      // api -> cbot -> fbot, the accounting barrier
     SettleEcho(Responder<UIDL, UID, ENC, KH>),  // fbot -> fbot, answered once the fbot reaches it
     SyncNow(Responder<UIDL, UID, ENC, KH>),     // api -> wbot -> syncer, a barrier over all before it
+    SyncOwed,                                   // cbot -> wbot -> syncer, a held discard owes a barrier soon
     CloseOldLiveFileState {
         fnum_old:       FileNum,
         fnum_new:       FileNum,
@@ -179,7 +206,7 @@ pub enum OzoneMsg<
         Meta<UIDL, UID>,
         Responder<UIDL, UID, ENC, KH>,
         Option<Error<ErrTag>>, // written, but its barrier failed: the caller's answer
-        Option<HeadTicket>,    // a store's head, answered with what it displaced
+        Option<StoreRole<UIDL, UID, ENC, KH>>, // a record of a store in progress
     ),
     NewLiveFile(Option<FileNum>, Responder<UIDL, UID, ENC, KH>), // Explicit file number for init, None for routine new file.
     NextLiveFile(Responder<UIDL, UID, ENC, KH>), // A routine request by a wbot to the zbot for the next live file.
@@ -204,7 +231,7 @@ pub enum OzoneMsg<
         meta:       Meta<UIDL, UID>,
         cbpind:     usize,
         resp:       Responder<UIDL, UID, ENC, KH>,
-        head:       Option<HeadTicket>,
+        role:       Option<StoreRole<UIDL, UID, ENC, KH>>,
     },
     // Respond
     Chunks(usize), // Number of chunks.
@@ -219,7 +246,6 @@ pub enum OzoneMsg<
     Error(Error<ErrTag>),
     Files(ZoneInd, BTreeMap<String, FileEntry>),
     GcCacheUpdateResponse(Vec<(FileLocation, RecordDigest)>), // re-anchored, from where
-    HeadInserted(Option<usize>, Displaced<UIDL, UID>), // a ticketed head's answer: its chunk index, what it displaced
     KeyExists(bool),
     KeyChunkExists(bool, usize), // includes chunk index
     Ok,

@@ -144,7 +144,8 @@ fn legacy_key_derived_value_overwritten_same_length_reads_whole_and_retires() ->
     res!(db.insert(k.clone(), val(1_100, 2), Uid::default(), None));
     let got = res!(db.get(&k, None));
     let new = res!(res!(head(&db, &k)).ok_or_else(|| err!("No new head."; Test, Missing)));
-    let gone = db.api().fetch_chunks(&Dat::Tup5u64(old), None).is_err();
+    // Retired by the cache bot once the new head is durable, after the put has returned.
+    let gone = wait_until(Duration::from_secs(10), || db.api().fetch_chunks(&Dat::Tup5u64(old), None).is_err());
     res!(db.close());
     let _ = std::fs::remove_dir_all(dir);
     assert!(matches!(&got, Some((v, _)) if *v == val(1_100, 2)), "the overwrite did not read back whole");
@@ -469,8 +470,9 @@ fn check(db: &TestDb, keys: &[Dat], lens: &[usize], phase: &str, bad: &mut Vec<S
 
 // A delete is a store with no chunks: its head tombstone is durable before the chunks of the value
 // it deletes are retired, so a read made between the two finds the value whole or gone, never a
-// current bunch key missing a chunk (fix A, 2026-10-09).  The delete is held between the two by
-// `set_retire_delay`.  `marker` deletes by storing the deleted marker, as the distributed adapters
+// current bunch key missing a chunk (fix A, 2026-10-09).  Since the durable mark the cache bot
+// retires them after the delete has returned, and `set_chunk_tombstone_delay` holds the chunk
+// tombstones so that the read lands between the two.  `marker` deletes by storing the deleted marker, as the distributed adapters
 // erase.
 fn read_during_delete(dir: &str, marker: bool) -> Outcome<()> {
     let _lock = lock();
@@ -480,7 +482,7 @@ fn read_during_delete(dir: &str, marker: bool) -> Outcome<()> {
     let tomb = Dat::Usr(oxedyne_fe2o3_o3db_sync::base::id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
     res!(db.insert(k.clone(), v.clone(), Uid::default(), None));
     let old = res!(res!(head(&db, &k)).ok_or_else(|| err!("No head for the value."; Test, Missing)));
-    hooks::set_retire_delay(Duration::from_millis(300));
+    hooks::set_chunk_tombstone_delay(Duration::from_millis(300));
     let del = {
         let (db, k, tomb) = (db.clone(), k.clone(), tomb.clone());
         thread::spawn(move || {
@@ -495,9 +497,9 @@ fn read_during_delete(dir: &str, marker: bool) -> Outcome<()> {
     pause(Duration::from_millis(100));
     let mid = db.get(&k, None);
     let del = match del.join() { Ok(r) => r, Err(_) => Err(fmt!("panicked")) };
-    hooks::set_retire_delay(Duration::ZERO);
     let after = db.get(&k, None);
-    let gone = db.api().fetch_chunks(&Dat::Tup5u64(old), None).is_err();
+    let gone = wait_until(Duration::from_secs(10), || db.api().fetch_chunks(&Dat::Tup5u64(old), None).is_err());
+    hooks::set_chunk_tombstone_delay(Duration::ZERO);
     res!(db.close());
     let _ = std::fs::remove_dir_all(dir);
     assert!(del.is_ok(), "the delete failed: {:?}", del);
@@ -898,7 +900,7 @@ fn no_tombstone_drops_before_replay_done() -> Outcome<()> {
     let meta = |s: u64| Meta::<{ UID_LEN }, Uid> { time: Timestamp::new(s, 0), user: Uid::default() };
     let floc = |f: u32| FileLocation { fnum: f, start: 0, klen: k.len() as u64, vlen: 10 };
     let put = |cache: &mut C, cind: Option<usize>, f: u32, s: u64| -> Outcome<()> {
-        let sup = res!(cache.insert(k.clone(), None, cind, floc(f), meta(s), true));
+        let sup = res!(cache.insert(k.clone(), None, cind, floc(f), meta(s)));
         cache.note(&k, cind, &floc(f), &meta(s), &sup);
         Ok(())
     };

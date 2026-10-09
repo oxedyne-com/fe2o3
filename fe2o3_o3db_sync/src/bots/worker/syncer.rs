@@ -72,7 +72,9 @@ use std::{
 
 
 /// When a record has to be durable before it is released, and so how long the discards a
-/// replacement makes wait: an older record is let go only once its winner is durable.
+/// replacement makes wait: an older record is let go only once its winner is durable.  `Never`
+/// and `EveryN` mean no barrier per write, not none at all: a discard held on a winner is owed a
+/// barrier within `constant::HELD_BARRIER` under every policy, one for all held in that time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SyncPolicy {
     EveryWrite,         // `sync_on_write`
@@ -100,7 +102,8 @@ impl SyncPolicy {
 /// files every later record is appended to, with their sizes, durable already; the pair it
 /// replaces is sealed, made durable before any record written to the new one is released.  A
 /// `Record` is one appended record with the insert that releases it to its cache bot, and the
-/// data and index ends after it.  `SyncNow` asks for a barrier over everything handed before it.
+/// data and index ends after it.  `SyncNow` asks for a barrier over everything handed before it,
+/// `SyncOwed` for one within `constant::HELD_BARRIER`.
 pub enum Handed<
     const UIDL: usize,
     UID:    NumIdDat<UIDL>,
@@ -117,6 +120,7 @@ pub enum Handed<
         ends:   (u64, u64),
     },
     SyncNow(Responder<UIDL, UID, ENC, KH>),
+    SyncOwed,
     Finish,
 }
 
@@ -138,6 +142,7 @@ pub struct Shared<
     KH:     Hasher,
 > {
     pub zone:   usize,
+    pub bot:    usize,              // the writer's, entered beside each mark it opens
     pub root:   PathBuf,
     pub marks:  DurableMarks,
     pub fault:  Fault,
@@ -241,6 +246,7 @@ struct Barrier<
     dirty:      bool,               // the pair holds records no barrier has covered
     since:      u32,                // records released since the last barrier
     last:       Option<Instant>,    // when the last barrier completed
+    owed:       Option<Instant>,    // a held discard's barrier is due by then
     poisoned:   Option<Error<ErrTag>>, // the failed barrier, for good
     shared:     Shared<UIDL, UID, ENC, KH>,
     running:    Arc<AtomicBool>,    // shared with the writer's handle
@@ -274,6 +280,7 @@ impl<
             dirty:      false,
             since:      0,
             last:       None,
+            owed:       None,
             poisoned:   None,
             shared,
             running,
@@ -284,7 +291,8 @@ impl<
         loop {
             if self.queue.is_empty() {
                 // The interval policy owes the disk a barrier on its period whether or not another
-                // record arrives, so the writes that end a burst are made durable too.
+                // record arrives, so the writes that end a burst are made durable too; a held
+                // discard is owed one under every policy.
                 let item = match self.owed_in() {
                     Some(wait) => match self.rx.recv_timeout(wait) {
                         Ok(item) => Some(item),
@@ -327,12 +335,24 @@ impl<
                             });
                         }
                     },
+                    // Only the first in a period sets the time, so all of them share one barrier.
+                    // A clean pair needs none: its mark already covers what is held.
+                    Handed::SyncOwed => if self.dirty && self.owed.is_none() && !hooks::owed_dropped() {
+                        self.owed = Some(Instant::now() + constant::HELD_BARRIER);
+                    },
                     Handed::Finish => return self.end(true),
                 }
             }
             // A syncer stopping as one that panicked would, with no last barrier.
             if stop_armed && hooks::syncer_stops() {
                 return;
+            }
+            // A steady stream of records never lets the wait above time out, so a held discard's
+            // barrier is also checked here, lest the writes that keep coming starve it.
+            if let Some(due) = self.owed {
+                if self.dirty && self.poisoned.is_none() && Instant::now() >= due {
+                    self.barrier_or_log();
+                }
             }
         }
     }
@@ -432,7 +452,7 @@ impl<
                 let _ = self.shared.writer.send(OzoneMsg::Durable(self.shared.zone, fnum));
             }
         }
-        if let Err(e) = self.shared.marks.open(self.shared.zone, live.fnum, live.sizes) {
+        if let Err(e) = self.shared.marks.open(self.shared.zone, live.fnum, live.sizes, self.shared.bot) {
             error!(sync_log::stream(), e);
         }
         self.doubt.push((live.fnum, live.paths.clone()));
@@ -461,6 +481,7 @@ impl<
         self.dirty = false;
         self.since = 0;
         self.last = Some(Instant::now());
+        self.owed = None;
         if let Some(fnum) = self.pair.as_ref().map(|p| p.fnum) {
             if let Err(e) = self.shared.marks.set(self.shared.zone, fnum, covered) {
                 error!(sync_log::stream(), e);
@@ -501,6 +522,11 @@ impl<
             are cut back to their last durable marks: {:?}", self.label, cuts;
             IO, File, Write, Fatal));
         self.shared.fault.raise(&self.shared.root, cuts.clone(), e);
+        // Every cache bot holding a chunk's answer behind a mark that will not move now hears
+        // of the fault, rather than its store waiting out the durability timeout.
+        if let Some(fnum) = self.pair.as_ref().map(|p| p.fnum) {
+            self.notify(fnum);
+        }
         if let Err(e) = self.shared.writer.send(OzoneMsg::Cut(cuts)) {
             error!(sync_log::stream(), err!(e,
                 "{}: The writer could not be told to cut its files after a failed barrier; the \
@@ -545,16 +571,21 @@ impl<
         }
     }
 
-    /// How long until the interval policy owes a barrier, while it owes one.  A poisoned syncer
-    /// owes nothing: no barrier of its can prove anything again.
+    /// How long until the interval policy or a held discard owes a barrier, while one is owed.
+    /// A poisoned syncer owes nothing: no barrier of its can prove anything again.
     fn owed_in(&self) -> Option<Duration> {
-        if self.poisoned.is_some() {
+        if self.poisoned.is_some() || !self.dirty {
             return None;
         }
-        match (self.dirty, self.policy, self.last) {
-            (true, SyncPolicy::Interval(p), Some(t))    => Some(p.saturating_sub(t.elapsed())),
-            (true, SyncPolicy::Interval(_), None)       => Some(Duration::ZERO),
-            _                                           => None,
+        let period = match (self.policy, self.last) {
+            (SyncPolicy::Interval(p), Some(t))  => Some(p.saturating_sub(t.elapsed())),
+            (SyncPolicy::Interval(_), None)     => Some(Duration::ZERO),
+            _                                   => None,
+        };
+        let held = self.owed.map(|t| t.saturating_duration_since(Instant::now()));
+        match (period, held) {
+            (Some(p), Some(h))  => Some(p.min(h)),
+            (p, h)              => p.or(h),
         }
     }
 

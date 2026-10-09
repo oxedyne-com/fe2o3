@@ -1,21 +1,20 @@
 //! A store in progress.  A chunked value is stored in two steps, its chunks and then its bunch
-//! key, and the second waits on the first being written and readable: a disk's durability
-//! round.  The server bot that began the store must not sit through it, or the bots of a
-//! database hold one chunked put each and every other put queues behind them (A3 round 2a,
-//! 2026-10-09: twelve concurrent chunked puts timed out against two server bots).  The store is
-//! therefore held here as a state that is advanced by one answer at a time, and the bot goes on
-//! with other requests between them.  A caller that has nothing else to do runs it to the end
-//! with `run`, which is how `OzoneApi::store_dat_using_responder` waits.
+//! key, and the second waits on the first being written, readable and durable.  The server bot
+//! that began the store must not sit through it, or the bots of a database hold one chunked put
+//! each and every other put queues behind them (A3 round 2a, 2026-10-09: twelve concurrent
+//! chunked puts timed out against two server bots).  The store is therefore held here as a state
+//! that is advanced by one answer at a time, and the bot goes on with other requests between
+//! them.  A caller that has nothing else to do runs it to the end with `run`, which is how
+//! `OzoneApi::store_dat_using_responder` waits.
 //!
-//! Since 2026-10-09 (B1, B2) every chunked write has a chunk set of its own.  Since 2026-10-10
-//! (Q1-3) a set is retired on supersession: the cache bot that enters a store's head answers with
-//! the record it displaced, and the store retires the set that record named, or its own when a
-//! newer record was already there.  Each displaced set is retired once, by the store whose
-//! durable head displaced it.  A set is held in the database's pending sets from the moment its
-//! id is drawn until its head's outcome is final (Q1-4, Q1-5), so the orphan sweep leaves it
-//! alone.  Three cases are left to the sweep, none of them a loss: a crash between the head and
-//! the retire, an unconfirmed head, and a store that stopped waiting before its head landed.
-//! Someone must run the sweep for them (`o3db_sweep`).
+//! Since 2026-10-09 (B1, B2) every chunked write has a chunk set of its own, held in the
+//! database's pending sets from the moment its id is drawn until its head is in the cache, so
+//! the orphan sweep leaves it alone.  Since 2026-10-10 (durable mark, R1) the head goes out only
+//! once a barrier covers every chunk, which may sit in another writer's files: each writer that
+//! took a chunk is asked for a barrier at once, so the wait is one fsync.  A head is never
+//! durable before its chunks.  The cache bot that enters the head retires the set it displaced,
+//! or the store's own when a newer record was already there, once the winner is durable; the
+//! store does not wait for it.  A crash before then leaves orphans for the sweep, never a loss.
 //!
 //! A delete is a store with no chunks (fix A, 2026-10-09).  Its tombstone is the head, and
 //! retires the set of the head it displaces.
@@ -29,17 +28,15 @@ use crate::{
     comm::{
         channels::PendingSets,
         msg::{
-            Displaced,
             HeadTicket,
             OzoneMsg,
+            StoreRole,
         },
         response::{
             AckWait,
             Responder,
-            decode_stored,
         },
     },
-    data::cache::Prior,
     test::hooks,
 };
 
@@ -66,9 +63,8 @@ use std::{
 // Which answers the store is waiting for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Step {
-    Chunks, // every chunk written and readable
-    Head,   // the bunch key, answered with what it displaced
-    Retire, // the tombstones of the chunks retired
+    Chunks, // every chunk written, readable and durable
+    Head,   // the bunch key
 }
 
 // Holds a chunk set in the database's pending sets for as long as it lives, or until it is handed
@@ -125,7 +121,7 @@ pub struct PendingStore<
     step:       Step,
     own:        Responder<UIDL, UID, ENC, KH>, // answers to the step in hand
     wait:       AckWait<UIDL, UID, ENC, KH>,
-    held:       Vec<OzoneMsg<UIDL, UID, ENC, KH>>, // the bunch key's answers, told after the retire
+    held:       Vec<OzoneMsg<UIDL, UID, ENC, KH>>, // the bunch key's answers, told last
     promised:   bool, // has the caller been told the bunch key is written?
 }
 
@@ -232,12 +228,14 @@ impl<
             self.promised = true;
         }
         for (msg, _) in chunks.iter_mut() {
-            if let OzoneMsg::Write { resp, .. } = msg {
+            if let OzoneMsg::Write { resp, role, .. } = msg {
                 *resp = self.own.clone();
+                *role = Some(StoreRole::Chunk);
             }
         }
         self.wait = Self::wait_for(chunks.len());
-        res!(api.store_bytes(chunks));
+        let took = res!(api.store_bytes(chunks));
+        res!(api.nudge(&took));
         Ok(false)
     }
 
@@ -344,18 +342,16 @@ impl<
             Step::Chunks => self.publish(api),
             Step::Head => {
                 self.held = acks;
-                self.retire(api)
+                self.answer()
             },
-            Step::Retire => self.answer(),
         }
     }
 
-    // The bunch key goes out once every chunk of the value is written and readable, so that a
-    // reader finds the value it replaces, or none, until the value that names its chunks has all
-    // of them.  Every head answers to the store, which passes its final answer on: a small value
-    // or a delete may displace a chunked value, and only its head's answer says so (D2).  The
-    // head carries the set's hold, handed over once it is sent; until then a failure here leaves
-    // it with the store, which releases it.
+    // The bunch key goes out once every chunk of the value is written, readable and durable, so
+    // that a reader finds the value it replaces, or none, until the value that names its chunks
+    // has all of them, and no restart finds the head without them.  The head carries the set's
+    // hold, handed over once it is sent, and what the cache bot retires by; until then a failure
+    // here leaves the hold with the store, which releases it.
     fn publish<PR: Hasher, CS: Checksummer>(
         &mut self,
         api: &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
@@ -370,10 +366,16 @@ impl<
             None => return Err(err!("A store in progress has no bunch key left to send."; Bug, Missing)),
         };
         self.own = api.responder();
-        if let (OzoneMsg::Write { resp, head: ticket, .. }, _) = &mut head {
+        if let (OzoneMsg::Write { resp, role: ticket, .. }, _) = &mut head {
             *resp = self.own.clone();
             if self.ticketed {
-                *ticket = Some(HeadTicket { set: self.hold.id });
+                *ticket = Some(StoreRole::Head(HeadTicket {
+                    set:    self.hold.id,
+                    own:    self.set.clone(),
+                    pred:   self.pred.take(),
+                    schms2: self.schms2.clone(),
+                    tmeta:  self.meta.clone(),
+                }));
             }
         }
         self.step = Step::Head;
@@ -383,117 +385,6 @@ impl<
             self.hold.hand_over();
         }
         Ok(false)
-    }
-
-    // The bunch key is durable and in the cache, which answered with what it displaced.  The set
-    // that record named is retired, or the store's own when a newer record was already cached;
-    // the caller is told only whether the key held a record, as before.  A set a durable record
-    // has displaced is named by no current head again, since no write reuses a set.
-    //
-    // Crash safety.  A retire is sent only after the cbot's insert, which follows the barrier,
-    // so a crash before it leaves the displaced set's chunks named by no head: orphans for the
-    // sweep, never a torn value.  An unconfirmed head is answered with an error, and nothing is
-    // retired.  A delete's tombstone is its head, and retires the set it displaces; a delete that
-    // loses has no set and retires nothing.  A legacy key-derived set is retired once, by the
-    // first ticketed head over it, and never by a store whose own set it is.  Each tombstone is
-    // stamped by `retire_stamp`, after every record of the set it retires.  The argument assumes
-    // one process on the store.
-    fn retire<PR: Hasher, CS: Checksummer>(
-        &mut self,
-        api: &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
-    )
-        -> Outcome<bool>
-    {
-        let mut displaced = None;
-        for ack in self.held.iter_mut() {
-            if let OzoneMsg::HeadInserted(cind, d) = ack {
-                let d = mem::replace(d, Displaced::Nothing);
-                let present = !matches!(d, Displaced::Nothing);
-                let told = match cind {
-                    Some(c) => OzoneMsg::KeyChunkExists(present, *c),
-                    None    => OzoneMsg::KeyExists(present),
-                };
-                *ack = told;
-                displaced = Some(d);
-            }
-        }
-        let retiring = match displaced {
-            None                        => None, // unticketed
-            Some(Displaced::Nothing)    => None,
-            Some(Displaced::Itself)     => self.set.clone(),
-            // The winner may never land, and then this is the key's value: the cache bot keeps
-            // the set held, and a restart's replay settles it.
-            Some(Displaced::ItselfUnconfirmed) => None,
-            Some(Displaced::Record { meta, prior }) => match prior {
-                Prior::NotHead      => None,
-                Prior::Head(bytes)  => match self.decode_head(api, &bytes) {
-                    Ok(pkey) => pkey.filter(|p| Some(p) != self.set.as_ref()),
-                    Err(e) => {
-                        self.not_retired(api, e);
-                        return self.answer();
-                    },
-                },
-                // A replayed head, whose bytes are not resident: it can only be the value this
-                // store read before it began, if the metadata agrees.
-                Prior::HeadUnread   => match &self.pred {
-                    Some((pkey, pmeta)) if *pmeta == meta && Some(pkey) != self.set.as_ref() =>
-                        Some(pkey.clone()),
-                    _ => None,
-                },
-            },
-        };
-        let pkey = match retiring {
-            Some(pkey)  => pkey,
-            None        => return self.answer(),
-        };
-        hooks::trace(hooks::Step::Durable);
-        hooks::retire_delay();
-        let mut tmeta = self.meta.clone();
-        tmeta.time = res!(crate::api::retire_stamp());
-        self.own = api.responder();
-        let n = match api.send_retires(&pkey, &tmeta, self.schms2.as_ref(), &self.own) {
-            Ok(n) => n,
-            Err(e) => {
-                self.not_retired(api, e);
-                return self.answer();
-            },
-        };
-        if n == 0 {
-            return self.answer();
-        }
-        self.step = Step::Retire;
-        self.wait = Self::wait_for(n);
-        Ok(false)
-    }
-
-    // The part key a displaced head named, if it named one.
-    fn decode_head<PR: Hasher, CS: Checksummer>(
-        &self,
-        api:    &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
-        bytes:  &[u8],
-    )
-        -> Outcome<Option<PartKey>>
-    {
-        let (dat, _) = res!(Dat::from_bytes(bytes));
-        let or = self.schms2.as_ref().map(|s| s.encrypter());
-        Ok(match res!(decode_stored(dat, api.schemes().encrypter(), or)) {
-            Some(Dat::Tup5u64(tup)) => Some(PartKey(tup)),
-            _                       => None,
-        })
-    }
-
-    // The new value is stored and durable; the old chunks are left to the orphan sweep, and the
-    // caller is not told its write failed.
-    fn not_retired<PR: Hasher, CS: Checksummer>(
-        &self,
-        api:    &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
-        e:      Error<ErrTag>,
-    ) {
-        warn!(sync_log::stream(),
-            "{}: The value stored at {:?} is durable, but the chunks it was to retire, of the \
-            value it replaced or its own after a newer write won, were not all retired, and wait \
-            for the orphan sweep: {}",
-            api.ozid(), self.k, e);
     }
 
     // Tells the caller the bunch key is stored.
@@ -511,8 +402,7 @@ impl<
     }
 
     // A step has failed.  Over the chunks that is the end of the store, with no bunch key
-    // written; over the bunch key it is the writer's error, as it stands; over the retire it is
-    // nothing the caller need hear.
+    // written; over the bunch key it is the writer's error, as it stands.
     fn fail<PR: Hasher, CS: Checksummer>(
         &mut self,
         api:    &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
@@ -522,10 +412,6 @@ impl<
     {
         self.hold.release();
         let e = match self.step {
-            Step::Retire => {
-                self.not_retired(api, e);
-                return self.answer();
-            },
             Step::Head => e,
             // A new error, not a wrapper: the tags of a chain are all reported, and the
             // `Unconfirmed` of a chunk that was written but not confirmed would say a write that

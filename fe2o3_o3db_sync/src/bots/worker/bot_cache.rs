@@ -7,9 +7,12 @@ use crate::{
             worker_deps::*,
         },
     },
-    comm::msg::{
-        Displaced,
-        HeadTicket,
+    comm::{
+        msg::{
+            HeadTicket,
+            StoreRole,
+        },
+        response::decode_stored,
     },
     data::{
         cache::{
@@ -22,23 +25,66 @@ use crate::{
         core::Key,
     },
     file::{
-        floc::FileLocation,
+        floc::{
+            FileLocation,
+            FileNum,
+        },
         stored::RecordDigest,
     },
     test::hooks,
 };
 
 use oxedyne_fe2o3_core::channels::Recv;
-use oxedyne_fe2o3_iop_db::api::Meta;
-use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_iop_db::api::{
+    Meta,
+    RestSchemesOverride,
+};
+use oxedyne_fe2o3_jdat::{
+    prelude::*,
+    chunk::PartKey,
+    id::NumIdDat,
+};
 
 use std::{
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
+    mem,
     sync::{
         Arc,
         atomic::Ordering,
     },
     time::Instant,
 };
+
+// What a store's head displaced, which is what its set retire is resolved by.
+enum Displaced<
+    const UIDL: usize,
+    UID: NumIdDat<UIDL>,
+> {
+    Itself,                                         // a newer record was already cached
+    Record { meta: Meta<UIDL, UID>, prior: Prior }, // the cached record, now old
+}
+
+// A set to retire: its part key, the store's metadata and its schemes.
+type Retire<const UIDL: usize, UID, ENC, KH> =
+    (PartKey, Meta<UIDL, UID>, Option<RestSchemesOverride<ENC, KH>>);
+
+/// Waits on a barrier covering its winner (F1, R1).
+#[derive(Debug)]
+enum Held<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+> {
+    Effect {                                            // what a supersession discards
+        old:    (FileLocation, RecordDigest),           // the loser, to mark old
+        retire: Option<Retire<UIDL, UID, ENC, KH>>,     // the set a store's head displaced
+    },
+    Answer(Responder<UIDL, UID, ENC, KH>, OzoneMsg<UIDL, UID, ENC, KH>), // a store's chunk
+}
 
 #[derive(Debug)]
 pub struct CacheBot<
@@ -65,6 +111,8 @@ pub struct CacheBot<
     // State
     active:     bool,
     cache:      Cache<UIDL, UID>,
+    held:       BTreeMap<(FileNum, u64), Vec<Held<UIDL, UID, ENC, KH>>>, // by the winner's end
+    owed:       BTreeSet<FileNum>,  // files whose writer was asked for a barrier since their last
     inited:     bool,
     trep:       Instant,
 }
@@ -201,9 +249,10 @@ impl<
                             };
                             self.result(&result);
                         },
-                        // The effects held on a winner's mark are commit B's; the notice is
-                        // harmless until then.
-                        OzoneMsg::Durable(_, _) => (),
+                        OzoneMsg::Durable(z, fnum) => {
+                            let result = self.drain(z, fnum);
+                            self.result(&result);
+                        },
                         OzoneMsg::ReplayDone => {
                             let result = match self.cache_mut().replay_done() {
                                 Ok(dropped) => self.retire_tombs(dropped),
@@ -211,8 +260,8 @@ impl<
                             };
                             self.result(&result);
                         },
-                        OzoneMsg::Insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed, head) => {
-                            let result = self.insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed, head);
+                        OzoneMsg::Insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed, role) => {
+                            let result = self.insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed, role);
                             self.result(&result);
                         },
                         // READ
@@ -308,6 +357,8 @@ impl<
             // State
             active:     false,
             cache,
+            held:       BTreeMap::new(),
+            owed:       BTreeSet::new(),
             inited:     false,
             trep:       Instant::now(),
         }
@@ -338,6 +389,10 @@ impl<
         Ok(())
     }
 
+    /// Enters a written record, and answers its caller at once, but a store's chunk only once a
+    /// barrier covers it (R1).  What the record's supersession discards, the loser's bytes and
+    /// for a store's head the chunk set it displaced, waits on the winner's mark: a winner that
+    /// a power cut or a failed sync could remove would otherwise take its loser with it (F1).
     pub fn insert(
         &mut self,
         key:        Vec<u8>,
@@ -348,7 +403,7 @@ impl<
         meta:       Meta<UIDL, UID>,
         resp_w1:    Responder<UIDL, UID, ENC, KH>,
         unconfirmed: Option<Error<ErrTag>>,
-        head:       Option<HeadTicket>,
+        role:       Option<StoreRole<UIDL, UID, ENC, KH>>,
     )
         -> Outcome<()>
     {
@@ -361,10 +416,11 @@ impl<
             true    => Some((key.clone(), meta.clone())),
             false   => None,
         };
-        let inserted = if head.is_some() && hooks::head_insert_fails() {
+        let is_head = matches!(role, Some(StoreRole::Head(_)));
+        let inserted = if is_head && hooks::head_insert_fails() {
             Err(err!("A store's head could not be entered in the cache (test::hooks)."; Data, Write))
         } else {
-            self.cache.insert(key, val, cind, floc, meta, unconfirmed.is_none())
+            self.cache.insert(key, val, cind, floc, meta)
         };
         let sup = match inserted {
             Ok(sup) => sup,
@@ -380,92 +436,286 @@ impl<
                 return Err(e);
             },
         };
-
-        // A record beaten or displaced by one whose sync failed is not old: the winner may never
-        // reach the disk, and then the loser is the key's value after a restart, whose replay
-        // settles which landed.  Until then its bytes are not collected, a set it names is not
-        // an orphan, and a tombstone over it is not dropped.
-        let unsettled = match &sup {
-            Superseded::None                    => false,
-            Superseded::Offered { confirmed, .. } => !*confirmed,
-            Superseded::Cached { .. }           => unconfirmed.is_some(),
-        };
+        // A tombstone noted early is only kept longer, which is safe.
         if let Some((k, m)) = noted {
-            match unsettled {
-                true    => self.cache.note(&k, cind, &floc_new, &m, &Superseded::None),
-                false   => self.cache.note(&k, cind, &floc_new, &m, &sup),
-            }
+            self.cache.note(&k, cind, &floc_new, &m, &sup);
         }
         let key_present = sup.old().is_some();
-        let floc_old_opt = match unsettled {
-            true    => None,
-            false   => sup.old(),
+        // The head is in the cache, so the sweep sees its set live, or retires it as an orphan
+        // only once the sweep's own barrier has made the winner durable.
+        let (chunk, ticket) = match role {
+            Some(StoreRole::Head(t)) => {
+                self.release_set(t.set);
+                (false, Some(t))
+            },
+            Some(StoreRole::Chunk)  => (true, None),
+            None                    => (false, None),
         };
-        // A displaced head names a set only the store's schemes can read, so the sweep is told
-        // it cannot know the live sets until a restart.  A beaten head's set is simply kept held.
-        let shadowed = match &sup {
-            Superseded::Cached { prior: Prior::Head(_), .. } |
-            Superseded::Cached { prior: Prior::HeadUnread, .. } => unsettled,
-            _                                                   => false,
-        };
-        if shadowed {
-            self.api().chans().unsettled_heads().fetch_add(1, Ordering::SeqCst);
-        }
-        let beaten = unsettled && matches!(sup, Superseded::Offered { .. });
-        
-        // [13] Inform the caller of successful file write and cache insertion, or of the barrier
-        // that failed after the write: told here, the caller can read its write back once it
-        // hears, as it can a confirmed one.  A store's head is answered with what it displaced,
-        // which the store retires by, and its set is released: the head is in the cache now, so
-        // the orphan sweep sees the set live, and on the unconfirmed road as well.
-        match (unconfirmed, head) {
-            (Some(e), head) => {
-                self.respond(Err(e), &resp_w1);
-                if !beaten {
-                    self.release_set(&head);
-                }
-            },
-            (None, Some(ticket)) => {
-                // A store retires its own set only against a winner that will be there after a
-                // restart: one whose sync failed may never reach the disk, and then this head is
-                // the key's value again.
-                let displaced = match sup {
-                    Superseded::None                                => Displaced::Nothing,
-                    Superseded::Offered { confirmed: true, .. }     => Displaced::Itself,
-                    Superseded::Offered { confirmed: false, .. }    => Displaced::ItselfUnconfirmed,
-                    Superseded::Cached { meta, prior, .. }          => Displaced::Record { meta, prior },
-                };
-                self.respond(Ok(OzoneMsg::HeadInserted(cind, displaced)), &resp_w1);
-                if !beaten {
-                    self.release_set(&Some(ticket));
-                }
-            },
-            (None, None) => match cind {
-                Some(cind)  => self.respond(Ok(OzoneMsg::KeyChunkExists(key_present, cind)), &resp_w1),
-                None        => self.respond(Ok(OzoneMsg::KeyExists(key_present)), &resp_w1),
-            },
-        }
-        self.respond(Ok(OzoneMsg::Finish), &resp_w1);
 
-        // [14] Insert the new data into the file state data map, via a file-selected cbot.
+        // [13] Inform the caller of the file write and the cache insertion, or of the barrier
+        //      that failed after the write.  A store's chunk is told only once a barrier covers
+        //      it, so that its head never becomes durable before it.
+        match unconfirmed {
+            Some(e) => {
+                self.respond(Err(e), &resp_w1);
+                self.respond(Ok(OzoneMsg::Finish), &resp_w1);
+            },
+            None => {
+                let answer = match cind {
+                    Some(cind)  => OzoneMsg::KeyChunkExists(key_present, cind),
+                    None        => OzoneMsg::KeyExists(key_present),
+                };
+                res!(self.hold_or_fire(&floc_new, match chunk {
+                    true    => Some(Held::Answer(resp_w1, answer)),
+                    false   => {
+                        self.respond(Ok(answer), &resp_w1);
+                        self.respond(Ok(OzoneMsg::Finish), &resp_w1);
+                        None
+                    },
+                }));
+            },
+        }
+
+        // [14] What the supersession discards waits on the winner: the offered record when it
+        //      won, the cached one when the offered record lost.
         let bots = res!(self.fbots());
         let (bot, _) = bots.choose_bot(
             &ChooseBot::ByFile(floc_new.file_number())
         );
-        res!(bot.send(OzoneMsg::UpdateData {
-            floc_new,
-            ilen,
-            floc_old_opt,
-            from_id: self.ozid().clone(),
-        }));
+        let (gate, old, displaced) = match sup {
+            Superseded::None => {
+                res!(bot.send(OzoneMsg::UpdateData {
+                    floc_new:       floc_new.clone(),
+                    ilen,
+                    floc_old_opt:   None,
+                    from_id:        self.ozid().clone(),
+                }));
+                return Ok(());
+            },
+            Superseded::Offered { floc, rid, winner } =>
+                (winner, (floc, rid), Displaced::Itself),
+            Superseded::Cached { floc, rid, meta, prior } =>
+                (floc_new.clone(), (floc, rid), Displaced::Record { meta, prior }),
+        };
+        let retire = match &ticket {
+            Some(t) => self.resolve_retire(displaced, t),
+            None    => None,
+        };
 
+        // [15] Insert the new data into the file state data map, via a file-selected fbot.  The
+        //      old-marking rides in it when a barrier already covers the winner, so the fbot
+        //      applies both before it weighs a collection; sent apart, a collection could start
+        //      between them and carry the loser into the rewritten file as current.
+        let now = res!(self.api().chans().marks().covers(self.wind.z(), &gate));
+        res!(bot.send(OzoneMsg::UpdateData {
+            floc_new:       floc_new.clone(),
+            ilen,
+            floc_old_opt:   if now { Some(old) } else { None },
+            from_id:        self.ozid().clone(),
+        }));
+        if now {
+            return self.fire_retire(retire);
+        }
+        self.hold_or_fire(&gate, Some(Held::Effect { old, retire }))
+    }
+
+    // Fires `item` if a barrier covers `gate`, or holds it until one does.
+    fn hold_or_fire(
+        &mut self,
+        gate: &FileLocation,
+        item: Option<Held<UIDL, UID, ENC, KH>>,
+    )
+        -> Outcome<()>
+    {
+        let item = match item {
+            Some(item)  => item,
+            None        => return Ok(()),
+        };
+        if res!(self.api().chans().marks().covers(self.wind.z(), gate)) {
+            return self.fire(item);
+        }
+        if let Held::Answer(resp, _) = &item {
+            // No mark moves after a failed barrier, so nothing would ever release it.
+            if self.api().chans().fault().is_set() {
+                self.fail_answer(resp);
+                return Ok(());
+            }
+        }
+        if let Held::Effect { .. } = item {
+            self.api().chans().held_effects().fetch_add(1, Ordering::SeqCst);
+            // Nothing else is bound to move the mark under `Never` or `EveryN`, so the writer
+            // that owns the file is asked for a barrier, once until it has given one.  A held
+            // chunk answer has its own request, from the store that waits on it.
+            if !self.owed.contains(&gate.fnum) {
+                let marks = self.api().chans().marks();
+                if let Some(b) = res!(marks.owner(self.wind.z(), gate.fnum)) {
+                    res!(self.api().owe(self.wind.zind(), b));
+                    self.owed.insert(gate.fnum);
+                }
+            }
+        }
+        let end = gate.start + gate.klen + gate.vlen;
+        self.held.entry((gate.fnum, end)).or_default().push(item);
         Ok(())
     }
 
-    fn release_set(&self, head: &Option<HeadTicket>) {
-        if let Some(HeadTicket { set: Some(id) }) = head {
+    // The mark of `fnum` has moved: fires everything it now covers.  After a failed barrier no
+    // mark moves again, so a store's chunk still waiting is told it failed; held discards stay
+    // held, and the restart's cut and replay settle them.
+    fn drain(&mut self, z: usize, fnum: FileNum) -> Outcome<()> {
+        if z != self.wind.z() {
+            return Ok(());
+        }
+        self.owed.remove(&fnum);
+        let upto = match res!(self.api().chans().marks().get(z, fnum)) {
+            Some((d, _))    => d,
+            None            => u64::MAX,
+        };
+        let keys: Vec<(FileNum, u64)> = self.held.range((fnum, 0)..=(fnum, upto))
+            .map(|(k, _)| *k)
+            .collect();
+        let mut result = Ok(());
+        for items in keys.iter().filter_map(|k| self.held.remove(k)).collect::<Vec<_>>() {
+            for item in items {
+                if let Held::Effect { .. } = item {
+                    self.api().chans().held_effects().fetch_sub(1, Ordering::SeqCst);
+                }
+                if let Err(e) = self.fire(item) {
+                    result = Err(e);
+                }
+            }
+        }
+        if self.api().chans().fault().is_set() {
+            let held = mem::take(&mut self.held);
+            for (k, items) in held {
+                let mut keep = Vec::new();
+                for item in items {
+                    match item {
+                        Held::Answer(resp, _)   => self.fail_answer(&resp),
+                        effect                  => keep.push(effect),
+                    }
+                }
+                if !keep.is_empty() {
+                    self.held.insert(k, keep);
+                }
+            }
+        }
+        result
+    }
+
+    fn fail_answer(&self, resp: &Responder<UIDL, UID, ENC, KH>) {
+        let (when, cause) = match self.api().chans().fault().get() {
+            Some(f) => (format!("{:?}", f.when), f.error),
+            None    => (String::from("?"), String::new()),
+        };
+        self.respond(Err(err!(
+            "{}: A chunk of this store was written, but the store stopped writing after a failed \
+            sync at {} ({}) before a barrier covered it, so the value was not stored.  Restart \
+            the store; it recovers from the disk.", self.ozid(), when, cause;
+            Write, Fatal, Unconfirmed)), resp);
+    }
+
+    // A chunk's answer goes to its store; a discard marks the loser old, then retires the set a
+    // head displaced.
+    fn fire(&mut self, item: Held<UIDL, UID, ENC, KH>) -> Outcome<()> {
+        match item {
+            Held::Answer(resp, answer) => {
+                self.respond(Ok(answer), &resp);
+                self.respond(Ok(OzoneMsg::Finish), &resp);
+            },
+            Held::Effect { old: (floc, rid), retire } => {
+                let bots = res!(self.fbots());
+                let (bot, _) = bots.choose_bot(&ChooseBot::ByFile(floc.file_number()));
+                res!(bot.send(OzoneMsg::ScheduleOld(floc, rid, self.ozid().clone())));
+                res!(self.fire_retire(retire));
+            },
+        }
+        Ok(())
+    }
+
+    // Sends the tombstones of the set a head displaced, stamped now and waited on by no one.  A
+    // tombstone that fails leaves an orphan for the sweep.
+    fn fire_retire(&mut self, retire: Option<Retire<UIDL, UID, ENC, KH>>) -> Outcome<()> {
+        if let Some((pkey, mut tmeta, schms2)) = retire {
+            hooks::trace(hooks::Step::Durable);
+            if hooks::retire_dropped() {
+                return Ok(());
+            }
+            let none = Responder::none(Some(self.ozid()));
+            let sent = crate::api::retire_stamp().and_then(|t| {
+                tmeta.time = t;
+                self.api().send_retires(&pkey, &tmeta, schms2.as_ref(), &none)
+            });
+            if let Err(e) = sent {
+                self.not_retired(&pkey, e);
+            }
+        }
+        Ok(())
+    }
+
+    // The set a store's head displaced, or its own when a newer record was already cached.  A
+    // set a durable record has displaced is named by no current head again, since no write
+    // reuses a set.  A legacy key-derived set is retired once, by the first ticketed head over
+    // it, and never by a store whose own set it is.  A delete that loses has no set.
+    fn resolve_retire(
+        &self,
+        displaced:  Displaced<UIDL, UID>,
+        t:          &HeadTicket<UIDL, UID, ENC, KH>,
+    )
+        -> Option<Retire<UIDL, UID, ENC, KH>>
+    {
+        let own = t.own.as_ref();
+        let pkey = match displaced {
+            Displaced::Itself => t.own.clone(),
+            Displaced::Record { meta, prior } => match prior {
+                Prior::NotHead      => None,
+                Prior::Head(bytes)  => match self.decode_head(&bytes, t) {
+                    Ok(pkey) => pkey.filter(|p| Some(p) != own),
+                    Err(e) => {
+                        self.not_retired(&bytes, e);
+                        None
+                    },
+                },
+                // A replayed head, whose bytes are not resident: it can only be the value the
+                // store read before it began, if the metadata agrees.
+                Prior::HeadUnread => match &t.pred {
+                    Some((pkey, pmeta)) if *pmeta == meta && Some(pkey) != own =>
+                        Some(pkey.clone()),
+                    _ => None,
+                },
+            },
+        };
+        pkey.map(|p| (p, t.tmeta.clone(), t.schms2.clone()))
+    }
+
+    // The part key a displaced head named, if it named one.
+    fn decode_head(
+        &self,
+        bytes:  &[u8],
+        t:      &HeadTicket<UIDL, UID, ENC, KH>,
+    )
+        -> Outcome<Option<PartKey>>
+    {
+        let (dat, _) = res!(Dat::from_bytes(bytes));
+        let or = t.schms2.as_ref().map(|s| s.encrypter());
+        Ok(match res!(decode_stored(dat, self.api().schemes().encrypter(), or)) {
+            Some(Dat::Tup5u64(tup)) => Some(PartKey(tup)),
+            _                       => None,
+        })
+    }
+
+    // The winner is durable; the old chunks are left to the orphan sweep.
+    fn not_retired<T: std::fmt::Debug>(&self, what: &T, e: Error<ErrTag>) {
+        warn!(sync_log::stream(),
+            "{}: A durable write's displaced chunks, {:?}, of the value it replaced or its own \
+            after a newer write won, were not all retired, and wait for the orphan sweep: {}",
+            self.ozid(), what, e);
+    }
+
+    fn release_set(&self, set: Option<u64>) {
+        if let Some(id) = set {
             if let Ok(mut held) = self.api().chans().pending_sets().lock() {
-                held.release(id);
+                held.release(&id);
             }
         }
     }

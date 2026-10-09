@@ -3,7 +3,9 @@
 //! the bunch key's answer alone, with the chunks possibly unwritten and a failure only logged.
 //! Since fix A (2026-10-09) a delete is a store with no chunks: the chunks are retired only once
 //! the head tombstone is durable, and a chunk tombstone that fails after that is left to the
-//! orphan sweep rather than failing the delete.
+//! orphan sweep rather than failing the delete.  Since the durable mark (2026-10-10) the cache bot
+//! sends the chunk tombstones once a barrier covers the head tombstone, and the delete does not
+//! wait for them.
 //! The hooks used are process-wide, so the tests here take a lock and put each back.
 
 mod gc_pair;
@@ -88,7 +90,7 @@ fn cbot_of(db: &TestDb, k: &Dat) -> Outcome<usize> {
 }
 
 #[test]
-fn chunked_delete_waits_for_chunks() -> Outcome<()> {
+fn chunked_delete_retires_its_chunks_after_it_returns() -> Outcome<()> {
     log_set_level!("error");
     let _lock = match HOOKS.lock() { Ok(g) => g, Err(p) => p.into_inner() };
     let db = res!(open("./test_db_chunk_delete_wait"));
@@ -121,16 +123,14 @@ fn chunked_delete_waits_for_chunks() -> Outcome<()> {
     let t0 = Instant::now();
     let existed = res!(db.delete(&k, user, None));
     let took = t0.elapsed();
-    hooks::set_chunk_tombstone_delay(Duration::ZERO);
     assert!(existed, "the delete did not find the value");
     msg!("The delete returned after {:?}.", took);
-    // Reads queue behind the held tombstones at their cache bot, so the read-back below holds
-    // either way; the time the delete took is what tells a delete that waited from one that did not.
-    assert!(took >= Duration::from_millis(300), "delete returned in {:?}, before a held chunk tombstone", took);
-    for (i, ck) in cks.iter().enumerate() {
-        assert!(res!(retired(&db, ck)), "chunk {} of the value is still live when delete returned", i + 1);
-    }
-
+    // The head tombstone is answered once it is entered; its chunks' tombstones follow it from
+    // the cache bot, after its barrier, and no one waits on them.
+    assert!(took < Duration::from_millis(300), "delete waited {:?} for its chunk tombstones", took);
+    let gone = wait_until(Duration::from_secs(10), || cks.iter().all(|ck| matches!(retired(&db, ck), Ok(true))));
+    hooks::set_chunk_tombstone_delay(Duration::ZERO);
+    assert!(gone, "the chunks of the deleted value were never retired");
     res!(db.close());
     Ok(())
 }
@@ -203,8 +203,8 @@ fn delete_does_not_erase_a_later_overwrite() -> Outcome<()> {
     Ok(())
 }
 
-// A chunked delete sends its head tombstone, waits for it to be durable, and only then sends the
-// tombstones of the chunks: sent together, the chunks' could land first and a reader find a chunk
+// A chunked delete sends its head tombstone, and the cache bot sends the tombstones of the chunks only
+// once a barrier covers it: sent together, the chunks' could land first and a reader find a chunk
 // gone under a current bunch key (fix A).  Counted from the order of the steps, not timed.
 #[test]
 fn chunked_delete_retires_after_its_head_is_durable() -> Outcome<()> {
@@ -218,17 +218,17 @@ fn chunked_delete_retires_after_its_head_is_durable() -> Outcome<()> {
 
     hooks::set_trace(true);
     let existed = res!(db.delete(&k, user, None));
+    let all = wait_until(Duration::from_secs(10),
+        || hooks::trace_steps().iter().filter(|s| **s == hooks::Step::Sent).count() > cks.len());
     let steps = hooks::trace_steps();
     hooks::set_trace(false);
     assert!(existed, "the delete did not find the value");
-    let sent = steps.iter().filter(|s| **s == hooks::Step::Sent).count();
-    assert_eq!(sent, cks.len() + 1, "expected a tombstone for each chunk and the bunch key: {:?}", steps);
+    assert!(all, "expected a tombstone for each chunk and the bunch key: {:?}", steps);
     let mut want = vec![hooks::Step::Sent, hooks::Step::Durable];
     want.extend(cks.iter().map(|_| hooks::Step::Sent));
     assert_eq!(steps, want, "the chunks were not retired after the head tombstone was durable");
-    for ck in &cks {
-        assert!(res!(retired(&db, ck)), "chunk {:?} is still live when delete returned", ck);
-    }
+    let gone = wait_until(Duration::from_secs(10), || cks.iter().all(|ck| matches!(retired(&db, ck), Ok(true))));
+    assert!(gone, "a chunk of the deleted value is still live");
     res!(db.close());
     Ok(())
 }

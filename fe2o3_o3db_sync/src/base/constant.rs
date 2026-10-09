@@ -81,8 +81,12 @@ pub const CACHE_HASH_BYTES:             usize = 4; // u32
 
 // File size management.
 // When the total length of old values in a data file exceeds the following percentage of the
-// maximum data file length, garbage collection on the file is triggered.
+// file's own length, garbage collection on the file is triggered.  The length is taken as no less
+// than the floor below, a fraction of the maximum data file length, so that a small file is not
+// rewritten for a few old bytes, and as no more than the maximum, so that a full file triggers
+// as it did when the basis was always the maximum (2026-10-10).
 pub const OLD_DATA_PERCENT_GC_TRIGGER:  f64 = 30.0;
+pub const GC_TRIGGER_FLOOR_FRAC_OF_MAX: f64 = 0.10;
 
 // File reading cache.
 pub const FILE_CACHE_EXPIRY_SECS:       u64 = 15*60; // 15 mins
@@ -128,6 +132,8 @@ pub const USER_REQUEST_WAIT:                    Wait = Wait {
     check_interval: CHECK_INTERVAL,
 };
 pub const BOT_REQUEST_TIMEOUT:                  Duration = Duration::from_secs(5);
+pub const CLOSE_SETTLE:                         Duration = Duration::from_secs(5); // barrier and held discards at close
+pub const HELD_BARRIER:                         Duration = Duration::from_millis(200); // owed to a held discard, under every policy
 pub const BOT_REQUEST_WAIT:                     Wait = Wait {
     max_wait:       BOT_REQUEST_TIMEOUT,
     check_interval: CHECK_INTERVAL,

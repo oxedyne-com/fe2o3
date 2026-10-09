@@ -243,7 +243,7 @@ fn qa1_child() -> Outcome<()> {
             res!(resp.recv_store_ack());
             println!("QA1 legacy head={:?}", res!(head(&db, &k)));
             if mode == "legacy_after_head" {
-                hooks::set_retire_delay(Duration::from_secs(20));
+                hooks::set_retire_drop(true);
             } else {
                 hooks::set_chunk_insert_delay(Duration::from_secs(20));
             }

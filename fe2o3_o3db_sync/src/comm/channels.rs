@@ -472,30 +472,26 @@ impl SetRegistry {
     }
 }
 
-/// How many heads in this process were displaced in a cache by a record whose sync failed.  Each
-/// may be the key's value again after a restart, and its chunk set cannot be named without the
-/// store's schemes, so the orphan sweep refuses while any is counted.  Only a restart, whose
-/// replay settles which records landed, clears it.
-pub type UnsettledHeads = Arc<AtomicUsize>;
-
 /// How far the last successful barrier of each live file reached, its data and index ends, by
 /// zone and file number.  A record past its file's mark may not survive a power cut, so nothing
 /// that discards an older record acts on it until the mark has passed it.  A file with no entry
 /// is durable: replayed and synced at start, sealed, or written by a collection that synced it.
+/// The writer bot that owns each entry is kept beside it, so that a discard held on a file can
+/// ask that writer's syncer for its barrier.
 #[derive(Clone, Debug, Default)]
-pub struct DurableMarks(Arc<RwLock<BTreeMap<(usize, FileNum), (u64, u64)>>>);
+pub struct DurableMarks(Arc<RwLock<BTreeMap<(usize, FileNum), ((u64, u64), usize)>>>);
 
 impl DurableMarks {
-    /// Enters a live file whose bytes up to `ends` are already durable.
-    pub fn open(&self, zone: usize, fnum: FileNum, ends: (u64, u64)) -> Outcome<()> {
+    /// Enters a live file of writer `bot` whose bytes up to `ends` are already durable.
+    pub fn open(&self, zone: usize, fnum: FileNum, ends: (u64, u64), bot: usize) -> Outcome<()> {
         let mut map = lock_write!(self.0);
-        map.insert((zone, fnum), ends);
+        map.insert((zone, fnum), (ends, bot));
         Ok(())
     }
 
     pub fn set(&self, zone: usize, fnum: FileNum, ends: (u64, u64)) -> Outcome<()> {
         let mut map = lock_write!(self.0);
-        if let Some(mark) = map.get_mut(&(zone, fnum)) {
+        if let Some((mark, _)) = map.get_mut(&(zone, fnum)) {
             mark.0 = mark.0.max(ends.0);
             mark.1 = mark.1.max(ends.1);
         }
@@ -511,22 +507,28 @@ impl DurableMarks {
 
     pub fn get(&self, zone: usize, fnum: FileNum) -> Outcome<Option<(u64, u64)>> {
         let map = lock_read!(self.0);
-        Ok(map.get(&(zone, fnum)).copied())
+        Ok(map.get(&(zone, fnum)).map(|(m, _)| *m))
+    }
+
+    /// The writer bot whose syncer moves the mark of `fnum`, while the file has one.
+    pub fn owner(&self, zone: usize, fnum: FileNum) -> Outcome<Option<usize>> {
+        let map = lock_read!(self.0);
+        Ok(map.get(&(zone, fnum)).map(|(_, b)| *b))
     }
 
     /// Has a barrier covered the whole record at `floc`?
     pub fn covers(&self, zone: usize, floc: &FileLocation) -> Outcome<bool> {
         let map = lock_read!(self.0);
         Ok(match map.get(&(zone, floc.fnum)) {
-            None            => true,
-            Some((d, _))    => floc.start + floc.klen + floc.vlen <= *d,
+            None                => true,
+            Some(((d, _), _))   => floc.start + floc.klen + floc.vlen <= *d,
         })
     }
 
     /// The files of `zone` that still have records no barrier has covered, or may have.
     pub fn files(&self, zone: usize) -> Outcome<Vec<(FileNum, (u64, u64))>> {
         let map = lock_read!(self.0);
-        Ok(map.iter().filter(|((z, _), _)| *z == zone).map(|((_, f), m)| (*f, *m)).collect())
+        Ok(map.iter().filter(|((z, _), _)| *z == zone).map(|((_, f), (m, _))| (*f, *m)).collect())
     }
 }
 
@@ -773,7 +775,6 @@ pub struct BotChannels<
     sbots:  ChannelPool<UIDL, UID, ENC, KH>,
     sup:    Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     sets:   PendingSets,
-    shadow: UnsettledHeads,
     marks:  DurableMarks,
     fault:  Fault,
     held:   Arc<AtomicUsize>,   // effects waiting on their winner's barrier, a gauge
@@ -802,7 +803,6 @@ impl<
             sbots:  ChannelPool::new(&PoolType::Server, cfg.num_sbots()),
             sup:    simplex(),
             sets:   Arc::new(Mutex::new(SetRegistry::default())),
-            shadow: Arc::new(AtomicUsize::new(0)),
             marks:  DurableMarks::default(),
             fault:  Fault::default(),
             held:   Arc::new(AtomicUsize::new(0)),
@@ -810,7 +810,6 @@ impl<
     }
 
     pub fn pending_sets(&self) -> &PendingSets { &self.sets }
-    pub fn unsettled_heads(&self) -> &UnsettledHeads { &self.shadow }
     pub fn marks(&self) -> &DurableMarks { &self.marks }
     pub fn fault(&self) -> &Fault { &self.fault }
     pub fn held_effects(&self) -> &Arc<AtomicUsize> { &self.held }

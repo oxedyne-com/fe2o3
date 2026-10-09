@@ -191,6 +191,18 @@ impl OzoneConfig {
         }
     }
 
+    /// The old share of a data file, in percent, as the collector's trigger weighs it: against
+    /// the file's own length, held between a floor and the maximum data file length.  Old-marking
+    /// can arrive after a collection has rewritten a file, from a held discard, another file
+    /// bot or a retire, and a rewritten file is small.  Weighed against the maximum, the record
+    /// that arrived late could hold such a file under the trigger for ever.
+    pub fn old_percent(&self, old_sum: u64, dat_size: usize) -> f64 {
+        let max = self.data_file_max_bytes as f64;
+        let floor = max * constant::GC_TRIGGER_FLOOR_FRAC_OF_MAX;
+        let basis = (dat_size as f64).max(floor).min(max);
+        100.0 * (old_sum as f64) / basis
+    }
+
     pub fn rest_chunk_size(&self)           -> usize { self.rest_chunk_bytes as usize }
     pub fn rest_chunking_threshold(&self)   -> usize { self.rest_chunk_threshold as usize }
     pub fn hashing_threshold(&self)         -> usize { self.bytes_before_hashing as usize }

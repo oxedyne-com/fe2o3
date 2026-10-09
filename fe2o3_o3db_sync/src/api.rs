@@ -838,7 +838,7 @@ impl<
     }
 
     /// This is the write dispatch method, where `WriterBots` are chosen randomly.  Callers must
-    /// ensure the value is wrapped in a `Dat::BU64`.
+    /// ensure the value is wrapped in a `Dat::BU64`.  Returns the writer each message went to.
     ///
     /// # Local errors
     /// * The write request message cannot be sent via a `WriterBot` channel.
@@ -846,18 +846,52 @@ impl<
         &self,
         msgs: Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>,
     )
-        -> Outcome<()>
+        -> Outcome<Vec<WorkerInd>>
     {
+        let mut took = Vec::with_capacity(msgs.len());
         for (msg, zind) in msgs {
             let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, &zind));
             let (bot, bpind) = wbots.choose_bot(&ChooseBot::Randomly);
+            let wind = WorkerInd::new(zind, bpind);
             match bot.send(msg) {
                 Err(e) => return Err(err!(e,
-                    "{}: While sending write request to wbot {}.",
-                    self.ozid(), WorkerInd::new(zind, bpind);
+                    "{}: While sending write request to wbot {}.", self.ozid(), wind;
                     Channel, Write)),
-                _ => (),
+                _ => took.push(wind),
             }
+        }
+        Ok(took)
+    }
+
+    /// Asks each writer named for a barrier over what it has taken, answered to no one.  Each
+    /// request queues behind the records already sent to the writer, so a chunk is covered by
+    /// one fsync rather than by the policy's period (R1).
+    pub(crate) fn nudge(&self, winds: &[WorkerInd]) -> Outcome<()> {
+        let mut done: Vec<(usize, usize)> = Vec::with_capacity(winds.len());
+        for wind in winds {
+            if done.contains(&(wind.z(), wind.b())) {
+                continue;
+            }
+            done.push((wind.z(), wind.b()));
+            let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, wind.zind()));
+            if let Err(e) = res!(wbots.get_bot(wind.b())).send(OzoneMsg::SyncNow(Responder::none(Some(self.ozid())))) {
+                return Err(err!(e,
+                    "{}: Cannot ask writer {} for a barrier over a store's chunks.", self.ozid(), wind;
+                    Channel, Write));
+            }
+        }
+        Ok(())
+    }
+
+    /// Tells writer `b` of `zind` that a discard held on one of its files owes it a barrier
+    /// within `constant::HELD_BARRIER`, whatever its policy.
+    pub(crate) fn owe(&self, zind: &ZoneInd, b: usize) -> Outcome<()> {
+        let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, zind));
+        if let Err(e) = res!(wbots.get_bot(b)).send(OzoneMsg::SyncOwed) {
+            return Err(err!(e,
+                "{}: Cannot ask writer {} of zone {} for the barrier a held discard owes.",
+                self.ozid(), b, zind;
+                Channel, Write));
         }
         Ok(())
     }
@@ -893,7 +927,7 @@ impl<
             meta,
             cbpind,
             resp,
-            head: None,
+            role: None,
         })
     }
 
@@ -1831,8 +1865,7 @@ impl<
                 for (fnum, fstat) in fstates.map() {
                     info!(sync_log::stream(), " {:10} {:?} old = {:.1}%",
                         fnum, fstat,
-                        100.0 * (fstat.get_old_sum() as f64)
-                        / (self.cfg().data_file_max_bytes as f64),
+                        self.cfg().old_percent(fstat.get_old_sum(), fstat.get_data_file_size()),
                     );
                 }
             }

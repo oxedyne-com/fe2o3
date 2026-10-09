@@ -714,10 +714,11 @@ impl<
         let plan = match self.states().get_state(fnum) {
             Ok(_) if stopped => Plan::Hold(Hold::Stopped),
             Ok(fstat) => {
-                let oldvals = fstat.get_old_sum() as f64;
-                let datfilemax = self.cfg().data_file_max_bytes as f64;
                 let trigger = constant::OLD_DATA_PERCENT_GC_TRIGGER;
-                let oldfrac = 100.0 * (oldvals / datfilemax);
+                let oldfrac = self.cfg().old_percent(
+                    fstat.get_old_sum(),
+                    fstat.get_data_file_size(),
+                );
                 if fstat.is_live() {
                     Plan::Hold(Hold::Live)
                 } else if unsynced {

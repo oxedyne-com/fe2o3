@@ -495,8 +495,7 @@ impl<
                 self.heard = Instant::now();
             },
             OzoneMsg::KeyExists(_) |
-            OzoneMsg::KeyChunkExists(..) |
-            OzoneMsg::HeadInserted(..) => {
+            OzoneMsg::KeyChunkExists(..) => {
                 self.acks.push(msg);
                 self.heard = Instant::now();
             },

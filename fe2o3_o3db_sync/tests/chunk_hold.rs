@@ -253,7 +253,7 @@ fn write_tracker_follows_head_transitions() -> Outcome<()> {
     ];
     for (i, (cind, v, tracked)) in steps.iter().enumerate() {
         let s = i as u64 + 1;
-        let sup = res!(cache.insert(k.clone(), Some(v.to_vec()), *cind, floc(s as u32), meta(s), true));
+        let sup = res!(cache.insert(k.clone(), Some(v.to_vec()), *cind, floc(s as u32), meta(s)));
         let grown = cache.tracker_size() > t0;
         assert_eq!(grown, *tracked, "step {}: the tracker is {} from {}", i, cache.tracker_size(), t0);
         if i == 4 {
@@ -280,9 +280,9 @@ fn record_without_value_drops_the_old_value() -> Outcome<()> {
         cache.set_lim(1 << 30);
         let k = b"replayed key".to_vec();
         let t0 = cache.tracker_size();
-        res!(cache.insert(k.clone(), Some(b"old value".to_vec()), cind, floc(1), meta(2), true));
+        res!(cache.insert(k.clone(), Some(b"old value".to_vec()), cind, floc(1), meta(2)));
         // An older record, offered late: it loses, and the cached value stands.
-        match res!(cache.insert(k.clone(), None, cind, floc(0), meta(1), true)) {
+        match res!(cache.insert(k.clone(), None, cind, floc(0), meta(1))) {
             Superseded::Offered { .. } => (),
             other => panic!("{:?}: an older record reported {:?}", cind, other),
         }
@@ -294,7 +294,7 @@ fn record_without_value_drops_the_old_value() -> Outcome<()> {
             other => panic!("{:?}: after an older record the cache gave {:?}", cind, other),
         }
         // A newer record with no value.
-        let sup = res!(cache.insert(k.clone(), None, cind, floc(2), meta(3), true));
+        let sup = res!(cache.insert(k.clone(), None, cind, floc(2), meta(3)));
         match (&sup, cind) {
             (Superseded::Cached { prior: Prior::Head(b), .. }, Some(0)) =>
                 assert_eq!(b, &b"old value".to_vec(), "the displaced head's bytes"),
@@ -323,23 +323,23 @@ fn pinned_heads_follow_head_transitions() -> Outcome<()> {
     let k = b"pinned key".to_vec();
     let none = cache.pinned_heads();
     assert_eq!((none.count, none.bytes), (0, 0), "a new cache pins nothing");
-    res!(cache.insert(k.clone(), Some(vec![1u8; 4]), Some(0), floc(2), meta(2), true));
+    res!(cache.insert(k.clone(), Some(vec![1u8; 4]), Some(0), floc(2), meta(2)));
     let one = cache.pinned_heads();
     assert_eq!(one.count, 1, "a head pinned {:?}", one);
     assert!(one.bytes >= 4, "a head of 4 bytes pinned {:?}", one);
     // An older head, offered late, loses and pins nothing.
-    res!(cache.insert(k.clone(), Some(vec![9u8; 64]), Some(0), floc(1), meta(1), true));
+    res!(cache.insert(k.clone(), Some(vec![9u8; 64]), Some(0), floc(1), meta(1)));
     assert_eq!(cache.pinned_heads(), one, "an older head offered late changed the pins");
     // A head over a head: still one pinned, at the new size.
-    res!(cache.insert(k.clone(), Some(vec![2u8; 12]), Some(0), floc(3), meta(3), true));
+    res!(cache.insert(k.clone(), Some(vec![2u8; 12]), Some(0), floc(3), meta(3)));
     let bigger = cache.pinned_heads();
     assert_eq!(bigger.count, 1, "a head over a head pinned {:?}", bigger);
     assert_eq!(bigger.bytes, one.bytes + 8, "a head of 12 bytes over one of 4 pinned {:?}", bigger);
     // Displaced by a non-head: nothing pinned.
-    res!(cache.insert(k.clone(), Some(b"small".to_vec()), None, floc(4), meta(4), true));
+    res!(cache.insert(k.clone(), Some(b"small".to_vec()), None, floc(4), meta(4)));
     assert_eq!(cache.pinned_heads(), none, "a head displaced by a non-head stayed pinned");
     // A non-head displaced by a head pins again, and a remove unpins it.
-    res!(cache.insert(k.clone(), Some(vec![3u8; 4]), Some(0), floc(5), meta(5), true));
+    res!(cache.insert(k.clone(), Some(vec![3u8; 4]), Some(0), floc(5), meta(5)));
     assert_eq!(cache.pinned_heads(), one, "a head over a non-head pinned");
     assert!(res!(cache.remove(&k, &meta(5))), "the entry was not removed");
     assert_eq!(cache.pinned_heads(), none, "a removed head stayed pinned");

@@ -209,16 +209,34 @@ fn qa2_bg_gc_overwrite_bounded() -> Outcome<()> {
 }
 
 // The chunk_leak shrink geometry with background GC, sampled every ten overwrites over two
-// hundred, to tell a linear leak from sampling jitter around a plateau.
+// hundred, to tell a linear leak from sampling jitter around a plateau.  Run under each sync
+// policy: a discard held for a barrier can be flagged old after a collection has carried its
+// record into a small rewritten file, and that file must still collect.
 #[test]
 fn qa2_shrink_footprint_series() -> Outcome<()> {
+    shrink_series("./test_db_qa2_shrink", true, 0)
+}
+
+#[test]
+fn qa2_shrink_footprint_series_interval() -> Outcome<()> {
+    shrink_series("./test_db_qa2_shrink_interval", false, 200)
+}
+
+#[test]
+fn qa2_shrink_footprint_series_never() -> Outcome<()> {
+    shrink_series("./test_db_qa2_shrink_never", false, 0)
+}
+
+// `sync_on_write`, else `interval_ms`, else no periodic barrier at all.
+fn shrink_series(dir: &str, sync_on_write: bool, interval_ms: u64) -> Outcome<()> {
     let _lock = lock();
-    let dir = "./test_db_qa2_shrink";
     let mut c = res!(setup::default_cfg());
     c.data_file_max_bytes    = 16_000;
     c.rest_chunk_threshold   = 3_000;
     c.rest_chunk_bytes       = 1_000;
-    c.sync_on_write          = true;
+    c.sync_on_write          = sync_on_write;
+    c.sync_every_n_writes    = 0;
+    c.sync_interval_ms       = interval_ms;
     c.zone_overrides         = BTreeMap::new();
     let db = res!(start(dir, c, true, true));
     let k = dat!("chunked:shrinking");
@@ -244,7 +262,7 @@ fn qa2_shrink_footprint_series() -> Outcome<()> {
     res!(db.close());
     let _ = std::fs::remove_dir_all(dir);
     for s in &samples {
-        println!("QA2 shrink after {:3}: dir {:6} bytes, tombstones held {}", s.0, s.1, s.2);
+        println!("QA2 shrink {} after {:3}: dir {:6} bytes, tombstones held {}", dir, s.0, s.1, s.2);
     }
     println!("QA2 shrink compacted: {} bytes, {:?}", compacted, rep);
     let w10 = samples[0].1;
@@ -252,7 +270,7 @@ fn qa2_shrink_footprint_series() -> Outcome<()> {
     let late: Vec<u64> = samples[10..].iter().map(|s| s.1).collect();
     let late_avg = late.iter().sum::<u64>() / late.len() as u64;
     let early_avg = samples[1..10].iter().map(|s| s.1).sum::<u64>() / 9;
-    println!("QA2 shrink: first {} max {} early avg {} late avg {}", w10, mx, early_avg, late_avg);
+    println!("QA2 shrink {}: first {} max {} early avg {} late avg {}", dir, w10, mx, early_avg, late_avg);
     assert!(late_avg <= early_avg * 3 / 2, "linear growth: early avg {} late avg {}", early_avg, late_avg);
     Ok(())
 }

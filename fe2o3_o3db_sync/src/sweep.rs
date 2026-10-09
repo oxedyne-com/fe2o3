@@ -11,9 +11,8 @@
 //!
 //! Since 2026-10-10 (Ozone run 2) a store retires the chunk set its head displaced once that head
 //! is durable, so an overwrite or a delete no longer leaves orphans behind it.  The sweep is needed
-//! only for three cases, none of them a loss: a crash between a head and its retire, a head whose
-//! entry was not confirmed, and a store that stopped waiting before its head landed.  Someone must
-//! still run it for those.  A set whose store is in progress is held in the database's pending
+//! only for two cases, neither of them a loss: a crash between a head and its retire, and a store
+//! that stopped waiting before its head landed.  Someone must still run it for those.  A set whose store is in progress is held in the database's pending
 //! sets, in the memory of the process that writes, so the sweep must run in that process
 //! (`OzoneApi` on the open store), never as a second process on the same store.
 //!
@@ -29,8 +28,8 @@
 //! live bunch key and its set was held by no store at any moment of the sweep.  The database's
 //! set registry holds a set from the draw of its id until its head's outcome is final, and while
 //! a sweep watches it also keeps every set let go since the watch began, so a store whose head
-//! lands too late for the live scan is still spared, however it overlaps the sweep.  A head
-//! displaced by a write not confirmed durable stops the sweep until a restart settles it.  No
+//! lands too late for the live scan is still spared, however it overlaps the sweep.  The sweep
+//! makes its scan durable before it retires, and refuses once a failed sync has stopped the store.  No
 //! clock is read: since 2026-10-10 a store's stamps may run past the wall clock after a restart
 //! (the stamp floor), and an age test would keep such an orphan for as long as they did.
 //!
@@ -69,7 +68,6 @@ use std::{
     collections::HashSet,
     fs,
     path::Path,
-    sync::atomic::Ordering,
 };
 
 
@@ -206,17 +204,10 @@ pub fn sweep_orphans<
         let reg = lock_mutex!(api.chans().pending_sets());
         reg.watched()
     };
-    // Checked after the live scan: a head displaced before it is counted here, and one displaced
-    // after it had its set read live.
-    let unsettled = api.chans().unsettled_heads().load(Ordering::SeqCst);
-    if unsettled > 0 {
-        return Err(err!(
-            "{}: {} head(s) in this process were displaced by a write not confirmed durable, so \
-            which value each of those keys holds after a restart is not known, nor which chunk \
-            sets are orphans.  Nothing was retired.  Restart the store, whose replay settles \
-            which records landed, then sweep.", api.ozid(), unsettled;
-            Data, Unknown));
-    }
+    // Every head the live scan read is made durable before anything is retired against it: one
+    // still past its mark could be undone by a power cut, and the set it displaced would be the
+    // key's value again.
+    res!(api.sync_now(dup_wait(&scan_wait)));
     let mut orphans: Vec<Dat> = Vec::new();
     let mut skipped_pending = 0usize;
     for (kdat, _empty, _meta) in &chunk_entries {

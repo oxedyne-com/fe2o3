@@ -78,7 +78,7 @@ pub enum Superseded<
     Offered {                                           // the offered record lost
         floc:       FileLocation,
         rid:        RecordDigest,
-        confirmed:  bool,                               // is the winner durable?
+        winner:     FileLocation,                       // the cached record, which gates the loss
     },
     Cached {                                            // the cached record was displaced
         floc:   FileLocation,
@@ -122,7 +122,6 @@ pub struct MetaLocation<
     meta: Meta<UIDL, UID>,
     floc: FileLocation,
     head: bool, // a bunch key, whose bytes stay resident
-    conf: bool, // confirmed durable, or replayed
 }
 
 impl<
@@ -135,7 +134,6 @@ impl<
     pub fn meta_move(self)      -> Meta<UIDL, UID>  { self.meta }
     pub fn file_location(&self) -> &FileLocation    { &self.floc }
     pub fn file_number(&self)   -> FileNum          { self.floc.file_number() }
-    pub fn confirmed(&self)     -> bool             { self.conf }
 
     pub fn new_start_position(&mut self, new_start: u64) {
         self.floc.start = new_start
@@ -370,9 +368,8 @@ impl<
 
     /// Insert key, value and location into the cache.  A record with chunk index 0 is a bunch
     /// key, the head of a chunked value: its bytes stay resident, out of the write tracker, so
-    /// that the head it displaces can be reported with the set it named.  A record whose sync
-    /// failed is entered `confirmed: false`, so that a record it beats is not told the winner
-    /// will be there after a restart.
+    /// that the head it displaces can be reported with the set it named.  Nothing here waits on
+    /// durability: the cache bot holds what the supersession discards on the winner's mark.
     ///
     /// Returns which copy of the key is now superseded, for the caller to schedule for garbage
     /// collection: usually the copy the cache held, but when the offered copy is the older of the
@@ -384,7 +381,6 @@ impl<
         cind:   Option<usize>,
         floc:   FileLocation,
         meta:   Meta<UIDL, UID>,
-        conf:   bool,
     )
         -> Outcome<Superseded<UIDL, UID>>
     {
@@ -445,14 +441,14 @@ impl<
                         self.ozid.clone(), kbyts, floc, meta.time, mloc.meta.time,
                     );
                     let rid = res!(RecordDigest::new(&kbyts, &meta));
-                    return Ok(Superseded::Offered { floc, rid, confirmed: mloc.conf });
+                    return Ok(Superseded::Offered { floc, rid, winner: mloc.floc.clone() });
                 }
                 // 2.2 It does, insert the new info and return the old.  The old value's bytes
                 //     belong to the old record, so they leave with it: a head's are moved into
                 //     the report, and any other's dropped.  The tracker follows the four
                 //     transitions: non-head to head removes the entry, head to non-head with
                 //     bytes inserts one, head to head has none, non-head to non-head updates.
-                let old_mloc = mem::replace(mloc, MetaLocation { meta, floc, head, conf });
+                let old_mloc = mem::replace(mloc, MetaLocation { meta, floc, head });
                 let rid = res!(RecordDigest::new(&kbyts, old_mloc.meta()));
                 let old_val = val2.take();
                 if let Some(v2) = &old_val {
@@ -507,7 +503,6 @@ impl<
                     meta,
                     floc,
                     head,
-                    conf,
                 };
                 self.map.insert(kbyts, CacheEntry::LocatedValue(mloc, val));
                 self.size = try_add!(&self.size, klen);
@@ -644,7 +639,7 @@ impl<
     {
         match self.map.get_mut(k) {
             Some(CacheEntry::LocatedValue(mloc, _)) => {
-                *mloc = MetaLocation { meta, floc, head: mloc.head, conf: mloc.conf };
+                *mloc = MetaLocation { meta, floc, head: mloc.head };
                 Ok(())
             },
             None => Err(err!(

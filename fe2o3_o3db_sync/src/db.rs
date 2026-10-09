@@ -24,7 +24,10 @@ use crate::{
             Fault,
         },
         msg::OzoneMsg,
-        response::Responder,
+        response::{
+            Responder,
+            Wait,
+        },
     },
     data::{
         core::{
@@ -648,6 +651,31 @@ impl<
             "Taking the shutdown record while closing the database.");
         if closing.done {
             return Ok(());
+        }
+
+        // Settles before stopping: a barrier over every writer releases what is held behind it,
+        // so the discards it gated are done now rather than by the next open's replay.  Bounded,
+        // and only logged, since a close must not fail on what a restart recovers.
+        if self.api.fault().is_none() {
+            let settle = match within {
+                Some(w) => w.min(constant::CLOSE_SETTLE),
+                None    => constant::CLOSE_SETTLE,
+            };
+            let wait = Wait { max_wait: settle, check_interval: Duration::from_millis(10) };
+            match self.api.sync_now(wait) {
+                Err(e)  => warn!(sync_log::stream(), "{}: Close could not settle with a barrier: {}",
+                    self.api.ozid(), e),
+                Ok(())  => {
+                    while self.api.held_effects() > 0 && begun.elapsed() < settle {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    let n = self.api.held_effects();
+                    if n > 0 {
+                        warn!(sync_log::stream(), "{}: Close stopped with {} discard(s) still \
+                            held; the next open's replay settles them.", self.api.ozid(), n);
+                    }
+                },
+            }
         }
 
         // The latest channel set the supervisor has broadcast, since the
