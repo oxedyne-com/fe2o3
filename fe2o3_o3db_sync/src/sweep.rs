@@ -331,7 +331,16 @@ fn zone_data_bytes(root: &Path) -> Outcome<u64> {
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().map(|e| e == constant::DATA_FILE_EXT).unwrap_or(false) {
-                let meta = res!(entry.metadata());
+                // The collector runs while the sweep counts, so a file listed a moment ago may be
+                // gone; it holds no bytes now.
+                let meta = match entry.metadata() {
+                    Ok(meta)                                                => meta,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound    => continue,
+                    Err(e) => return Err(err!(e,
+                        "Cannot read the size of data file {:?} while totalling the store's data \
+                        before a sweep.", path;
+                        IO, File, Read)),
+                };
                 total += meta.len();
             }
         }

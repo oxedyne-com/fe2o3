@@ -256,6 +256,41 @@ fn a_chunk_answer_waits_for_its_barrier() -> Outcome<()> {
     Ok(())
 }
 
+// M8.  A writer finishes its barrier before it takes the next record, so a head sharing a writer
+// with a chunk waits on the chunk's barrier whether or not the chunk's answer was held.  With one
+// writer in each of sixteen zones a head usually lands in a zone that took none of its three
+// chunks; only the held chunk answers then keep the put from returning, and the head from being
+// written, before its chunks are durable.
+#[test]
+fn a_head_with_its_own_writer_waits_for_its_chunks() -> Outcome<()> {
+    let _g = lock();
+    let delay = Duration::from_millis(600);
+    for p in [Policy::Never, Policy::Interval(3_600_000)] {
+        let c = res!(cfg(p, 16, 1));
+        let root = res!(fresh("m8"));
+        let db = res!(open(&root, &c, false, true));
+        for i in 0..8 {
+            let label = fmt!("{:?} key {}", p, i);
+            let k = dat!(fmt!("races m8 chunked {}", i));
+            res!(put(&db, &k, val(1_200, 1)));
+            res!(db.api().sync_now(wait()));
+            hooks::set_barrier_delay(delay);
+            let t0 = Instant::now();
+            let r = put(&db, &k, val(1_200, 2));
+            let took = t0.elapsed();
+            hooks::set_barrier_delay(Duration::ZERO);
+            res!(r);
+            assert!(took >= delay - Duration::from_millis(50),
+                "{}: the chunked put returned in {:?}, before the barrier over its chunks ({:?})",
+                label, took, delay);
+            assert_eq!(read(&db, &k), "1200/2", "{}", label);
+        }
+        res!(db.close());
+        let _ = fs::remove_dir_all(&root);
+    }
+    Ok(())
+}
+
 // P5: the power-cut oracle with automatic collection on, small files and more ops, every policy.
 fn model(seed: u64, p: Policy, zones: u16, wbots: u16) -> Outcome<()> {
     let label = fmt!("seed {} {:?} {}x{}", seed, p, zones, wbots);
