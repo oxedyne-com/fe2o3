@@ -67,6 +67,8 @@ static REPLAY_SYNC_FAILS: AtomicBool = AtomicBool::new(false); // the flush befo
 static REPLAY_FLUSH_WAY: AtomicU64 = AtomicU64::new(0);      // 0 as the kernel allows, 1 syncfs, 2 per file
 static REPLAY_FLUSHES:   AtomicU64  = AtomicU64::new(0);      // syncfs or file syncs made before replay
 static DURABILITY_MS:    AtomicU64  = AtomicU64::new(0);      // a store's durability timeout, when set
+static KERNEL_RELEASE:   Mutex<Option<String>> = Mutex::new(None); // in place of the running kernel's
+static HALT:             Mutex<Option<(Halt, std::path::PathBuf)>> = Mutex::new(None); // where to wait for a kill
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
 /// of a busy disk's writes would be held.
@@ -225,7 +227,8 @@ pub(crate) fn sweep_hold() {
     }
 }
 
-/// Makes the durable record of a store's fault fail to be written, as a failing disk would.
+/// Makes the durable record of a store's fault, and its refusal marker, fail to be written, as a
+/// failing disk would.
 pub fn set_fault_record_fails(on: bool) {
     FAULT_RECORD_FAILS.store(on, Ordering::SeqCst);
 }
@@ -240,8 +243,60 @@ pub fn set_replay_sync_failure(on: bool) {
     REPLAY_SYNC_FAILS.store(on, Ordering::SeqCst);
 }
 
-pub(crate) fn replay_sync_fails() -> bool {
-    REPLAY_SYNC_FAILS.load(Ordering::SeqCst)
+// The answer of a flush before replay: the real call has been made, and the hook replaces its
+// answer with `injected` when a test has asked, so the error path is the real one.
+pub(crate) fn replay_sync<E>(real: Result<(), E>, injected: E) -> Result<(), E> {
+    match REPLAY_SYNC_FAILS.load(Ordering::SeqCst) {
+        true    => Err(injected),
+        false   => real,
+    }
+}
+
+/// Gives the open a kernel release of `rel` in place of the running kernel's, as
+/// `/proc/sys/kernel/osrelease` would, and `Some("")` for one that cannot be read.
+pub fn set_kernel_release(rel: Option<&str>) {
+    let mut r = match KERNEL_RELEASE.lock() { Ok(r) => r, Err(p) => p.into_inner() };
+    *r = rel.map(String::from);
+}
+
+pub(crate) fn kernel_release() -> Option<String> {
+    match KERNEL_RELEASE.lock() {
+        Ok(r)   => r.clone(),
+        Err(p)  => p.into_inner().clone(),
+    }
+}
+
+/// Where a process that a test means to kill stops, to wait for the kill.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Halt {
+    Synced,         // a barrier's syncs have returned, its mark is not yet published
+    RecordSynced,   // the fault record's temporary file is synced, not yet renamed into place
+    Recorded,       // the fault record is in place, the refusal marker not yet written
+    Quarantined,    // a cut's data tail is in quarantine, the data file not yet cut
+    DataCut,        // a cut's data file is cut, its index not yet
+}
+
+/// Stops the process at `at`, the first time it gets there: `flag` is written, naming the halt,
+/// and the thread sleeps until the test kills the process.  `None` stops nowhere.
+pub fn set_halt(at: Option<(Halt, std::path::PathBuf)>) {
+    let mut h = match HALT.lock() { Ok(h) => h, Err(p) => p.into_inner() };
+    *h = at;
+}
+
+pub(crate) fn halt(at: Halt) {
+    let flag = {
+        let mut h = match HALT.lock() { Ok(h) => h, Err(p) => p.into_inner() };
+        match h.as_ref() {
+            Some((want, _)) if *want == at => h.take().map(|(_, flag)| flag),
+            _ => None,
+        }
+    };
+    if let Some(flag) = flag {
+        let _ = std::fs::write(&flag, format!("{:?}", at));
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
 }
 
 /// How the flush before replay is made.

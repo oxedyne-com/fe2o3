@@ -19,10 +19,7 @@ use crate::{
         bot_super::Supervisor,
     },
     comm::{
-        channels::{
-            BotChannels,
-            Fault,
-        },
+        channels::BotChannels,
         msg::OzoneMsg,
         response::{
             Responder,
@@ -314,51 +311,6 @@ impl<
         Ok(())
     }
 
-    /// Applies the cuts of a fault record left by an earlier run, then removes the record.  A
-    /// cut only ever shortens a file, so one interrupted part way is simply run again; any failure
-    /// refuses the open and leaves the record for the next attempt.
-    fn cut_after_fault(&self) -> Outcome<()> {
-        let path = Fault::record_path(&self.db_root);
-        if !path.exists() {
-            return Ok(());
-        }
-        let cuts = match Fault::read_record(&path) {
-            Ok(cuts) => cuts,
-            Err(e) => return Err(err!(e,
-                "The store at {:?} stopped after a failed sync, and its fault record {:?} cannot \
-                be read, so the files in doubt cannot be cut.", self.db_root, path;
-                Init, File, Read)),
-        };
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let mut done = Vec::new();
-        for c in &cuts {
-            match c.apply(stamp) {
-                Ok((d, i)) => done.push(fmt!("file {} of zone {}: {} data and {} index bytes",
-                    c.fnum, c.zone + 1, d, i)),
-                Err(e) => return Err(err!(e,
-                    "The store at {:?} stopped after a failed sync, and file {} of zone {} could \
-                    not be cut back to its durable mark, so it is not opened.",
-                    self.db_root, c.fnum, c.zone + 1;
-                    Init, File, Write)),
-            }
-        }
-        if let Err(e) = std::fs::remove_file(&path) {
-            return Err(err!(e,
-                "The files in doubt at {:?} are cut, but the fault record {:?} cannot be removed.",
-                self.db_root, path;
-                Init, File, Write));
-        }
-        res!(crate::file::zdir::sync_dir(&self.db_root));
-        error!(sync_log::stream(), err!(
-            "The store at {:?} had stopped after a failed sync.  The files in doubt were cut back \
-            to their last durable marks before replay: {}.", self.db_root, done.join("; ");
-            Init, File, Fatal));
-        Ok(())
-    }
-
     /// Start the Ozone database.  Returns once every zone has surveyed its files and loaded its
     /// caches, bounded by `constant::CONTROL_REQUEST_TIMEOUT`.  A start that fails returns once the
     /// bots it brought up have stopped, so the directory can be opened again at once.
@@ -398,9 +350,9 @@ impl<
             }
         }
 
-        // A run stopped by a failed sync left the files it could not prove: cut each back to its
-        // last durable mark before anything replays them, as a power cut at the failure would.
-        res!(self.cut_after_fault());
+        // A refused open, or a run stopped by a failed sync, leaves the store refused until an
+        // operator clears it: the kernel will not report the error to this open again.
+        res!(Refusal::check(&self.db_root));
 
         // Write config to a file now that we have a directory structure.
         res!(self.cfg().write_config_file(self.db_root()));

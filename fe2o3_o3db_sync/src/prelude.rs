@@ -13,7 +13,10 @@ pub use crate::{
     },
     data::core::RestSchemes,
     db::O3db,
-    file::core::FileType,
+    file::{
+        core::FileType,
+        refusal::Refusal,
+    },
 };
 
 pub use oxedyne_fe2o3_core::{

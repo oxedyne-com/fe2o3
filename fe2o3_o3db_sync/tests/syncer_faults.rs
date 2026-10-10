@@ -23,7 +23,10 @@ use oxedyne_fe2o3_o3db_sync::{
         response::Wait,
     },
     data::core::RestSchemesInput,
-    file::floc::FileNum,
+    file::{
+        floc::FileNum,
+        refusal::Refusal,
+    },
     test::{
         hooks,
         setup::{
@@ -183,6 +186,7 @@ fn failing_disk_stops_the_store() -> Outcome<()> {
     }
 
     // The restart cuts the file back to its mark and recovers.
+    res!(Refusal::clear(&root)); // as the operator would
     let db = res!(open(&root, cfg));
     let recorded = root.join(constant::FAULT_FILENAME).exists();
     let one = res!(db.get(&key(1), None));

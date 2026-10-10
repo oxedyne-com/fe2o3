@@ -6,6 +6,7 @@ use crate::{
         channels::{
             BotChannels,
             ChannelPool,
+            Fault,
         },
         response::Responder,
     },
@@ -170,8 +171,12 @@ impl<
             }
             all.push(zdir);
         }
-        // Every file is made durable before any zone replays (R2), in one flush per filesystem.
+        // A run stopped by a failed sync left the files it could not prove: each is cut back to
+        // its last durable mark before anything replays it, as a power cut at the failure would.
+        // The record names zones and file numbers, so the cut follows a store that has moved.
         let paths: Vec<PathBuf> = all.iter().map(|zd| zd.dir.clone()).collect();
+        res!(Fault::cut_after(self.db_root(), &paths));
+        // Every file is made durable before any zone replays (R2), in one flush per filesystem.
         res!(flush_for_replay(self.db_root(), &paths));
         for (z, zdir) in all.into_iter().enumerate() {
             let z = z as u16;

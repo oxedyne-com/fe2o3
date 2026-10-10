@@ -10,6 +10,7 @@ use crate::{
             LiveFile,
             LivePair,
         },
+        refusal::Refusal,
     },
     format_data_file,
     test::hooks,
@@ -302,13 +303,37 @@ pub fn sync_dir(dir: &Path) -> Outcome<()> {
     }
 }
 
+/// Writes `text` to `dir/name` through a temporary file that is synced, renamed into place, and
+/// its directory synced, so that a crash leaves the file whole or absent.
+pub fn write_whole(dir: &Path, name: &str, text: &str, halt: Option<hooks::Halt>) -> Outcome<PathBuf> {
+    use std::io::Write;
+    let path = dir.join(name);
+    let tmp = dir.join(fmt!("{}.tmp", name));
+    {
+        let mut file = res!(File::create(&tmp));
+        res!(file.write_all(text.as_bytes()));
+        res!(file.sync_all());
+    }
+    if let Some(at) = halt {
+        hooks::halt(at);
+    }
+    res!(std::fs::rename(&tmp, &path));
+    res!(sync_dir(dir));
+    Ok(path)
+}
+
 /// Makes every data and index file in the zone directories `dirs` durable before replay calls
 /// the records in them durable (R2): after a process crash a tail may sit only in the page cache,
 /// and a write-back error nobody has seen yet must refuse the open.  Where the kernel reports
 /// write-back errors through `syncfs` (Linux 5.8 on) this is one `syncfs` per filesystem the
 /// zones sit on, else a sync of each file, which on a store of thousands of files costs seconds.
-/// `syncfs` reports an unseen write-back error anywhere on its filesystem, so another program's
-/// failed write refuses the open too: that fails safe.  Each zone directory is synced last.
+///
+/// The kernel reports a write-back error to the first caller that asks, and to no later one: a
+/// second open, or another program's `syncfs` on the same filesystem, would be told nothing.  So
+/// a failed flush leaves the store's refusal marker (`Refusal`), and every later open is refused
+/// until an operator clears it.  A marker that cannot be written either is said so in the error.
+/// `syncfs` also reports another program's failed write on the same filesystem, which refuses
+/// the open as well.  Each zone directory is synced last.
 pub fn flush_for_replay(root: &Path, dirs: &[PathBuf]) -> Outcome<()> {
     let by_fs = match hooks::replay_flush() {
         hooks::ReplayFlush::Kernel  => syncfs_reports_errors(),
@@ -334,7 +359,11 @@ fn syncfs_reports_errors() -> bool {
     if !cfg!(target_os = "linux") {
         return false;
     }
-    match std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+    let rel = match hooks::kernel_release() {
+        Some(rel)   => Ok(rel),
+        None        => std::fs::read_to_string("/proc/sys/kernel/osrelease"),
+    };
+    match rel {
         Ok(rel) => release_at_least(&rel, (5, 8)),
         Err(_)  => false,
     }
@@ -369,16 +398,13 @@ fn syncfs_each(root: &Path, dirs: &[PathBuf]) -> Outcome<()> {
             continue; // flushed already
         }
         hooks::count_replay_flush();
-        let synced = match hooks::replay_sync_fails() {
-            true    => Err(nix::errno::Errno::EIO),
-            false   => nix::unistd::syncfs(&d),
-        };
+        let synced = hooks::replay_sync(nix::unistd::syncfs(&d), nix::errno::Errno::EIO);
         if let Err(e) = synced {
-            return Err(err!(e,
+            return Err(Refusal::refuse(root, err!(e,
                 "The filesystem holding {:?} reported a write-back error, so the open of the \
                 store at {:?} is refused: a record replayed from it might not survive a power \
                 cut.  The error may be another program's on the same filesystem.", dir, root;
-                Init, IO, File, Write));
+                Init, IO, File, Write)));
         }
     }
     Ok(())
@@ -414,16 +440,12 @@ fn sync_files_in(root: &Path, dir: &Path) -> Outcome<()> {
                 Init, IO, File, Read)),
         };
         hooks::count_replay_flush();
-        let synced = match hooks::replay_sync_fails() {
-            true    => Err(std::io::Error::other(
-                "the disk failed the sync (test::hooks::set_replay_sync_failure)")),
-            false   => file.sync_data(),
-        };
+        let synced = hooks::replay_sync(file.sync_data(), std::io::Error::from_raw_os_error(5));
         if let Err(e) = synced {
-            return Err(err!(e,
+            return Err(Refusal::refuse(root, err!(e,
                 "Cannot make {:?} durable before replaying it, so the open of the store at {:?} \
                 is refused: a record replayed from it might not survive a power cut.", path, root;
-                Init, IO, File, Write));
+                Init, IO, File, Write)));
         }
     }
     Ok(())

@@ -15,10 +15,15 @@ use crate::{
         worker::bot::WorkerType,
     },
     comm::msg::OzoneMsg,
-    file::floc::{
-        FileLocation,
-        FileNum,
+    file::{
+        floc::{
+            FileLocation,
+            FileNum,
+        },
+        refusal::Refusal,
+        zdir::ZoneDir,
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_core::{
@@ -43,7 +48,10 @@ use std::{
         Index,
         IndexMut,
     },
-    path::PathBuf,
+    path::{
+        Path,
+        PathBuf,
+    },
     sync::{
         Arc,
         Mutex,
@@ -547,23 +555,24 @@ impl Cut {
     /// Cuts the data and index files back to their marks, first copying each tail to the zone's
     /// quarantine as evidence (best effort: the tail may hold page-cache ghosts).  A file is only
     /// ever shortened, never extended, so a cut run twice changes nothing the second time.  A
-    /// missing file is logged and skipped: a collection may have replaced it since.  Returns
-    /// the bytes cut from the data and the index.
+    /// missing file fails the cut: collection is refused once the store has stopped, so a file
+    /// in doubt that is gone was lost, or left behind by a move or a restore.  Returns the bytes
+    /// cut from the data and the index.
     pub fn apply(&self, stamp: u64) -> Outcome<(u64, u64)> {
-        let d = res!(Self::cut_file(&self.data, self.data_upto, stamp));
-        let i = res!(Self::cut_file(&self.index, self.index_upto, stamp));
+        let d = res!(Self::cut_file(&self.data, self.data_upto, stamp, Some(hooks::Halt::Quarantined)));
+        hooks::halt(hooks::Halt::DataCut);
+        let i = res!(Self::cut_file(&self.index, self.index_upto, stamp, None));
         Ok((d, i))
     }
 
-    fn cut_file(path: &PathBuf, upto: u64, stamp: u64) -> Outcome<u64> {
+    fn cut_file(path: &PathBuf, upto: u64, stamp: u64, halt: Option<hooks::Halt>) -> Outcome<u64> {
         let file = match fs::OpenOptions::new().read(true).write(true).open(path) {
             Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                warn!(sync_log::stream(),
-                    "Cutting {:?} back to {} found no such file, so there is nothing to cut.",
-                    path, upto);
-                return Ok(0);
-            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(err!(e,
+                "The file in doubt {:?} is missing, so it cannot be cut back to its durable mark \
+                {}.  Collection stops with the store, so it was lost, or left behind when the \
+                store was moved or restored: put it back, or restore the whole store.", path, upto;
+                IO, File, Missing)),
             Err(e) => return Err(err!(e,
                 "Cannot open {:?} to cut it back to its durable mark {}.", path, upto;
                 IO, File, Write)),
@@ -573,6 +582,9 @@ impl Cut {
             return Ok(0);
         }
         Self::quarantine(path, &file, upto, len, stamp);
+        if let Some(at) = halt {
+            hooks::halt(at);
+        }
         if let Err(e) = file.set_len(upto) {
             return Err(err!(e,
                 "Cannot cut {:?} from {} back to its durable mark {}.", path, len, upto;
@@ -633,6 +645,17 @@ pub struct FaultReport {
     pub error:  String,
     pub cuts:   Vec<Cut>,
     pub record: Option<PathBuf>, // the durable fault record, if it could be written
+    pub refusal: Option<PathBuf>, // the refusal marker, if it could be written
+}
+
+impl FaultReport {
+    /// Was the stop written down durably, as the fault record or the refusal marker?  A process
+    /// that exits on a fault, as the gateway does, exits only then: otherwise a restart would be
+    /// told nothing of the failed sync and replay what is not on the disk, so the process stays
+    /// up with writes refused and raises the alarm.
+    pub fn recorded(&self) -> bool {
+        self.record.is_some() || self.refusal.is_some()
+    }
 }
 
 /// The store's fault: set by the first failed barrier, and never cleared in the process.  After
@@ -654,9 +677,10 @@ impl Fault {
         self.get().is_some()
     }
 
-    /// Sets the fault and writes the record of it into `root`, durably.  The first raise sets the
-    /// time and the error; a later one adds its cuts.  A record that cannot be written leaves the store stopped in this process, and is
-    /// logged as critical, naming the cuts, since a restart would then replay the page cache.
+    /// Sets the fault and writes the record of it into `root`, durably, then the refusal marker
+    /// (`Refusal`), so no open replays the store until an operator has looked.  The first raise
+    /// sets the time and the error; a later one adds its cuts.  A record that cannot be written
+    /// leaves the store stopped in this process, and is logged as critical, naming the cuts.
     pub fn raise(&self, root: &PathBuf, cuts: Vec<Cut>, error: &Error<ErrTag>) -> FaultReport {
         let mut f = match self.0.lock() {
             Ok(f)   => f,
@@ -677,6 +701,7 @@ impl Fault {
                 error:  fmt!("{}", error),
                 cuts,
                 record: None,
+                refusal: None,
             },
         };
         match Self::write_record(root, &report) {
@@ -687,6 +712,16 @@ impl Fault {
                 restarting, truncate them by hand: {:?}", root, report.cuts;
                 IO, File, Write, Fatal)),
         }
+        hooks::halt(hooks::Halt::Recorded);
+        if report.refusal.is_none() {
+            match Refusal::write(root, &fmt!("a sync failed at run time: {}", report.error)) {
+                Ok(path) => report.refusal = Some(path),
+                Err(e) => error!(sync_log::stream(), err!(e,
+                    "The store at {:?} stopped after a failed sync, and its refusal marker could \
+                    not be written.", root;
+                    IO, File, Write, Fatal)),
+            }
+        }
         *f = Some(report.clone());
         report
     }
@@ -695,34 +730,25 @@ impl Fault {
         root.join(crate::base::constant::FAULT_FILENAME)
     }
 
-    // Through a temporary file, synced, renamed and the directory synced, so that the record is
-    // either whole or absent.
+    // Each cut names its zone and file number, not a path, so a store moved or restored to
+    // another root is cut where it now stands (QA F2).
     fn write_record(root: &PathBuf, report: &FaultReport) -> Outcome<PathBuf> {
-        if crate::test::hooks::fault_record_fails() {
+        if hooks::fault_record_fails() {
             return Err(err!("The fault record could not be written (test::hooks)."; IO, Write));
         }
         let secs = report.when.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let mut text = fmt!("when {}\nerror {}\n", secs, report.error.replace('\n', " "));
         for c in &report.cuts {
-            text.push_str(&fmt!("cut {} {} {} {} {} {}\n",
-                c.zone, c.fnum, c.data_upto, c.index_upto,
-                c.data.display(), c.index.display()));
+            text.push_str(&fmt!("cut {} {} {} {}\n", c.zone, c.fnum, c.data_upto, c.index_upto));
         }
-        let path = Self::record_path(root);
-        let tmp = path.with_extension("fault.tmp");
-        {
-            let mut file = res!(File::create(&tmp));
-            res!(file.write_all(text.as_bytes()));
-            res!(file.sync_all());
-        }
-        res!(fs::rename(&tmp, &path));
-        res!(crate::file::zdir::sync_dir(root));
-        Ok(path)
+        crate::file::zdir::write_whole(root, constant::FAULT_FILENAME, &text,
+            Some(hooks::Halt::RecordSynced))
     }
 
-    /// Reads a fault record left by an earlier run.  A path holding spaces is the last field, so
-    /// the data path is held to be everything up to its extension's end.
-    pub fn read_record(path: &PathBuf) -> Outcome<Vec<Cut>> {
+    /// Reads a fault record left by an earlier run, placing each cut in `zdirs`, the zone
+    /// directories as the store now stands.  Anything after a cut's four numbers, such as the
+    /// absolute paths an older record carried, is ignored.
+    pub fn read_record(path: &PathBuf, zdirs: &[PathBuf]) -> Outcome<Vec<Cut>> {
         let text = res!(fs::read_to_string(path));
         let mut cuts = Vec::new();
         for line in text.lines() {
@@ -730,7 +756,7 @@ impl Fault {
                 Some(rest)  => rest,
                 None        => continue,
             };
-            let mut it = rest.splitn(5, ' ');
+            let mut it = rest.split(' ');
             let mut num = |what: &str| -> Outcome<u64> {
                 let field = res!(it.next().ok_or_else(|| err!(
                     "Fault record {:?}: a cut has no {}: {:?}", path, what, line; Decode, Missing)));
@@ -740,23 +766,65 @@ impl Fault {
             let fnum = res!(num("file number")) as FileNum;
             let data_upto = res!(num("data mark"));
             let index_upto = res!(num("index mark"));
-            let paths = res!(it.next().ok_or_else(|| err!(
-                "Fault record {:?}: a cut has no paths: {:?}", path, line; Decode, Missing)));
-            let ext = fmt!(".{} ", crate::base::constant::DATA_FILE_EXT);
-            let split = res!(paths.find(&ext).ok_or_else(|| err!(
-                "Fault record {:?}: a cut's paths cannot be told apart: {:?}", path, line;
-                Decode, Invalid)));
-            let (data, index) = paths.split_at(split + ext.len() - 1);
+            let dir = res!(zdirs.get(zone).ok_or_else(|| err!(
+                "Fault record {:?}: a cut names zone {}, but the store has {} zones: {:?}",
+                path, zone + 1, zdirs.len(), line; Decode, Invalid)));
             cuts.push(Cut {
                 zone,
                 fnum,
-                data:       PathBuf::from(data),
+                data:       dir.join(ZoneDir::relative_file_path(&FileType::Data, fnum)),
                 data_upto,
-                index:      PathBuf::from(&index[1..]),
+                index:      dir.join(ZoneDir::relative_file_path(&FileType::Index, fnum)),
                 index_upto,
             });
         }
         Ok(cuts)
+    }
+
+    /// Applies the cuts of a fault record left by an earlier run to the zone directories `zdirs`
+    /// of the store at `root`, then removes the record.  A cut only ever shortens a file, so one
+    /// interrupted part way is simply run again; any failure, a missing file in doubt among them,
+    /// refuses the open and leaves the record for the next attempt.
+    pub fn cut_after(root: &Path, zdirs: &[PathBuf]) -> Outcome<()> {
+        let path = Self::record_path(&root.to_path_buf());
+        if !path.exists() {
+            return Ok(());
+        }
+        let cuts = match Self::read_record(&path, zdirs) {
+            Ok(cuts) => cuts,
+            Err(e) => return Err(err!(e,
+                "The store at {:?} stopped after a failed sync, and its fault record {:?} cannot \
+                be read, so the files in doubt cannot be cut.", root, path;
+                Init, File, Read)),
+        };
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut done = Vec::new();
+        for c in &cuts {
+            match c.apply(stamp) {
+                Ok((d, i)) => done.push(fmt!("file {} of zone {}: {} data and {} index bytes",
+                    c.fnum, c.zone + 1, d, i)),
+                Err(e) => return Err(err!(e,
+                    "The store at {:?} stopped after a failed sync, and file {} of zone {} could \
+                    not be cut back to its durable mark, so it is not opened.",
+                    root, c.fnum, c.zone + 1;
+                    Init, File, Write)),
+            }
+        }
+        if let Err(e) = fs::remove_file(&path) {
+            return Err(err!(e,
+                "The files in doubt at {:?} are cut, but the fault record {:?} cannot be removed.",
+                root, path;
+                Init, File, Write));
+        }
+        res!(crate::file::zdir::sync_dir(root));
+        error!(sync_log::stream(), err!(
+            "The store at {:?} had stopped after a failed sync.  The files in doubt were cut back \
+            to their last durable marks before replay: {}.", root, done.join("; ");
+            Init, File, Fatal));
+        Ok(())
     }
 }
 

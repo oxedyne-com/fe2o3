@@ -458,6 +458,28 @@ impl<
         self.doubt.push((live.fnum, live.paths.clone()));
         self.taken = live.sizes;
         self.pair = Some(live);
+        // The pair taken after the stop is in doubt from its first byte, and the cut set raised
+        // at the stop could not name it, so it joins the record and is cut back to the sizes it
+        // was opened with (QA F3).
+        if let Some(e) = self.poisoned.clone() {
+            if let Some(live) = &self.pair {
+                let cut = Cut {
+                    zone:       self.shared.zone,
+                    fnum:       live.fnum,
+                    data:       live.paths.0.clone(),
+                    data_upto:  live.sizes.0,
+                    index:      live.paths.1.clone(),
+                    index_upto: live.sizes.1,
+                };
+                self.shared.fault.raise(&self.shared.root, vec![cut.clone()], &e);
+                if let Err(e) = self.shared.writer.send(OzoneMsg::Cut(vec![cut])) {
+                    error!(sync_log::stream(), err!(e,
+                        "{}: The writer could not be told to cut the file it rolled over to after \
+                        a failed barrier; the next open cuts it.", self.label;
+                        Channel, Write));
+                }
+            }
+        }
     }
 
     // Tells every cache bot released to since the last barrier that `fnum`'s mark has moved.
@@ -478,6 +500,7 @@ impl<
             self.poison(&e);
             return Err(e);
         }
+        hooks::halt(hooks::Halt::Synced);
         self.dirty = false;
         self.since = 0;
         self.last = Some(Instant::now());

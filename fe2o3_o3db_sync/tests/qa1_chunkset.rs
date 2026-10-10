@@ -27,6 +27,7 @@ use oxedyne_fe2o3_o3db_sync::{
         CacheEntry,
         is_chunk_key,
     },
+    file::refusal::Refusal,
     sweep,
     test::{
         hooks,
@@ -622,6 +623,7 @@ fn qa1_unconfirmed_head_that_lands() -> Outcome<()> {
     let live = describe(&db.get(&k, None));
     let report = sweep::sweep_orphans(db.api(), Uid::default(), None, scan_wait());
     let _ = db.close();
+    res!(Refusal::clear(Path::new(dir))); // as the operator would
     let db = res!(start(dir, res!(cfg()), false));
     let rest = describe(&db.get(&k, None));
     let v = res!(verify::verify_live_set(db.api(), None, scan_wait()));

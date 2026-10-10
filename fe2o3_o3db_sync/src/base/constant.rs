@@ -67,6 +67,7 @@ pub const DEFAULT_MAX_ZONE_DIR_BYTES:   u64 = 104_857_600; // 100 MiB
 pub const CONFIG_FILENAME:              &'static str = "config.jdat";
 pub const STORE_LOCK_FILENAME:          &'static str = "ozone.lock"; // held by the one process on a store
 pub const FAULT_FILENAME:               &'static str = "ozone.fault"; // the cuts a failed sync leaves for the next open
+pub const REFUSAL_FILENAME:             &'static str = "ozone.refused"; // every open is refused while it stands
 pub const QUARANTINE_DIR:               &'static str = "quarantine"; // in a zone, the tails a cut removed
 pub const DB_UID_CHAR_LEN:              usize = 5;
 

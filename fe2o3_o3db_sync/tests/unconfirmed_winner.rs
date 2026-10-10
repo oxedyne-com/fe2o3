@@ -22,7 +22,10 @@ use oxedyne_fe2o3_o3db_sync::{
         constant,
     },
     comm::response::Wait,
-    file::core::FileType,
+    file::{
+        core::FileType,
+        refusal::Refusal,
+    },
     sweep,
     test::{
         hooks,
@@ -188,6 +191,7 @@ fn a_store_in_flight_when_a_sync_fails_is_refused() -> Outcome<()> {
     assert!(u.is_err(), "U's store succeeded although its sync was failed");
     assert!(pr.is_err(), "P's head was written on a stopped store");
     res!(assert_stopped(faulted, &live, &compact, &swept));
+    res!(Refusal::clear(&root)); // as the operator would
     let (after, cleared, clean) = res!(restart(&root, &k));
     let _ = std::fs::remove_dir_all(dir);
     assert_eq!(after, "none", "after the restart's cut the key holds neither U nor P");
@@ -215,6 +219,7 @@ fn a_failed_sync_never_displaces_a_durable_head() -> Outcome<()> {
         compact.as_ref().map_err(|e| fmt!("{}", e)), swept.as_ref().map_err(|e| fmt!("{}", e)));
     assert!(u.is_err(), "U's store succeeded although its sync was failed");
     res!(assert_stopped(faulted, &live, &compact, &swept));
+    res!(Refusal::clear(&root)); // as the operator would
     let (after, cleared, clean) = res!(restart(&root, &k));
     let _ = std::fs::remove_dir_all(dir);
     assert_eq!(after, "1500/2", "after the restart's cut P is the key's value");

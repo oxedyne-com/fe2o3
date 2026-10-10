@@ -27,6 +27,7 @@ use oxedyne_fe2o3_o3db_sync::{
     },
     file::{
         core::FileType,
+        refusal::Refusal,
         zdir::ZoneDir,
     },
     file::state::DataState,
@@ -184,6 +185,7 @@ fn power_cut(db: &TestDb, root: &Path, c: &OzoneConfig, to: &str) -> Outcome<Pat
         }
     }
     let _ = fs::remove_file(dst.join(constant::FAULT_FILENAME));
+    let _ = fs::remove_file(dst.join(constant::REFUSAL_FILENAME));
     for (z, f, (d, i)) in marks {
         for (typ, upto) in [(FileType::Data, d), (FileType::Index, i)] {
             let p = zdir(&dst, c, z).join(ZoneDir::relative_file_path(&typ, f));
@@ -285,6 +287,7 @@ fn displaced_by_a_failed_write(p: Policy, zones: u16, wbots: u16, small: bool, c
         assert!(chunks_live(&db, t), "{}: P's chunks were retired behind a failed barrier", label);
     }
     let _ = db.close();
+    res!(Refusal::clear(&root)); // as the operator would
     let db = res!(open(&root, &c, false));
     assert_eq!(read(&db, &k), want, "{}: the restart did not give P back", label);
     assert!(db.api().fault().is_none(), "{}: the restart left the fault", label);
@@ -494,6 +497,7 @@ fn the_open_cuts_to_the_marks() -> Outcome<()> {
     }
     let before = lens(&root);
     assert!(marks.iter().zip(&before).any(|((_, m), l)| l.0 > m.0), "positive control: nothing past a mark");
+    res!(Refusal::clear(&root)); // as the operator would
     let db = res!(open(&root, &c, false));
     assert_eq!(read(&db, &k), "300/2");
     res!(db.close());
@@ -606,6 +610,7 @@ fn the_sweep_syncs_after_its_scan() -> Outcome<()> {
     assert!(db.api().fault().is_some(), "the failed barrier did not stop the store");
     assert!(chunks_live(&db, old), "P's chunks were retired");
     let _ = db.close();
+    res!(Refusal::clear(&root)); // as the operator would
     let db = res!(open(&root, &c, false));
     assert_eq!(read(&db, &k), "1500/2", "the restart did not give P back");
     res!(db.close());
