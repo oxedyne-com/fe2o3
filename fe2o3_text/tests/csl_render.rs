@@ -263,3 +263,58 @@ mod typst {
 		Ok(())
 	}
 }
+
+// B2b types: page ranges and persons, as hayagriva and citationberg give them.
+mod b2b_types {
+	use oxedyne_fe2o3_text::csl::{
+		page::{
+			format_range,
+			PageVal,
+		},
+		person::Person,
+		style::PageRange,
+	};
+
+	fn fr(f: PageRange, a: &str, b: &str) -> String {
+		let mut s = String::new();
+		format_range(&mut s, f, a, b, None);
+		s
+	}
+
+	#[test]
+	fn test_page_range_formats() {
+		assert_eq!(fr(PageRange::Chicago16, "321", "328"), "321–28");
+		assert_eq!(fr(PageRange::Chicago16, "1001", "1012"), "1001–12");
+		assert_eq!(fr(PageRange::Chicago16, "123", "129"), "123–29");
+		assert_eq!(fr(PageRange::Chicago16, "100", "104"), "100–104");
+		assert_eq!(fr(PageRange::Chicago16, "101", "108"), "101–8");
+		assert_eq!(fr(PageRange::Chicago15, "1496", "1504"), "1496–1504");
+		assert_eq!(fr(PageRange::Expanded, "42", "5"), "42–45");
+		assert_eq!(fr(PageRange::Minimal, "321", "328"), "321–8");
+		assert_eq!(fr(PageRange::MinimalTwo, "321", "328"), "321–28");
+		assert_eq!(fr(PageRange::Expanded, "S1", "S12"), "S1–S12");
+		let mut s = String::new();
+		if let PageVal::Typed(p) = PageVal::from_str("1-5, 7 & 9") {
+			assert!(p.is_plural());
+			p.write(&mut s, None, None);
+		}
+		assert_eq!(s, "1–5, 7 & 9");
+		assert!(!PageVal::from_str("12").is_plural());
+		assert!(matches!(PageVal::from_str("i-x 3"), PageVal::Str(_)));
+	}
+
+	#[test]
+	fn test_person_parts() {
+		let mut s = String::new();
+		let _ = Person::new("Müller", Some("Hans-Peter")).initials(&mut s, Some(". "), true);
+		assert_eq!(s, "H.-P.");
+		s.clear();
+		let _ = Person::new("Müller", Some("Hans-Peter")).initials(&mut s, Some(""), false);
+		assert_eq!(s, "HP");
+		let p = Person::new("van der Berg", Some("Anna"));
+		assert_eq!(p.particle_in_family(), Some("van der"));
+		assert_eq!(p.family_without_particle(), "Berg");
+		assert!(Person::literal("Acme Corporation").is_institutional());
+		assert_eq!(Person::literal("The Acme Group").family_without_article(), "Acme Group");
+	}
+}
