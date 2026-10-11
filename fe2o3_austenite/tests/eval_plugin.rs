@@ -3,21 +3,28 @@
 //! is declared past the ceiling, which the limiter stops. Typst sets no such limits, so the oracle cannot
 //! check these; each must end in a `Limit` diagnostic that names the limit, and never hang or abort.
 //! `grow` really allocates up to the ceiling, so run this file under `rc-build 2G`. The memo of loads,
-//! transitions and calls (W2) is checked over three compiles of one session.
+//! transitions and calls (W2) is checked over three compiles of one session. Under a loop budget the same
+//! loops stop at the plugin time a pass allows (TS), long before the default fuel; the heaviest real
+//! plugins, jogs and ctxjs, are compiled under it by the ignored test at the end, which names its documents
+//! in `AUS_HEAVY` and is run in release.
 
 #![cfg(feature = "plugin")]
 
 use oxedyne_fe2o3_austenite::caches::Counters;
 use oxedyne_fe2o3_austenite::compile::Session;
+use oxedyne_fe2o3_austenite::compile::supply_typst_package_cache;
 use oxedyne_fe2o3_austenite::diag::DiagnosticKind;
 use oxedyne_fe2o3_austenite::emit::sinks::PdfSink;
 use oxedyne_fe2o3_austenite::eval::eval::{
 	eval_string,
 	EvalMode,
 };
+use oxedyne_fe2o3_austenite::door::LOOP_BUDGET;
 use oxedyne_fe2o3_austenite::eval::plugin::{
 	FUEL,
 	MEMORY,
+	SLICE,
+	TIME_MS,
 };
 use oxedyne_fe2o3_austenite::eval::scope::Scope;
 use oxedyne_fe2o3_austenite::eval::{
@@ -39,13 +46,19 @@ use std::time::{
 };
 
 const TEST_FUEL: u64 = 1_000_000_000;
+const TEST_TIME: u64 = 2_000;	// milliseconds, for the time bound's tests
 
 // Evaluates `code` from a source beside the fixture modules, answering the first error's kind and message.
 fn first_error(code: &str) -> Outcome<(DiagnosticKind, String)> {
+	// The default, FUEL, takes a loop about 26 minutes to spend; the mechanism is the same at any figure.
+	first_error_in(code, |engine| engine.plugin_fuel = TEST_FUEL)
+}
+
+// As `first_error`, the engine set by `set` first.
+fn first_error_in<F: FnOnce(&mut Engine)>(code: &str, set: F) -> Outcome<(DiagnosticKind, String)> {
 	let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval/plugin");
 	let mut engine = Engine::new(World::new(dir.clone()));
-	// The default, FUEL, takes a loop about 26 minutes to spend; the mechanism is the same at any figure.
-	engine.plugin_fuel = TEST_FUEL;
+	set(&mut engine);
 	let id = res!(engine.world.add_source(dir.join("case.typ"), String::new()));
 	let _ = eval_string(&mut engine, code, EvalMode::Code, Scope::new(), Span::new(id, 0, 0));
 	match engine.diags.iter().find(|d| d.is_error()) {
@@ -93,6 +106,96 @@ fn the_limits_are_named_in_the_message() -> Outcome<()> {
 	assert!(msg.contains(&TEST_FUEL.to_string()), "'{}' does not give the fuel figure {}", msg, TEST_FUEL);
 	// No document Typst compiles may meet the default: the corpus's most is 84,908,412,112 (jogs 0.2.4).
 	assert!(FUEL >= 10 * 84_908_412_112);
+	Ok(())
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ TIME                                                                       │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+// Runs `code` as the door does, under its loop budget and so its plugin time, with the default fuel, which
+// is reached only after about 26 minutes. The test time is shorter than `TIME_MS` and changes nothing else.
+fn assert_timed_out(code: &str) -> Outcome<()> {
+	assert_timed_out_at(code, TEST_TIME)
+}
+
+// As `assert_timed_out`, with the plugin time `ms`.
+fn assert_timed_out_at(code: &str, ms: u64) -> Outcome<()> {
+	let t = Instant::now();
+	let (kind, msg) = res!(first_error_in(code, |engine| {
+		engine.set_fuel(Some(LOOP_BUDGET));
+		assert_eq!(engine.plugin_time, Some(TIME_MS), "a loop budget brings the plugin time with it");
+		engine.plugin_time = Some(ms);
+	}));
+	let took = t.elapsed();
+	assert_eq!(kind, DiagnosticKind::Limit, "{}: kind {} ({})", code, kind, msg);
+	let named = fmt!("{} s a layout pass allows plugins", ms / 1_000);
+	assert!(msg.contains(&named), "{}: '{}' does not name the time bound", code, msg);
+	assert!(!msg.contains("fuel"), "{}: '{}' met the fuel, not the time", code, msg);
+	eprintln!("{}: stopped after {:?} under {} ms", code, took, ms);
+	// The time, then at most the slice under way: about 1.5 s in release and well under a minute in debug.
+	assert!(took < Duration::from_millis(ms) + Duration::from_secs(60), "{}: took {:?}", code, took);
+	Ok(())
+}
+
+#[test]
+fn a_call_that_loops_forever_is_stopped_by_the_time_under_a_loop_budget() -> Outcome<()> {
+	assert_eq!(SLICE, 1_000_000_000);
+	assert_timed_out("plugin(\"spin.wasm\").spin()")
+}
+
+#[test]
+fn a_start_function_that_loops_forever_is_stopped_by_the_time_under_a_loop_budget() -> Outcome<()> {
+	assert_timed_out("plugin(\"spin_start.wasm\")")
+}
+
+// The stop times at the plugin time the door really allows, for the record; run in release.
+#[test]
+#[ignore]
+fn hostile_loops_stop_at_the_real_plugin_time() -> Outcome<()> {
+	res!(assert_timed_out_at("plugin(\"spin.wasm\").spin()", TIME_MS));
+	assert_timed_out_at("plugin(\"spin_start.wasm\")", TIME_MS)
+}
+
+#[test]
+fn without_a_loop_budget_no_time_bound_applies() -> Outcome<()> {
+	let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval/plugin");
+	let mut engine = Engine::new(World::new(dir));
+	engine.set_fuel(None);
+	assert_eq!(engine.plugin_time, None, "the command line, as Typst, sets no plugin time");
+	Ok(())
+}
+
+// The heaviest plugins the corpus calls, under the door's loop budget and so the default plugin time: jogs
+// 0.2.4 spends 8.5e10 fuel in classy-german-invoice and ctxjs 0.5.0 4.2e9 in starchy-junia. `AUS_HEAVY` holds
+// main files separated by `:`, compiled each from its own directory with `TYPST_PACKAGE_CACHE_PATH` as set.
+#[test]
+#[ignore]
+fn the_heaviest_real_plugins_compile_under_the_loop_budget() -> Outcome<()> {
+	let list = res!(std::env::var("AUS_HEAVY").map_err(|_| err!("Set AUS_HEAVY to the documents' main files."; Missing)));
+	supply_typst_package_cache();
+	for main in list.split(':').filter(|m| !m.is_empty()) {
+		let main = PathBuf::from(main);
+		let dir = res!(main.parent().ok_or_else(|| err!("{} has no directory", main.display(); Missing)));
+		let mut s = Session::new(FontStore::default());
+		let mut sink = res!(PdfSink::new());
+		let t = Instant::now();
+		let done = res!(s.compile(&main, dir, &mut sink, None, Some(LOOP_BUDGET), false));
+		let took = t.elapsed();
+		let plugins = done.counters.plugin_misses;
+		// A document that never reached its plugin proves nothing about the bound.
+		assert!(plugins > 0, "{}: no plugin ran: {}", main.display(),
+			done.laid.as_ref().err().map(|e| e.plain()).unwrap_or_default());
+		match &done.laid {
+			Ok(_)	=> eprintln!("{}: compiled in {:?}, {} plugin runs", main.display(), took, plugins),
+			Err(e)	=> {
+				let msg = e.plain();
+				assert!(!msg.contains("plugin"), "{}: a plugin was stopped: {}", main.display(), msg);
+				eprintln!("{}: no plugin failed in {:?} ({} runs); it fails later: {}", main.display(), took,
+					plugins, msg.lines().next().unwrap_or(""));
+			}
+		}
+	}
 	Ok(())
 }
 

@@ -18,6 +18,12 @@
 //! renders, so a regression on a fresh box fails instead of self-blessing -- the milestone audit's first
 //! finding. austenite-doc is deferred (its source is under active authoring), so it still bootstraps.
 //!
+//! Two roots are known-divergent for the curated reader (`src/lang/`, frozen): oxeweb-techspec's late
+//! headings sit 4-5 pages from Typst's and float-fixture places two floats differently. Their mismatches
+//! are recorded in expected.json as `divergent`, so the run fails only on a new one, and `ORACLE_ACCEPT=1`
+//! writes the tracked expected.json itself, not just the cache (2026-10-12). The curated reader and this
+//! test are deleted at U11.
+//!
 //! `tests/oracle/mod.rs` (loaded below as `mod driver`, see its own comment for why) is the driver;
 //! everything that shells out to `typst`, `pdfinfo`, `pdftoppm`, ImageMagick or `sha256sum` lives there,
 //! so this file stays a short statement of what is being asserted and why.
@@ -36,6 +42,7 @@ use driver::{
 	compare_root,
 	corpus,
 	expected_baseline,
+	new_divergences,
 	qc_dir,
 	record_and_diff,
 	trio,
@@ -87,8 +94,20 @@ fn corpus_roots_compile_and_match_the_typst_oracle() -> Outcome<()> {
 		for (page, pct) in &report.raster_samples {
 			println!("[oracle] {}: page {} raster diff {:.2}%", report.name, page, pct);
 		}
-		for m in &report.mismatches {
-			problems.push(fmt!("{}: {} (see {:?})", report.name, m, report.pdf_path));
+		// A known-divergent root (`divergent` in expected.json) fails only on a mismatch it does not
+		// record, unless the run is accepting, which records the new set.
+		let expected = res!(expected_baseline());
+		let marked = expected.get(report.name).map_or(false, |e| e.divergent.is_some());
+		let known = report.mismatches.len() - new_divergences(&expected, &report).len();
+		if known > 0 {
+			println!("[oracle] {}: {} known divergence(s) of the curated reader, as recorded", report.name, known);
+		}
+		for m in new_divergences(&expected, &report) {
+			if accept && marked {
+				println!("[oracle] {}: new divergence ACCEPTED (ORACLE_ACCEPT=1): {}", report.name, m);
+			} else {
+				problems.push(fmt!("{}: {} (see {:?})", report.name, m, report.pdf_path));
+			}
 		}
 		match res!(record_and_diff(&baseline, &report, accept)) {
 			BaselineOutcome::Bootstrapped	=> println!("[oracle] {}: baseline recorded (first run for this root)", report.name),
@@ -127,7 +146,7 @@ fn baseline_records_and_diffs_correctly() -> Outcome<()> {
 	let path		= work_dir.join("baseline-selftest.json");
 
 	let entry = |pages: usize, hash: &str, raster: Option<f64>| BaselineEntry {
-		pages, anchors: 7, pdf_sha256: hash.to_string(), raster_worst_pct: raster,
+		pages, anchors: 7, pdf_sha256: hash.to_string(), raster_worst_pct: raster, ..Default::default()
 	};
 
 	let mut entries = BTreeMap::new();
@@ -306,6 +325,8 @@ fn expected_json_pin_blocks_bootstrap_for_crate_owned_roots() -> Outcome<()> {
 			anchors:			4,
 			pdf_sha256:			"cache-self-blessed-wrong-hash".to_string(),
 			raster_worst_pct:	None,
+			note:				None,
+			divergent:			None,
 		});
 		res!(Baseline::from_entries(seeded).write_to_file(&path));
 	}

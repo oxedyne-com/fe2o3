@@ -165,6 +165,10 @@ pub fn run_with<L: Layouter, S: PageSink>(
 		engine.reads = ReadLog::default();
 		engine.context = Context::default();
 		engine.fuel = fuel;
+		#[cfg(feature = "plugin")]
+		{
+			engine.plugin_spent = 0.0;
+		}
 		engine.body = None;
 		if let Some(t) = engine.timings.as_mut() {
 			t.begin_pass();

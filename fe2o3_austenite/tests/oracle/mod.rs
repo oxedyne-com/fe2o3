@@ -1285,12 +1285,14 @@ fn sha256_of_file(path: &Path) -> Outcome<String> {
 /// [`record_and_diff`] compares it only when both the prior and the current entry have a value, so a box
 /// without ImageMagick neither trips a false raster regression nor silently erases a real one recorded
 /// elsewhere.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct BaselineEntry {
 	pub pages:				usize,
 	pub anchors:			usize,
 	pub pdf_sha256:			String,
 	pub raster_worst_pct:	Option<f64>,
+	pub note:				Option<String>,			// a person's, kept through a re-record
+	pub divergent:			Option<Vec<String>>,	// a known-divergent root's mismatches against Typst, as found
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1311,21 +1313,34 @@ impl Baseline {
 		self.entries.insert(name.to_string(), entry);
 	}
 
-	fn to_dat(&self) -> Outcome<Dat> {
+	// One root to a line, as the tracked file is kept by hand, a known divergence one to a line beneath.
+	fn to_json(&self) -> Outcome<String> {
+		let q = |t: &str| -> Outcome<String> { dat!(t.to_string()).json() };
 		let mut rows = Vec::with_capacity(self.entries.len());
 		for (name, e) in &self.entries {
-			let mut row = omapdat!{
-				"name"			=> dat!(name.clone()),
-				"pages"			=> dat!(e.pages as u64),
-				"anchors"		=> dat!(e.anchors as u64),
-				"pdf_sha256"	=> dat!(e.pdf_sha256.clone()),
-			};
+			let mut row = fmt!("\t{{ \"name\": {}, \"pages\": {}, \"anchors\": {}, \"pdf_sha256\": {}",
+				res!(q(name)), e.pages, e.anchors, res!(q(&e.pdf_sha256)));
 			if let Some(pct) = e.raster_worst_pct {
-				let _ = res!(row.map_put(dat!("raster_worst_pct"), dat!(pct)));
+				row.push_str(&fmt!(", \"raster_worst_pct\": {}", pct));
 			}
+			if let Some(n) = &e.note {
+				row.push_str(&fmt!(", \"note\": {}", res!(q(n))));
+			}
+			if let Some(d) = &e.divergent {
+				let mut lines = Vec::with_capacity(d.len());
+				for m in d {
+					lines.push(fmt!("\t\t{}", res!(q(m))));
+				}
+				if lines.is_empty() {
+					row.push_str(", \"divergent\": []");
+				} else {
+					row.push_str(&fmt!(", \"divergent\": [\n{}\n\t]", lines.join(",\n")));
+				}
+			}
+			row.push_str(" }");
 			rows.push(row);
 		}
-		Ok(omapdat!{ "roots" => Dat::List(rows) })
+		Ok(fmt!("{{ \"roots\": [\n{}\n]}}\n", rows.join(",\n")))
 	}
 
 	fn from_dat(mut dat: Dat) -> Outcome<Self> {
@@ -1351,14 +1366,27 @@ impl Baseline {
 				},
 				None	=> None,
 			};
-			entries.insert(name, BaselineEntry { pages, anchors, pdf_sha256, raster_worst_pct });
+			let note = match res!(row.map_remove(&dat!("note"))) {
+				Some(d)	=> Some(try_extract_dat!(d, Str)),
+				None	=> None,
+			};
+			let divergent = match res!(row.map_remove(&dat!("divergent"))) {
+				Some(d)	=> {
+					let mut out = Vec::new();
+					for m in try_extract_dat!(d, List) {
+						out.push(try_extract_dat!(m, Str));
+					}
+					Some(out)
+				}
+				None	=> None,
+			};
+			entries.insert(name, BaselineEntry { pages, anchors, pdf_sha256, raster_worst_pct, note, divergent });
 		}
 		Ok(Self { entries })
 	}
 
 	pub fn write_to_file(&self, path: &Path) -> Outcome<()> {
-		let dat	= res!(self.to_dat());
-		let s	= res!(dat.json());
+		let s = res!(self.to_json());
 		res!(std::fs::write(path, s));
 		Ok(())
 	}
@@ -1389,8 +1417,18 @@ pub fn baseline_path(work_dir: &Path) -> PathBuf {
 /// is authoritative, so a broken file must fail the run loudly rather than silently reverting a pinned
 /// root to the always-pass bootstrap it exists to forbid.
 pub fn expected_baseline() -> Outcome<Baseline> {
-	let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("oracle").join("expected.json");
-	Baseline::read_from_file(&path)
+	Baseline::read_from_file(&expected_path())
+}
+
+fn expected_path() -> PathBuf {
+	Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("oracle").join("expected.json")
+}
+
+/// A known-divergent root's mismatches that its tracked entry does not record: the regressions. A root not
+/// marked divergent has every mismatch returned, as before.
+pub fn new_divergences<'a>(expected: &Baseline, report: &'a RootReport) -> Vec<&'a String> {
+	let known = expected.get(report.name).and_then(|e| e.divergent).unwrap_or_default();
+	report.mismatches.iter().filter(|m| !known.contains(m)).collect()
 }
 
 /// How far a re-measured raster percentage may sit from what was recorded before it is treated as a real
@@ -1457,11 +1495,13 @@ pub fn record_and_diff(path: &Path, report: &RootReport, accept: bool) -> Outcom
 	} else {
 		Baseline::default()
 	};
-	let current = BaselineEntry {
+	let mut current = BaselineEntry {
 		pages:				report.austenite_pages,
 		anchors:			report.austenite_anchors,
 		pdf_sha256:			report.pdf_sha256.clone(),
 		raster_worst_pct:	report.raster_worst_pct,
+		note:				None,
+		divergent:			None,
 	};
 	// The tracked expected.json is AUTHORITATIVE for a pinned root: its reference governs even when a cache
 	// entry exists, so a cache that self-blessed a regression -- a fresh box that bootstrapped a wrong
@@ -1482,7 +1522,19 @@ pub fn record_and_diff(path: &Path, report: &RootReport, accept: bool) -> Outcom
 			Ok(BaselineOutcome::Bootstrapped)
 		},
 		Some(p) => {
-			let diffs = describe_entry_diff(&p, &current);
+			current.note = p.note.clone();
+			// A known-divergent root records its mismatches as this run found them, when the oracle ran.
+			current.divergent = match (&p.divergent, report.typst_pages) {
+				(Some(_), Some(_))	=> Some(report.mismatches.clone()),
+				(d, _)				=> d.clone(),
+			};
+			let mut diffs = describe_entry_diff(&p, &current);
+			// A changed divergence fails only where it is new, which the caller reports from
+			// `new_divergences`; one that has gone is an improvement, recorded when accepted.
+			if accept && p.divergent != current.divergent {
+				let n = |d: &Option<Vec<String>>| d.as_ref().map_or(0, |v| v.len());
+				diffs.push(fmt!("known divergences {} -> {}", n(&p.divergent), n(&current.divergent)));
+			}
 			if diffs.is_empty() {
 				// Still rewritten: a raster field newly measured this run (`None` -> `Some`, a box that
 				// just gained ImageMagick) upgrades the stored entry even though nothing DIFFERS.
@@ -1490,7 +1542,14 @@ pub fn record_and_diff(path: &Path, report: &RootReport, accept: bool) -> Outcom
 				res!(baseline.write_to_file(path));
 				Ok(BaselineOutcome::Unchanged)
 			} else if accept {
+				// The tracked file is the reference for a pinned root, so an accepted change is written
+				// there, for a person to review and commit; the cache alone would be overruled next run.
 				let msg = fmt!("{}: {}", report.name, diffs.join(", "));
+				if expected.get(report.name).is_some() {
+					let mut tracked = expected;
+					tracked.set(report.name, current.clone());
+					res!(tracked.write_to_file(&expected_path()));
+				}
 				baseline.set(report.name, current);
 				res!(baseline.write_to_file(path));
 				Ok(BaselineOutcome::Accepted(msg))

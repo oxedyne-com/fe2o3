@@ -175,6 +175,10 @@ pub struct Engine {
 	pub fuel:		Option<u64>,		// loop iterations remaining; none is unbounded, as Typst is
 	#[cfg(feature = "plugin")]
 	pub plugin_fuel:	u64,			// wasmi fuel for each plugin load and call, `plugin::FUEL` unless the host sets it
+	#[cfg(feature = "plugin")]
+	pub plugin_time:	Option<u64>,	// plugin milliseconds a pass allows, `plugin::TIME_MS` under a loop budget
+	#[cfg(feature = "plugin")]
+	pub plugin_spent:	f64,			// plugin milliseconds spent in this pass
 	pub context:	Context,
 	pub reads:		ReadLog,			// introspection reads recorded for the fixpoint (U8)
 	pub fonts:		FontStore,			// faces for shaping and `measure` (U6a)
@@ -204,6 +208,10 @@ impl Engine {
 			fuel:		None,
 			#[cfg(feature = "plugin")]
 			plugin_fuel:	crate::eval::plugin::FUEL,
+			#[cfg(feature = "plugin")]
+			plugin_time:	None,
+			#[cfg(feature = "plugin")]
+			plugin_spent:	0.0,
 			context:	Context::default(),
 			reads:		ReadLog::default(),
 			fonts:		FontStore::default(),
@@ -346,6 +354,27 @@ impl Engine {
 			},
 			None	=> Ok(()),
 		}
+	}
+
+	/// Sets the loop budget of each pass, and with it the plugin time a pass allows: a host that bounds a
+	/// compile's loops cannot stop it itself, so a plugin must not hold it either.
+	pub fn set_fuel(&mut self, fuel: Option<u64>) {
+		self.fuel = fuel;
+		#[cfg(feature = "plugin")]
+		{
+			self.plugin_time = fuel.map(|_| crate::eval::plugin::TIME_MS);
+		}
+	}
+
+	/// What the next plugin load, transition or call may spend; hand it back to [`Engine::plugin_spend`].
+	#[cfg(feature = "plugin")]
+	pub fn plugin_bound(&self) -> crate::eval::plugin::Bound {
+		crate::eval::plugin::Bound { fuel: self.plugin_fuel, time: self.plugin_time, spent: self.plugin_spent }
+	}
+
+	#[cfg(feature = "plugin")]
+	pub fn plugin_spend(&mut self, bound: &crate::eval::plugin::Bound) {
+		self.plugin_spent = bound.spent;
 	}
 
 	pub fn has_errors(&self) -> bool { self.diags.iter().any(|d| d.is_error()) }

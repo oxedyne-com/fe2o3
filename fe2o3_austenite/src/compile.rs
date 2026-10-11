@@ -453,7 +453,7 @@ fn assemble_eval_from<S: PageSink>(
 	let id = res!(world.load(&main_path));
 	let mut engine = Engine::new(world);
 	engine.fonts = fonts;
-	engine.fuel = fuel;
+	engine.set_fuel(fuel);
 	engine.timings = timings;
 	std::mem::swap(caches, &mut engine.caches);
 	if let Some(t) = engine.timings.as_mut() {
