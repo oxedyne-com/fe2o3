@@ -688,12 +688,10 @@ fn emit_image(elem: &Elem, ctx: &Transform, ops: &mut Vec<SvgOp>) -> Outcome<()>
 		Ok(b)	=> b,
 		Err(_)	=> return Ok(()),
 	};
-	let (pm, tone) = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-		res!(crate::pixmap::Pixmap::from_png_toned(&bytes))
-	} else if bytes.starts_with(&[0xFF, 0xD8]) {
-		res!(crate::pixmap::Pixmap::from_jpeg_toned(&bytes))
-	} else {
-		return Ok(());	// neither PNG nor JPEG by its magic bytes
+	let (pm, tone) = match crate::sniff::sniff(&bytes) {
+		Some(crate::sniff::ImageKind::Png)	=> res!(crate::pixmap::Pixmap::from_png_toned(&bytes)),
+		Some(crate::sniff::ImageKind::Jpeg)	=> res!(crate::pixmap::Pixmap::from_jpeg_toned(&bytes)),
+		_					=> return Ok(()),	// neither PNG nor JPEG by its bytes
 	};
 	let (iw, ih) = (pm.width(), pm.height());
 	let rgba = pm.into_data();

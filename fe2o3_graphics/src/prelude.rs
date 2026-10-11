@@ -34,6 +34,7 @@ pub use crate::{
 		QrMatrix,
 	},
 	raster::FillRule,
+	sniff::ImageKind,
 	stroke::{
 		Cap,
 		Dash,

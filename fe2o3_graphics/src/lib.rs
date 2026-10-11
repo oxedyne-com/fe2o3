@@ -114,8 +114,14 @@ pub mod png;
 pub mod prelude;
 pub mod qr;
 pub mod raster;
+pub mod sniff;
 pub mod stroke;
 pub mod svg;
 pub mod svg_doc;
 pub mod transform;
 pub mod yuv;
+
+pub use sniff::{
+	ImageKind,
+	sniff,
+};
