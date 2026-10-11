@@ -1,0 +1,145 @@
+# kind	file	csl id or code	names	updated	source revision	match
+style	styles/alphanumeric.csl	http://typst.org/csl/alphanumeric	alphanumeric		hayagriva 0.10.1	crate
+style	styles/american-anthropological-association.csl	http://www.zotero.org/styles/american-anthropological-association	american-anthropological-association	2012-09-27T22:06:38+00:00	273cd84882f0f6672e0c4ebd0aee1dec8081c348	exact
+style	styles/american-chemical-society.csl	http://www.zotero.org/styles/american-chemical-society	american-chemical-society	2022-09-19T18:32:56+00:00	7573fb9e3ae8185d1fe43f53c48cb84ece1c9fe1	exact
+style	styles/american-geophysical-union.csl	http://www.zotero.org/styles/american-geophysical-union	american-geophysical-union	2012-09-27T22:06:38+00:00	9296c8c15d3c01f701eb2c30a21a5567441e807d	exact
+style	styles/american-institute-of-aeronautics-and-astronautics.csl	http://www.zotero.org/styles/american-institute-of-aeronautics-and-astronautics	american-institute-of-aeronautics-and-astronautics	2023-09-26T07:49:11+00:00	3cbe27f6c73381d7406ccc7dc1ac63a285ed2ab2	exact
+style	styles/american-institute-of-physics.csl	http://www.zotero.org/styles/american-institute-of-physics	american-institute-of-physics	2024-03-27T11:18:50+00:00	72c96faed175645b7438054369376cb7eac688eb	exact
+style	styles/american-medical-association.csl	http://www.zotero.org/styles/american-medical-association	american-medical-association	2026-02-06T00:00:00+00:00	618ee16a9f64019654e8af3542e4c6a1fe8999c9	exact
+style	styles/american-meteorological-society.csl	http://www.zotero.org/styles/american-meteorological-society	american-meteorological-society	2025-03-22T15:43:16+00:00	8c5439ee7e0689c5afb44e2fff9694eb9d36ec7b	exact
+style	styles/american-physics-society.csl	http://www.zotero.org/styles/american-physics-society	american-physics-society	2024-12-17T11:58:54+00:00	77c46c415385cd9d68525dbad3bdf86cb5e18260	exact
+style	styles/american-physiological-society.csl	http://www.zotero.org/styles/american-physiological-society	american-physiological-society	2020-05-21T09:18:04+00:00	b5a5d009681b851163f051357a00080a6ec2e300	exact
+style	styles/american-political-science-association.csl	http://www.zotero.org/styles/american-political-science-association	american-political-science-association	2024-03-13T15:37:50+00:00	4be3a32557984ccfb08190f96210d31475203820	exact
+style	styles/apa.csl	http://www.zotero.org/styles/apa	american-psychological-association,apa	2026-02-07T00:00:00+00:00	32078ede72b9224e1ed02c546668e20ee7c75585	exact
+style	styles/american-society-for-microbiology.csl	http://www.zotero.org/styles/american-society-for-microbiology	american-society-for-microbiology	2022-01-13T16:47:12+00:00	98d6a03ab7af025875dd8476317bac2b06bd40c6	exact
+style	styles/american-society-of-civil-engineers.csl	http://www.zotero.org/styles/american-society-of-civil-engineers	american-society-of-civil-engineers	2025-11-14T09:39:51+00:00	7dfed9be723444a721758a2e5caa66a6b21de098	exact
+style	styles/american-society-of-mechanical-engineers.csl	http://www.zotero.org/styles/american-society-of-mechanical-engineers	american-society-of-mechanical-engineers	2023-11-03T07:25:27+00:00	3303ecc46b90a170ab07d7c04b3095de431ae223	exact
+style	styles/american-sociological-association.csl	http://www.zotero.org/styles/american-sociological-association	american-sociological-association	2025-06-30T13:17:50+00:00	dc6e88690e335a3af43b3bdce7f45100a1f88f06	exact
+style	styles/angewandte-chemie.csl	http://www.zotero.org/styles/angewandte-chemie	angewandte-chemie	2025-08-21T12:42:21+00:00	a91f1c293f9eecc57b3b9076804dad67535f8bba	exact
+style	styles/annual-reviews.csl	http://www.zotero.org/styles/annual-reviews	annual-reviews	2013-03-28T21:58:08+00:00	b7df21a2b28d7a747637041a875865ed1845ca7d	exact
+style	styles/annual-reviews-author-date.csl	http://www.zotero.org/styles/annual-reviews-author-date	annual-reviews-author-date	2018-10-24T03:09:48+00:00	b7df21a2b28d7a747637041a875865ed1845ca7d	exact
+style	styles/associacao-brasileira-de-normas-tecnicas.csl	http://www.zotero.org/styles/associacao-brasileira-de-normas-tecnicas	associacao-brasileira-de-normas-tecnicas	2023-08-20T17:15:26+00:00	c7de5bedd4caf9c2ce193e4ccc536f8b5899707b	exact
+style	styles/association-for-computing-machinery.csl	http://www.zotero.org/styles/association-for-computing-machinery	association-for-computing-machinery	2024-01-24T11:32:48+00:00	c18c1a491dc6c5db555185e9858561c8357af943	exact
+style	styles/biomed-central.csl	http://www.zotero.org/styles/biomed-central	biomed-central	2025-07-26T16:12:16+00:00	ff33b4c8dbe923e88fcee5cbae094a1307b6b36c	exact
+style	styles/bristol-university-press.csl	http://www.zotero.org/styles/bristol-university-press	bristol-university-press	2025-03-08T10:51:15+00:00	371ebd448591d48689600b110605c884fedad7fe	exact
+style	styles/bmj.csl	http://www.zotero.org/styles/bmj	british-medical-journal,bmj	2024-06-06T09:34:02+00:00	4e5c833e82edcdba24af6d94a838bc831866d2a5	exact
+style	styles/cell.csl	http://www.zotero.org/styles/cell	cell	2024-03-28T09:46:58+00:00	24552cb901737a24663df35bea5bbbf6cd2ec7cf	exact
+style	styles/chicago-author-date.csl	http://www.zotero.org/styles/chicago-author-date	chicago-author-date	2025-02-09T00:00:00+00:00	1aaf551f864d50e875a617b4faf2bf5da30f3f15	exact
+style	styles/chicago-notes-bibliography.csl	http://www.zotero.org/styles/chicago-notes-bibliography	chicago-notes,chicago-fullnotes	2025-02-09T00:00:00+00:00	1aaf551f864d50e875a617b4faf2bf5da30f3f15	exact
+style	styles/chicago-shortened-notes-bibliography.csl	http://www.zotero.org/styles/chicago-shortened-notes-bibliography	chicago-shortened-notes	2025-02-09T00:00:00+00:00	1aaf551f864d50e875a617b4faf2bf5da30f3f15	exact
+style	styles/copernicus-publications.csl	http://www.zotero.org/styles/copernicus-publications	copernicus	2023-06-05T10:43:11+00:00	5c039ad4602a46af3ce7eff75fb211aff07ef1d1	exact
+style	styles/cse-citation-sequence-brackets-8th-edition.csl	http://www.zotero.org/styles/cse-citation-sequence-brackets-8th-edition	cse-citation-sequence-brackets-8th-edition,council-of-science-editors	2021-08-12T04:37:16+00:00	f925d6191159e1a2291c91759b98323031e66d47	exact
+style	styles/cse-name-year.csl	http://www.zotero.org/styles/cse-name-year	cse-name-year,council-of-science-editors-author-date	2025-09-12T07:37:16+00:00	f925d6191159e1a2291c91759b98323031e66d47	exact
+style	styles/current-opinion.csl	http://www.zotero.org/styles/current-opinion	current-opinion	2012-09-27T22:06:38+00:00	b7df21a2b28d7a747637041a875865ed1845ca7d	exact
+style	styles/deutsche-gesellschaft-fur-psychologie.csl	http://www.zotero.org/styles/deutsche-gesellschaft-fur-psychologie	deutsche-gesellschaft-für-psychologie	2026-02-04T15:02:00+00:00	876b884b0ecf040ce681f199bc7df2c07677e42f	exact
+style	styles/deutsche-sprache.csl	http://www.zotero.org/styles/deutsche-sprache	deutsche-sprache	2014-08-12T18:40:54+00:00	b7284c9ca814b914f33f6c699a8b4bb48bbd9154	exact
+style	styles/elsevier-harvard.csl	http://www.zotero.org/styles/elsevier-harvard	elsevier-harvard	2014-03-04T00:09:00+00:00	9b37385e700b67ed908ebf3ac60321c60405b7e0	exact
+style	styles/elsevier-vancouver.csl	http://www.zotero.org/styles/elsevier-vancouver	elsevier-vancouver	2019-10-15T22:06:38+00:00	b5a5d009681b851163f051357a00080a6ec2e300	exact
+style	styles/elsevier-with-titles.csl	http://www.zotero.org/styles/elsevier-with-titles	elsevier-with-titles	2019-10-15T22:06:38+00:00	b7df21a2b28d7a747637041a875865ed1845ca7d	exact
+style	styles/frontiers.csl	http://www.zotero.org/styles/frontiers	frontiers	2024-02-20T20:07:43+00:00	b7df21a2b28d7a747637041a875865ed1845ca7d	exact
+style	styles/future-medicine.csl	http://www.zotero.org/styles/future-medicine	future-medicine	2020-06-03T12:27:46+00:00	b9fbfa37d9c1a8d4e87dd715e0238c07d7314554	exact
+style	styles/future-science-group.csl	http://www.zotero.org/styles/future-science-group	future-science	2019-01-14T11:57:07+00:00	8dd68f66647e30127ca1fad529d52b1d22081d25	exact
+style	styles/chinese-gb7714-2005-numeric.csl	http://www.zotero.org/styles/chinese-gb7714-2005-numeric	gb-7714-2005-numeric	2024-01-22T22:56:37+08:00	cd2728158d69c6f23a1ac9f6fdd0c6eed4366ce7	exact
+style	styles/china-national-standard-gb-t-7714-2015-author-date.csl	http://www.zotero.org/styles/china-national-standard-gb-t-7714-2015-author-date	gb-7714-2015-author-date	2024-01-22T23:27:33+08:00	cd2728158d69c6f23a1ac9f6fdd0c6eed4366ce7	exact
+style	styles/china-national-standard-gb-t-7714-2015-note.csl	http://www.zotero.org/styles/china-national-standard-gb-t-7714-2015-note	gb-7714-2015-note	2024-01-22T22:42:27+08:00	cd2728158d69c6f23a1ac9f6fdd0c6eed4366ce7	exact
+style	styles/china-national-standard-gb-t-7714-2015-numeric.csl	http://www.zotero.org/styles/china-national-standard-gb-t-7714-2015-numeric	gb-7714-2015-numeric	2024-01-22T22:07:03+08:00	cd2728158d69c6f23a1ac9f6fdd0c6eed4366ce7	exact
+style	styles/gost-r-7-0-5-2008-numeric.csl	http://www.zotero.org/styles/gost-r-7-0-5-2008-numeric	gost-r-705-2008-numeric	2025-09-29T20:34:00+00:00	d8023c82ec0abad2053b3c45b0637c23a414321a	exact
+style	styles/harvard-cite-them-right.csl	http://www.zotero.org/styles/harvard-cite-them-right	harvard-cite-them-right	2026-02-12T10:08:06+00:00	c4b23ac4ba0de5b165fde037cbdc1df52645f861	exact
+style	styles/ieee.csl	http://www.zotero.org/styles/ieee	institute-of-electrical-and-electronics-engineers,ieee	2024-03-27T11:41:27+00:00	1ccf4696be22ea0b55f83cc9163bde3061fddb0a	exact
+style	styles/institute-of-physics-numeric.csl	http://www.zotero.org/styles/institute-of-physics-numeric	institute-of-physics-numeric	2012-09-27T22:06:38+00:00	9296c8c15d3c01f701eb2c30a21a5567441e807d	exact
+style	styles/iso690-author-date-en.csl	http://www.zotero.org/styles/iso690-author-date-en	iso-690-author-date	2023-10-20T12:00:00+00:00	42f54b22d8058c957404945b7dca5cc59c1fc68d	exact
+style	styles/iso690-numeric-en.csl	http://www.zotero.org/styles/iso690-numeric-en	iso-690-numeric	2022-03-24T00:29:32+00:00	42f54b22d8058c957404945b7dca5cc59c1fc68d	exact
+style	styles/karger-journals.csl	http://www.zotero.org/styles/karger-journals	karger	2019-07-08T19:49:43+00:00	6ead27bca765563a8b49c4a20b2900f57caeae29	exact
+style	styles/mary-ann-liebert-vancouver.csl	http://www.zotero.org/styles/mary-ann-liebert-vancouver	mary-ann-liebert-vancouver	2022-09-09T07:53:38+00:00	b5a5d009681b851163f051357a00080a6ec2e300	exact
+style	styles/mhra-notes.csl	http://www.zotero.org/styles/mhra-notes	modern-humanities-research-association-notes,modern-humanities-research-association	2025-02-04T00:00:00+00:00	1933d84304a0913084199d087f6e0898a4b36d47	exact
+style	styles/modern-language-association.csl	http://www.zotero.org/styles/modern-language-association	modern-language-association,mla,modern-language-association-8,mla-8	2026-02-03T00:00:00+00:00	c0c8fd69fb7222b81cfd068d3bccfdb17b833045	exact
+style	styles/multidisciplinary-digital-publishing-institute.csl	http://www.zotero.org/styles/multidisciplinary-digital-publishing-institute	multidisciplinary-digital-publishing-institute	2024-08-03T20:34:58+00:00	6e0bac94c0202540fe471b6b384f4c922020c59d	exact
+style	styles/nature.csl	http://www.zotero.org/styles/nature	nature	2025-09-10T18:26:21+00:00	f89411c723adade3f5991d737c87b7e43882dfec	exact
+style	styles/nlm-citation-sequence.csl	http://www.zotero.org/styles/nlm-citation-sequence	nlm-citation-sequence,vancouver	2026-01-07T00:00:00+00:00	f25316f71c0006867950b25d6d2064f5d8dd591a	exact
+style	styles/nlm-citation-sequence-superscript.csl	http://www.zotero.org/styles/nlm-citation-sequence-superscript	nlm-citation-sequence-superscript,vancouver-superscript	2026-01-07T00:00:00+00:00	f25316f71c0006867950b25d6d2064f5d8dd591a	exact
+style	styles/pensoft-journals.csl	http://www.zotero.org/styles/pensoft-journals	pensoft	2020-08-21T12:00:00+00:00	1f51ef812ebcaf033adc51c89ec41d79b67e1a16	exact
+style	styles/plos.csl	http://www.zotero.org/styles/plos	public-library-of-science,plos	2019-09-29T19:19:07+00:00	b5a5d009681b851163f051357a00080a6ec2e300	exact
+style	styles/royal-society-of-chemistry.csl	http://www.zotero.org/styles/royal-society-of-chemistry	royal-society-of-chemistry	2026-01-28T19:49:13+00:00	9e562bba7fbb36df7942a97a724fbb326bf76854	exact
+style	styles/sage-vancouver.csl	http://www.zotero.org/styles/sage-vancouver	sage-vancouver	2016-04-07T22:06:38+00:00	b5a5d009681b851163f051357a00080a6ec2e300	exact
+style	styles/sist02.csl	http://www.zotero.org/styles/sist02	sist02	2015-12-13T06:04:50+00:00	1d060f9e113158fbb6af375d4f5fe2c42a7013bc	exact
+style	styles/spie-journals.csl	http://www.zotero.org/styles/spie-journals	spie	2015-01-23T09:18:00+00:00	332af6f7a253b7b3b1669ee533844cc23eb8631b	exact
+style	styles/springer-basic-brackets.csl	http://www.zotero.org/styles/springer-basic-brackets	springer-basic	2016-03-04T12:00:00+00:00	b7df21a2b28d7a747637041a875865ed1845ca7d	exact
+style	styles/springer-basic-author-date.csl	http://www.zotero.org/styles/springer-basic-author-date	springer-basic-author-date	2019-09-25T12:00:00+00:00	b7df21a2b28d7a747637041a875865ed1845ca7d	exact
+style	styles/springer-fachzeitschriften-medizin-psychologie.csl	http://www.zotero.org/styles/springer-fachzeitschriften-medizin-psychologie	springer-fachzeitschriften-medizin-psychologie	2019-09-25T17:55:52+00:00	b7284c9ca814b914f33f6c699a8b4bb48bbd9154	exact
+style	styles/springer-humanities-author-date.csl	http://www.zotero.org/styles/springer-humanities-author-date	springer-humanities-author-date	2019-09-25T12:00:00+00:00	b7df21a2b28d7a747637041a875865ed1845ca7d	exact
+style	styles/springer-lecture-notes-in-computer-science.csl	http://www.zotero.org/styles/springer-lecture-notes-in-computer-science	springer-lecture-notes-in-computer-science	2019-09-25T13:54:37+00:00	6ead27bca765563a8b49c4a20b2900f57caeae29	exact
+style	styles/springer-mathphys-brackets.csl	http://www.zotero.org/styles/springer-mathphys-brackets	springer-mathphys	2019-09-25T12:00:00+00:00	b7df21a2b28d7a747637041a875865ed1845ca7d	exact
+style	styles/springer-socpsych-author-date.csl	http://www.zotero.org/styles/springer-socpsych-author-date	springer-socpsych-author-date	2019-09-25T20:48:24+00:00	b7df21a2b28d7a747637041a875865ed1845ca7d	exact
+style	styles/springer-vancouver-brackets.csl	http://www.zotero.org/styles/springer-vancouver-brackets	springer-vancouver	2025-09-14T15:13:05+00:00	b5a5d009681b851163f051357a00080a6ec2e300	exact
+style	styles/taylor-and-francis-chicago-author-date.csl	http://www.zotero.org/styles/taylor-and-francis-chicago-author-date	taylor-and-francis-chicago-author-date	2025-02-09T00:00:00+00:00	1aaf551f864d50e875a617b4faf2bf5da30f3f15	exact
+style	styles/taylor-and-francis-national-library-of-medicine.csl	http://www.zotero.org/styles/taylor-and-francis-national-library-of-medicine	taylor-and-francis-national-library-of-medicine	2024-03-11T10:34:15+00:00	e306b561ba83e5e9d66f4b21dbde4eab92956c0a	exact
+style	styles/the-institution-of-engineering-and-technology.csl	http://www.zotero.org/styles/the-institution-of-engineering-and-technology	the-institution-of-engineering-and-technology	2013-05-09T23:17:00+00:00	149a664d26b80c572a26aaf9184088eea2f65454	exact
+style	styles/the-lancet.csl	http://www.zotero.org/styles/the-lancet	the-lancet	2012-09-27T22:06:38+00:00	b65453ee6cad13789f17ebf80cae1d36df826c85	exact
+style	styles/thieme-german.csl	http://www.zotero.org/styles/thieme-german	thieme	2021-11-10T14:09:06+00:00	46e961fca96bb403ab12eb030df44ba8bc4c9d87	exact
+style	styles/trends-journals.csl	http://www.zotero.org/styles/trends-journals	trends	2022-09-12T12:37:15+00:00	201e022903e5ab3b0e11e7f44e4f05b12552bbff	exact
+style	styles/chicago-author-date-17th-edition.csl	http://www.zotero.org/styles/chicago-author-date-17th-edition	turabian-author-date	2025-02-09T00:00:00+00:00	1aaf551f864d50e875a617b4faf2bf5da30f3f15	exact
+style	styles/chicago-notes-bibliography-subsequent-author-title-17th-edition.csl	http://www.zotero.org/styles/chicago-notes-bibliography-subsequent-author-title-17th-edition	turabian-fullnote-8	2025-02-09T00:00:00+00:00	1aaf551f864d50e875a617b4faf2bf5da30f3f15	exact
+locale	locales/af-ZA.xml	af-ZA		2025-10-16T03:08:07+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/ar.xml	ar		2026-03-09T22:17:05+01:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/bal-PK.xml	bal-PK		2025-10-18T05:53:07+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/bg-BG.xml	bg-BG		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/brh-PK.xml	brh-PK		2025-10-18T05:53:06+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/ca-AD.xml	ca-AD		2025-10-16T03:08:07+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/cs-CZ.xml	cs-CZ		2026-02-04T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/cy-GB.xml	cy-GB		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/da-DK.xml	da-DK		2026-04-29T00:00:00+00:00	0b721415e29768da02ac3a318732da5a12bfa829	exact
+locale	locales/de-AT.xml	de-AT		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/de-CH.xml	de-CH		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/de-DE.xml	de-DE		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/el-GR.xml	el-GR		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/en-GB.xml	en-GB		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/en-US.xml	en-US		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/es-CL.xml	es-CL		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/es-ES.xml	es-ES		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/es-MX.xml	es-MX		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/et-EE.xml	et-EE		2026-04-29T00:00:00+00:00	8d9e85a62608a7c12b38a26c0b7eb52759ffcf6a	exact
+locale	locales/eu.xml	eu		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/fa-IR.xml	fa-IR		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/fi-FI.xml	fi-FI		2025-10-16T03:24:01+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/fr-CA.xml	fr-CA		2025-10-18T05:52:36+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/fr-FR.xml	fr-FR		2025-10-18T05:52:35+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/gl-ES.xml	gl-ES		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/he-IL.xml	he-IL		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/hi-IN.xml	hi-IN		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/hr-HR.xml	hr-HR		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/hu-HU.xml	hu-HU		2026-03-29T11:35:00+00:00	ea342150ba6bee8bf5bf2167b66b74876aa79068	exact
+locale	locales/hy-AM.xml	hy-AM		2026-01-31T12:37:21+04:00	fc02bc2ae89d081cfa9d3118c2a52b4e659d4e4d	exact
+locale	locales/id-ID.xml	id-ID		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/is-IS.xml	is-IS		2025-10-16T03:24:01+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/it-IT.xml	it-IT		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/ja-JP.xml	ja-JP		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/km-KH.xml	km-KH		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/ko-KR.xml	ko-KR		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/la.xml	la		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/lij-IT.xml	lij-IT		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/lt-LT.xml	lt-LT		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/lv-LV.xml	lv-LV		2026-01-10T00:00:00+00:00	906f091ee9da9f07e9dbcd817c1b8c513c526373	exact
+locale	locales/mn-MN.xml	mn-MN		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/ms-MY.xml	ms-MY		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/nb-NO.xml	nb-NO		2026-02-04T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/nl-NL.xml	nl-NL		2026-01-10T00:00:00+00:00	d81e2014647ef27102f69fde265945f6d440f553	exact
+locale	locales/nn-NO.xml	nn-NO		2026-02-04T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/pa-PK.xml	pa-PK		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/pl-PL.xml	pl-PL		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/pt-BR.xml	pt-BR		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/pt-PT.xml	pt-PT		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/ro-RO.xml	ro-RO		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/ru-RU.xml	ru-RU		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/sk-SK.xml	sk-SK		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/sl-SI.xml	sl-SI		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/sr-Cyrl-RS.xml	sr-Cyrl-RS		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/sr-Latn-RS.xml	sr-Latn-RS		2025-10-18T05:50:06+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/sv-SE.xml	sv-SE		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/th-TH.xml	th-TH		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/tl-PH.xml	tl-PH		2026-02-01T00:00:00+00:00	83be573f9d8da4cf3e60a5c28423e4af0a43cd38	exact
+locale	locales/tr-TR.xml	tr-TR		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/uk-UA.xml	uk-UA		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+locale	locales/vi-VN.xml	vi-VN		2025-10-16T03:24:00+00:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/zh-CN.xml	zh-CN		2025-10-16T11:24:00+08:00	90376eecd11f2a15cf9cac284e3e8334e5e1b78a	exact
+locale	locales/zh-TW.xml	zh-TW		2026-01-10T00:00:00+00:00	938c09c164a60b3cfeabe61089f1bf4c3ea6a4ed	exact
+json	locales.json				3c8a3b3d9252e623d48a531873af1a766b6fb6aa	exact
