@@ -2,6 +2,7 @@
 //! 
 //! This crate provides several core data structures:
 //! 
+//! - Shortest edit scripts ([`diff`]) - Myers' matched pairs and changed runs between two slices, under a budget
 //! - Generation-swept maps ([`gen_map`]) - A cache map that drops what the last two compiles left untouched, under a byte ceiling
 //! - Interval maps ([`interval`]) - Disjoint half-open integer ranges mapped to values
 //! - Ring buffers ([`ring`]) - Fixed-size circular buffers with position tracking
@@ -20,6 +21,7 @@
 //! appropriate.
 //!
 #![forbid(unsafe_code)]
+pub mod diff;
 pub mod digraph;
 pub mod gen_map;
 pub mod hll;
