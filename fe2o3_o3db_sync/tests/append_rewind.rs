@@ -202,3 +202,41 @@ fn a_failed_cut_back_stops_the_store() -> Outcome<()> {
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }
+
+/// A failed cut back whose fault record cannot be written is still recorded, by the refusal
+/// marker, which carries the cut; clearing the marker folds it into the record, and the next open
+/// cuts the pair back (2026-10-11, rebased onto durable-mark re-QA round 2 F1, F2).
+#[test]
+fn a_failed_cut_back_is_held_by_the_marker_alone() -> Outcome<()> {
+    let _g = lock();
+    let Start { root, c, db, dat, ind, rec, dlen, ilen } =
+        res!(start("./test_db_append_rewind_marker"));
+    hooks::set_fault_record_fails_at(1);
+    hooks::set_cut_back_failure(true);
+    hooks::set_write_tear(FileType::Data, Some(rec / 2));
+    let failed = put(&db, "k2", 3);
+    hooks::set_cut_back_failure(false);
+    hooks::set_fault_record_fails_at(0);
+    assert!(failed.is_err(), "a torn write was confirmed");
+    let report = res!(db.api().fault().ok_or_else(|| err!(
+        "A torn append that could not be cut back did not stop the store."; Test)));
+    assert!(report.record.is_none(), "a record that failed to be written is named");
+    assert!(report.refusal.is_some(), "the refusal marker was not written");
+    assert!(report.recorded(), "a stop held by the marker says it is not recorded");
+    let cut = res!(report.cuts.iter().find(|cut| cut.data == dat && cut.data_upto == dlen
+        && cut.index == ind && cut.index_upto == ilen).ok_or_else(|| err!(
+        "The fault does not cut the pair to ({}, {}): {:?}", dlen, ilen, report.cuts; Test)));
+    let marker = res!(fs::read_to_string(Refusal::path(&root)));
+    assert!(marker.lines().any(|l| l.starts_with(&cut.line())),
+        "the refusal marker does not carry the cut {:?}: {:?}", cut.line(), marker);
+    let _ = db.close();
+    assert!(res!(Refusal::clear(&root)));
+    let db = res!(open(&root, &c, false));
+    assert_eq!(size(&dat), dlen, "the open did not cut the torn bytes off the data file");
+    assert_eq!(res!(reads(&db, "k0")), Some(val(1)));
+    assert_eq!(res!(reads(&db, "k1")), Some(val(2)));
+    assert_eq!(res!(reads(&db, "k2")), None, "the torn record was served");
+    res!(db.close());
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}

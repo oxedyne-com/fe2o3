@@ -709,7 +709,8 @@ impl<
                 Ok(start)
             },
             Some(e) => Err(err!(e,
-                "{}: Appending {} bytes to {:?} file of live pair {} at offset {} failed after                 {} bytes{}.", self.ozid(), vlen, typ, self.lpair.fnum, before,
+                "{}: Appending {} bytes to {:?} file of live pair {} at offset {} failed after \
+                {} bytes{}.", self.ozid(), vlen, typ, self.lpair.fnum, before,
                 written, if new_file { ", in a file just started" } else { "" };
                 IO, File, Write)),
         }
