@@ -678,6 +678,27 @@ impl<
             }
         }
     
+        // A data file whose index stands, with records in it, was lost: serving the zone without
+        // it answers its keys "not found", so the open is refused, naming it, as a missing file in
+        // doubt is (QA r2 F4).  A lost index is not refused, since it is rebuilt from the data, and
+        // nor is an empty index, which names no record: a rollover abandoned with nothing written
+        // can leave one.  Collection removes the index of a file before its data, so a crash
+        // between the two leaves a data file, rebuilt and collected again, never an index alone.
+        for shard in &shards {
+            for (fnum, st) in shard.map() {
+                if matches!(st.present(), Present::Solo(FileType::Index)) && st.get_index_file_size() > 0 {
+                    let data = self.zdir().dir.join(ZoneDir::relative_file_path(&FileType::Data, *fnum));
+                    return Err(err!(
+                        "{}: Zone {}: the data file {:?} is missing while its index, of {} bytes, \
+                        stands, so the keys it holds would read as absent.  The file was lost, or \
+                        left behind when the store was moved or restored: put it back, or restore \
+                        the whole store.  The open is refused.",
+                        self.ozid(), self.zind(), data, st.get_index_file_size();
+                        Init, File, Missing));
+                }
+            }
+        }
+
         // Sort incomplete files by number descending.
         incomplete_files.sort_by(|a, b| b.0.cmp(&a.0));
 

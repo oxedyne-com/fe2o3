@@ -497,7 +497,8 @@ impl<
         if lpair.dat.size > 0 || lpair.ind.size > 0 {
             return; // not new after all, so not this writer's to remove
         }
-        for path in [&lpair.dat.path, &lpair.ind.path] {
+        // The index first, as collection removes a pair.
+        for path in [&lpair.ind.path, &lpair.dat.path] {
             if let Err(e) = std::fs::remove_file(path) {
                 warn!(sync_log::stream(),
                     "{}: Could not remove {:?}, created for a rollover that did not happen: {}",

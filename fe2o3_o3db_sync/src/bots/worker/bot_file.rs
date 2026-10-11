@@ -786,7 +786,10 @@ impl<
                 // [18.2] Just delete the data file and its index file if it has no current data.
                 debug!(sync_log::stream(), "{}: Automated garbage collection for file {}", self_id, fnum);
                 let gone = res!(self.states().get_state(fnum)).old_rids();
-                for ftyp in [FileType::Data, FileType::Index] {
+                // The index goes first, so a crash between the two leaves a data file, which the
+                // next open rebuilds and collects again, never an index whose data is gone, which
+                // the open refuses.
+                for ftyp in [FileType::Index, FileType::Data] {
                     let mut path = self.zdir().dir.clone();
                     path.push(ZoneDir::relative_file_path(&ftyp, fnum));
                     if path.is_file() {
