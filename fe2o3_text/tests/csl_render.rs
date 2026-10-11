@@ -62,12 +62,15 @@ mod typst {
 		item::{
 			ChunkKind,
 			Chunked,
+			DateVal,
 			Item,
 		},
 		node::{
 			Meta,
 			Node,
 		},
+		page::PageVal,
+		person::Person,
 		render::{
 			self,
 			Cite,
@@ -93,6 +96,12 @@ mod typst {
 		publisher:	Option<&'static str>,
 		doi:		Option<&'static str>,
 		url:		Option<&'static str>,
+		vol_title:	Option<&'static str>,
+		also:		Option<&'static str>,	// a second CSL type the entry matches
+		author:		Vec<Person>,
+		editor:		Vec<Person>,
+		issued:		Option<DateVal>,
+		page:		Option<&'static str>,
 	}
 
 	impl Item for Fx {
@@ -100,6 +109,7 @@ mod typst {
 			match var {
 				"title"			=> Some(self.title.clone()),
 				"container-title"	=> self.container.map(Chunked::normal),
+				"volume-title"		=> self.vol_title.map(Chunked::normal),
 				"publisher"		=> self.publisher.map(Chunked::normal),
 				"DOI"			=> self.doi.map(Chunked::normal),
 				"URL"			=> self.url.map(Chunked::normal),
@@ -117,6 +127,33 @@ mod typst {
 		fn csl_type(&self) -> &str {
 			self.ty
 		}
+		fn is_type(&self, t: &str) -> bool {
+			self.ty == t || self.also == Some(t)
+		}
+		fn page(&self) -> Option<PageVal> {
+			self.page.map(PageVal::from_str)
+		}
+		fn names(&self, var: &str) -> &[Person] {
+			match var {
+				"author"	=> &self.author,
+				"editor"	=> &self.editor,
+				_		=> &[],
+			}
+		}
+		fn date(&self, var: &str) -> Option<DateVal> {
+			match var {
+				"issued"	=> self.issued,
+				_		=> None,
+			}
+		}
+	}
+
+	fn p(family: &str, given: &str) -> Person {
+		Person::new(family, Some(given))
+	}
+
+	fn ymd(year: i32, month: Option<u8>, day: Option<u8>) -> Option<DateVal> {
+		Some(DateVal { year, month, day, ..DateVal::default() })
 	}
 
 	fn chunks(parts: &[(ChunkKind, &str)]) -> Chunked {
@@ -157,6 +194,66 @@ mod typst {
 					(ChunkKind::Normal, " and other things"),
 				]),
 				container: Some("Annals of Maths"), volume: Some("7"),
+				..Fx::default()
+			},
+			// biblatex 0.12 reads "Doe, Jr., Jane" with the suffix, and hayagriva sets no comma
+			// before it (`comma_suffix: false`) for every BibTeX name.
+			Fx {
+				key: "n1", ty: "article-journal", title: Chunked::normal("Names in Order"),
+				container: Some("Journal of Names"), volume: Some("3"), page: Some("123-129"),
+				author: vec![
+					p("Smith", "John"),
+					p("Beethoven", "Ludwig").with_particle("van"),
+					p("Doe", "Jane").with_suffix("Jr."),
+				],
+				issued: Some(DateVal::year(2020)),
+				..Fx::default()
+			},
+			Fx {
+				key: "n2", ty: "book", title: Chunked::normal("Annual Report"),
+				publisher: Some("Acme Press"),
+				author: vec![Person::literal("Acme Corporation")],
+				issued: ymd(2018, Some(3), Some(15)),
+				..Fx::default()
+			},
+			Fx {
+				key: "n3", ty: "article-journal", title: Chunked::normal("Eight Authors"),
+				container: Some("Many Hands"), volume: Some("9"), issue: Some("2"), page: Some("1001-1012"),
+				author: vec![
+					p("Alpha", "Ann"), p("Beta", "Bob"), p("Gamma", "Gus"), p("Delta", "Dan"),
+					p("Epsilon", "Eve"), p("Zeta", "Zed"), p("Eta", "Ed"), p("Theta", "Tom"),
+				],
+				// `2019/2021` reaches hayagriva as its end date.
+				issued: Some(DateVal::year(2021)),
+				..Fx::default()
+			},
+			// An @inproceedings is an article whose parent is the proceedings, whose title hayagriva
+			// answers for both container-title and volume-title.
+			Fx {
+				key: "n4", ty: "paper-conference", title: Chunked::normal("Approximate Things"),
+				container: Some("Proceedings of Circa"), vol_title: Some("Proceedings of Circa"),
+				page: Some("45-47"),
+				author: vec![p("Müller", "Hans-Peter"), p("Cruz", "María").with_particle("de la")],
+				editor: vec![p("Editor", "Edith")],
+				issued: Some(DateVal { year: 2015, approximate: true, ..DateVal::default() }),
+				..Fx::default()
+			},
+			// A @misc with a URL matches both webpage and document in hayagriva.
+			Fx {
+				key: "n5", ty: "webpage", also: Some("document"), title: Chunked::normal("A Month Only"),
+				url: Some("https://example.org/m"),
+				author: vec![p("O'Neil", "Kate")],
+				issued: ymd(2021, Some(7), None),
+				..Fx::default()
+			},
+			Fx {
+				key: "n6", ty: "article-journal", title: Chunked::normal("Twenty-One Authors"),
+				container: Some("Crowd Science"), volume: Some("1"), page: Some("321-328"),
+				author: (1..=21).map(|i| {
+					let given = format!("A{}", (b'a' + (i as u8 - 1)) as char);
+					Person::new(&format!("A{:02}", i), Some(&given))
+				}).collect(),
+				issued: Some(DateVal::year(2017)),
 				..Fx::default()
 			},
 		]
@@ -229,7 +326,7 @@ mod typst {
 		let mut matched = 0;
 		let mut report = String::new();
 		for (i, fx) in fixtures().iter().enumerate() {
-			let cite = Cite { number: Some(i + 1), ..Cite::default() };
+			let cite = Cite { number: Some(i + 1), first: true, ..Cite::default() };
 			let nodes = res!(render::bibliography_entry(&style, &chain, fx, &cite, Some("en"))
 				.ok_or_else(|| err!("{} has no bibliography.", style_name; Missing)));
 			let got = entry_html(nodes, align);
@@ -247,19 +344,25 @@ mod typst {
 
 	#[test]
 	fn test_ieee_as_typst() -> Outcome<()> {
-		assert_eq!(res!(check("ieee")), 4);
+		assert_eq!(res!(check("ieee")), 10);
 		Ok(())
 	}
 
 	#[test]
 	fn test_apa_as_typst() -> Outcome<()> {
-		assert_eq!(res!(check("apa")), 4);
+		assert_eq!(res!(check("apa")), 10);
+		Ok(())
+	}
+
+	#[test]
+	fn test_american_medical_association_as_typst() -> Outcome<()> {
+		assert_eq!(res!(check("american-medical-association")), 10);
 		Ok(())
 	}
 
 	#[test]
 	fn test_chicago_author_date_as_typst() -> Outcome<()> {
-		assert_eq!(res!(check("chicago-author-date")), 4);
+		assert_eq!(res!(check("chicago-author-date")), 10);
 		Ok(())
 	}
 }

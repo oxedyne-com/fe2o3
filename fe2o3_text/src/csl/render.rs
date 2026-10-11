@@ -1602,13 +1602,18 @@ impl<'a, I: Item> Ctx<'a, I> {
 				sub = (sub.0 || p, sub.1.merge(i));
 			}
 		}
-		// A name element showing none of an et-al list counts as empty.
-		if let Some(name) = &n.name {
-			if let (Some(min), Some(0)) = (name.opts.et_al_min, name.opts.et_al_use_first) {
+		// A name element showing none of an et-al list counts as empty. So, as in hayagriva, does
+		// a `names` with children but no `name`: AMA's `<names variable="editor"><label/></names>`
+		// prints nothing, though CSL would print the names with an implicit `name`.
+		match &n.name {
+			Some(name) => if let (Some(min), Some(0)) = (name.opts.et_al_min, name.opts.et_al_use_first) {
 				if counts.iter().all(|&c| c >= min as usize) {
 					empty = true;
 				}
-			}
+			},
+			None => if n.et_al.is_some() || n.label.is_some() || n.substitute.is_some() {
+				empty = true;
+			},
 		}
 		self.w.suppressing = s;
 		let visible = !empty || sub.0;
