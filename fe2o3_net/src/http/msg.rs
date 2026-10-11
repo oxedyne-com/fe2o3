@@ -329,6 +329,27 @@ impl HttpMessage {
         self.header.fields.insert(nam, val, ord)
     }
 
+    /// The header fields as `log` writes them, one line per value. A credential's value
+    /// (`Cookie`, `Set-Cookie`, `Authorization` and their kin) is never written, at any level:
+    /// only its length, so a log still shows that one was sent.
+    pub fn header_log_lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (k, header_field_values) in self.header.fields.iter() {
+            for header_field_value in header_field_values {
+                let prefix = match header_field_value {
+                    HeaderFieldValue::Generic(_) => "   ",
+                    _ => " > ",
+                };
+                match k.is_credential() {
+                    true    => out.push(fmt!("{}{}: [redacted, {} bytes]",
+                        prefix, k, header_field_value.to_string().len())),
+                    false   => out.push(fmt!("{}{}: {}", prefix, k, header_field_value)),
+                }
+            }
+        }
+        out
+    }
+
     pub fn log(&self, log_level: LogLevel) {
         if log_level >= LogLevel::Trace {
             //Header.
@@ -344,14 +365,8 @@ impl HttpMessage {
                     false
                 },
             };
-            for (k, header_field_values) in self.header.fields.iter() {
-                for header_field_value in header_field_values {
-                    let prefix = match header_field_value {
-                        HeaderFieldValue::Generic(_) => "   ",
-                        _ => " > ",
-                    };
-                    trace!("{}{}: {}", prefix, k, header_field_value);
-                }
+            for line in self.header_log_lines() {
+                trace!("{}", line);
             }
 
             // Body. A body on disk is never read to be logged: the point of
