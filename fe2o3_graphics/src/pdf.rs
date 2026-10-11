@@ -380,6 +380,17 @@ fn pdf_text_string(s: &str) -> String {
 	}
 }
 
+/// Opens a `/Span` marked-content sequence whose `/ActualText` is `text`, in UTF-16BE hex with a byte-order
+/// mark. A glyph's `/ToUnicode` entry holds one text, so a glyph shown for another (every missing character
+/// drawn as `.notdef`, say) is bracketed by this and `EMC` for the extracted text to be the real one.
+fn actual_text(s: &mut String, text: &str) {
+	s.push_str("/Span <</ActualText <FEFF");
+	for u in text.encode_utf16() {
+		s.push_str(&fmt!("{:04X}", u));
+	}
+	s.push_str(">>> BDC\n");
+}
+
 /// Accumulates pages and writes them out as one PDF file.
 #[derive(Clone, Debug, Default)]
 pub struct PdfWriter {
@@ -921,7 +932,7 @@ impl<W: Write> PdfStream<W> {
 					s.push_str("S\n");
 				},
 				Draw::Glyph { outline, x, y, size, adv, colour, text } => {
-					let (font_idx, code) = self.assign_glyph(outline, *adv, *size, text);
+					let (font_idx, code, other) = self.assign_glyph(outline, *adv, *size, text);
 					let name = fmt!("F{}", font_idx);
 					let obj = self.fonts[font_idx].obj;
 					if !used.iter().any(|(n, _)| n == &name) {
@@ -934,16 +945,30 @@ impl<W: Write> PdfStream<W> {
 					// page in y, and this `[1 0 0 -1 x y]` flips the text within it, so the glyph reads upright.
 					// A per-glyph matrix means the font's advance never moves the pen -- the offset is exact.
 					s.push_str(&fmt!("1 0 0 -1 {} {} Tm\n", numf32(*x), numf32(*y)));
+					if other {
+						actual_text(&mut s, text);
+					}
 					s.push_str(&fmt!("<{:02x}> Tj\n", code));
+					if other {
+						s.push_str("EMC\n");
+					}
 				},
 				Draw::Text { font, gid, x, y, size, colour, text } => {
-					let idx		= self.assign_text(font, *gid, text);
+					let (idx, other) = self.assign_text(font, *gid, text);
 					let name	= fmt!("C{}", idx);
 					let obj		= self.cid_fonts[idx].obj;
 					if !used.iter().any(|(n, _)| n == &name) {
 						used.push((name.clone(), obj));
 					}
 					let colour = res!(inks.get(*colour));
+					if other {
+						// Shown alone in its span, with its own text matrix; the next glyph starts a new run.
+						ts.flush(&mut s);
+						ts.begin(&mut s, translucent, &mut cur_alpha, colour, &name, *size);
+						actual_text(&mut s, text);
+						s.push_str(&fmt!("1 0 0 -1 {} {} Tm\n<{:04X}> Tj\nEMC\n", numf32(*x), numf32(*y), gid));
+						continue;
+					}
 					let same_state = ts.open
 						&& ts.colour == Some(colour)
 						&& ts.font.as_ref().map_or(false, |(n, z)| n == &name && z == size);
@@ -991,8 +1016,9 @@ impl<W: Write> PdfStream<W> {
 	}
 
 	/// Records glyph `gid` of an embedded font as shown, reserving the font's `Type0` dictionary number
-	/// the first time the program is met. The first non-empty source text a glyph arrives with is kept.
-	fn assign_text(&mut self, font: &Arc<FontProgram>, gid: u16, text: &str) -> usize {
+	/// the first time the program is met. The first non-empty source text a glyph arrives with is kept for
+	/// its `/ToUnicode` entry; the flag says this show's text is another, so it needs an `/ActualText`.
+	fn assign_text(&mut self, font: &Arc<FontProgram>, gid: u16, text: &str) -> (usize, bool) {
 		let idx = match self.cid_slots.get(&font.key()) {
 			Some(&i)	=> i,
 			None		=> {
@@ -1005,22 +1031,34 @@ impl<W: Write> PdfStream<W> {
 			},
 		};
 		let entry = self.cid_fonts[idx].used.entry(gid).or_default();
-		if entry.is_empty() && !text.is_empty() {
+		if entry.is_empty() {
 			*entry = text.to_string();
+			return (idx, false);
 		}
-		idx
+		(idx, !text.is_empty() && entry != text)
 	}
 
 	/// Assigns a glyph its Type-3 font index and code, storing the outline once. The key is the content of
 	/// the outline's path operators, so the same shape drawn by any face or size shares one `CharProc`. A
 	/// new glyph takes the next code; each font holds 256 codes, and crossing that boundary reserves a
-	/// fresh font-dictionary object number from the extra-object counter.
-	fn assign_glyph(&mut self, outline: &Path, adv: f32, size: f32, text: &str) -> (usize, u8) {
+	/// fresh font-dictionary object number from the extra-object counter. As for [`assign_text`], the flag
+	/// says a known glyph is shown for a text other than the one its code maps to.
+	///
+	/// [`assign_text`]: Self::assign_text
+	fn assign_glyph(&mut self, outline: &Path, adv: f32, size: f32, text: &str) -> (usize, u8, bool) {
 		let mut ops = String::new();
 		path_ops(&mut ops, outline);
 		let key = fnv1a(ops.as_bytes());
-		if let Some(&slot) = self.glyph_slots.get(&key) {
-			return slot;
+		if let Some(&(font_idx, code)) = self.glyph_slots.get(&key) {
+			let mut other = false;
+			if let Some(g) = self.fonts.get_mut(font_idx).and_then(|f| f.glyphs.get_mut(code as usize)) {
+				if g.text.is_empty() {
+					g.text = text.to_string();
+				} else {
+					other = !text.is_empty() && g.text != text;
+				}
+			}
+			return (font_idx, code, other);
 		}
 		let seq			= self.glyph_slots.len();
 		let font_idx	= seq / 256;
@@ -1040,7 +1078,7 @@ impl<W: Write> PdfStream<W> {
 		let wx = if size != 0.0 { (adv / size * GLYPH_UPM).round() as i64 } else { 0 };
 		self.fonts[font_idx].glyphs.push(GlyphEntry { ops, wx, bbox, text: text.to_string() });
 		self.glyph_slots.insert(key, (font_idx, code));
-		(font_idx, code)
+		(font_idx, code, false)
 	}
 
 	/// Writes the Type-3 fonts: for each, its `CharProc` glyph streams, a `/ToUnicode` CMap, and the font
@@ -2178,6 +2216,41 @@ mod tests {
 			"the widths of the three glyphs, found: {}", text);
 		assert!(text.contains("<0024> <0041>"), "the ToUnicode maps glyph 36 to 'A'");
 		assert!(res!(xref_lands(&bytes)) > 8, "the font objects are in the xref");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_glyph_shown_for_a_second_text_carries_actual_text_15b() -> Outcome<()> {
+		// A face without CJK glyphs maps every missing character to `.notdef`, gid 0. The ToUnicode CMap can
+		// map that glyph to only one text, so each later show of it for different text is wrapped in a
+		// `/Span` marked-content sequence whose `/ActualText` gives the real characters, as Typst does. The
+		// first show, and a repeat of the text already mapped, need no span.
+		let data = Arc::new(include_bytes!("../../fe2o3_font/fonts/DejaVuSans.ttf").to_vec());
+		let prog = match res!(FontProgram::parse(data)) {
+			Some(p)	=> Arc::new(p),
+			None	=> return Err(err!("DejaVu Sans should be embeddable"; Test)),
+		};
+		let mut page = PdfPage::new(200.0, 200.0);
+		for (i, t) in ["\u{5C71}", "\u{6771}", "\u{5C71}", "\u{5927}"].iter().enumerate() {
+			page.text(prog.clone(), 0, 10.0 + 12.0 * i as f32, 50.0, 12.0, Rgba::BLACK, (*t).into());
+		}
+		// The Type-3 path: one outline, so one code, shown for two texts.
+		page.glyph(res!(tri(0.0)), 10.0, 80.0, 12.0, 8.0, Rgba::BLACK, "O".into());
+		page.glyph(res!(tri(0.0)), 20.0, 80.0, 12.0, 8.0, Rgba::BLACK, "Q".into());
+		let mut w = PdfWriter::new();
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(text.contains("<0000> <5C71>"), "the ToUnicode keeps the first text of gid 0");
+		assert!(text.contains("/Span <</ActualText <FEFF6771>>> BDC\n"), "the second text is spanned: {}", text);
+		assert!(text.contains("/Span <</ActualText <FEFF5927>>> BDC\n"), "and the fourth: {}", text);
+		assert!(!text.contains("<FEFF5C71>"), "the mapped text needs no span");
+		assert!(text.contains("<00> <004F>"), "the Type-3 code keeps its first text");
+		assert!(text.contains("/Span <</ActualText <FEFF0051>>> BDC\n"), "its second text is spanned");
+		assert_eq!(text.matches(" BDC\n").count(), 3, "three spans");
+		assert_eq!(text.matches("EMC\n").count(), 3, "each closed");
+		let (bt, et) = (text.matches("BT\n").count(), text.matches("ET\n").count());
+		assert_eq!(bt, et, "text objects balanced");
 		Ok(())
 	}
 
