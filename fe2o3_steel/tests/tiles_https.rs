@@ -95,7 +95,7 @@ fn data(rel: &str) -> PathBuf {
 
 /// An empty database map of the type the server holds, taken from the constructor's own
 /// signature, since the tile route never reaches a database.
-fn no_dbs<T>(_: fn(&Path, &[u8]) -> Outcome<T>)
+fn no_dbs<T>(_: fn(&Path, &[u8], bool) -> Outcome<T>)
     -> Arc<RwLock<HashMap<String, (Arc<RwLock<T>>, id::Uid)>>>
 {
     Arc::new(RwLock::new(HashMap::new()))

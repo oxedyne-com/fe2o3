@@ -67,7 +67,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 0x82, 0x61, 0x0f, 0x17, 0x24, 0xc4, 0x0d, 0xd2,
             ];
 
-            let mut db = res!(context::new_db(&db_root, &db_enc_key));
+            let mut db = res!(context::new_db(&db_root, &db_enc_key, false));
 
             // Since we are testing, delete all existing data and index files.
             let files = res!(db.find_all_data_files());
@@ -120,6 +120,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 access_log:             true,
                 permissions_policy:     None,
                 admin_dashboard:        true,
+                db_sync_on_write:       false,
             };
 
             let web_handler: AppWebHandler<HashMap<String, OsPath>> = AppWebHandler::new(

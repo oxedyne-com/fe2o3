@@ -266,8 +266,9 @@ impl AppShellContext {
             info!("Vhost '{}' has a database at {:?}; it will be opened on unseal.",
                 primary_lc, db_dir);
             db_specs.push(VhostDbSpec {
-                vhost_key:  primary_lc,
+                vhost_key:      primary_lc,
                 db_dir,
+                sync_on_write:  vh.db_sync_on_write,
             });
         }
 
@@ -1024,7 +1025,7 @@ async fn open_dbs_on_unseal(
         for spec in &db_specs {
             info!("Starting database for vhost '{}' at {:?}...",
                 spec.vhost_key, spec.db_dir);
-            let mut db = res!(new_db(&spec.db_dir, &enc_key));
+            let mut db = res!(new_db(&spec.db_dir, &enc_key, spec.sync_on_write));
             // Label is the vhost's canonical name so log output
             // disambiguates multi-vhost deployments.
             let label = fmt!("db_{}", spec.vhost_key);

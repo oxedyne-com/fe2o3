@@ -95,7 +95,7 @@ struct Seen {
     body:   String,
 }
 
-fn no_dbs<T>(_: fn(&Path, &[u8]) -> Outcome<T>)
+fn no_dbs<T>(_: fn(&Path, &[u8], bool) -> Outcome<T>)
     -> Arc<RwLock<HashMap<String, (Arc<RwLock<T>>, id::Uid)>>>
 {
     Arc::new(RwLock::new(HashMap::new()))

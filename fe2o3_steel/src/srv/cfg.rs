@@ -1162,6 +1162,11 @@ pub struct VhostConfig {
     // listener (`admin_local_port`) names no vhost and is untouched. Defaults to `true`, which is
     // what every config written before the field existed says.
     pub admin_dashboard:        bool,
+    // Whether this vhost's Ozone fsyncs every write before acknowledging it, rather than on the
+    // library's 200 ms interval. A store whose every write is an author's edit (a wiki, say) sets
+    // it, trading write latency for losing nothing on a power cut. Defaults to `false`, which is
+    // what every config written before the field existed says, and is ignored with no `db_dir_rel`.
+    pub db_sync_on_write:       bool,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -1210,6 +1215,7 @@ impl Default for VhostConfig {
             tiles:                  None,
             access_log:             true,
             admin_dashboard:        true,
+            db_sync_on_write:       false,
         }
     }
 }
@@ -1572,6 +1578,13 @@ impl VhostConfig {
                 "VhostConfig: 'admin_dashboard' must be a boolean.";
                 Invalid, Input, Mismatch)),
         };
+        let db_sync_on_write = match m.get(&dat!("db_sync_on_write")) {
+            Some(Dat::Bool(b)) => *b,
+            None => false,
+            _ => return Err(err!(
+                "VhostConfig: 'db_sync_on_write' must be a boolean.";
+                Invalid, Input, Mismatch)),
+        };
         // A tile request names where its viewer looked, so a vhost serving tiles may not keep
         // even the connection lines that would pair a viewer's address with the time.
         if tiles.is_some() && access_log {
@@ -1602,6 +1615,7 @@ impl VhostConfig {
             tiles,
             access_log,
             admin_dashboard,
+            db_sync_on_write,
         })
     }
 

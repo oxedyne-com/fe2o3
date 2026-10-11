@@ -279,7 +279,7 @@ async fn drive() -> Outcome<()> {
     // Unsealed: the database the map now holds reaches the handler.
     let db_dir = base.join("db");
     res!(std::fs::create_dir_all(&db_dir), IO, File);
-    let db = res!(context::new_db(&db_dir, &[7u8; 32]));
+    let db = res!(context::new_db(&db_dir, &[7u8; 32], false));
     {
         let mut g = res!(dbs.write().map_err(|_| err!("The db map lock is poisoned."; Test)));
         g.insert(HOST.to_string(), (Arc::new(RwLock::new(db)), id::Uid::default()));
