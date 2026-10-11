@@ -4,7 +4,11 @@
 //! The target is Typst 0.15.1's behaviour, which is hayagriva 0.10.1's, and where hayagriva departs
 //! from the CSL specification this follows hayagriva. Each departure is noted where it is made.
 pub mod archive;
+pub mod case;
+mod case_words;
+pub mod item;
 pub mod locale;
+pub mod node;
 pub mod style;
 
 pub use locale::{
