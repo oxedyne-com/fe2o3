@@ -506,7 +506,8 @@ fn run_text_layer(tsel: &mut TselLayer, bx: Sp, by: Sp, height: Sp, shaped: &Sha
 /// spaces, and a collapsed character takes no position from an `x` list, so a space inside a span would
 /// push every later position one character along. Bare, it collapses exactly as the old
 /// one-span-per-glyph layer's did, and the text a copy or a search reads is the same. The later
-/// characters of a ligature are bare too, flowing on from its first as they did there.
+/// characters of a glyph -- a ligature's tail, a mark, a variation selector -- close its span with no
+/// position of their own, flowing on from the first and kept in its cluster as they were there.
 #[derive(Clone, Debug, Default)]
 pub struct TselLayer {
 	buf:	String,
@@ -530,6 +531,7 @@ impl TselLayer {
 		let mut txt		= String::new();	// the open span's characters
 		let mut line	= self.line;
 		let mut any		= false;
+		let mut ws		= true;				// the last character written collapses a space after it
 		let close = |out: &mut String, xs: &mut String, txt: &mut String| {
 			if !xs.is_empty() {
 				out.push_str(&fmt!("<tspan x=\"{}\">{}</tspan>", xs, xml_escape(txt)));
@@ -546,8 +548,37 @@ impl TselLayer {
 			any = true;
 			let at	= (base_y - gy, size);
 			let x	= num2(base_x + gx);
+			// The glyph's position goes to its first addressable character, as an `x` on a span of the
+			// whole text did: a space that collapses into the one before takes none, so a cluster such
+			// as a space and a word joiner places the joiner, not the space.
+			let mut placed	= false;
+			let mut tail	= false;	// a later character joined the open span, which closes after the glyph
+			let n = text.chars().count();
 			for (k, ch) in text.chars().enumerate() {
-				if matches!(ch, ' ' | '\t' | '\n' | '\r') || k > 0 {
+				let space = matches!(ch, ' ' | '\t' | '\n' | '\r');
+				if placed {
+					// A later character of the glyph -- a ligature's tail, a mark, a variation selector --
+					// takes no position and flows on from the one before. It stays in the open span, last
+					// and with no `x`, so the browser keeps it in its base's cluster as the old layer did.
+					if !space && !xs.is_empty() {
+						txt.push(ch);
+						tail = true;
+					} else {
+						close(&mut out, &mut xs, &mut txt);
+						out.push_str(&xml_escape(&ch.to_string()));
+					}
+					ws = space;
+					continue;
+				}
+				if space && ws {
+					close(&mut out, &mut xs, &mut txt);
+					out.push_str(&xml_escape(&ch.to_string()));
+					continue;
+				}
+				placed	= true;
+				ws		= space;
+				// A lone addressable space stays bare: nothing in its glyph flows on from it.
+				if space && k + 1 == n {
 					close(&mut out, &mut xs, &mut txt);
 					out.push_str(&xml_escape(&ch.to_string()));
 					continue;
@@ -560,6 +591,11 @@ impl TselLayer {
 					out.push_str(&fmt!("<tspan y=\"{}\" font-size=\"{}\">", num2(at.0), num2(at.1)));
 					line = Some(at);
 				}
+				if space {
+					// An addressable space leading a longer cluster opens a span of its own at the glyph's
+					// position, and the rest of the cluster flows on from it.
+					close(&mut out, &mut xs, &mut txt);
+				}
 				for _ in 0..ch.len_utf16() {
 					if !xs.is_empty() {
 						xs.push(' ');
@@ -570,7 +606,7 @@ impl TselLayer {
 			}
 			// A browser that counts an astral character once, not as its two UTF-16 units, would read
 			// every later position one along; a fresh span after it keeps that inside this glyph.
-			if text.chars().any(|c| c.len_utf16() > 1) {
+			if tail || text.chars().any(|c| c.len_utf16() > 1) {
 				close(&mut out, &mut xs, &mut txt);
 			}
 		}
@@ -679,9 +715,9 @@ mod tests {
 	}
 
 	/// The selectable layer's text is what the old one-span-per-glyph layer held, character for
-	/// character, so a copy or a search reads the same: spaces and a ligature's later characters stand
-	/// bare between spans, each span's `x` has one position per UTF-16 unit, an astral character closes its
-	/// span, and a line is one `<tspan y font-size>` the next run carries on in.
+	/// character, so a copy or a search reads the same: spaces stand bare between spans, a ligature's
+	/// later characters end its span with no position, each other character has one per UTF-16 unit, an
+	/// astral character closes its span, and a line is one `<tspan y font-size>` the next run carries on in.
 	#[test]
 	fn the_selectable_layer_keeps_its_text_and_one_position_per_character() -> Outcome<()> {
 		let glyphs = [
@@ -703,10 +739,34 @@ mod tests {
 		let svg = fmt!("<text class=\"tsel\">{}</text>", buf);
 		assert_eq!(tsel_text(&svg), "fix <a>\u{1D400}zq w", "the text is unchanged, found: {}", buf);
 		assert_eq!(buf, [
-			"<tspan y=\"100\" font-size=\"11\"><tspan x=\"10\">f</tspan>i<tspan x=\"19\">x</tspan> ",
-			"<tspan x=\"25\">&lt;</tspan>a&gt;<tspan x=\"30 30\">\u{1D400}</tspan><tspan x=\"40\">z</tspan>",
+			"<tspan y=\"100\" font-size=\"11\"><tspan x=\"10\">fi</tspan><tspan x=\"19\">x</tspan> ",
+			"<tspan x=\"25\">&lt;a&gt;</tspan><tspan x=\"30 30\">\u{1D400}</tspan><tspan x=\"40\">z</tspan>",
 			"</tspan><tspan y=\"98\" font-size=\"11\"><tspan x=\"44\">q</tspan> <tspan x=\"50\">w</tspan></tspan>",
 		].concat(), "the layout");
+		Ok(())
+	}
+
+	/// A cluster that opens with a space, as an outline's leader writes a space and a word joiner before
+	/// the page number, puts its position on the first character the browser addresses: the joiner when
+	/// the space collapses into the one before it, the space itself when it does not.
+	#[test]
+	fn a_cluster_opening_with_a_space_positions_its_first_addressable_character() -> Outcome<()> {
+		let mut tsel = TselLayer::new();
+		let glyphs = [(0.0f32, 0.0f32, "."), (4.0, 0.0, " "), (6.0, 0.0, " \u{2060}"), (9.0, 0.0, "1")];
+		tsel.run(10.0, 100.0, 11.0, glyphs.iter().map(|(x, y, t)| (*x, *y, *t)));
+		assert_eq!(tsel.finish(), "<tspan y=\"100\" font-size=\"11\"><tspan x=\"10\">.</tspan>  \
+			<tspan x=\"16 19\">\u{2060}1</tspan></tspan>", "a collapsed space takes no position");
+		let mut tsel = TselLayer::new();
+		let glyphs = [(0.0f32, 0.0f32, "."), (6.0, 0.0, " \u{2060}"), (9.0, 0.0, "1")];
+		tsel.run(10.0, 100.0, 11.0, glyphs.iter().map(|(x, y, t)| (*x, *y, *t)));
+		assert_eq!(tsel.finish(), "<tspan y=\"100\" font-size=\"11\"><tspan x=\"10\">.</tspan>\
+			<tspan x=\"16\"> \u{2060}</tspan><tspan x=\"19\">1</tspan></tspan>", "an addressable space takes it");
+		// A variation selector stays in its base's span, so the browser keeps it in that cluster.
+		let mut tsel = TselLayer::new();
+		let glyphs = [(0.0f32, 0.0f32, "a"), (4.0, 0.0, "\u{25B6}\u{FE0E}"), (9.0, 0.0, "b")];
+		tsel.run(10.0, 100.0, 11.0, glyphs.iter().map(|(x, y, t)| (*x, *y, *t)));
+		assert_eq!(tsel.finish(), "<tspan y=\"100\" font-size=\"11\"><tspan x=\"10 14\">a\u{25B6}\u{FE0E}</tspan>\
+			<tspan x=\"19\">b</tspan></tspan>", "a selector takes no position and closes the span");
 		Ok(())
 	}
 
