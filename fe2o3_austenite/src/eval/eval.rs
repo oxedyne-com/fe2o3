@@ -1904,7 +1904,7 @@ impl<'a> Vm<'a> {
 			if methods::is_mutating(&field) && matches!(tv, Value::Array(_) | Value::Dict(_)) {
 				return Err(self.error(DiagnosticKind::Syntax, span, "cannot mutate a temporary value"));
 			}
-			if let Some(f) = methods::type_method(tv.ty(), &field) {
+			if let Some(f) = methods::type_method(tv.ty(), &field).or_else(|| methods::element_method(&tv, &field)) {
 				args.prepend(target.span(), tv);
 				return self.engine.call_func(&Func::Native(f), args);
 			}

@@ -244,7 +244,7 @@ pub fn call_method(
 
 /// A function in the scope of the receiver's element, which Typst lets content call as a method after
 /// the content type's own: `it.indented(it.prefix(), it.inner())` on an `outline.entry`.
-fn element_method(receiver: &Value, name: &str) -> Option<NativeFunc> {
+pub fn element_method(receiver: &Value, name: &str) -> Option<NativeFunc> {
 	match receiver {
 		Value::Content(Content::Elem(e))	=> lib::model::method(e.kind, name).map(NativeFunc::Model),
 		_									=> None,
