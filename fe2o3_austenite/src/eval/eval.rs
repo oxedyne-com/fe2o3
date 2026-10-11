@@ -217,6 +217,8 @@ impl Engine {
 				all.items.extend(args.items);
 				self.call_func(&w.0, all)
 			}
+			#[cfg(feature = "plugin")]
+			Func::Plugin(p)		=> lib::foundations::call_plugin(self, p, args),
 		};
 		match out {
 			Ok(v)	=> Ok(v),
@@ -468,6 +470,8 @@ pub fn func_field(f: &Func, name: &str) -> Option<Func> {
 		},
 		Func::With(w)		=> func_field(&w.0, name),
 		Func::Closure(_)	=> None,
+		#[cfg(feature = "plugin")]
+		Func::Plugin(_)		=> None,
 	}
 }
 

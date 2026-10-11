@@ -681,6 +681,8 @@ fn func_eq(x: &Func, y: &Func) -> bool {
 		(Func::Element(p), Func::Element(q))	=> p == q,
 		(Func::Closure(p), Func::Closure(q))	=> Arc::ptr_eq(p, q),
 		(Func::With(p), Func::With(q))			=> Arc::ptr_eq(p, q),
+		#[cfg(feature = "plugin")]
+		(Func::Plugin(p), Func::Plugin(q))		=> p == q,
 		_										=> false,
 	}
 }

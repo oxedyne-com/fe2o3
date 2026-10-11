@@ -48,6 +48,8 @@ pub mod locate;
 pub mod methods;
 pub mod ops;
 pub mod package;
+#[cfg(feature = "plugin")]
+pub mod plugin;
 pub mod realise;
 pub mod scope;
 pub mod select;

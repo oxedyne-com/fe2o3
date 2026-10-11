@@ -91,6 +91,7 @@ native_fns! {
 		Bytes			=> "bytes",
 		Arguments		=> "arguments",
 		Plugin			=> "plugin",
+		PluginTransition	=> "transition",
 		Decimal			=> "decimal",
 		Target			=> "target",
 		At				=> "at",
@@ -287,6 +288,8 @@ pub fn func_scope(f: &Func, name: &str) -> Option<Value> {
 			_		=> None,
 		},
 		Func::Native(NativeFunc::Data(d)) => crate::eval::lib::data::func_scope(*d, name),
+		Func::Native(NativeFunc::Found(FoundFn::Plugin)) if name == "transition"
+			=> Some(native(FoundFn::PluginTransition)),
 		_ => None,
 	}
 }
@@ -621,9 +624,37 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			a.span = span;
 			Value::Args(Arc::new(a))
 		}
-		FoundFn::Plugin => return Err(engine.error_hint(DiagnosticKind::Unsupported, span,
+		#[cfg(not(feature = "plugin"))]
+		FoundFn::Plugin | FoundFn::PluginTransition => return Err(engine.error_hint(DiagnosticKind::Unsupported, span,
 			"wasm plugins are not supported by Austenite",
 			"a package that needs a plugin cannot be compiled here")),
+		#[cfg(feature = "plugin")]
+		FoundFn::Plugin => {
+			let at = args.items.iter().find(|a| a.name.is_none()).map(|a| a.value_span).unwrap_or(span);
+			let v = res!(need(engine, &mut args, "source"));
+			res!(finish(engine, args));
+			let bytes = res!(crate::eval::lib::data::source(engine, at, v));
+			let p = match crate::eval::plugin::Plugin::load(&bytes).map(Arc::new) {
+				Ok(p)	=> p,
+				Err(e)	=> return Err(plugin_error(engine, at, e)),
+			};
+			Value::Module(Arc::new(crate::eval::plugin::Plugin::into_module(p)))
+		}
+		#[cfg(feature = "plugin")]
+		FoundFn::PluginTransition => {
+			let at = args.items.iter().find(|a| a.name.is_none()).map(|a| a.value_span).unwrap_or(span);
+			let f = res!(need(engine, &mut args, "func"));
+			let p = match f {
+				Value::Func(Func::Plugin(p))	=> p,
+				// Typst's cast names no found type here.
+				_								=> return Err(engine.error(DiagnosticKind::Type, at, "expected plugin function")),
+			};
+			let bytes = res!(plugin_args(engine, args));
+			match p.transition(bytes) {
+				Ok(m)	=> Value::Module(Arc::new(m)),
+				Err(e)	=> return Err(plugin_error(engine, span, e)),
+			}
+		}
 		FoundFn::Decimal => {
 			let v = res!(need(engine, &mut args, "value"));
 			res!(finish(engine, args));
@@ -1262,6 +1293,7 @@ pub fn repr(v: &Value) -> String {
 			}).collect();
 			fmt!("arguments{}", pretty_array_like(&parts, false))
 		}
+		Value::Module(m) if m.name.is_empty()	=> "<module>".to_string(),
 		Value::Module(m)		=> fmt!("<module {}>", m.name),
 		Value::Type(t)			=> match t {
 			Type::None	=> "type(none)".to_string(),
@@ -1407,6 +1439,8 @@ fn repr_func(f: &Func) -> String {
 			None	=> "(..) => ..".to_string(),
 		},
 		Func::With(_)		=> "(..) => ..".to_string(),
+		#[cfg(feature = "plugin")]
+		Func::Plugin(p)		=> p.name().to_string(),
 	}
 }
 
@@ -1632,4 +1666,40 @@ pub fn display(v: &Value) -> Option<String> {
 		other				=> repr(other),
 	};
 	Some(s)
+}
+
+// The bytes a plugin function is given: every argument positional and of type bytes.
+#[cfg(feature = "plugin")]
+fn plugin_args(engine: &mut Engine, args: Args) -> Outcome<Vec<Arc<Vec<u8>>>> {
+	let mut out = Vec::with_capacity(args.items.len());
+	for a in args.items {
+		if let Some(n) = &a.name {
+			return Err(engine.error(DiagnosticKind::Type, a.span, fmt!("unexpected argument: {}", n)));
+		}
+		match a.value {
+			Value::Bytes(b)	=> out.push(b),
+			other			=> return Err(mismatch(engine, a.value_span, "bytes", &other)),
+		}
+	}
+	Ok(out)
+}
+
+// A plugin's failure as a diagnostic: Typst's message as the runtime words it, and a limit of Austenite's
+// named as a limit.
+#[cfg(feature = "plugin")]
+fn plugin_error(engine: &mut Engine, span: Span, e: Error<ErrTag>) -> Error<ErrTag> {
+	let kind = if e.tags().contains(&ErrTag::LimitReached) { DiagnosticKind::Limit } else { DiagnosticKind::Type };
+	let msg = e.msgs().last().cloned().unwrap_or_default();
+	engine.error(kind, span, msg)
+}
+
+/// `p.name(..args)`: runs an exported function of a plugin on its bytes, answering bytes.
+#[cfg(feature = "plugin")]
+pub fn call_plugin(engine: &mut Engine, p: &crate::eval::plugin::PluginFunc, args: Args) -> Outcome<Value> {
+	let span = args.span;
+	let bytes = res!(plugin_args(engine, args));
+	match p.call(bytes).map(Arc::new) {
+		Ok(out)	=> Ok(Value::Bytes(out)),
+		Err(e)	=> Err(plugin_error(engine, span, e)),
+	}
 }

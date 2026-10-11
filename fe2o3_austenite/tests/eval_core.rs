@@ -902,7 +902,8 @@ fn diagnostics_carry_the_kind_of_what_they_report() -> Outcome<()> {
 		("1 + \"a\"",						K::Type,			true),
 		("int(\"x\")",					K::Type,			true),
 		("{ let f() = f(); f() }",			K::Limit,			true),
-		("plugin(\"x.wasm\")",			K::Unsupported,		true),
+		// Not a module: a type error when plugins run, refused outright when the feature is off.
+		("plugin(bytes(\"x\"))",		if cfg!(feature = "plugin") { K::Type } else { K::Unsupported },	true),
 		("json(bytes((255, 254, 65)))",	K::Encoding,		true),
 		("read(\"/absent.txt\")",		K::MissingFile,		true),
 		("read(\"/bad.txt\")",			K::Encoding,		true),

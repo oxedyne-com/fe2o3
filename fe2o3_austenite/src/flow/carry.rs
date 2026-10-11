@@ -498,6 +498,8 @@ impl Walk for Func {
 			Func::Element(k)	=> { fp.tag(1); k.mix(fp); },
 			Func::Closure(c)	=> { fp.tag(2); c.mix(fp); },
 			Func::With(w)		=> { fp.tag(3); w.0.mix(fp); w.1.mix(fp); },
+			#[cfg(feature = "plugin")]
+			Func::Plugin(p)		=> { fp.tag(4); fp.h.write_fingerprint(p.fingerprint()); },
 		}
 	}
 }

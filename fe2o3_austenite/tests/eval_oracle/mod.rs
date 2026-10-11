@@ -290,7 +290,9 @@ pub fn compare_first_error(
 		None				=> Verdict::Fail(vec![fmt!("austenite accepts it; typst: {}", want_msg)]),
 		Some((msg, pos))	=> {
 			let mut d = Vec::new();
-			if msg != want_msg {
+			// The oracle reads Typst's message a line at a time and trims each, so a message that runs over
+			// several lines is compared the same way on both sides.
+			if lines_trimmed(msg) != lines_trimmed(want_msg) {
 				d.push(fmt!("message: typst `{}`, austenite `{}`", want_msg, msg));
 			}
 			if want_pos.is_some() && *pos != want_pos {
@@ -299,6 +301,10 @@ pub fn compare_first_error(
 			if d.is_empty() { Verdict::Pass } else { Verdict::Fail(d) }
 		}
 	}
+}
+
+fn lines_trimmed(s: &str) -> String {
+	s.lines().map(str::trim).collect::<Vec<_>>().join("\n")
 }
 
 /// Typst's first error split into its message and, when it has one, its line and column, both 1-based.

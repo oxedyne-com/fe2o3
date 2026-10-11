@@ -26,6 +26,8 @@ use crate::eval::lib::{
 use crate::eval::lib;
 use crate::eval::methods::CoreFn;
 use crate::eval::fp;
+#[cfg(feature = "plugin")]
+use crate::eval::plugin::PluginFunc;
 use crate::eval::scope::Scope;
 use crate::eval::select::StyleFn;
 use crate::eval::value::Value;
@@ -47,6 +49,8 @@ pub enum Func {
 	Element(ElemKind),
 	Closure(Arc<Closure>),
 	With(Arc<(Func, Args)>),	// `f.with(..)`: arguments applied before the call's own
+	#[cfg(feature = "plugin")]
+	Plugin(Arc<PluginFunc>),	// an exported function of a WebAssembly plugin
 }
 
 impl Func {
@@ -57,6 +61,8 @@ impl Func {
 			Func::Element(k)	=> Some(k.name()),
 			Func::Closure(c)	=> c.name(),
 			Func::With(w)		=> w.0.name(),
+			#[cfg(feature = "plugin")]
+			Func::Plugin(p)		=> Some(p.name()),
 		}
 	}
 

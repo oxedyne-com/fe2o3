@@ -258,6 +258,8 @@ pub fn hash_func(h: &mut Fingerprinter, f: &Func) {
 		Func::Element(k)	=> { h.write_u8(1); h.write_u64(*k as u64); }
 		Func::Closure(c)	=> { h.write_u8(2); h.write_fingerprint(c.fingerprint()); }
 		Func::With(w)		=> { h.write_u8(3); hash_func(h, &w.0); hash_args(h, &w.1); }
+		#[cfg(feature = "plugin")]
+		Func::Plugin(p)		=> { h.write_u8(4); h.write_fingerprint(p.fingerprint()); }
 	}
 }
 

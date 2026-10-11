@@ -48,6 +48,11 @@ oxedyne_fe2o3_data 				= { path = "../fe2o3_data", default-features = false }	# 
 oxedyne_fe2o3_font 				= { path = "../fe2o3_font" }
 oxedyne_fe2o3_text 				= { path = "../fe2o3_text", features = ["hyphenation"] }
 
+# WebAssembly plugins (`plugin()`), owner-approved for plugin execution only (D-20261011-26): the interpreter
+# and pin Typst 0.15.1 uses, so a plugin answers as it does in Typst.
+wasmi 							= { version = "=1.0.9", default-features = false, features = ["simd"], optional = true }
+wasmi_core 						= { version = "=1.0.9", default-features = false, optional = true }	# names LimiterError, which wasmi keeps private
+
 # The bundled FOGRA39L Coated profile, off the wasm build: a package for `wasm32` carries no profile bytes.
 # Cargo resolver 2 does not unify a target-specific feature into the other target.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -62,11 +67,15 @@ wasm-bindgen 	= "0.2"
 js-sys 			= "0.3"
 
 [features]
-default = ["embed-fonts"]
+default = ["embed-fonts", "plugin"]
 # Compiles in the faces Typst embeds (Libertinus Serif, New Computer Modern Math, DejaVu Sans Mono; about
 # 5.8 MB).  The browser build turns it off with `--no-default-features` and takes them from the host as the
 # font pack, each family a compile reaches asked for in `needs` as `font:<family>`.
 embed-fonts = []
+# Runs WebAssembly plugins through wasmi (`src/eval/plugin.rs`); without it `plugin()` is refused with a
+# diagnostic. On by default for the native build; the browser build adds it to `--features wasm` by choice,
+# after `--no-default-features`, since it adds about 1.5 MB to the module.
+plugin = ["dep:wasmi", "dep:wasmi_core"]
 # Turns on the `wasm` compile surface (`src/wasm.rs`).  Enable it with `--target wasm32-unknown-unknown
 # --features wasm`; on a native target the module is compiled out regardless, so the feature is inert there.
 wasm = []
