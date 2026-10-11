@@ -30,7 +30,10 @@ use oxedyne_fe2o3_o3db_sync::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     path::Path,
     sync::{
         Mutex,
@@ -49,7 +52,7 @@ const CHUNK:    u64 = 400;
 const LENS:     [usize; 4] = [350, 1_100, 3_000, 6_400]; // 1, 3, 8 and 16 chunks
 
 #[derive(Clone, Copy, Debug)]
-enum Policy { EveryWrite, Interval(u64), Never }
+enum Policy { EveryN(u32), EveryWrite, Interval(u64), Never }
 
 fn lock() -> MutexGuard<'static, ()> {
     let g = match HOOKS.lock() { Ok(g) => g, Err(p) => p.into_inner() };
@@ -72,6 +75,7 @@ fn cfg(p: Policy, zones: u16, wbots: u16, file_max: u64) -> Outcome<OzoneConfig>
     c.sync_every_n_writes   = 0;
     c.sync_interval_ms      = 0;
     match p {
+        Policy::EveryN(n)   => c.sync_every_n_writes = n,
         Policy::EveryWrite  => c.sync_on_write = true,
         Policy::Interval(t) => c.sync_interval_ms = t,
         Policy::Never       => (),
@@ -162,10 +166,11 @@ fn run_layouts(p: Policy, settle: Duration, tag: &str) -> Outcome<Vec<String>> {
                 bad.push(fmt!("{:?} {}x{} {} bytes: a writer made {} barriers in the chunk phase {:?}",
                     p, z, w, len, worst, phase));
             }
-            // M3: one writer per zone per put.
-            if phase.len() > z as usize {
-                bad.push(fmt!("{:?} {}x{} {} bytes: {} writers barriered for {} zones {:?}",
-                    p, z, w, len, phase.len(), z, phase));
+            // M3: one writer per zone per put, each writer touched in a zone of its own.
+            let zones: BTreeSet<usize> = phase.keys().map(|(zone, _)| *zone).collect();
+            if zones.len() != phase.len() || phase.len() > z as usize {
+                bad.push(fmt!("{:?} {}x{} {} bytes: {} writers barriered in {} distinct zones of {} {:?}",
+                    p, z, w, len, phase.len(), zones.len(), z, phase));
             }
         }
         println!("BARRIERS {:?} {}x{}: {}", p, z, w, counts.join(" "));
@@ -179,6 +184,18 @@ fn run_layouts(p: Policy, settle: Duration, tag: &str) -> Outcome<Vec<String>> {
 fn chunk_phase_interval() -> Outcome<()> {
     let _lock = lock();
     let bad = res!(run_layouts(Policy::Interval(200), Duration::from_millis(400), "int"));
+    if !bad.is_empty() {
+        return Err(err!("{:?}", bad; Test));
+    }
+    Ok(())
+}
+
+// The chunks do not count towards every n writes either, so a put of more chunks than n still
+// takes one barrier per writer touched.
+#[test]
+fn chunk_phase_every_n() -> Outcome<()> {
+    let _lock = lock();
+    let bad = res!(run_layouts(Policy::EveryN(3), Duration::ZERO, "everyn"));
     if !bad.is_empty() {
         return Err(err!("{:?}", bad; Test));
     }

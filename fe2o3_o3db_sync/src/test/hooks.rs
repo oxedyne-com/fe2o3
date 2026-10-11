@@ -82,6 +82,7 @@ static DELETE_OLD_ORDER: AtomicBool = AtomicBool::new(false); // a whole-file de
 static DELETE_ABORT_AT:  AtomicU64  = AtomicU64::new(0);      // the process aborts after the first unlink of this delete, 0 never
 static DELETES_BEGUN:    AtomicU64  = AtomicU64::new(0);      // whole-file deletes counted for the above
 static HEAD_DROPS:       AtomicBool = AtomicBool::new(false); // a chunked store never sends its head
+static SYNCER_CHUNK_US:  AtomicU64  = AtomicU64::new(0);      // before a syncer takes in a store's chunk
 static BARRIERS:         Mutex<BTreeMap<(usize, usize), u64>> = Mutex::new(BTreeMap::new()); // completed, by (zone, writer)
 static HALT:             Mutex<Option<(Halt, std::path::PathBuf)>> = Mutex::new(None); // where to wait for a kill
 
@@ -204,7 +205,8 @@ pub fn set_barrier_failure(on: bool) {
 
 /// Holds every chunked store, its chunks durable and in the cache, before it sends its head, until
 /// the hold is lifted, so that a test can write between the two.  `heads_held` counts the stores
-/// that have reached it.
+/// that have reached it.  It covers one put at a time: the hold blocks the server bot driving the
+/// put, so a second put held at once that shares that server bot cannot advance to the hold.
 pub fn set_head_hold(on: bool) {
     HEAD_HOLD.store(on, Ordering::SeqCst);
 }
@@ -525,6 +527,19 @@ pub(crate) fn compact_fails() -> bool {
 
 pub(crate) fn barrier_delay() {
     pause(&BARRIER_DELAY_MS);
+}
+
+/// Holds every syncer this long before it takes in each of a store's chunks, so that a syncer
+/// lagging its writer through a long put can be reproduced.
+pub fn set_syncer_chunk_delay(d: Duration) {
+    SYNCER_CHUNK_US.store(d.as_micros().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn syncer_chunk_delay() {
+    let us = SYNCER_CHUNK_US.load(Ordering::Relaxed);
+    if us > 0 {
+        thread::sleep(Duration::from_micros(us));
+    }
 }
 
 pub(crate) fn publish_delay() {

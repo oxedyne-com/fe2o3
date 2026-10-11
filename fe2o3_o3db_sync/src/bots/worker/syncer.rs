@@ -349,17 +349,17 @@ impl<
                     },
                     Handed::Finish => return self.end(true),
                 }
+                // A steady stream of records never lets the wait above time out, so what the
+                // period or a held discard owes is also checked after each item, lest the writes
+                // that keep coming starve it.  Per item, not per batch: one batch can be a long
+                // put's every chunk, which owe no period of their own (QA B A1).
+                if self.owed_in().is_some_and(|w| w.is_zero()) {
+                    self.barrier_or_log();
+                }
             }
             // A syncer stopping as one that panicked would, with no last barrier.
             if stop_armed && hooks::syncer_stops() {
                 return;
-            }
-            // A steady stream of records never lets the wait above time out, so a held discard's
-            // barrier is also checked here, lest the writes that keep coming starve it.
-            if let Some(due) = self.owed {
-                if self.dirty && self.poisoned.is_none() && Instant::now() >= due {
-                    self.barrier_or_log();
-                }
             }
         }
     }
@@ -378,6 +378,9 @@ impl<
         ends:   (u64, u64),
         chunk:  bool,
     ) {
+        if chunk {
+            hooks::syncer_chunk_delay();
+        }
         let mut run = vec![(cbot, cbpind, insert, resp)];
         self.taken = ends;
         self.policed |= !chunk;

@@ -44,13 +44,17 @@ use oxedyne_fe2o3_o3db_sync::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     fs,
     path::{
         Path,
         PathBuf,
     },
     sync::Mutex,
+    thread,
     time::{
         Duration,
         Instant,
@@ -103,6 +107,8 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
     hooks::set_barrier_failure_for(None);
     hooks::set_fault_record_fails(false);
     hooks::set_owed_drop(false);
+    hooks::set_barrier_delay(Duration::ZERO);
+    hooks::set_head_hold(false);
     g
 }
 
@@ -198,6 +204,21 @@ fn live_chunks(db: &TestDb) -> Outcome<usize> {
         }
     }
     Ok(n)
+}
+
+// The live chunk keys, those that are not tombstones.
+fn chunk_keys(db: &TestDb) -> Outcome<BTreeSet<Vec<u8>>> {
+    res!(db.api().settle_for_test(Duration::from_secs(20)));
+    let mut keys = BTreeSet::new();
+    for (_, cache) in res!(db.api().collect_caches(wait())) {
+        let tombs = cache.tomb_tracker().tombs();
+        for k in cache.map().keys() {
+            if is_chunk_key(k) && !tombs.contains_key(k) {
+                keys.insert(k.clone());
+            }
+        }
+    }
+    Ok(keys)
 }
 
 // Fails every barrier from now, makes one over a new record, and lets the switch go.  The store
@@ -506,29 +527,74 @@ fn a_fault_stops_the_store_without_its_record() -> Outcome<()> {
     Ok(())
 }
 
-/// A chunked put returns only once a barrier covers its chunks, so a power cut that keeps its
-/// head keeps the whole value (R1).  The chunks and the head may go to different writers.
+/// A chunked put's chunks are answered only once a barrier covers them, so a power cut taken
+/// while its head is held back keeps every chunk of the put and no head (R1).  The data files are
+/// large enough that no rollover seal makes the chunks durable by the way, and each barrier is
+/// slowed, so a chunk answered before its barrier is cut short in the image.  One store is held
+/// at a time, since the hold blocks the server bot driving it, and its chunk set is counted
+/// exactly: the chunk keys the store added, from the live store once the put has returned.
 #[test]
 fn a_head_never_outlives_its_chunks() -> Outcome<()> {
     let _g = lock();
-    for p in [Policy::EveryN(1_000), Policy::Interval(3_600_000), Policy::Never] {
-        let c = res!(cfg(p, 2, 2));
-        let root = res!(fresh("./test_db_durable_mark_r1"));
-        let db = res!(open(&root, &c, true));
-        let keys: Vec<Dat> = (0..6).map(|i| dat!(fmt!("durable mark r1 {}", i))).collect();
-        for k in &keys {
-            res!(put(&db, k, val(1_500, 2)));
+    let mut bad = Vec::new();
+    for p in POLICIES {
+        for (z, w) in [(1u16, 1u16), (1, 4), (2, 2)] {
+            let label = fmt!("{:?} {}x{}", p, z, w);
+            let mut c = res!(cfg(p, z, w));
+            c.data_file_max_bytes = 1_048_576;
+            let root = res!(fresh("./test_db_durable_mark_r1"));
+            let db = res!(open(&root, &c, true));
+            res!(put(&db, &dat!("durable mark r1 base"), val(1_500, 2)));
+            res!(db.api().sync_now(wait()));
+            let base = res!(chunk_keys(&db));
+            let k = dat!("durable mark r1");
+            let held = hooks::heads_held();
+            hooks::set_barrier_delay(Duration::from_millis(900));
+            hooks::set_head_hold(true);
+            let putter = {
+                let db = db.clone();
+                let k = k.clone();
+                thread::spawn(move || put(&db, &k, val(3_000, 4)))
+            };
+            let reached = wait_until(Duration::from_secs(30), || hooks::heads_held() > held);
+            hooks::set_barrier_delay(Duration::ZERO);
+            let cut = power_cut(&db, &root, &c, "./test_db_durable_mark_r1_cut");
+            hooks::set_head_hold(false);
+            let done = match putter.join() { Ok(r) => r, Err(_) => Err(err!("{}: the put panicked.", label; Test)) };
+            res!(done);
+            let cut = res!(cut);
+            let new: BTreeSet<Vec<u8>> = res!(chunk_keys(&db)).difference(&base).cloned().collect();
+            let db2 = res!(open(&cut, &c, false));
+            let image = res!(chunk_keys(&db2));
+            let got = read(&db2, &k);
+            res!(db2.close());
+            let _ = fs::remove_dir_all(&cut);
+            let after = res!(read_after_cut(&db, &root, &c, "./test_db_durable_mark_r1_cut", &[k.clone()]));
+            res!(db.close());
+            let _ = fs::remove_dir_all(&root);
+            let missing = new.difference(&image).count();
+            if !reached {
+                bad.push(fmt!("{}: the put never reached the head hold", label));
+            }
+            if new.len() < 2 {
+                bad.push(fmt!("{}: the put added {} chunks, so it was not chunked", label, new.len()));
+            }
+            if missing > 0 {
+                bad.push(fmt!("{}: a cut at the head hold lost {} of the put's {} answered chunks",
+                    label, missing, new.len()));
+            }
+            if got != "none" {
+                bad.push(fmt!("{}: a cut at the head hold read {}, but no head had been sent", label, got));
+            }
+            let whole = after.iter().all(|g| g == "3000/4" || (!matches!(p, Policy::EveryWrite) && g == "none"));
+            if !whole {
+                bad.push(fmt!("{}: a cut after the put returned read {:?}", label, after));
+            }
+            println!("R1 {}: {} chunks, {} missing at the hold, then {:?}", label, new.len(), missing, after);
         }
-        res!(db.api().sync_now(wait()));
-        for k in &keys {
-            res!(put(&db, k, val(1_300, 4)));
-        }
-        let got = res!(read_after_cut(&db, &root, &c, "./test_db_durable_mark_r1_cut", &keys));
-        for g in got {
-            assert!(g == "1500/2" || g == "1300/4", "{:?}: a power cut left {}", p, g);
-        }
-        res!(db.close());
-        let _ = fs::remove_dir_all(&root);
+    }
+    if !bad.is_empty() {
+        return Err(err!("{:?}", bad; Test));
     }
     Ok(())
 }
