@@ -270,8 +270,8 @@ pub fn col_align(a: Align) -> &'static str {
 	}
 }
 
-/// The attribute fields of a figure, a definition list, a division or a span, each left out when it
-/// names nothing.
+/// The attribute fields of a figure, a definition list, a division, a span or an inline image, each
+/// left out when it names nothing.
 fn attr_fields(attrs: &Attrs) -> Vec<(&'static str, Dat)> {
 	let mut fields = Vec::with_capacity(3);
 	if !attrs.classes.is_empty() {
@@ -326,11 +326,11 @@ fn inline(item: &Inline) -> Dat {
 		// An inline image keeps the source it was written with. SBJ's block `image` addresses a blob
 		// by content hash (§4.2), which a path is not; whatever publishes the blob rewrites `src` to
 		// `hash` then, and until it does the source is what the prose said.
-		Inline::Image { src, alt } => node(
-			NodeKind::Img,
-			vec![("alt", Dat::Str(clean(alt))), (KEY_SRC, Dat::Str(clean(src)))],
-			Vec::new(),
-		),
+		Inline::Image { src, alt, attrs } => {
+			let mut fields = vec![("alt", Dat::Str(clean(alt))), (KEY_SRC, Dat::Str(clean(src)))];
+			fields.extend(attr_fields(attrs));
+			node(NodeKind::Img, fields, Vec::new())
+		}
 		Inline::Code(s) => node(NodeKind::Tt, vec![("text", Dat::Str(clean(s)))], Vec::new()),
 		Inline::Span { attrs, content } => node(NodeKind::Span, attr_fields(attrs), inlines(content)),
 		Inline::Break => node(NodeKind::Break, Vec::new(), Vec::new()),
@@ -718,6 +718,7 @@ mod tests {
 				Inline::Image {
 					src:	"tree.png".to_string(),
 					alt:	"A diagram of a tree".to_string(),
+					attrs:	Attrs::default(),
 				},
 			]),
 		]));
@@ -734,7 +735,7 @@ mod tests {
 		let tree = res!(imported(vec![
 			Block::Para(vec![
 				t("Words."),
-				Inline::Image { src: "tree.png".to_string(), alt: String::new() },
+				Inline::Image { src: "tree.png".to_string(), alt: String::new(), attrs: Attrs::default() },
 			]),
 		]));
 		let img = res!(kid(&res!(kid(&tree, 0)), 1));
@@ -869,7 +870,7 @@ mod tests {
 				t(", a "),
 				Inline::Code("span".to_string()),
 				Inline::Break,
-				Inline::Image { src: "x.png".to_string(), alt: "a picture".to_string() },
+				Inline::Image { src: "x.png".to_string(), alt: "a picture".to_string(), attrs: Attrs::default() },
 			]),
 			Block::Rule,
 			Block::Table {

@@ -316,8 +316,12 @@ where
 					None		=> out.extend(kept),
 				}
 			}
-			Inline::Image { src, alt } => match map(src) {
-				Some(there)	=> out.push(Inline::Image { src: there, alt: alt.clone() }),
+			Inline::Image { src, alt, attrs } => match map(src) {
+				Some(there)	=> out.push(Inline::Image {
+					src:	there,
+					alt:	alt.clone(),
+					attrs:	attrs.clone(),
+				}),
 				None if !alt.trim().is_empty()	=> out.push(Inline::Text(alt.clone())),
 				None		=> {},
 			},
@@ -510,9 +514,13 @@ fn inlines(items: &[Inline], policy: &Policy, depth: usize) -> Vec<Inline> {
 					out.extend(kept);
 				}
 			}
-			Inline::Image { src, alt } => {
+			Inline::Image { src, alt, attrs } => {
 				if policy.allow_images && policy.permits_url(src) {
-					out.push(Inline::Image { src: src.clone(), alt: alt.clone() });
+					out.push(Inline::Image {
+						src:	src.clone(),
+						alt:	alt.clone(),
+						attrs:	self::kept(attrs, policy),
+					});
 				} else if !alt.trim().is_empty() {
 					// What the image stood for is what the author said it stood for.
 					out.push(Inline::Text(alt.clone()));
@@ -637,7 +645,7 @@ mod tests {
 				to:			fmt!("../../elsewhere"),
 				content:	vec![Inline::Text(fmt!("up and out"))],
 			},
-			Inline::Image { src: fmt!("logo.png"), alt: fmt!("a logo") },
+			Inline::Image { src: fmt!("logo.png"), alt: fmt!("a logo"), attrs: Attrs::default() },
 		])] };
 		let out = retarget(&doc, |to: &str| {
 			if to.starts_with("..") {
@@ -680,6 +688,7 @@ mod tests {
 		let d = para(vec![Inline::Image {
 			src: fmt!("https://tracker.example/pixel.gif"),
 			alt: fmt!("a picture of a cat"),
+			attrs: Attrs::default(),
 		}]);
 		let html = html::render(&apply(&d, &Policy::default()));
 		assert!(!html.contains("<img"), "an image survived: {}", html);
@@ -746,7 +755,7 @@ mod tests {
 	fn test_the_trusting_policy_changes_nothing_07() -> Outcome<()> {
 		let p = Policy::trusting();
 		assert!(p.permits_url("javascript:alert(1)"), "the trusting policy refused a scheme");
-		let d = para(vec![Inline::Image { src: fmt!("a.png"), alt: fmt!("alt") }]);
+		let d = para(vec![Inline::Image { src: fmt!("a.png"), alt: fmt!("alt"), attrs: Attrs::default() }]);
 		let html = html::render(&apply(&d, &p));
 		assert!(html.contains("<img"), "the trusting policy dropped an image: {}", html);
 		Ok(())
@@ -760,6 +769,33 @@ mod tests {
 		assert!(!html.contains("<script>"), "a script tag was written: {}", html);
 		assert!(!html.contains("<img"), "an img tag was written: {}", html);
 		assert!(html.contains("&lt;script&gt;"), "the words were lost: {}", html);
+		Ok(())
+	}
+
+	/// An image's names pass the policy as any other node's do: classes and pairs by the lists, the
+	/// id only where ids are allowed.
+	#[test]
+	fn test_an_images_names_are_filtered_like_any_others_09() -> Outcome<()> {
+		let d = para(vec![Inline::Image {
+			src:	fmt!("a.png"),
+			alt:	fmt!("alt"),
+			attrs:	Attrs {
+				id:		Some(fmt!("x")),
+				classes:	vec![fmt!("diagram"), fmt!("evil")],
+				pairs:		vec![(fmt!("width"), fmt!("5")), (fmt!("onload"), fmt!("go()"))],
+			},
+		}]);
+		let mut p = Policy::default();
+		p.allow_images	= true;
+		p.classes	= AllowList::Only(vec![fmt!("diagram")]);
+		p.pairs		= AllowList::Only(vec![fmt!("width")]);
+		p.ids		= false;
+		let html = html::render(&apply(&d, &p));
+		assert!(html.contains("class=\"diagram\""), "a permitted class was lost: {}", html);
+		assert!(html.contains("width=\"5\""), "a permitted pair was lost: {}", html);
+		for gone in ["evil", "onload", "id="] {
+			assert!(!html.contains(gone), "{:?} survived: {}", gone, html);
+		}
 		Ok(())
 	}
 }

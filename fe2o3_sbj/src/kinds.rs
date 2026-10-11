@@ -464,10 +464,15 @@ impl NodeKind {
 			Self::Tt => &[
 				Field { name: "text",	typ: FieldType::Str,	opt: false },
 			],
+			// An inline image carries the attribute names too, so a page's `class`, `width` and
+			// `height` survive. Added to `oxeweb/doc/1` in place, before any store held a `/1` tree.
 			Self::Img => &[
 				Field { name: ADDR_HASH,	typ: FieldType::Hash32,	opt: true },
 				Field { name: "alt",	typ: FieldType::Str,	opt: false },
 				Field { name: KEY_SRC,	typ: FieldType::Str,	opt: true },
+				Field { name: KEY_CLASSES,	typ: FieldType::Strs,	opt: true },
+				Field { name: KEY_ID,	typ: FieldType::Str,	opt: true },
+				Field { name: KEY_PAIRS,	typ: FieldType::Strs,	opt: true },
 			],
 		}
 	}

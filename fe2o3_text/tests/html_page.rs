@@ -121,6 +121,7 @@ fn test_a_figure_holds_its_image_and_caption_00() -> Outcome<()> {
 		content:	vec![Block::Para(vec![Inline::Image {
 			src:	"img/paw.jpg".to_string(),
 			alt:	"Dog offering a paw".to_string(),
+			attrs:	Attrs::default(),
 		}])],
 		caption:	vec![
 			Inline::Span { attrs: class("fig-caption"), content: vec![t("Hachikō giving a paw.")] },
@@ -308,15 +309,19 @@ fn test_the_new_nodes_are_counted_and_written_as_markdown_08() -> Outcome<()> {
 /// The body of an article, modelled on the Hachikō and Mammal pages: sections' content as the editor
 /// stores it, each construct as those pages write it.
 ///
-/// Two things the pages write are not carried, and the fixture leaves them out: an `img`'s `width`,
-/// `height` and `class` (an [`Inline::Image`] is its source and alt text), and the `section` around
-/// each part, which the application splits a page by before it reads one.
+/// One thing the pages write is not carried, and the fixture leaves it out: the `section` around each
+/// part, which the application splits a page by before it reads one. An `img`'s `class`, `width` and
+/// `height` are carried, as the image's [`Attrs`].
 const ARTICLE: &str = r#"
 <h2>Life story</h2>
 <p>Hachikō, a creamy-white Akita, was born in mid-November 1923, at a farm in Ōdate, Akita Prefecture, Japan. His father was Ōshinai-yama-gō (<i>'Ōshinai mountain'</i>).</p>
 <figure class="fig">
-	<img src="img/paw.jpg" alt="Dog offering a paw">
+	<img src="img/paw.jpg" width="896" height="654" alt="Dog offering a paw">
 	<figcaption><span class="fig-caption">Hachikō giving a paw.</span> <span class="credit">Unknown author, public domain</span></figcaption>
+</figure>
+<figure class="fig">
+	<img class="diagram" src="img/skull.png" width="568" height="260" alt="Diagram of a synapsid skull with one temporal opening">
+	<figcaption><span class="fig-caption">The original synapsid skull structure contains one temporal opening.</span> <span class="credit">Preto(m), CC BY-SA 3.0</span></figcaption>
 </figure>
 <p>Text from <a href="https://en.wikipedia.org/w/index.php?title=Hachik%C5%8D&amp;oldid=1375772297">Hachikō</a>, revision <span class="id">1375772297</span>, CO<sub>2</sub> and m<sup>2</sup>.</p>
 <h2>Facts</h2>
@@ -362,6 +367,33 @@ fn test_an_article_body_round_trips_09() -> Outcome<()> {
 	assert_eq!(norm(&out), expected(ARTICLE), "\n--- rendered ---\n{}", out);
 	// And the tree is a fixed point: reading what was written gives the tree back.
 	assert_eq!(res!(parse_kept(&out)), doc);
+	// The diagram's names are in the tree, not merely passed through as text.
+	let diagram = Attrs {
+		id:		None,
+		classes:	vec!["diagram".to_string()],
+		pairs:		vec![
+			("width".to_string(), "568".to_string()),
+			("height".to_string(), "260".to_string()),
+		],
+	};
+	let found = doc.blocks.iter().any(|b| match b {
+		Block::Figure { content, .. }	=> content.iter().any(|p| match p {
+			Block::Para(run)	=> run.iter().any(|i| match i {
+				Inline::Image { attrs, .. }	=> *attrs == diagram,
+				_				=> false,
+			}),
+			_			=> false,
+		}),
+		_				=> false,
+	});
+	assert!(found, "the diagram's class and size were not carried: {:?}", doc.blocks);
+	// The plain reader still reads an image as its source and alt text alone.
+	let plain = res!(read::parse("<p><img class=\"diagram\" src=\"a.png\" width=\"5\" alt=\"x\"></p>"));
+	assert_eq!(plain, vec![Block::Para(vec![Inline::Image {
+		src:	"a.png".to_string(),
+		alt:	"x".to_string(),
+		attrs:	Attrs::default(),
+	}])]);
 	Ok(())
 }
 

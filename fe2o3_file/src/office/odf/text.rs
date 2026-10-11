@@ -283,7 +283,7 @@ fn inlines(out: &mut Out, content: &[Inline], left: &mut Left) -> Outcome<()> {
 				res!(inlines(out, content, left));
 				res!(out.close("text:a"));
 			}
-			Inline::Image { src, alt }		=> {
+			Inline::Image { src, alt, .. }	=> {
 				left.images.push(src.clone());
 				out.open("text:span", &[("text:style-name", "Emphasis")]);
 				res!(text_run(out, alt));

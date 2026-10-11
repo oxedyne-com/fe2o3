@@ -252,7 +252,7 @@ impl Build {
 					res!(self.inlines(content, Fmt { link: true, ..fmt }));
 					res!(self.out.close("w:hyperlink"));
 				}
-				Inline::Image { src, alt }		=> {
+				Inline::Image { src, alt, .. }	=> {
 					// The tree holds where an image is, not what it holds, and nothing here can
 					// fetch it. The alt text stands in its place and the omission is counted, so the
 					// caller can say so rather than the reader having to notice.

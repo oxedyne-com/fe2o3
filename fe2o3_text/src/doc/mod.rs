@@ -368,6 +368,7 @@ pub enum Inline {
 		src:		String,
 		/// The text that stands in for the image.
 		alt:		String,
+		attrs:		Attrs,		// names and sizes the image; empty unless a reader was asked to keep them
 	},
 	/// A span of code within a line.
 	Code(String),

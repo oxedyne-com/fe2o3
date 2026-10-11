@@ -231,7 +231,7 @@ fn inlines(out: &mut String, content: &[Inline], start: bool) {
 				out.push(')');
 				start = false;
 			}
-			Inline::Image { src, alt }		=> {
+			Inline::Image { src, alt, .. }	=> {
 				out.push_str("![");
 				out.push_str(&escape(alt, false));
 				out.push_str("](");

@@ -228,6 +228,12 @@ fn block(out: &mut String, item: &Block, opts: &Opts) {
 /// reaches it by. A pair `k=v` becomes the attribute `k="v"`; the tree does not police which keys a
 /// document may set, on the same principle that it does not police what a class means.
 fn write_attrs(out: &mut String, attrs: &Attrs) {
+	write_attrs_but(out, attrs, &[]);
+}
+
+/// The names as [`write_attrs`] writes them, less any pair whose key the element already writes
+/// from a field of its own (an image's `src` and `alt`), so that no tag carries one twice.
+fn write_attrs_but(out: &mut String, attrs: &Attrs, own: &[&str]) {
 	if let Some(id) = &attrs.id {
 		out.push_str(" id=\"");
 		escape_attr(out, id);
@@ -244,7 +250,7 @@ fn write_attrs(out: &mut String, attrs: &Attrs) {
 		out.push('"');
 	}
 	for (k, v) in &attrs.pairs {
-		if !is_safe_key(k) {
+		if !is_safe_key(k) || own.iter().any(|o| k.eq_ignore_ascii_case(o)) {
 			continue;
 		}
 		out.push(' ');
@@ -383,12 +389,14 @@ fn inline(out: &mut String, item: &Inline, opts: &Opts) {
 			inlines(out, content, opts);
 			out.push_str("</a>");
 		}
-		Inline::Image { src, alt } => {
+		Inline::Image { src, alt, attrs } => {
 			out.push_str("<img src=\"");
 			escape_attr(out, src);
 			out.push_str("\" alt=\"");
 			escape_attr(out, alt);
-			out.push_str("\">");
+			out.push('"');
+			write_attrs_but(out, attrs, &["src", "alt"]);
+			out.push('>');
 		}
 		Inline::Span { attrs, content } => {
 			out.push_str("<span");
@@ -711,7 +719,7 @@ mod tests {
 			blocks: vec![
 				Block::Rule,
 				Block::Para(vec![
-					Inline::Image { src: "fig.png".to_string(), alt: "a figure".to_string() },
+					Inline::Image { src: "fig.png".to_string(), alt: "a figure".to_string(), attrs: Attrs::default() },
 					Inline::Code("inline()".to_string()),
 				]),
 			],

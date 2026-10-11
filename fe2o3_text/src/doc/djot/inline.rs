@@ -432,6 +432,9 @@ fn bracket(src: &str, i: usize, depth: usize, refs: &HashMap<String, String>)
 
 /// What a `![` at the offset settles to, and the offset just past it, or nothing where it is not an
 /// image at all.
+///
+/// An attribute block against the image's end names it, as `![alt](src){.diagram width=568}` does,
+/// whichever of the three forms gave the source.
 fn image(src: &str, i: usize, depth: usize, refs: &HashMap<String, String>)
 	-> Option<(Outcome<Inline>, usize)>
 {
@@ -442,23 +445,35 @@ fn image(src: &str, i: usize, depth: usize, refs: &HashMap<String, String>)
 	};
 	let inner = &src[i + 2..close];
 	let after = close + 1;
+	let mut found = None;
 	if after < b.len() && b[after] == b'(' {
-		if let Some((to, end)) = dest(src, after) {
-			return Some((img(to, inner, depth, refs), end));
-		}
+		found = dest(src, after);
 	}
-	if after < b.len() && b[after] == b'[' {
+	if found.is_none() && after < b.len() && b[after] == b'[' {
 		if let Some((label, end)) = ref_label(src, after) {
 			let key = if label.trim().is_empty() { normalise(inner) } else { normalise(&label) };
 			if let Some(to) = refs.get(&key) {
-				return Some((img(to.clone(), inner, depth, refs), end));
+				found = Some((to.clone(), end));
 			}
 		}
 	}
-	if let Some(to) = refs.get(&normalise(inner)) {
-		return Some((img(to.clone(), inner, depth, refs), after));
+	if found.is_none() {
+		if let Some(to) = refs.get(&normalise(inner)) {
+			found = Some((to.clone(), after));
+		}
 	}
-	None
+	let (to, end) = match found {
+		Some(f)	=> f,
+		None	=> return None,
+	};
+	let (attrs, end) = match end < b.len() && b[end] == b'{' {
+		true	=> match attrs_of(&src[end..]) {
+			Some((attrs, used))	=> (attrs, end + used),
+			None			=> (Attrs::default(), end),
+		},
+		false	=> (Attrs::default(), end),
+	};
+	Some((img(to, inner, attrs, depth, refs), end))
 }
 
 /// A link to `to`, its text read as prose in its own right.
@@ -468,10 +483,12 @@ fn link(to: String, inner: &str, depth: usize, refs: &HashMap<String, String>) -
 }
 
 /// An image at `src`, its alt text the flattened words of what stood for it.
-fn img(to: String, inner: &str, depth: usize, refs: &HashMap<String, String>) -> Outcome<Inline> {
+fn img(to: String, inner: &str, attrs: Attrs, depth: usize, refs: &HashMap<String, String>)
+	-> Outcome<Inline>
+{
 	// An image stands for itself in words, so its alt is flattened.
 	let alt = text_of(&res!(run(inner, depth + 1, refs)));
-	Ok(Inline::Image { src: to, alt })
+	Ok(Inline::Image { src: to, alt, attrs })
 }
 
 /// A span carrying the attributes in the braces, its content read as prose.
@@ -892,11 +909,11 @@ mod tests {
 	#[test]
 	fn test_a_bang_before_a_link_makes_an_image_08() -> Outcome<()> {
 		assert_eq!(res!(parse0("![a picture](p.png)")), vec![
-			Inline::Image { src: "p.png".to_string(), alt: "a picture".to_string() },
+			Inline::Image { src: "p.png".to_string(), alt: "a picture".to_string(), attrs: Attrs::default() },
 		]);
 		// The alt is flattened, so emphasis within it does not lose its words.
 		assert_eq!(res!(parse0("![an _italic_ picture](p.png)")), vec![
-			Inline::Image { src: "p.png".to_string(), alt: "an italic picture".to_string() },
+			Inline::Image { src: "p.png".to_string(), alt: "an italic picture".to_string(), attrs: Attrs::default() },
 		]);
 		Ok(())
 	}
@@ -1013,6 +1030,24 @@ mod tests {
 	#[test]
 	fn test_a_verbatim_span_outranks_what_is_in_it_17() -> Outcome<()> {
 		assert_eq!(res!(parse0("`[a](b)`")), vec![Inline::Code("[a](b)".to_string())]);
+		Ok(())
+	}
+
+	/// An attribute block against an image names it, whichever form gave the source.
+	#[test]
+	fn test_an_image_carries_the_attributes_after_it_18() -> Outcome<()> {
+		let named = Attrs {
+			id:		None,
+			classes:	vec!["diagram".to_string()],
+			pairs:		vec![
+				("width".to_string(), "568".to_string()),
+				("height".to_string(), "260".to_string()),
+			],
+		};
+		assert_eq!(res!(parse0("![a skull](s.png){.diagram width=568 height=260} b")), vec![
+			Inline::Image { src: "s.png".to_string(), alt: "a skull".to_string(), attrs: named },
+			t(" b"),
+		]);
 		Ok(())
 	}
 }

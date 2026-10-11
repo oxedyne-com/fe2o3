@@ -67,7 +67,7 @@ const ARTICLE: &str = r#"
 <h2>Life story</h2>
 <p>Hachikō, a creamy-white Akita, was born in mid-November 1923, at a farm in Ōdate, Akita Prefecture, Japan. His father was Ōshinai-yama-gō (<i>'Ōshinai mountain'</i>).</p>
 <figure class="fig">
-	<img src="img/paw.jpg" alt="Dog offering a paw">
+	<img class="diagram" src="img/paw.jpg" width="896" height="654" alt="Dog offering a paw">
 	<figcaption><span class="fig-caption">Hachikō giving a paw.</span> <span class="credit">Unknown author, public domain</span></figcaption>
 </figure>
 <p>Text from <a href="https://en.wikipedia.org/w/index.php?title=Hachik%C5%8D&amp;oldid=1375772297">Hachikō</a>, revision <span class="id">1375772297</span>, CO<sub>2</sub> and m<sup>2</sup>.</p>
@@ -182,7 +182,7 @@ impl Gen {
 		let d = depth.saturating_sub(1);
 		match pick {
 			0 => Inline::Text(self.s()),
-			1 => Inline::Image { src: self.s(), alt: self.s() },
+			1 => Inline::Image { src: self.s(), alt: self.s(), attrs: self.attrs() },
 			2 => Inline::Code(self.s()),
 			3 => Inline::Break,
 			4 => Inline::Emph { strong: self.coin(), content: self.inlines(d, cov) },
@@ -277,7 +277,19 @@ fn test_every_variant_nested_four_deep_round_trips_02() -> Outcome<()> {
 			content:	vec![Inline::Sub(vec![Inline::Code("x".to_string())])],
 		}])] },
 		Inline::Link { to: "b".to_string(), content: vec![Inline::Break] },
-		Inline::Image { src: "i.png".to_string(), alt: String::new() },
+		Inline::Image { src: "i.png".to_string(), alt: String::new(), attrs: Attrs::default() },
+		Inline::Image {
+			src:	"img/skull.png".to_string(),
+			alt:	"A skull".to_string(),
+			attrs:	Attrs {
+				id:		Some("skull".to_string()),
+				classes:	vec!["diagram".to_string()],
+				pairs:		vec![
+					("width".to_string(), "568".to_string()),
+					("height".to_string(), "260".to_string()),
+				],
+			},
+		},
 	];
 	let table = Block::Table {
 		head:		Some(Row(vec![Cell { content: leaf.clone(), header: true }])),

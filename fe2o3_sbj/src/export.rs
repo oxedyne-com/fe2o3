@@ -283,7 +283,11 @@ fn inline(
 					"An inline image is addressed by content hash, which has no source string to \
 					become; resolve it to a source first."; Invalid, Input, Unimplemented));
 			}
-			Inline::Image { src: res!(req_str(map, KEY_SRC)), alt: res!(req_str(map, "alt")) }
+			Inline::Image {
+				src:	res!(req_str(map, KEY_SRC)),
+				alt:	res!(req_str(map, "alt")),
+				attrs:	res!(attrs(map)),
+			}
 		},
 		NodeKind::Tt => Inline::Code(res!(req_str(map, "text"))),
 		NodeKind::Span => Inline::Span {

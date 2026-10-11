@@ -21,7 +21,8 @@
 //!
 //! The one exception is asked for. Under [`Opts::keep_classed`], read with [`parse_with`], a `span`
 //! or a `div` that carries a class or an id is kept, as an [`Inline::Span`] or a [`Block::Div`]
-//! holding its [`Attrs`], and so is the class or id of a `figure` or a `dl`. That is the reading a
+//! holding its [`Attrs`], and so is the class or id of a `figure` or a `dl`, and the id, classes,
+//! `width` and `height` of an `img`. That is the reading a
 //! caller wants when the HTML is the prose's own store, and writing it back must give the page the
 //! classes its stylesheet names. A `span` or `div` that carries neither is still erased, since it
 //! names nothing the tree could carry. The tree still learns no HTML: what it keeps is a name, and
@@ -69,7 +70,7 @@ pub const DEPTH_LIMIT: usize = 32;
 /// What a caller may vary about the reading.
 #[derive(Clone, Debug, Default)]
 pub struct Opts {
-	pub keep_classed: bool,	// keep a classed or id'd `span`/`div`, and a `figure`'s or `dl`'s names
+	pub keep_classed: bool,	// keep a classed or id'd `span`/`div`, a `figure`'s or `dl`'s names, an `img`'s names and size
 }
 
 /// Reads HTML into the blocks it is made of.
@@ -422,6 +423,7 @@ fn inline(lex: &mut Lex, run: &mut Run, k: Kind, name: &str, attrs: &str, void: 
 		Kind::Image	=> run.push(Inline::Image {
 			src:	attr(attrs, "src").unwrap_or_default(),
 			alt:	attr(attrs, "alt").unwrap_or_default(),
+			attrs:	img_attrs(lex, attrs),
 		}),
 		Kind::CodeSpan	=> {
 			// A code span is not a `pre`: HTML collapses the whitespace within one exactly as it does
@@ -970,6 +972,18 @@ fn kept_attrs(lex: &Lex, attrs: &str) -> Attrs {
 		true	=> attrs_from(attrs),
 		false	=> Attrs::default(),
 	}
+}
+
+/// An `img`'s names where the reader keeps them: its id, its classes, and its `width` and `height` as
+/// pairs. The source and the alt text are the image's own fields, and anything else on the tag
+/// (`loading`, `style`, a handler) is presentation the tree does not carry.
+fn img_attrs(lex: &Lex, attrs: &str) -> Attrs {
+	let mut out = kept_attrs(lex, attrs);
+	out.pairs.retain(|(k, _)| k.eq_ignore_ascii_case("width") || k.eq_ignore_ascii_case("height"));
+	for (k, _) in out.pairs.iter_mut() {
+		k.make_ascii_lowercase();
+	}
+	out
 }
 
 /// Does the element carry a class or an id?
@@ -1538,12 +1552,14 @@ mod tests {
 		assert_eq!(b, vec![Block::Para(vec![Inline::Image {
 			src:	"fig.png".to_string(),
 			alt:	"a figure".to_string(),
+			attrs:	Attrs::default(),
 		}])]);
 		// An image that stands for nothing says nothing, and is still an image.
 		let b = res!(parse("<p><img src=\"fig.png\"></p>"));
 		assert_eq!(b, vec![Block::Para(vec![Inline::Image {
 			src:	"fig.png".to_string(),
 			alt:	String::new(),
+			attrs:	Attrs::default(),
 		}])]);
 		Ok(())
 	}
@@ -1657,6 +1673,7 @@ mod tests {
 		assert_eq!(b, vec![Block::Para(vec![Inline::Image {
 			src:	"a.png".to_string(),
 			alt:	String::new(),
+			attrs:	Attrs::default(),
 		}])]);
 		Ok(())
 	}

@@ -316,7 +316,7 @@ fn runs(out: &mut Out, content: &[Inline], fmt: Fmt, left: &mut Left) -> Outcome
 			Inline::Link { content, .. }		=> {
 				res!(runs(out, content, Fmt { link: true, ..fmt }, left))
 			}
-			Inline::Image { src, alt }		=> {
+			Inline::Image { src, alt, .. }	=> {
 				left.images.push(src.clone());
 				res!(run(out, alt, Fmt { italic: true, ..fmt }));
 			}
