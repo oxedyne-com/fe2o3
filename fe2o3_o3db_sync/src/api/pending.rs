@@ -361,6 +361,9 @@ impl<
         if self.set.is_some() {
             hooks::head_hold();
         }
+        if hooks::head_drops() {
+            return Err(err!("A store's head was dropped after its chunks (test::hooks)."; Data, Write));
+        }
         let mut head = match self.head.take() {
             Some(head) => head,
             None => return Err(err!("A store in progress has no bunch key left to send."; Bug, Missing)),

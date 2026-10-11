@@ -270,7 +270,7 @@ impl<
     /// the write is stamped, which the orphan sweep's epoch relies on.
     pub fn chunk_set_id(kbuf: &[u8], nonce: u64) -> u64 {
         let nonce = nonce.to_be_bytes();
-        Self::fold_set_id(HashScheme::new_seahash()
+        fold_set_id(HashScheme::new_seahash()
             .hash(&[kbuf, &nonce], constant::CHUNK_SET_ID_SALT)
             .as_hashform())
     }
@@ -278,26 +278,10 @@ impl<
     /// The identifier the builds of 2026-09 derived from the key alone, under which every write
     /// of one length reused one chunk set.  Values written so still read, since a reader takes
     /// the identifier from the bunch key, and move to a set of their own on their next write.
-    /// Kept to reproduce such values in tests.
+    /// Kept to reproduce such values in tests, and to find their heads at the open
+    /// (`lone_index`).
     pub fn legacy_chunk_set_id(kbuf: &[u8]) -> u64 {
-        Self::fold_set_id(HashScheme::new_seahash()
-            .hash(&[kbuf], constant::CHUNK_SET_ID_SALT)
-            .as_hashform())
-    }
-
-    fn fold_set_id(h: HashForm) -> u64 {
-        match h {
-            HashForm::U64(h)    => h,
-            // Seahash always yields a U64; fold any other form defensively into one.
-            other               => {
-                let v = other.as_vec();
-                let mut buf = [0u8; 8];
-                for (i, b) in v.iter().take(8).enumerate() {
-                    buf[i] = *b;
-                }
-                u64::from_be_bytes(buf)
-            },
-        }
+        legacy_chunk_set_id(kbuf)
     }
 
     pub fn ozone_key(
@@ -2368,5 +2352,28 @@ impl<
 {
     fn name_id(&self) -> Outcome<NamexId> {
         NamexId::try_from(constant::NAMEX_ID)
+    }
+}
+
+/// The chunk set identifier the builds of 2026-09 derived from the stored key alone (see
+/// `OzoneApi::legacy_chunk_set_id`).
+pub(crate) fn legacy_chunk_set_id(kbuf: &[u8]) -> u64 {
+    fold_set_id(HashScheme::new_seahash()
+        .hash(&[kbuf], constant::CHUNK_SET_ID_SALT)
+        .as_hashform())
+}
+
+fn fold_set_id(h: HashForm) -> u64 {
+    match h {
+        HashForm::U64(h)    => h,
+        // Seahash always yields a U64; fold any other form defensively into one.
+        other               => {
+            let v = other.as_vec();
+            let mut buf = [0u8; 8];
+            for (i, b) in v.iter().take(8).enumerate() {
+                buf[i] = *b;
+            }
+            u64::from_be_bytes(buf)
+        },
     }
 }

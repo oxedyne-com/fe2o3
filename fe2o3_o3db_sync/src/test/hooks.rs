@@ -76,6 +76,10 @@ static WRITES_TORN:      AtomicU64  = AtomicU64::new(0);      // appends failed 
 static CUT_BACK_FAILS:   AtomicBool = AtomicBool::new(false); // a torn append cannot be cut back off
 static DURABILITY_MS:    AtomicU64  = AtomicU64::new(0);      // a store's durability timeout, when set
 static KERNEL_RELEASE:   Mutex<Option<String>> = Mutex::new(None); // in place of the running kernel's
+static DELETE_OLD_ORDER: AtomicBool = AtomicBool::new(false); // a whole-file delete unlinks its data file first
+static DELETE_ABORT_AT:  AtomicU64  = AtomicU64::new(0);      // the process aborts after the first unlink of this delete, 0 never
+static DELETES_BEGUN:    AtomicU64  = AtomicU64::new(0);      // whole-file deletes counted for the above
+static HEAD_DROPS:       AtomicBool = AtomicBool::new(false); // a chunked store never sends its head
 static HALT:             Mutex<Option<(Halt, std::path::PathBuf)>> = Mutex::new(None); // where to wait for a kill
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
@@ -397,6 +401,27 @@ pub fn set_collect_fails_for(fnum: Option<u32>) {
     COLLECT_FAILS_FOR.store(fnum.map_or(u64::MAX, |n| n as u64), Ordering::Relaxed);
 }
 
+/// Shapes a collection's whole-file delete as a crash between its two unlinks finds it.  With
+/// `old_order` the data file goes first, as every build before 2026-10-11 did, and a crash leaves
+/// an index without its data file.  With `abort_at` n > 0 the process aborts straight after the
+/// first unlink of the nth such delete, which no handler can answer: the store's files are then
+/// as a process crash leaves them.
+pub fn set_delete_cut(old_order: bool, abort_at: u64) {
+    DELETE_OLD_ORDER.store(old_order, Ordering::Relaxed);
+    DELETES_BEGUN.store(0, Ordering::Relaxed);
+    DELETE_ABORT_AT.store(abort_at, Ordering::Relaxed);
+}
+
+/// Makes every store that sends a head after its chunks, the forcing path's included, fail once
+/// its chunks are written and before it sends its head, as a crash between the two leaves it.
+pub fn set_head_drop(on: bool) {
+    HEAD_DROPS.store(on, Ordering::SeqCst);
+}
+
+pub(crate) fn head_drops() -> bool {
+    HEAD_DROPS.load(Ordering::SeqCst)
+}
+
 /// Makes the directory sync after a collection's data rename fail, so the records the collection
 /// left out are not known to be gone.
 pub fn set_dir_sync_failure(on: bool) {
@@ -593,6 +618,23 @@ pub(crate) fn collect_fails(fnum: u32) -> bool {
         COLLECTS_FAILED.fetch_add(1, Ordering::Relaxed);
     }
     fails
+}
+
+// The order of a whole-file delete's two unlinks.
+pub(crate) fn delete_order() -> [FileType; 2] {
+    match DELETE_OLD_ORDER.load(Ordering::Relaxed) {
+        true    => [FileType::Data, FileType::Index],
+        false   => [FileType::Index, FileType::Data],
+    }
+}
+
+// Called after the first unlink of a whole-file delete.
+pub(crate) fn delete_first_unlinked() {
+    let at = DELETE_ABORT_AT.load(Ordering::Relaxed);
+    if at > 0 && DELETES_BEGUN.fetch_add(1, Ordering::SeqCst) + 1 == at {
+        eprintln!("test::hooks: aborting after the first unlink of whole-file delete {}.", at);
+        std::process::abort();
+    }
 }
 
 pub(crate) fn collect_fails_for(fnum: u32) -> bool {

@@ -788,12 +788,16 @@ impl<
                 let gone = res!(self.states().get_state(fnum)).old_rids();
                 // The index goes first, so a crash between the two leaves a data file, which the
                 // next open rebuilds and collects again, never an index whose data is gone, which
-                // the open refuses.
-                for ftyp in [FileType::Index, FileType::Data] {
+                // the open must judge record by record (`lone_index`).  The test hooks can take
+                // the old order and crash between the two.
+                for (i, ftyp) in hooks::delete_order().iter().enumerate() {
                     let mut path = self.zdir().dir.clone();
-                    path.push(ZoneDir::relative_file_path(&ftyp, fnum));
+                    path.push(ZoneDir::relative_file_path(ftyp, fnum));
                     if path.is_file() {
                         res!(fs::remove_file(path));
+                    }
+                    if i == 0 {
+                        hooks::delete_first_unlinked();
                     }
                 }
                 // The state outlived the files until 2026-10-08, with its old bytes still counted

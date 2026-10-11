@@ -17,19 +17,22 @@
 
 use crate::{
     prelude::*,
+    api::legacy_chunk_set_id,
     base::{
         alias,
         constant,
-        index::ZoneInd,
+        index::{
+            BotPoolInd,
+            WorkerInd,
+            ZoneInd,
+        },
     },
     bots::worker::worker_deps::WorkerType,
-    comm::{
-        msg::OzoneMsg,
-        response::Wait,
-    },
+    comm::msg::OzoneMsg,
     data::{
         cache::supersedes,
         choose::ChooseCache,
+        core::Key,
     },
     file::{
         floc::{
@@ -46,7 +49,6 @@ use crate::{
             sync_dir,
         },
     },
-    sweep,
 };
 
 use oxedyne_fe2o3_iop_db::api::Meta;
@@ -142,6 +144,12 @@ pub fn settle<
             if newer {
                 continue;
             }
+            // A key of the chunk form is judged as a chunk.  The write has refused a user key of
+            // that form only since cb05687c (2026-10-09), so an older store could hold one, but on
+            // 2026-10-11 no caller writes such a key: a read-only grep for Tup5u64, t5u64 and
+            // [u64; 5] over the Daimond gateway source, the Oxegen tree and fe2o3's callers of
+            // Ozone (steel, ore, sbj, net) found none, and jarrah's r545 store copy checked on
+            // 2026-10-10 held no chunked value at all (review F2).
             match Dat::from_bytes(&rec.kbyts) {
                 Ok((Dat::Tup5u64(tup), n)) if n == rec.kbyts.len() => chunks.push((l, r, tup)),
                 _ => return Err(refusal(api, &lones[l], rec, "no other file holds a newer record \
@@ -150,26 +158,52 @@ pub fn settle<
         }
     }
 
-    // 2. A chunk with nothing newer at its key is lost only if a current value names it.
+    // 2. A chunk with nothing newer at its key is lost only if a current value names it.  One
+    //    write stamps its head and every chunk with one metadata, so the head of the chunk's own
+    //    write carries its stamp.  The exception is key reuse: the builds of 2026-09 took the set
+    //    identifier from the key alone, so a torn rewrite of one key at one length leaves the
+    //    first write's head naming the second write's chunks, and that head is found by its key
+    //    (2026-10-11).  So the caches are asked for those heads alone and only they are read,
+    //    never every value in the store (review F3, 2026-10-11).  A head that cannot be read is a
+    //    head that may name the chunk, so it refuses; any other unreadable value is never looked
+    //    at.
     if !chunks.is_empty() {
-        let wait = Wait {
-            max_wait:       constant::CONTROL_REQUEST_TIMEOUT,
-            check_interval: constant::CHECK_INTERVAL,
-        };
-        let (live, _) = match sweep::live_chunk_keys(api, None, wait) {
-            Ok(found) => found,
-            Err(e) => {
-                let (l, r, _) = chunks[0];
-                return Err(err!(e, "{}", refusal(api, &lones[l], &lones[l].recs[r],
-                    "it is a chunk with no newer record at its key, and the values naming chunks \
-                    could not be read to tell whether one names it");
-                    Init, File, Missing));
-            },
-        };
+        let mut metas: Vec<Meta<UIDL, UID>> = Vec::new();
+        let mut set_ids: Vec<u64> = Vec::new();
         for (l, r, tup) in &chunks {
-            if live.contains(tup) {
-                return Err(refusal(api, &lones[*l], &lones[*l].recs[*r],
-                    "it is a chunk of a current value"));
+            let m = &lones[*l].recs[*r].meta;
+            if !metas.contains(m) {
+                metas.push(m.clone());
+            }
+            if !set_ids.contains(&tup[0]) {
+                set_ids.push(tup[0]);
+            }
+        }
+        for z in 0..api.cfg().num_zones as usize {
+            for b in 0..api.cfg().num_cbots_per_zone as usize {
+                for (kbyts, hmeta) in res!(heads_of(api, z, b, metas.clone(), set_ids.clone())) {
+                    let named = part_key_of(api, z, b, &kbyts);
+                    let legacy = legacy_chunk_set_id(&kbyts);
+                    for (l, r, tup) in &chunks {
+                        let rec = &lones[*l].recs[*r];
+                        if rec.meta != hmeta && legacy != tup[0] {
+                            continue;
+                        }
+                        match &named {
+                            Ok(Some(pk)) if names(pk, tup) => return Err(refusal(api,
+                                &lones[*l], rec, "it is a chunk of a current value")),
+                            Ok(Some(_)) => (), // another write's set, under the same stamp
+                            Ok(None) => return Err(refusal(api, &lones[*l], rec,
+                                "it is a chunk written with the head of a current value, and \
+                                that head does not read as a part key, so whether it names this \
+                                chunk cannot be told")),
+                            Err(e) => return Err(err!(e.clone(), "{}", refusal(api, &lones[*l],
+                                rec, "it is a chunk written with the head of a current value, and \
+                                that head cannot be read to tell whether it names this chunk");
+                                Init, File, Missing)),
+                        }
+                    }
+                }
             }
         }
     }
@@ -177,7 +211,13 @@ pub fn settle<
     // 3. Every record is superseded, so the file was deleted whole: finish the delete.
     let mut synced = Vec::new();
     for lone in &lones {
-        res!(fs::remove_file(&lone.ind));
+        if let Err(e) = fs::remove_file(&lone.ind) {
+            return Err(err!(e,
+                "{}: Completing the interrupted delete of index {:?}, whose data file {:?} is \
+                gone and every record of which is superseded, failed at the unlink, so the \
+                store is not opened.  No record was changed: fix the cause and reopen.", api.ozid(), lone.ind, lone.dat;
+                Init, IO, File, Write));
+        }
         info!(sync_log::stream(), "{}: Removed index {:?}, left by an interrupted collection: its \
             data file {:?} was deleted and each of its {} records is superseded.",
             api.ozid(), lone.ind, lone.dat, lone.recs.len());
@@ -186,7 +226,18 @@ pub fn settle<
         }
     }
     for dir in &synced {
-        res!(sync_dir(dir));
+        if let Err(e) = sync_dir(dir) {
+            let done = lones.iter()
+                .filter(|l| &l.zdir == dir)
+                .map(|l| fmt!("index {:?} (data file {:?})", l.ind, l.dat))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(err!(e,
+                "{}: Completing the interrupted delete of {}, whose data files are gone and \
+                every record superseded, failed at the sync of directory {:?} after the unlink, so \
+                the store is not opened.  No record was changed: fix the cause and reopen.", api.ozid(), done, dir;
+                Init, IO, File, Write));
+        }
     }
     Ok(lones.len())
 }
@@ -329,6 +380,81 @@ fn records_of<
             without its data file: {:?}", api.ozid(), b, z, msg;
             Channel, Unexpected)),
     }
+}
+
+// The current heads cache bot `b` of zone `z` holds written with any of `metas`.
+fn heads_of<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>(
+    api:    &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
+    z:      usize,
+    b:      usize,
+    metas:  Vec<Meta<UIDL, UID>>,
+    set_ids: Vec<u64>,
+)
+    -> Outcome<Vec<(Vec<u8>, Meta<UIDL, UID>)>>
+{
+    let resp = api.responder();
+    let cbots = res!(api.chans().get_workers_of_type_in_zone(&WorkerType::Cache, &ZoneInd::new(z)));
+    let bot = res!(cbots.get_bot(b));
+    if let Err(e) = bot.send(OzoneMsg::HeadsStamped(metas, set_ids, resp.clone())) {
+        return Err(err!(e,
+            "{}: Asking cache bot {} of zone {} for the heads written with the chunks of an index \
+            without its data file.", api.ozid(), b, z;
+            Channel, Write));
+    }
+    match res!(resp.recv_timeout(constant::CONTROL_REQUEST_TIMEOUT)) {
+        OzoneMsg::HeadsAt(heads) => Ok(heads),
+        OzoneMsg::Error(e) => Err(err!(e,
+            "{}: Cache bot {} of zone {} could not give the heads written with the chunks of an \
+            index without its data file.", api.ozid(), b, z;
+            Channel)),
+        msg => Err(err!(
+            "{}: Unexpected answer from cache bot {} of zone {} for the heads written with the \
+            chunks of an index without its data file: {:?}", api.ozid(), b, z, msg;
+            Channel, Unexpected)),
+    }
+}
+
+// The part key the head at stored key `kbyts`, held by cache bot `b` of zone `z`, names, read with
+// the store's own schemes.
+fn part_key_of<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>(
+    api:    &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
+    z:      usize,
+    b:      usize,
+    kbyts:  &[u8],
+)
+    -> Outcome<Option<[u64; 5]>>
+{
+    let cbwind = WorkerInd::new(ZoneInd::new(z), BotPoolInd::new(b));
+    let resp = res!(api.fetch_using_key(Key::Complete(kbyts.to_vec()), cbwind));
+    match res!(resp.recv_daticle(api.schemes().encrypter(), None)) {
+        (Some((Dat::Tup5u64(tup), _)), _)   => Ok(Some(tup)),
+        _                                   => Ok(None),
+    }
+}
+
+// Does the part key `pk` of a head name the chunk key `tup`?  The chunk keys of a set are the part
+// key with its index running from 1 to the number of parts.
+fn names(pk: &[u64; 5], tup: &[u64; 5]) -> bool {
+    pk[0] == tup[0]
+        && pk[2] == tup[2]
+        && pk[3] == tup[3]
+        && pk[4] == tup[4]
+        && tup[1] >= 1
+        && tup[1] <= pk[3]
 }
 
 // The refusal for a record nothing else holds: the index, the record and the data file it is in,

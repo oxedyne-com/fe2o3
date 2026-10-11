@@ -319,6 +319,10 @@ impl<
                                 .collect();
                             self.respond(Ok(OzoneMsg::RecordsAt(held)), &resp);
                         },
+                        OzoneMsg::HeadsStamped(metas, set_ids, resp) => {
+                            let heads = self.cache.heads_stamped(&metas, &set_ids);
+                            self.respond(Ok(OzoneMsg::HeadsAt(heads)), &resp);
+                        },
                         _ => return self.listen_more(msg),
                     }
                 }

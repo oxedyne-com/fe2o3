@@ -709,6 +709,32 @@ impl<
         }
     }
 
+    /// The current heads, chunked values' bunch records, written with any of `metas` or stored
+    /// under a key whose legacy chunk set identifier is one of `set_ids`.  One write stamps a head
+    /// and the chunks of its value with one metadata, so a head can name a chunk of another
+    /// stamp only when two writes shared a set: the builds of 2026-09 took the set identifier
+    /// from the key alone, so a rewrite of one key at one length reused the set, and a torn
+    /// rewrite left the head of the first write naming chunks of the second (2026-10-11).  The
+    /// key test costs one hash per head and reads no value.
+    pub fn heads_stamped(
+        &self,
+        metas:      &[Meta<UIDL, UID>],
+        set_ids:    &[u64],
+    )
+        -> Vec<(Vec<u8>, Meta<UIDL, UID>)>
+    {
+        let mut heads = Vec::new();
+        for (k, entry) in &self.map {
+            let CacheEntry::LocatedValue(mloc, _) = entry;
+            if mloc.head && (metas.contains(&mloc.meta)
+                || set_ids.contains(&crate::api::legacy_chunk_set_id(k)))
+            {
+                heads.push((k.clone(), mloc.meta.clone()));
+            }
+        }
+        heads
+    }
+
     /// Where the record cached for `k` is in the files, following a key referral as `get` does.
     /// A deletion is a tombstone record, so it has one too.
     pub fn located(&self, k: &[u8]) -> Option<&FileLocation> {
