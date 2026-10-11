@@ -167,6 +167,12 @@ const TYPST_STYLES: &[&str] = &[
 /// `bibliography(sources, ..)`: the schema walk, then the sources read and their keys checked.
 pub fn construct(engine: &mut Engine, args: &mut Args) -> Outcome<Content> {
 	let span = args.span;
+	// A path resolves at the argument that wrote it, as Typst does: `bibliography.with("refs.bib")`
+	// handed to a template in another file still names the caller's file.
+	let at = args.items.iter()
+		.find(|a| a.name.is_none() || a.name.as_deref() == Some("sources"))
+		.map(|a| a.span)
+		.unwrap_or(span);
 	let mut elem = res!(super::construct_schema(engine, ElemKind::Bibliography, args));
 	let sources = match elem.field("sources") {
 		Some(Value::Array(a))	=> (**a).clone(),
@@ -177,8 +183,8 @@ pub fn construct(engine: &mut Engine, args: &mut Args) -> Outcome<Content> {
 	for s in sources {
 		let (text, name) = match s {
 			Value::Str(p) => {
-				let path = res!(import::resolve_path(engine, &p, span.file, span));
-				let bytes = res!(import::read_file(engine, &path, span));
+				let path = res!(import::resolve_path(engine, &p, at.file, at));
+				let bytes = res!(import::read_file(engine, &path, at));
 				match String::from_utf8(bytes) {
 					Ok(t)	=> (t, p.to_string()),
 					Err(_)	=> return Err(engine.error(DiagnosticKind::Encoding, span, "file is not valid utf-8")),
