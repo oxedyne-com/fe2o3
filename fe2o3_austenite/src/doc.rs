@@ -79,7 +79,7 @@ use crate::page::{
 };
 use crate::lang::RefusalClass;
 use crate::theme::{
-	PageNumbering,
+	Numbering,
 	Theme,
 	ThemePatch,
 };
@@ -1353,7 +1353,7 @@ impl<'a> Authoring<'a> {
 					let lines = res!(break_paragraph_pieces(
 						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
 						Some(cap_edge(style, style.text.body_size))));
-					self.nodes.extend(guard_widows(lines));
+					self.nodes.extend(guard_widows(align_lines(lines, style.par.align)));
 					i += 1;
 					self.first = false;
 					self.prev_para = true;
@@ -1371,7 +1371,7 @@ impl<'a> Authoring<'a> {
 					let lines = res!(break_paragraph_pieces(
 						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
 						Some(cap_edge(style, style.text.body_size))));
-					self.nodes.extend(guard_widows(lines));
+					self.nodes.extend(guard_widows(align_lines(lines, style.par.align)));
 					i += 1;
 					self.first = false;
 					self.prev_para = true;
@@ -2151,6 +2151,31 @@ fn indent_piece(indent: Sp) -> Piece {
 /// height and its inter-block glue attaches where Typst's does.
 pub(crate) fn cap_edge(style: &Theme, size: Sp) -> Sp {
 	Sp((size.raw() as f64 * style.calibration.line_box_em).round() as i32)
+}
+
+/// Sets each line of a paragraph that falls short of its measure at the alignment in force, Typst's
+/// `align`: half its slack goes before it when centred, all of it when right-aligned. A justified interior
+/// line already fills the measure, so it does not move.
+fn align_lines(mut lines: Vec<Node>, align: Align) -> Vec<Node> {
+	if align == Align::Left {
+		return lines;
+	}
+	for n in lines.iter_mut() {
+		if let Node::HBox(b) = n {
+			let ink = b.list.iter().fold(0i64, |w, c| w + match c {
+				Node::Leaf(l)					=> l.dims.width.raw() as i64,
+				Node::Glue(g)					=> g.natural.raw() as i64,
+				Node::HBox(x) | Node::VBox(x)	=> x.dims.width.raw() as i64,
+				_								=> 0,
+			});
+			let slack = b.dims.width.raw() as i64 - ink;
+			if slack > 0 {
+				let lead = if align == Align::Centre { slack / 2 } else { slack };
+				b.list.insert(0, Node::Glue(Glue::fixed(Sp(lead as i32))));
+			}
+		}
+	}
+	lines
 }
 
 /// Guards a flow paragraph's set lines against a widow or an orphan across a page break. The page breaker
@@ -5227,11 +5252,11 @@ fn heading_number_themed(level: u8, sec: &[u32; 6], style: &Theme) -> String {
 		return String::new();
 	}
 	let idx = (level as usize).saturating_sub(1).min(style.heading.levels.len().saturating_sub(1));
-	if let Some(pattern) = style.heading.levels.get(idx).and_then(|l| l.numbering.as_deref()) {
-		let l = (level as usize).min(6);
-		return format_numbering(pattern, &sec[..l]);
+	match style.heading.levels.get(idx).map(|l| &l.numbering) {
+		Some(Numbering::Pattern(pattern))	=> format_numbering(pattern, &sec[..(level as usize).min(6)]),
+		Some(Numbering::Off)				=> String::new(),
+		Some(Numbering::Furniture) | None	=> heading_number(level, sec),
 	}
-	heading_number(level, sec)
 }
 
 /// Renders a Typst numbering pattern against a list of counter values, as `numbering(pattern, ..nums)`
@@ -6136,9 +6161,9 @@ pub fn decorate(
 		// A document's own `#set page(numbering:)` replaces the house furniture: Typst's numbering on every
 		// page, or none at all, with no running head either way.
 		match &style.page.numbering {
-			PageNumbering::Furniture	=> {},
-			PageNumbering::Off			=> continue,
-			PageNumbering::Pattern(p)	=> {
+			Numbering::Furniture	=> {},
+			Numbering::Off			=> continue,
+			Numbering::Pattern(p)	=> {
 				// As Typst does, a pattern with two counting symbols ("1 / 1") shows the total beside the page.
 				let both	= p.chars().filter(|c| matches!(c, '1' | 'a' | 'A' | 'i' | 'I')).count() >= 2;
 				let nums	= if both { vec![page.number, total] } else { vec![page.number] };
@@ -6582,7 +6607,7 @@ mod tests {
 		assert_eq!(heads_d[0].number, "1", "the default heading number is the plain arabic count");
 
 		let mut alpha = Theme::default();
-		for l in &mut alpha.heading.levels { l.numbering = Some("A".to_string()); }
+		for l in &mut alpha.heading.levels { l.numbering = Numbering::Pattern("A".to_string()); }
 		let (_, heads_a, _) = res!(author(fonts, geom, &alpha, &FaceResolver::default(), &blocks, None, None));
 		assert_eq!(heads_a[0].number, "A", "a heading numbering pattern must reach the rendered number");
 		Ok(())

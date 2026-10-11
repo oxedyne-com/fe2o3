@@ -136,6 +136,11 @@ impl Oracle {
 		h.feed(self.version.as_bytes());
 		h.feed(FACES.as_bytes());
 		h.feed(fx.name.as_bytes());
+		// Typst's answers name the fixture by its absolute path, so a target directory shared by two
+		// checkouts must not hand one checkout's answers to the other.
+		let root = fx.root.canonicalize().unwrap_or_else(|_| fx.root.clone());
+		h.feed(root.to_string_lossy().as_bytes());
+		h.feed(&[0]);
 		for (rel, bytes) in &files {
 			h.feed(rel.as_bytes());
 			h.feed(&[0]);

@@ -203,9 +203,8 @@ impl Default for ThemePar {
 	}
 }
 
-/// One heading level's styling. Only `size`, `space_above` and `space_below` are read today; the
-/// face, weight, italic, smallcaps and numbering fields are reserved for the unit that lowers a
-/// document's `set heading(numbering: ...)` and per-level `show` rules.
+/// One heading level's styling. The face, weight, italic and smallcaps fields are reserved for the unit
+/// that lowers per-level `show` rules.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeHeadingLevel {
 	pub size:			Sp,
@@ -213,7 +212,7 @@ pub struct ThemeHeadingLevel {
 	pub weight:			Option<u16>,	// reserved: font weight, 100-900
 	pub italic:			bool,			// reserved
 	pub smallcaps:		bool,			// reserved
-	pub numbering:		Option<String>,	// reserved: a Typst numbering pattern, e.g. "1.1"
+	pub numbering:		Numbering,
 	pub space_above:	Sp,
 	pub space_below:	Sp,
 }
@@ -226,7 +225,7 @@ impl ThemeHeadingLevel {
 			weight:			None,
 			italic:			false,
 			smallcaps:		false,
-			numbering:		None,
+			numbering:		Numbering::Furniture,
 			space_above:	Sp::from_pt(above_pt),
 			space_below:	Sp::from_pt(below_pt),
 		}
@@ -454,16 +453,17 @@ pub struct ThemePage {
 	pub back:			ThemePagePart,
 	pub columns:		usize,
 	pub column_gutter:	Length,
-	pub numbering:		PageNumbering,
+	pub numbering:		Numbering,
 }
 
-/// What a page carries for its number, from a document's `#set page(numbering:)`.
+/// What a page or a heading carries for its number, from a document's `#set page(numbering:)` or
+/// `#set heading(numbering:)`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub enum PageNumbering {
+pub enum Numbering {
 	#[default]
-	Furniture,			// none set: the house running head and folio
+	Furniture,			// none set: the house running head and folio, or a chapter's document-order number
 	Off,				// `numbering: none`: no number at all
-	Pattern(String),	// a Typst pattern such as "1", set at the foot's centre on every page
+	Pattern(String),	// a Typst pattern such as "1" or "1.1"
 }
 
 impl Default for ThemePage {
@@ -474,7 +474,7 @@ impl Default for ThemePage {
 			back:			ThemePagePart::default(),
 			columns:		1,
 			column_gutter:	Length::Rel(0.04),
-			numbering:		PageNumbering::Furniture,
+			numbering:		Numbering::Furniture,
 		}
 	}
 }
@@ -627,7 +627,7 @@ pub struct ThemeHeadingLevelPatch {
 	pub weight:			Option<Option<u16>>,
 	pub italic:			Option<bool>,
 	pub smallcaps:		Option<bool>,
-	pub numbering:		Option<Option<String>>,
+	pub numbering:		Option<Numbering>,
 	pub space_above:	Option<Sp>,
 	pub space_below:	Option<Sp>,
 }
@@ -638,7 +638,7 @@ pub struct ThemeHeadingPatch {
 	pub face:			Option<Option<String>>,
 	// `set heading(numbering: ...)` applies one pattern across every level, whatever the theme's level
 	// count, so it is a group-level leaf rather than a per-level one.
-	pub numbering_all:	Option<Option<String>>,
+	pub numbering_all:	Option<Numbering>,
 	// A `#show heading: set text(size: ...)` with no `level:` predicate sizes every level alike, the way
 	// `numbering_all` numbers them alike; a level-predicated rule uses a per-level `levels` entry instead.
 	pub size_all:		Option<Sp>,
@@ -733,7 +733,7 @@ pub struct ThemePagePatch {
 	pub back:			ThemePagePartPatch,
 	pub columns:		Option<usize>,
 	pub column_gutter:	Option<Length>,
-	pub numbering:		Option<PageNumbering>,
+	pub numbering:		Option<Numbering>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1039,6 +1039,28 @@ fn opt_str_from(d: Dat) -> Outcome<Option<String>> {
 	}
 }
 
+// A heading level's numbering: none set, as an unnumbered theme always serialised, a pattern, or `false`.
+fn numbering_dat(n: &Numbering) -> Dat {
+	match n {
+		Numbering::Furniture	=> Dat::Opt(Box::new(None)),
+		Numbering::Off			=> Dat::Opt(Box::new(Some(dat!(false)))),
+		Numbering::Pattern(p)	=> Dat::Opt(Box::new(Some(dat!(p.clone())))),
+	}
+}
+
+fn numbering_from(d: Dat) -> Outcome<Numbering> {
+	match d {
+		Dat::Opt(b)	=> match *b {
+			None					=> Ok(Numbering::Furniture),
+			Some(Dat::Bool(false))	=> Ok(Numbering::Off),
+			Some(Dat::Str(p))		=> Ok(Numbering::Pattern(p)),
+			Some(other)				=> Err(err!(
+				"A theme heading numbering must be a pattern or false, found a {:?}.", other.kind(); Input, Invalid)),
+		},
+		other	=> Err(err!("A theme heading numbering must be a jdat Opt, found a {:?}.", other.kind(); Input, Invalid)),
+	}
+}
+
 fn opt_u16_dat(o: Option<u16>) -> Dat {
 	Dat::Opt(Box::new(o.map(|v| dat!(v))))
 }
@@ -1251,7 +1273,7 @@ impl ThemeHeadingLevel {
 			"weight"		=> opt_u16_dat(self.weight),
 			"italic"		=> dat!(self.italic),
 			"smallcaps"		=> dat!(self.smallcaps),
-			"numbering"		=> opt_str_dat(&self.numbering),
+			"numbering"		=> numbering_dat(&self.numbering),
 			"space_above"	=> sp_dat(self.space_above),
 			"space_below"	=> sp_dat(self.space_below),
 		})
@@ -1263,7 +1285,7 @@ impl ThemeHeadingLevel {
 			weight:			res!(opt_u16_from(res!(map_must(&mut d, "weight")))),
 			italic:			try_extract_dat!(res!(map_must(&mut d, "italic")), Bool),
 			smallcaps:		try_extract_dat!(res!(map_must(&mut d, "smallcaps")), Bool),
-			numbering:		res!(opt_str_from(res!(map_must(&mut d, "numbering")))),
+			numbering:		res!(numbering_from(res!(map_must(&mut d, "numbering")))),
 			space_above:	res!(sp_from(res!(map_must(&mut d, "space_above")))),
 			space_below:	res!(sp_from(res!(map_must(&mut d, "space_below")))),
 		})
@@ -1493,17 +1515,17 @@ impl ThemePage {
 		];
 		// Written only when a document set it, so a theme without one serialises, and hashes, as before.
 		match &self.numbering {
-			PageNumbering::Furniture	=> {},
-			PageNumbering::Off			=> pairs.push((dat!("numbering".to_string()), dat!(false))),
-			PageNumbering::Pattern(p)	=> pairs.push((dat!("numbering".to_string()), dat!(p.clone()))),
+			Numbering::Furniture	=> {},
+			Numbering::Off			=> pairs.push((dat!("numbering".to_string()), dat!(false))),
+			Numbering::Pattern(p)	=> pairs.push((dat!("numbering".to_string()), dat!(p.clone()))),
 		}
 		Ok(create_dat_ordmap(pairs))
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
 		let numbering = match res!(d.map_remove(&dat!("numbering".to_string()))) {
-			None					=> PageNumbering::Furniture,
-			Some(Dat::Bool(false))	=> PageNumbering::Off,
-			Some(Dat::Str(p))		=> PageNumbering::Pattern(p),
+			None					=> Numbering::Furniture,
+			Some(Dat::Bool(false))	=> Numbering::Off,
+			Some(Dat::Str(p))		=> Numbering::Pattern(p),
 			Some(other)				=> return Err(err!(
 				"A theme page numbering must be false or a pattern string, found {:?}.", other; Input, Invalid)),
 		};
@@ -1703,7 +1725,7 @@ mod tests {
 		theme.text.justify				= false;
 		theme.text.faces.body			= vec!["Felipa".to_string(), "Libertinus Serif".to_string()];
 		theme.heading.kind				= HeadingStyle::DocInline;
-		theme.heading.levels[0].numbering	= Some("1.1".to_string());
+		theme.heading.levels[0].numbering	= Numbering::Pattern("1.1".to_string());
 		theme.heading.levels[2].weight		= Some(700);
 		theme.opener.chap_num_size		= Sp::from_pt(48.0);
 		theme.equation.numbering		= Some("(1)".to_string());
@@ -1738,7 +1760,7 @@ mod tests {
 		patch.text.body_size				= Some(Sp::from_pt(12.0));
 		patch.text.faces.body				= Some(vec!["Libertinus Serif".to_string()]);
 		patch.par.indent					= Some(Sp::from_pt(18.0));
-		patch.heading.numbering_all			= Some(Some("1.1".to_string()));
+		patch.heading.numbering_all			= Some(Numbering::Pattern("1.1".to_string()));
 		patch.opener.chap_num_size			= Some(Sp::from_pt(48.0));
 		patch.equation.numbering			= Some(Some("(1)".to_string()));
 		patch.page.body.default.width		= Some(Some(Sp::from_pt(400.0)));
@@ -1748,8 +1770,8 @@ mod tests {
 		assert_eq!(theme.text.faces.body,				vec!["Libertinus Serif".to_string()]);
 		assert_eq!(theme.par.indent,					Sp::from_pt(18.0));
 		// numbering_all reached every level, not just the first.
-		assert_eq!(theme.heading.levels[0].numbering,	Some("1.1".to_string()));
-		assert_eq!(theme.heading.levels[1].numbering,	Some("1.1".to_string()));
+		assert_eq!(theme.heading.levels[0].numbering,	Numbering::Pattern("1.1".to_string()));
+		assert_eq!(theme.heading.levels[1].numbering,	Numbering::Pattern("1.1".to_string()));
 		assert_eq!(theme.opener.chap_num_size,			Sp::from_pt(48.0));
 		assert_eq!(theme.equation.numbering,			Some("(1)".to_string()));
 		assert_eq!(theme.page.body.default.width,		Some(Sp::from_pt(400.0)));

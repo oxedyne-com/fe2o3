@@ -28,7 +28,7 @@ use crate::lang::RefusalClass;
 use crate::lang::Refusals;
 use crate::theme::{
 	LeadingGap,
-	PageNumbering,
+	Numbering,
 	Theme,
 	ThemeHeadingLevelPatch,
 	ThemePatch,
@@ -186,6 +186,14 @@ pub fn lower_set(target: &str, args: &str) -> ThemePatch {
 	patch
 }
 
+/// The patch a `#text(args)[body]` call's arguments lower to, as `#set text(args)` would scoped to the
+/// body, with the keys it applied; the reader sets the call's `weight` and `style` itself, as faces.
+pub(crate) fn lower_text_call(args: &str) -> (ThemePatch, Vec<&'static str>) {
+	let mut patch	= ThemePatch::default();
+	let used		= lower_set_into("text", &lex::args(args), &mut patch, DEFAULT_BODY_PT);
+	(patch, used)
+}
+
 /// The house default body size, in points -- the base an `em` length in a lone `#set` (no earlier
 /// `#set text(size:)` to move it) resolves against, matching [`crate::theme::ThemeText`]'s own default.
 const DEFAULT_BODY_PT: f64 = 11.0;
@@ -263,14 +271,13 @@ fn lower_set_into(target: &str, list: &[lex::Arg], patch: &mut ThemePatch, em_ba
 		"heading" => {
 			// `numbering` applies across the levels, the way Typst's own `set heading(numbering: ...)` does:
 			// one group-level leaf the patch folds onto every level, whatever their count.
-			// `none` is no numbering, as an empty pattern is.
+			// `none` draws no number at all, a chapter's display numeral included.
 			let numbering = match lex::named(list, "numbering") {
-				Some(v) if v.trim() == "none"	=> Some(String::new()),
-				_								=> named_string(list, "numbering"),
+				Some(v) if v.trim() == "none"	=> Some(Numbering::Off),
+				_								=> named_string(list, "numbering").filter(|p| !p.is_empty()).map(Numbering::Pattern),
 			};
-			if let Some(pattern) = numbering {
-				let pat = if pattern.is_empty() { None } else { Some(pattern) };
-				patch.heading.numbering_all = Some(pat);
+			if let Some(n) = numbering {
+				patch.heading.numbering_all = Some(n);
 				used.push("numbering");
 			}
 		},
@@ -343,9 +350,9 @@ fn lower_set_into(target: &str, list: &[lex::Arg], patch: &mut ThemePatch, em_ba
 			// A pattern sets the number at the foot of every page; `none` sets no number at all.
 			if let Some(expr) = lex::named(list, "numbering") {
 				let numbering = if expr.trim() == "none" {
-					Some(PageNumbering::Off)
+					Some(Numbering::Off)
 				} else {
-					string_value(expr.trim()).filter(|p| !p.is_empty()).map(PageNumbering::Pattern)
+					string_value(expr.trim()).filter(|p| !p.is_empty()).map(Numbering::Pattern)
 				};
 				if let Some(n) = numbering {
 					patch.page.numbering = Some(n);
@@ -942,7 +949,7 @@ mod tests {
 		let mut theme = Theme::default();
 		theme.apply(&patch);
 		for level in &theme.heading.levels {
-			assert_eq!(level.numbering, Some("1.1".to_string()));
+			assert_eq!(level.numbering, Numbering::Pattern("1.1".to_string()));
 		}
 	}
 
@@ -1107,7 +1114,7 @@ mod tests {
 	#[test]
 	fn a_rule_in_an_item_strong_or_emphasis_is_not_lowered_for_the_document() {
 		let top = lower_declarations("#set heading(numbering: \"1.\")\n= Next\n");
-		assert_eq!(top.heading.numbering_all, Some(Some("1.".to_string())));
+		assert_eq!(top.heading.numbering_all, Some(Numbering::Pattern("1.".to_string())));
 		for src in [
 			"- item\n  #set heading(numbering: \"1.\")\n= Next\n",
 			"*bold\n#set heading(numbering: \"1.\")\nstill*\n\n= Next\n",

@@ -531,6 +531,8 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 		} else if let Some(kind) = capture_opener(trimmed, binds, open_here)
 			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_) | CaptureKind::Bare) && !lines.is_empty()))
+			.filter(|k| !(matches!(k, CaptureKind::Text)
+				&& (!lines.is_empty() || prose_follows(src.get(offset as usize..).unwrap_or("")))))
 		{
 			// A standalone content-binding reference mid-paragraph joins the paragraph inline rather than
 			// splicing a block, matching Typst's inline value flow: only a reference with no paragraph open
@@ -2380,6 +2382,8 @@ enum CaptureKind {
 	SectionBanner,	// a line-leading `#section-banner("logo")`, a full-width grey bar carrying a section logo
 	Let(String),	// a `#let name = (...)` data array bound to this name
 	Columns,		// a `#columns(n)[ ... ]` wrapper: its body is set single-column
+	Align,			// a `#align(alignment)[ ... ]` block: its paragraphs' short lines sit at that edge or centred
+	Text,			// an own-line `#text(args)[ ... ]` with no paragraph open: its body set as its own paragraph, styled
 	StyledBox,		// a `#styled-box[ ... ]` callout: its body is set inside a filled, padded box
 	Bare,			// a line-leading `#[ ... ]`: a content block Typst joins into the markup around it, its own `#set`s scoped to it
 	DeclStyle,		// a `#show: <t>.with(...)` application or a lowerable `#set <target>(...)`; lowered onto the theme, not refused
@@ -2450,6 +2454,14 @@ fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>, op
 	}
 	if trimmed.starts_with("#columns(") {
 		return Some(CaptureKind::Columns);
+	}
+	if trimmed.starts_with("#align(") {
+		return Some(CaptureKind::Align);
+	}
+	// A `#text(args)[ ... ]` that closes on its own line. The loop takes it only with no paragraph open and no
+	// prose on the next line, which Typst would join into one paragraph with it.
+	if !open && call_args_body(trimmed, "#text").is_some_and(|(_, _, tail)| tail.trim().is_empty()) {
+		return Some(CaptureKind::Text);
 	}
 	// A `#place(...)[ ... ]` is gathered whole: a floating one is set, spanning its column or the page; an
 	// absolutely placed overlay is refused visibly at dispatch.
@@ -2776,6 +2788,102 @@ fn dispatch_capture(
 				} else {
 					items.push(Item::Scoped { patch, items: inner, span: Span::new(cap.start, cap.start) });
 				}
+			}
+		},
+		CaptureKind::Align => {
+			// An `#align(alignment)[ ... ]` block. Its body is a block sequence, read through the document parser
+			// again and scoped under a patch setting the paragraph alignment, which the renderer applies to each
+			// line short of the measure; a justified interior line fills the measure and so does not move.
+			let at = Span::new(cap.start, cap.start);
+			match call_args_body(&cap.buf, "#align") {
+				Some((args, body, tail)) => {
+					let align = match align_arg(&args) {
+						Some((align, top)) => {
+							if !top {
+								skips.record_stand_in("#align", at, RefusalClass::Unsupported,
+									"a vertical alignment other than top, so its body is set at the top");
+							}
+							align
+						},
+						None => {
+							skips.record_stand_in("#align", at, RefusalClass::Unsupported,
+								&fmt!("an alignment it cannot read ({}), so its body is set at the start edge", args.trim()));
+							Align::Left
+						},
+					};
+					let scope = binds.guards.body(binds.guard_at + cap.start as usize, &body);
+					let (inner, sub) = res!(parse_items(&body, binds.in_scoped_body().with_guards(&scope, 0)));
+					skips.merge(sub);
+					if align != Align::Left {
+						refuse_unaligned(&inner, at, skips);
+					}
+					let mut patch	= crate::lang::set::lower_declarations(&body);
+					patch.par.align	= Some(align);
+					items.push(Item::Scoped { patch, items: inner, span: at });
+					// What stands after the block's closing bracket is read on as the file's own.
+					if !tail.trim().is_empty() {
+						let tail_at = cap.start.saturating_add(cap.buf.len().saturating_sub(tail.len()) as u32);
+						let (mut more, mut sub) = res!(parse_items(&tail, binds.at(binds.guard_at + tail_at as usize)));
+						sub.shift(tail_at);
+						skips.merge(sub);
+						items.append(&mut more);
+					}
+				},
+				None => skips.record("#align", at),
+			}
+		},
+		CaptureKind::Text => {
+			// An own-line `#text(args)[ ... ]` with no paragraph open: its body is set as its own paragraph under
+			// the patch its arguments lower to, as `#set text(args)` would scoped to it, with its `weight` and
+			// `style` set as the bold and italic faces. An argument neither takes is refused by name.
+			let at = Span::new(cap.start, cap.start);
+			match call_args_body(&cap.buf, "#text") {
+				Some((args, body, _)) => {
+					let list			= lex::args(&args);
+					let (patch, used)	= crate::lang::set::lower_text_call(&args);
+					let mut left: Vec<String> = Vec::new();
+					let bold = match lex::named(&list, "weight") {
+						Some(v) => match weight_is_bold(v) {
+							Some(b)	=> b,
+							None	=> { left.push(fmt!("weight: {}", v)); false },
+						},
+						None => false,
+					};
+					let italic = match lex::named(&list, "style") {
+						Some(v) => match v.trim() {
+							"\"italic\"" | "\"oblique\""	=> true,
+							"\"normal\""					=> false,
+							_							=> { left.push(fmt!("style: {}", v)); false },
+						},
+						None => false,
+					};
+					for a in &list {
+						match a.key.as_deref() {
+							Some("weight") | Some("style")		=> {},
+							Some(k) if used.iter().any(|u| *u == k)	=> {},
+							Some(k)								=> left.push(k.to_string()),
+							None								=> left.push("a positional argument".to_string()),
+						}
+					}
+					if !left.is_empty() {
+						skips.record_stand_in("#text", at, RefusalClass::Unsupported,
+							&fmt!("left unapplied: {}", left.join(", ")));
+					}
+					let scope = binds.guards.body(binds.guard_at + cap.start as usize, &body);
+					let (mut inner, sub) = res!(parse_items(&body, binds.in_scoped_body().with_guards(&scope, 0)));
+					skips.merge(sub);
+					for it in &mut inner {
+						if let Item::Paragraph { runs, .. } = it {
+							restyle_runs(runs, bold, italic);
+						}
+					}
+					if patch == crate::theme::ThemePatch::default() {
+						items.append(&mut inner);
+					} else {
+						items.push(Item::Scoped { patch, items: inner, span: at });
+					}
+				},
+				None => skips.record("#text", at),
 			}
 		},
 		CaptureKind::StyledBox => {
@@ -3590,13 +3698,19 @@ fn inline_plain(runs: &[Inline]) -> String {
 /// dropped, and the bracketed block content returned for re-parsing. `None` when no `[...]` group follows
 /// the arguments, so a malformed wrapper contributes no body.
 fn columns_body(buf: &str) -> Option<String> {
+	call_args_body(buf, "#columns").map(|(_, body, _)| body)
+}
+
+/// A captured `#name(args)[ ... ]` call as `(its arguments, its bracketed body, the text after the body)`.
+/// `None` when the call does not close, or no `[...]` body follows its arguments.
+fn call_args_body(buf: &str, name: &str) -> Option<(String, String, String)> {
 	let chars:	Vec<char>	= buf.chars().collect();
-	let Some(at) = find_lit(&chars, "#columns") else { return None; };
-	let open	= at + "#columns".chars().count();
+	let Some(at) = find_lit(&chars, name) else { return None; };
+	let open	= at + name.chars().count();
 	if chars.get(open) != Some(&'(') {
 		return None;
 	}
-	let Some((_, after_args)) = read_group(&chars, open) else { return None; };
+	let Some((args, after_args)) = read_group(&chars, open) else { return None; };
 	let mut j = after_args;
 	while j < chars.len() && chars[j].is_whitespace() {
 		j += 1;
@@ -3604,7 +3718,90 @@ fn columns_body(buf: &str) -> Option<String> {
 	if chars.get(j) != Some(&'[') {
 		return None;
 	}
-	read_group(&chars, j).map(|(body, _)| body)
+	read_group(&chars, j).map(|(body, after)| (args, body, chars[after..].iter().collect()))
+}
+
+/// An `#align` argument as its horizontal alignment and whether it leaves the body at the top, which a
+/// block in the flow always stands at. `start` and `end` are read left to right. `None` for an argument
+/// that is not a sum of alignment names, or that names two of one axis.
+fn align_arg(args: &str) -> Option<(Align, bool)> {
+	let list = lex::args(args);
+	let expr = match list.as_slice() {
+		[a] if a.key.as_deref().is_none() || a.key.as_deref() == Some("alignment")	=> a.value.clone(),
+		_																		=> return None,
+	};
+	let (mut h, mut v): (Option<Align>, Option<bool>) = (None, None);
+	for part in expr.split('+') {
+		match part.trim() {
+			"left" | "start"	if h.is_none()	=> h = Some(Align::Left),
+			"center"			if h.is_none()	=> h = Some(Align::Centre),
+			"right" | "end"		if h.is_none()	=> h = Some(Align::Right),
+			"top"				if v.is_none()	=> v = Some(true),
+			"horizon" | "bottom"	if v.is_none()	=> v = Some(false),
+			_									=> return None,
+		}
+	}
+	Some((h.unwrap_or(Align::Left), v.unwrap_or(true)))
+}
+
+/// Refuses, at the `#align` it stands in, each block of an aligned body the renderer sets only at the start
+/// edge: a paragraph, a space or a break aligns, and a scope is looked through.
+fn refuse_unaligned(items: &[Item], at: Span, skips: &mut Refusals) {
+	for it in items {
+		let kind = match it {
+			Item::Scoped { items, .. }	=> { refuse_unaligned(items, at, skips); continue; },
+			Item::Paragraph { .. } | Item::Space { .. } | Item::PageBreak { .. } | Item::ColBreak { .. }	=> continue,
+			Item::Heading { .. }		=> "heading",
+			Item::List { .. }			=> "list",
+			Item::Code { .. }			=> "code block",
+			Item::Table { .. }			=> "table",
+			Item::Figure { .. }			=> "figure",
+			Item::Image { .. }			=> "image",
+			Item::SectionBanner { .. }	=> "section banner",
+			Item::Rule { .. }			=> "rule",
+			Item::Place { .. }			=> "float",
+			Item::PrintGlossary { .. }	=> "glossary",
+			Item::ClaimIndex { .. }		=> "claim index",
+			Item::Box { .. }			=> "box",
+		};
+		skips.record_stand_in("#align", at, RefusalClass::Unsupported,
+			&fmt!("a {} in its body, set at the start edge", kind));
+	}
+}
+
+/// Does the next line hold prose, which Typst would join into one paragraph with the line before it?
+fn prose_follows(rest: &str) -> bool {
+	let t = rest.lines().next().unwrap_or("").trim();
+	!(t.is_empty() || t.starts_with('#') || t.starts_with('=') || t.starts_with(']') || t.starts_with("```")
+		|| t.starts_with("- ") || t.starts_with("+ ") || t.starts_with("/ "))
+}
+
+/// Is a `#text` `weight` bold -- a named weight from semibold up, or a number from 600? `None` for a value
+/// that is neither a weight name nor a number.
+fn weight_is_bold(v: &str) -> Option<bool> {
+	match v.trim().trim_matches('"') {
+		"thin" | "extralight" | "light" | "regular" | "medium"	=> Some(false),
+		"semibold" | "bold" | "extrabold" | "black"				=> Some(true),
+		n	=> n.parse::<u16>().ok().map(|w| w >= 600),
+	}
+}
+
+/// Sets a run list in the bold face, the italic or both, as a `#text(weight:, style:)` call around it does.
+fn restyle_runs(runs: &mut [Inline], bold: bool, italic: bool) {
+	if !bold && !italic {
+		return;
+	}
+	for r in runs.iter_mut() {
+		let styled = match std::mem::replace(r, Inline::Text(String::new())) {
+			Inline::Text(t) if bold && italic	=> Inline::BoldItalic(t),
+			Inline::Text(t) if bold				=> Inline::Strong(t),
+			Inline::Text(t)						=> Inline::Emph(t),
+			Inline::Strong(t) if italic			=> Inline::BoldItalic(t),
+			Inline::Emph(t) if bold				=> Inline::BoldItalic(t),
+			other								=> other,
+		};
+		*r = styled;
+	}
 }
 
 /// A captured `#[ ... ]` content block as `(the byte its body starts at in `buf`, the body, the text after the
