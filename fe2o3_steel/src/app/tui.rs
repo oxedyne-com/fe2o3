@@ -436,27 +436,33 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
     let mut shell_cfg = ShellConfig::default();
 
     if invocation_cmds.len() > 0 {
-        match context.execute(invocation_cmds, &shell_cfg) {
-            Ok(evals) => for eval in evals {
-                match eval {
-                    Evaluation::Output(s) => println!("{}", s),
-                    Evaluation::Exit => {
-                        println!("Exiting {} now.", cfg.app_human_name);
-                    }
-                    _ => (),
-                }
-            }
-            Err(e) => {
-                //println!("{} error: {}", cfg.app_human_name, e);
-                return Err(e);
-            }
-        }
+        let evals = res!(context.execute(invocation_cmds, &shell_cfg));
+        res!(command_line_outcome(evals, &cfg.app_human_name));
     } else {
         shell_cfg.greeting_msg =
             fmt!("Welcome, type \"help\" for a help menu.");
         res!(context.start_shell(&shell_cfg, None));
     }
 
+    Ok(())
+}
+
+
+/// Prints a command-line invocation's evaluations, and fails on the first error among them, so
+/// that `<app> server` refusing to start (a missing certificate, say) exits non-zero with the
+/// reason instead of returning quietly to a supervisor that reads a clean exit as a deliberate
+/// stop.
+pub fn command_line_outcome(evals: Vec<Evaluation>, app_name: &str) -> Outcome<()> {
+    for eval in evals {
+        match eval {
+            Evaluation::Output(s)   => println!("{}", s),
+            Evaluation::Exit        => println!("Exiting {} now.", app_name),
+            Evaluation::None        => (),
+            Evaluation::Error(s)    => return Err(err!(
+                "{}: {}", app_name, s;
+                Init)),
+        }
+    }
     Ok(())
 }
 
