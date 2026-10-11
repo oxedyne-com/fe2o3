@@ -420,6 +420,160 @@ pub fn write_with_index(
 	Ok(buf)
 }
 
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ FOREIGN SCHEMAS                                                           │
+// └───────────────────────────────────────────────────────────────────────────┘
+//
+// An application's own record, under a schema this crate does not know, sealed in the same
+// container and read back through a validator the application supplies. A separate path rather
+// than a `Payload` variant: `Payload` stays closed, so every exhaustive match on it downstream is
+// untouched, `Payload::schema` keeps its `&'static str`, and `read_artefact` and `read` refuse a
+// foreign envelope exactly as before. A caller with no validator cannot obtain a foreign body at
+// all.
+
+/// The validator an application supplies for its own schema.
+///
+/// `name` is the schema the envelope declares and the signature covers. It may not be one this
+/// crate reads itself, nor anything under `oxeweb/`, which this crate reserves. `validate` is run
+/// on the body before it is sealed and again after it has been verified and decoded, so a body it
+/// refuses is never given a signature and never handed back.
+///
+/// The container holds the body to its size limit and to one encoding per value. Everything else
+/// is the validator's. A body may embed whole `oxeweb/doc/1` trees, each rooted at a `doc` node,
+/// which `validate` checks with [`canon::check`] and [`validate::validate`], as a document reader
+/// would.
+pub trait ForeignSchema {
+	fn name(&self) -> &str;
+	fn validate(&self, body: &Dat) -> Outcome<()>;
+}
+
+/// A verified foreign artefact: obtained only from [`read_foreign`], so holding one means its
+/// envelope, hash, signature, canonical encoding and the caller's validator all checked out.
+///
+/// The fields are private for the reason [`Doc`] gives.
+#[derive(Clone, Debug)]
+pub struct Foreign {
+	env:	Envelope,
+	body:	Dat,
+}
+
+impl Foreign {
+
+	pub fn env(&self) -> &Envelope {
+		&self.env
+	}
+
+	pub fn body(&self) -> &Dat {
+		&self.body
+	}
+
+	pub fn into_body(self) -> Dat {
+		self.body
+	}
+
+	pub fn into_parts(self) -> (Envelope, Dat) {
+		(self.env, self.body)
+	}
+}
+
+/// Writes an artefact under the caller's own schema: name check, validate, canonical encode, hash,
+/// sign, assemble.
+///
+/// Sealing is the same `seal` and `assemble` every other artefact goes through. The body is held to
+/// the canonical rules of §3 and the size limit of §5 like any tree region.
+pub fn write_foreign<V: ForeignSchema>(
+	v:		&V,
+	body:	&Dat,
+	signer:	&SignatureScheme,
+	time:	u64,
+)
+	-> Outcome<Vec<u8>>
+{
+	res!(check_foreign_name(v.name(), "write"));
+	res!(v.validate(body));
+	let bytes = res!(body.to_bytes(Vec::new()));
+	if bytes.len() > limit::TREE_BYTES {
+		return Err(err!(
+			"The '{}' body encodes to {} bytes, exceeding the limit of {} bytes (SPEC.md §5).",
+			v.name(), bytes.len(), limit::TREE_BYTES;
+		Invalid, Input, TooBig, LimitReached));
+	}
+	let env = res!(seal(&bytes, v.name(), signer, time));
+	assemble(&env, &bytes)
+}
+
+/// Reads an artefact under the caller's own schema: header, envelope, hash, signature, then the
+/// schema check, the canonical decode and the caller's validator, in that order.
+pub fn read_foreign<V: ForeignSchema>(
+	buf:	&[u8],
+	v:		&V,
+)
+	-> Outcome<Foreign>
+{
+	res!(check_foreign_name(v.name(), "read"));
+	let (env, bytes) = res!(verify(buf));
+	if env.schema != v.name() {
+		return Err(err!(
+			"The envelope declares the schema '{}', but the validator supplied reads '{}'.",
+			env.schema, v.name();
+		Invalid, Input, Mismatch));
+	}
+	let body = res!(decode_foreign(&env.schema, bytes));
+	res!(v.validate(&body));
+	Ok(Foreign {
+		env,
+		body,
+	})
+}
+
+/// Decodes a foreign body, refusing bytes that are not the one encoding of the value they decode to.
+///
+/// The body is not a node tree, so `canon::decode`, which checks node rules, does not apply. What
+/// does is the byte comparison every record reader here makes: a duplicate key or a non-minimal
+/// length survives only in the bytes, and either would give one body two addresses.
+fn decode_foreign(
+	schema:	&str,
+	bytes:	&[u8],
+)
+	-> Outcome<Dat>
+{
+	let (body, n) = res!(Dat::from_bytes_limited(bytes, &canon::decode_limits()));
+	if n != bytes.len() {
+		return Err(err!(
+			"The '{}' body occupies {} of the {} bytes of its region, leaving {} trailing.",
+			schema, n, bytes.len(), bytes.len() - n;
+		Invalid, Input, Decode));
+	}
+	let re = res!(body.to_bytes(Vec::new()));
+	if re != bytes {
+		return Err(err!(
+			"The '{}' body is not in canonical form: it re-encodes to {} bytes against the {} \
+			supplied, so it carries a duplicate key or a non-minimal length (SPEC.md §3).",
+			schema, re.len(), bytes.len();
+		Invalid, Input, Decode));
+	}
+	Ok(body)
+}
+
+/// Refuses a foreign schema name that this crate reads itself or reserves.
+///
+/// A validator claiming a built-in name could seal, under that name, a body the built-in reader
+/// would then judge by its own rules, and could read a built-in artefact by rules other than its
+/// own. `oxeweb/` is refused whole, so a schema added there later cannot already be in use.
+fn check_foreign_name(name: &str, phase: &str) -> Outcome<()> {
+	let built_in = Schema::from_name(name).is_ok()
+		|| name == SCHEMA_POST
+		|| name == SCHEMA_CARD
+		|| name == SCHEMA_SHARE;
+	if built_in || name.starts_with("oxeweb/") || name.is_empty() {
+		return Err(err!(
+			"Refused to {} under the foreign schema '{}': a foreign schema may not be empty, \
+			one this crate reads itself, or under the reserved prefix 'oxeweb/'.", phase, name;
+		Invalid, Input, Mismatch));
+	}
+	Ok(())
+}
+
 /// Hashes a tree region with the scheme the envelope names.
 pub fn hash_tree(
 	scheme:	u32,
@@ -1459,5 +1613,162 @@ mod tests {
 				Ok(())
 			},
 		}
+	}
+
+	// ┌───────────────────────────────────────────────────────────────────────────┐
+	// │ FOREIGN SCHEMAS                                                           │
+	// └───────────────────────────────────────────────────────────────────────────┘
+
+	/// A test application's page record: a title, and a whole `oxeweb/doc/1` tree as its page.
+	struct PageRecord {
+		name:	&'static str,
+	}
+
+	impl ForeignSchema for PageRecord {
+		fn name(&self) -> &str {
+			self.name
+		}
+		fn validate(&self, body: &Dat) -> Outcome<()> {
+			let map = match body {
+				Dat::Map(map)	=> map,
+				other	=> return Err(err!(
+					"A page record is a map, not a {}.", other.kind();
+				Invalid, Input)),
+			};
+			match map.get(&dat!("title")) {
+				Some(Dat::Str(_))	=> (),
+				_	=> return Err(err!("A page record needs a string 'title'."; Invalid, Input)),
+			}
+			let page = res!(map.get(&dat!("page")).ok_or_else(|| err!(
+				"A page record needs a 'page'."; Invalid, Input, Missing)));
+			res!(canon::check(page));
+			res!(validate::validate(page, crate::SCHEMA_DOC_1));
+			Ok(())
+		}
+	}
+
+	const PAGE: PageRecord = PageRecord { name: "zoapedia/page/0" };
+
+	fn page_body(page: Dat) -> Dat {
+		mapdat!{
+			"title"	=> dat!("Fred"),
+			"page"	=> page,
+		}
+	}
+
+	/// Asserts that an outcome failed, and that the message says why.
+	fn refused<T>(out: Outcome<T>, what: &str, says: &str) -> Outcome<()> {
+		match out {
+			Ok(_) => Err(err!("Expected a refusal of {}, but it succeeded.", what; Test, Invalid)),
+			Err(e) => {
+				let msg = fmt!("{}", e);
+				assert!(msg.contains(says),
+					"The refusal of {} should say '{}', but says: {}", what, says, msg);
+				Ok(())
+			},
+		}
+	}
+
+	#[test]
+	fn test_a_foreign_artefact_round_trips_25() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		let body = page_body(sample_tree());
+		let buf = res!(write_foreign(&PAGE, &body, &signer, TIME));
+		res!(verify_only(&buf));
+		let f = res!(read_foreign(&buf, &PAGE));
+		assert_eq!(f.env().schema, "zoapedia/page/0");
+		assert_eq!(f.env().time, TIME);
+		assert_eq!(Some(f.env().author.clone()),
+			res!(signer.get_public_key()).map(|pk| pk.to_vec()));
+		assert_eq!(f.body(), &body);
+		// Written twice, written the same: the body is canonical.
+		assert_eq!(res!(write_foreign(&PAGE, &body, &signer, TIME)), buf);
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_built_in_readers_refuse_a_foreign_artefact_26() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		let buf = res!(write_foreign(&PAGE, &page_body(sample_tree()), &signer, TIME));
+		res!(refused(read_artefact(&buf), "read_artefact of a foreign artefact", "zoapedia/page/0"));
+		// `read` decodes before it learns the schema, so it refuses on the body's shape.
+		res!(refused(read(&buf), "read of a foreign artefact", "a node is a usr daticle"));
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_wrong_validator_is_refused_27() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		let buf = res!(write_foreign(&PAGE, &page_body(sample_tree()), &signer, TIME));
+		let other = PageRecord { name: "zoapedia/person/0" };
+		res!(refused(read_foreign(&buf, &other), "a read under another schema",
+			"zoapedia/person/0"));
+		// A body the validator refuses is not handed back, even under the right name: here the
+		// envelope is sound and the name matches, but the body is not a page record.
+		let bare = dat!("not a record");
+		let bytes = res!(bare.to_bytes(Vec::new()));
+		let env = res!(seal(&bytes, PAGE.name, &signer, TIME));
+		let bad = res!(assemble(&env, &bytes));
+		res!(verify_only(&bad));
+		res!(refused(read_foreign(&bad, &PAGE), "a body the validator refuses", "is a map"));
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_built_in_or_oxeweb_name_is_refused_28() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		let body = page_body(sample_tree());
+		for name in [
+			SCHEMA_DOC, crate::SCHEMA_DOC_1, crate::SCHEMA_CHROME, crate::SCHEMA_APP,
+			SCHEMA_POST, SCHEMA_CARD, SCHEMA_SHARE, "oxeweb/page/0", "",
+		] {
+			let v = PageRecord { name };
+			res!(refused(write_foreign(&v, &body, &signer, TIME), "a write under a reserved name",
+				"Refused to write"));
+		}
+		// At read: a genuine post, and a genuine document, each claimed by a validator naming it.
+		let post = res!(write_artefact(&Payload::Post(sample_post()), &signer, TIME));
+		res!(refused(read_foreign(&post, &PageRecord { name: SCHEMA_POST }),
+			"a read of a post as foreign", "Refused to read"));
+		let (_, doc) = res!(sample_file());
+		res!(refused(read_foreign(&doc, &PageRecord { name: SCHEMA_DOC }),
+			"a read of a document as foreign", "Refused to read"));
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_foreign_body_over_the_limit_is_refused_29() -> Outcome<()> {
+		/// Accepts anything, so that only the size limit can refuse.
+		struct Any;
+		impl ForeignSchema for Any {
+			fn name(&self) -> &str { "zoapedia/any/0" }
+			fn validate(&self, _: &Dat) -> Outcome<()> { Ok(()) }
+		}
+		let signer = SignatureScheme::new_ed25519();
+		let big = Dat::BU64(vec![0u8; limit::TREE_BYTES + 1]);
+		res!(refused(write_foreign(&Any, &big, &signer, TIME), "an oversized body", "exceeding"));
+		Ok(())
+	}
+
+	#[test]
+	fn test_an_embedded_doc_tree_is_validated_30() -> Outcome<()> {
+		let signer = SignatureScheme::new_ed25519();
+		// A paragraph is not a doc, so it is not a whole tree, and the page validator refuses it
+		// before anything is signed.
+		let para = node(NodeKind::Para, mapdat!{
+			"children" => Dat::List(vec![text("orphan")]),
+		});
+		res!(refused(write_foreign(&PAGE, &page_body(para), &signer, TIME),
+			"a page that is not a doc tree", "must be a doc"));
+		// And an unknown field inside an otherwise sound doc is refused through the same call.
+		let bad = node(NodeKind::Doc, mapdat!{
+			"title" => dat!("t"),
+			"lang" => dat!("en"),
+			"bogus" => dat!(1u8),
+			"children" => Dat::List(vec![]),
+		});
+		assert!(write_foreign(&PAGE, &page_body(bad), &signer, TIME).is_err(),
+			"A page embedding an invalid doc tree was sealed.");
+		Ok(())
 	}
 }

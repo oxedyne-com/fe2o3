@@ -2,7 +2,11 @@
 
 pub use crate::{
 	canon,
-	doc::Doc,
+	doc::{
+		Doc,
+		Foreign,
+		ForeignSchema,
+	},
 	envelope::{
 		Envelope,
 		Header,
