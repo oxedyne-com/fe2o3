@@ -77,8 +77,14 @@ impl GlyphDefs {
 			let flipped = res!(outline.transform(&Transform::scale(1.0, -1.0)));
 			self.defs.insert(key, write_path_data(&flipped));
 		}
-		let _ = write!(out, "  <use href=\"#ag{:016x}\" x=\"{}\" y=\"{}\" ", key, x, y);
-		out.push_str(&presentation(Some(colour), None));
+		// Black is SVG's initial fill and no ancestor of a glyph sets one, so a black glyph says nothing
+		// (about 16 bytes a glyph on prose). Positions keep f32's shortest form: rounding them moves whole
+		// lines across Chrome's sub-pixel raster buckets, which the pixel gate sees.
+		let _ = write!(out, "  <use href=\"#ag{:016x}\" x=\"{}\" y=\"{}\"", key, x, y);
+		if colour != Rgba::BLACK {
+			out.push(' ');
+			out.push_str(&presentation(Some(colour), None));
+		}
 		out.push_str("/>\n");
 		Ok(())
 	}
@@ -680,7 +686,8 @@ mod tests {
 		let bnodes	= res!(break_paragraph(
 			fonts.clone(), Role::Body, Dir::Ltr, size, "Black prose here", measure, leading, false, Rgba::BLACK, None));
 		let bsvg	= res!(render_text_leaves(geom, &bnodes));
-		assert!(bsvg.contains("fill=\"#000000\""), "a default paragraph must draw black glyphs");
+		assert!(bsvg.contains("<use href=\"#ag"), "a default paragraph must draw its glyphs");
+		assert!(!bsvg.contains("fill=\"#000000\""), "a black glyph takes SVG's default fill, unwritten");
 		assert!(!bsvg.contains("fill=\"#ff0000\""), "a default paragraph must never draw red");
 		Ok(())
 	}
@@ -710,7 +717,8 @@ mod tests {
 		assert_eq!(xs.split(' ').count(), 6, "every character has its own position, found: {}", xs);
 		// The visible outlines are unaffected: still one filled black path per inked glyph, nothing new
 		// added to that part of the document.
-		assert!(svg.contains("fill=\"#000000\""), "the outline glyphs still draw in black");
+		assert!(svg.contains("<use href=\"#ag"), "the outline glyphs still draw");
+		assert!(!svg.contains("fill=\"#000000\""), "and in black, SVG's default fill, found: {}", svg);
 		Ok(())
 	}
 
