@@ -122,15 +122,13 @@ impl BlockEntry {
 }
 
 /// One cached page-emit result: the SVG of the page's body frame, split into the visible glyph and
-/// graphic ink and the invisible selectable text layer's tspans, plus whether the body left any text
-/// behind (so the furniture's tspans take their leading interword space exactly as a single-pass render
-/// would). The furniture -- running head and folio -- is never cached, since its folio differs page to
+/// graphic ink and the invisible selectable text layer, kept open (its interword space and open line)
+/// so the furniture carries on from it exactly as a single-pass render would. The furniture -- running head and folio -- is never cached, since its folio differs page to
 /// page; it is drawn fresh and concatenated onto the cached body, byte for byte as one pass produces.
 #[derive(Clone)]
 pub struct PageEntry {
 	pub body_ink:		String,
-	pub body_tspans:	String,
-	pub seen_text:		bool,
+	pub body_tsel:		crate::emit::svg::TselLayer,	// the body's selectable layer, open for the furniture
 	pub body_defs:		crate::emit::svg::GlyphDefs,	// the body's glyph outlines, for the page's `<defs>`
 }
 
@@ -219,10 +217,9 @@ impl Memo {
 		&mut self,
 		key:			Fingerprint,
 		body_ink:		String,
-		body_tspans:	String,
-		seen_text:		bool,
+		body_tsel:		crate::emit::svg::TselLayer,
 		body_defs:		crate::emit::svg::GlyphDefs,
 	) {
-		self.pages.insert(key, PageEntry { body_ink, body_tspans, seen_text, body_defs }, 0);
+		self.pages.insert(key, PageEntry { body_ink, body_tsel, body_defs }, 0);
 	}
 }

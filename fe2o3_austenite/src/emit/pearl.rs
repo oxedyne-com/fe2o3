@@ -26,6 +26,7 @@
 use crate::doc::Heading;
 use crate::emit::svg::{
 	assemble_sized,
+	TselLayer,
 	GlyphDefs,
 };
 use crate::ir::{
@@ -739,32 +740,15 @@ impl PageDevice for SvgSink {
 	}
 
 	fn text_layer(&mut self, runs: &[TselRun]) -> Outcome<()> {
-		// One page-wide `.tsel` buffer: every run's tspans joining a single `<text>`, in placement order,
-		// with a leading space ahead of every run but the first to stand in for the interword gap Pearl's
-		// per-word leaves carry as pure position. One element rather than one per run sidesteps a
-		// `window.find` gap Chromium was found to have across sibling `<text>` elements once tspans carry
-		// per-glyph `x`/`y`.
-		let mut buf			= String::new();
-		let mut seen_text	= false;
+		// One page-wide `.tsel` buffer: every run joining a single `<text>`, in placement order, with a
+		// leading space ahead of every run but the first to stand in for the interword gap Pearl's per-word
+		// leaves carry as pure position. One element rather than one per run sidesteps a `window.find` gap
+		// Chromium was found to have across sibling `<text>` elements once tspans carry positions.
+		let mut tsel = TselLayer::new();
 		for run in runs {
-			let mut tspans = String::new();
-			for s in &run.spans {
-				tspans.push_str(&fmt!(
-					"<tspan x=\"{}\" y=\"{}\" font-size=\"{}\">{}</tspan>",
-					run.base_x + s.gx, run.base_y - s.gy, run.size, xml_escape(&s.text)));
-			}
-			if tspans.is_empty() {
-				continue;
-			}
-			if seen_text {
-				buf.push_str(&fmt!(
-					"<tspan x=\"{}\" y=\"{}\" font-size=\"{}\"> </tspan>",
-					run.base_x, run.base_y, run.size));
-			}
-			buf.push_str(&tspans);
-			seen_text = true;
+			tsel.run(run.base_x, run.base_y, run.size, run.spans.iter().map(|s| (s.gx, s.gy, s.text.as_str())));
 		}
-		self.tspans = buf;
+		self.tspans = tsel.finish();
 		Ok(())
 	}
 
