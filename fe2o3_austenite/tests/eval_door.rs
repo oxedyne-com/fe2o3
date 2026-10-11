@@ -725,18 +725,22 @@ fn delta_fail(inst: &mut Instance, p: &Project) -> Outcome<Failure> {
 
 /// The text a page's SVG offers for selection, with its whitespace removed: the characters of its `.tsel` layer.
 fn text_layer(svg: &str) -> String {
-	let mut out = String::new();
-	let mut rest = match svg.find("<text class=\"tsel\">") {
-		Some(i)	=> &svg[i..],
-		None	=> return out,
+	let body = match svg.find("<text class=\"tsel\">") {
+		Some(i)	=> &svg[i + "<text class=\"tsel\">".len()..],
+		None	=> return String::new(),
 	};
-	while let Some(at) = rest.find("<tspan") {
-		let span	= &rest[at..];
-		let open	= match span.find('>') { Some(i) => i + 1, None => break };
-		let close	= match span.find("</tspan>") { Some(i) => i, None => break };
-		out.push_str(&span[open..close]);
-		rest = &span[close + "</tspan>".len()..];
+	let body = body.split("</text>").next().unwrap_or("");
+	let mut out = String::new();
+	let mut tag = false;
+	for c in body.chars() {
+		match c {
+			'<'			=> tag = true,
+			'>'			=> tag = false,
+			_ if !tag	=> out.push(c),
+			_			=> (),
+		}
 	}
+	let out = out.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&");
 	out.split_whitespace().collect()
 }
 
