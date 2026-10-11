@@ -96,6 +96,19 @@ enum Start {
 
 /// Reads a run of lines into the blocks they are, at the given nesting depth.
 fn blocks(lines: &[&str], depth: usize, refs: &HashMap<String, String>) -> Outcome<Vec<Block>> {
+	let (out, _) = res!(blocks_to(lines, depth, refs, None));
+	Ok(out)
+}
+
+/// Reads lines into blocks up to the bare fence of at least `close` colons that ends the division
+/// they are in, and says how many lines that was, the fence not counted.
+///
+/// The fence is looked for here, among the blocks, rather than by a scan of the lines, because only
+/// the blocks know which lines are theirs: a fence inside a listing, or indented inside a list item,
+/// closes nothing out here.
+fn blocks_to(lines: &[&str], depth: usize, refs: &HashMap<String, String>, close: Option<usize>)
+	-> Outcome<(Vec<Block>, usize)>
+{
 	if depth > DEPTH_LIMIT {
 		return Err(err!(
 			"Djot blocks nest more than {} deep, which no document written to be read \
@@ -127,6 +140,9 @@ fn blocks(lines: &[&str], depth: usize, refs: &HashMap<String, String>) -> Outco
 				emit(&mut out, &mut pending, b);
 				i += n;
 			}
+			Start::Div { len, open: false, .. } if close.map_or(false, |c| len >= c) => {
+				return Ok((out, i));
+			}
 			Start::Div { len, attrs, .. }	=> {
 				let (b, n) = res!(div(&lines[i..], depth, len, attrs, refs));
 				emit(&mut out, &mut pending, b);
@@ -157,7 +173,7 @@ fn blocks(lines: &[&str], depth: usize, refs: &HashMap<String, String>) -> Outco
 			}
 		}
 	}
-	Ok(out)
+	Ok((out, lines.len()))
 }
 
 /// Adds a block, wrapping it in a division where a standalone attributes line stood above it.
@@ -253,7 +269,7 @@ fn classify(line: &str) -> Start {
 	if b[0] == b'{' {
 		let t = rest.trim_end();
 		if let Some((a, used)) = inline::attrs_of(t) {
-			if used == t.len() {
+			if used == t.len() && inline::attrs_clean(&t[1..used - 1]) {
 				return Start::Attr(a);
 			}
 		}
@@ -417,6 +433,8 @@ fn cells_of(line: &str) -> Vec<&str> {
 	while i < b.len() {
 		match b[i] {
 			b'\\'	=> i += 2,	// A backslash and whatever it escapes divide nothing.
+			// Nor does a pipe within a code span, which is code.
+			b'`'	=> i = code_end(b, i),
 			b'|'	=> {
 				out.push(trim(&t[s..i]));
 				i += 1;
@@ -429,6 +447,26 @@ fn cells_of(line: &str) -> Vec<&str> {
 		out.push(trim(&t[s..]));
 	}
 	out
+}
+
+/// The offset past the code span a run of backticks at `i` opens, or past the run where nothing closes
+/// it, which is how the inline pass reads it.
+fn code_end(b: &[u8], i: usize) -> usize {
+	let run = |k: usize| b[k..].iter().take_while(|c| **c == b'`').count();
+	let n = run(i);
+	let mut j = i + n;
+	while j < b.len() {
+		if b[j] == b'`' {
+			let m = run(j);
+			if m == n {
+				return j + m;
+			}
+			j += m;
+			continue;
+		}
+		j += 1;
+	}
+	i + n
 }
 
 /// A heading's text, with the whitespace around it taken off.
@@ -544,6 +582,13 @@ fn heading(lines: &[&str], text: String, refs: &HashMap<String, String>)
 
 /// Reads a paragraph, or the table a delimiter row turns its last line into.
 fn para(lines: &[&str], refs: &HashMap<String, String>) -> Outcome<(Block, usize)> {
+	// A delimiter row with nothing above it opens a table with no header, its row only aligning the
+	// columns. It must draw its own left edge, so a line of dashes stays the prose it is.
+	if strip_leading(lines[0]).starts_with('|') {
+		if let Some(cols) = delim_of(lines[0], cells_of(lines[0]).len()) {
+			return table(lines, cols, false, refs);
+		}
+	}
 	let mut acc = vec![strip_leading(lines[0]).to_string()];
 	let mut i = 1;
 	while i < lines.len() {
@@ -558,7 +603,7 @@ fn para(lines: &[&str], refs: &HashMap<String, String>) -> Outcome<(Block, usize
 					i - 1,
 				));
 			}
-			return table(lines, cols, refs);
+			return table(lines, cols, true, refs);
 		}
 		if ref_def_of(lines[i]).is_some() || interrupts(lines[i]) {
 			break;
@@ -569,19 +614,49 @@ fn para(lines: &[&str], refs: &HashMap<String, String>) -> Outcome<(Block, usize
 	Ok((Block::Para(res!(inline::parse(acc.join("\n").trim_end(), refs))), i))
 }
 
-/// Reads a table: the header row, the delimiter row that made it one, and the body beneath them.
-fn table(lines: &[&str], cols: Vec<Align>, refs: &HashMap<String, String>)
+/// Reads a table: the header row where there is one, the delimiter row, the body beneath them, and
+/// the caption that may follow.
+///
+/// A caption is Djot's `^ ` line after the table, a blank line between them or not, and it carries on
+/// across the lines that follow it as a paragraph does.
+fn table(lines: &[&str], cols: Vec<Align>, headed: bool, refs: &HashMap<String, String>)
 	-> Outcome<(Block, usize)>
 {
-	let head = res!(row(lines[0], cols.len(), refs));
+	let (head, mut i) = match headed {
+		true	=> (Some(res!(row(lines[0], cols.len(), refs))), 2),
+		false	=> (None, 1),
+	};
 	let mut rows = Vec::new();
-	let mut i = 2;
 	// The table runs to the first line that begins a block of its own, a blank line among them.
-	while i < lines.len() && !interrupts(lines[i]) {
+	while i < lines.len() && !interrupts(lines[i]) && caption_of(lines[i]).is_none() {
 		rows.push(res!(row(lines[i], cols.len(), refs)));
 		i += 1;
 	}
-	Ok((Block::Table { head: Some(head), rows, cols, caption: Vec::new() }, i))
+	let mut j = i;
+	while j < lines.len() && is_blank(lines[j]) {
+		j += 1;
+	}
+	let mut caption = Vec::new();
+	if let Some(first) = lines.get(j).and_then(|l| caption_of(l)) {
+		let mut acc = vec![first.to_string()];
+		j += 1;
+		while j < lines.len() && !interrupts(lines[j]) && ref_def_of(lines[j]).is_none() {
+			acc.push(strip_leading(lines[j]).to_string());
+			j += 1;
+		}
+		caption = res!(inline::parse(acc.join("\n").trim(), refs));
+		i = j;
+	}
+	Ok((Block::Table { head, rows, cols, caption }, i))
+}
+
+/// The text of a table caption line, `^ ` and all before it taken off, if the line is one.
+fn caption_of(line: &str) -> Option<&str> {
+	let rest = strip_leading(line);
+	match rest == "^" {
+		true	=> Some(""),
+		false	=> rest.strip_prefix("^ "),
+	}
 }
 
 /// Reads one row of a table, held to the width the header set.
@@ -626,57 +701,18 @@ fn fence_closes(line: &str, ch: u8, len: usize) -> bool {
 
 /// Reads a division and the blocks within it, which run to its closing fence or to the end of input.
 ///
-/// The fences nest, so a division holds divisions. An opening fence names a class or attributes and an
-/// inner opening fence deepens the nesting; a bare fence of colons closes the innermost division still
-/// open. A division nobody closed runs to the end, as an unclosed code fence does.
+/// The fences nest, so a division holds divisions: a bare fence of colons at least as long as the
+/// opening one closes the innermost division still open. A division nobody closed runs to the end, as
+/// an unclosed code fence does.
 fn div(lines: &[&str], depth: usize, len: usize, attrs: Attrs, refs: &HashMap<String, String>)
 	-> Outcome<(Block, usize)>
 {
-	let mut nest = 1;
-	let mut close = None;
-	let mut i = 1;
-	while i < lines.len() {
-		if let Some((flen, open)) = div_fence(lines[i]) {
-			if open {
-				nest += 1;
-			} else if flen >= len {
-				nest -= 1;
-				if nest == 0 {
-					close = Some(i);
-					break;
-				}
-			}
-		}
-		i += 1;
-	}
-	let end = match close {
-		Some(c)	=> c,
-		None	=> lines.len(),
-	};
-	let content = res!(blocks(&lines[1..end], depth + 1, refs));
-	let consumed = match close {
-		Some(c)	=> c + 1,
-		None	=> lines.len(),
+	let (content, n) = res!(blocks_to(&lines[1..], depth + 1, refs, Some(len)));
+	let consumed = match 1 + n < lines.len() {
+		true	=> n + 2,	// the closing fence is the division's too
+		false	=> lines.len(),
 	};
 	Ok((Block::Div { attrs, content }, consumed))
-}
-
-/// Whether the line is a division fence, how many colons it runs to, and whether it opens.
-///
-/// A fence that names a class or attributes opens a division; a bare run of colons closes one. An
-/// anonymous division opened by a bare fence is read where it does not nest inside another anonymous
-/// one, which no prose written to be read does.
-fn div_fence(line: &str) -> Option<(usize, bool)> {
-	let rest = &line[ws_end(line)..];
-	let b = rest.as_bytes();
-	if b.is_empty() || b[0] != b':' {
-		return None;
-	}
-	let n = rest.bytes().take_while(|c| *c == b':').count();
-	if n < 3 {
-		return None;
-	}
-	Some((n, !rest[n..].trim().is_empty()))
 }
 
 /// Reads a block quotation and the blocks within it.
