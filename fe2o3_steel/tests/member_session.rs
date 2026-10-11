@@ -276,6 +276,33 @@ mod member {
     }
 
     #[test]
+    fn set_data_writes_through_and_survives_a_restart() -> Outcome<()> {
+        let s = res!(store("set_data"));
+        let (clk, t) = clock();
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        let tok = res!(ss.start(&s.db, b"kit", dat!("before")));
+        let other = res!(ss.start(&s.db, b"kit", dat!("other")));
+        t.store(T0 + 10, Ordering::SeqCst);
+        assert!(res!(ss.set_data(&s.db, &tok, dat!("after"))));
+        let got = res!(res!(ss.check(&s.db, &tok)).ok_or_else(|| err!("Lost."; Test)));
+        assert_eq!(got.data, dat!("after"));
+        let got = res!(res!(ss.check(&s.db, &other)).ok_or_else(|| err!("Lost."; Test)));
+        assert_eq!(got.data, dat!("other"));
+        drop(ss);
+        let (clk, t2) = clock();
+        t2.store(T0 + 20, Ordering::SeqCst);
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        let got = res!(res!(ss.check(&s.db, &tok)).ok_or_else(|| err!("Lost at restart."; Test)));
+        assert_eq!(got.data, dat!("after"));
+        // An ended or unknown session takes no data and is not revived.
+        assert!(res!(ss.end(&s.db, &tok)));
+        assert!(!res!(ss.set_data(&s.db, &tok, dat!("ghost"))));
+        assert!(res!(ss.check(&s.db, &tok)).is_none());
+        assert!(!res!(ss.set_data(&s.db, &res!(Token::from_hex(&"ab".repeat(32))), dat!("ghost"))));
+        Ok(())
+    }
+
+    #[test]
     fn the_store_holds_the_hash_and_never_the_token() -> Outcome<()> {
         let s = res!(store("hash"));
         let (clk, _) = clock();

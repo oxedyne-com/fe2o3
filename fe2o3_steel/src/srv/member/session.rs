@@ -400,6 +400,38 @@ impl Sessions {
         Ok(Some(live.session(&hash)))
     }
 
+    /// Replaces the app data of the live session the token names, written through before the map
+    /// changes, as a re-challenge records its time. Whether there was a live session. An expired
+    /// one is left for `check` or the sweep to end; it is not revived.
+    pub fn set_data(
+        &self,
+        db:     &(Arc<RwLock<VhostDb>>, Uid),
+        token:  &Token,
+        data:   Dat,
+    )
+        -> Outcome<bool>
+    {
+        let now = res!(self.clock.now());
+        let hash = res!(token.hash());
+        let (db_arc, uid) = db;
+        let mut state = lock_mutex!(self.state);
+        let mut e = match state.by_hash.get(&hash) {
+            Some(e) if !expired(&self.cfg, e, now)  => e.clone(),
+            _                                       => return Ok(false),
+        };
+        e.data = data;
+        {
+            let dbr = lock_read!(db_arc);
+            res!(dbr.insert(self.cfg.key(&hash), e.to_dat(e.last_seen), uid.clone(), None));
+        }
+        e.stored_seen = e.last_seen;
+        if let Some(live) = state.by_hash.get_mut(&hash) {
+            *live = e;
+        }
+        debug!("member session: {} data replaced.", short(&hash));
+        Ok(true)
+    }
+
     /// Ends the session the token names. Whether there was one.
     pub fn end(
         &self,
