@@ -834,6 +834,7 @@ pub struct SGlyph {
 	pub c:				char,			// the cluster's first character
 	pub justifiable:	bool,
 	pub script:			Script,
+	pub safe_to_break:	bool,			// the shaper says a line may start here without reshaping
 }
 
 impl SGlyph {
@@ -914,8 +915,9 @@ pub struct ShapedRun {
 	pub text:		Arc<str>,
 	pub rtl:		bool,
 	pub props:		Arc<TextProps>,
-	pub glyphs:		Arc<Vec<SGlyph>>,
-	pub kept:		(usize, usize),
+	pub glyphs:		Arc<Vec<SGlyph>>,	// shared with the run the line breaker cut this one from
+	pub span:		(usize, usize),		// this run's glyphs within `glyphs`
+	pub kept:		(usize, usize),		// the glyphs layout sees, within `span`
 }
 
 impl ShapedRun {
@@ -924,7 +926,21 @@ impl ShapedRun {
 		self.glyphs.get(self.kept.0..self.kept.1).unwrap_or(&[])
 	}
 
+	/// The run's glyphs, those trimmed away included.
+	pub fn all(&self) -> &[SGlyph] {
+		self.glyphs.get(self.span.0..self.span.1).unwrap_or(&[])
+	}
+
+	/// The kept glyphs to change. A run sliced from a longer one first takes its own copy of its span
+	/// alone, as Typst's `Cow::to_mut` does; `Arc::make_mut` then copies only a list still shared.
 	pub fn kept_mut(&mut self) -> &mut [SGlyph] {
+		if self.span != (0, self.glyphs.len()) {
+			let off = self.span.0;
+			let own: Vec<SGlyph> = self.all().to_vec();
+			self.span = (0, own.len());
+			self.kept = (self.kept.0.saturating_sub(off), self.kept.1.saturating_sub(off));
+			self.glyphs = Arc::new(own);
+		}
 		let (a, b) = self.kept;
 		match Arc::make_mut(&mut self.glyphs).get_mut(a..b) {
 			Some(s)	=> s,
@@ -958,7 +974,7 @@ impl ShapedRun {
 
 	/// Trims glyphs matching `f` from both ends of the kept range.
 	pub fn trim<F: Fn(&SGlyph) -> bool>(&mut self, f: F) {
-		let all = self.glyphs.as_slice();
+		let all = self.all();
 		let mut a = 0;
 		while a < all.len() && f(&all[a]) {
 			a += 1;
@@ -967,12 +983,12 @@ impl ShapedRun {
 		while b > a && f(&all[b - 1]) {
 			b -= 1;
 		}
-		self.kept = (a, b);
+		self.kept = (self.span.0 + a, self.span.0 + b);
 	}
 
 	/// The same properties with no text.
 	pub fn empty(&self) -> Self {
-		Self { text: Arc::from(""), glyphs: Arc::new(Vec::new()), kept: (0, 0), ..self.clone() }
+		Self { text: Arc::from(""), glyphs: Arc::new(Vec::new()), span: (0, 0), kept: (0, 0), ..self.clone() }
 	}
 
 	/// The run's top and bottom extent: the chain's edges measured over each kept glyph's face, or over
@@ -981,7 +997,7 @@ impl ShapedRun {
 		let size = self.props.size;
 		let mut top = 0.0f64;
 		let mut bottom = 0.0f64;
-		if self.glyphs.is_empty() {
+		if self.all().is_empty() {
 			let face = self.props.families.iter().find_map(|f| book.select(&f.name, self.props.variant));
 			if let Some(f) = face.and_then(|i| book.face(i)) {
 				let (t, b) = edges(f, self.props.top_edge, self.props.bottom_edge, size, None);
@@ -1134,6 +1150,7 @@ pub fn shape_run(book: &FontBook, base: usize, text: &str, props: &Arc<TextProps
 		rtl,
 		props:	props.clone(),
 		glyphs:	Arc::new(ctx.glyphs),
+		span:	(0, n),
 		kept:	(0, n),
 	})
 }
@@ -1295,6 +1312,7 @@ fn shape_segment(ctx: &mut Ctx, base: usize, text: &str, from: usize) -> Outcome
 				c,
 				justifiable:	is_justifiable(c, script, x_advance, (0.0, 0.0)),
 				script,
+				safe_to_break:	g.safe_to_break,
 			});
 		} else {
 			// The end of the not-drawn stretch, then its text range.
@@ -1395,6 +1413,7 @@ fn shape_tofus(ctx: &mut Ctx, base: usize, text: &str, fid: usize) -> Outcome<()
 			c,
 			justifiable:	is_justifiable(c, script, adv, (0.0, 0.0)),
 			script,
+			safe_to_break:	true,
 		});
 	};
 	if ctx.rtl {
@@ -1473,15 +1492,76 @@ fn calculate_adjustability(ctx: &mut Ctx) {
 }
 
 impl ShapedRun {
-	/// The slice `start..end` of the run, shaped afresh: a line boundary cutting a run is where kerning
-	/// and ligatures may change, and shaping the slice gives exactly what Typst's safe-to-break reuse
-	/// or reshape gives.
+	/// The slice `start..end` of the run, as Typst's `reshape`: the run's own glyphs, shared, when the
+	/// shaper marked both ends safe to break, else the slice shaped afresh, since a line boundary there
+	/// may change kerning or a ligature.
 	pub fn reshape(&self, book: &FontBook, start: usize, end: usize) -> Outcome<ShapedRun> {
-		let text = match self.text.get(start - self.base..end - self.base) {
-			Some(t)	=> t,
-			None	=> return Err(err!("A line cuts a text run off a character boundary at {}..{}.", start, end; Bug)),
+		let text = match self.text.get(start.saturating_sub(self.base)..end.saturating_sub(self.base)) {
+			Some(t) if start >= self.base	=> t,
+			_								=> return Err(err!(
+				"A line cuts a text run off a character boundary at {}..{}.", start, end; Bug)),
 		};
+		if let Some((a, b)) = self.slice_safe_to_break(start, end) {
+			return Ok(ShapedRun {
+				base:	start,
+				text:	Arc::from(text),
+				rtl:	self.rtl,
+				props:	self.props.clone(),
+				glyphs:	self.glyphs.clone(),
+				span:	(a, b),
+				kept:	(a, b),
+			});
+		}
 		shape_run(book, start, text, &self.props, self.rtl)
+	}
+
+	/// The glyphs, as a range within `glyphs`, that draw `start..end` when both ends are safe to break.
+	fn slice_safe_to_break(&self, start: usize, end: usize) -> Option<(usize, usize)> {
+		let (l, r) = if self.rtl { (end, start) } else { (start, end) };
+		let a = self.find_safe_to_break(l)?;
+		let b = self.find_safe_to_break(r)?;
+		if a <= b { Some((self.span.0 + a, self.span.0 + b)) } else { None }
+	}
+
+	/// The index, within the run, of the glyph that starts text index `at` furthest towards the run's
+	/// start, when the shaper marked it safe to break; Typst's `find_safe_to_break`.
+	fn find_safe_to_break(&self, at: usize) -> Option<usize> {
+		let all = self.all();
+		let ltr = !self.rtl;
+		let len = all.len();
+		if at == self.base {
+			return Some(if ltr { 0 } else { len });
+		} else if at == self.base + self.text.len() {
+			return Some(if ltr { len } else { 0 });
+		}
+		let found = all.binary_search_by(|g| {
+			let o = g.range.0.cmp(&at);
+			if ltr { o } else { o.reverse() }
+		});
+		let mut idx = match found {
+			Ok(i)	=> i,
+			Err(i)	=> {
+				// A break before a newline, which draws no glyph: safe when the glyph before ends there.
+				let nl = i > 0
+					&& all.get(i - 1).map_or(false, |g| g.range.1 == at)
+					&& self.text.get(at - self.base..).map_or(false, |t| t.starts_with('\n'));
+				return if nl { Some(i) } else { None };
+			},
+		};
+		// The start-most glyph at `at`: empty clusters there go with this line's start, those at the end
+		// with the next line.
+		loop {
+			let next = if ltr { idx.checked_sub(1) } else { idx.checked_add(1) };
+			match next {
+				Some(n) if all.get(n).map_or(false, |g| g.range.0 == at)	=> idx = n,
+				_															=> break,
+			}
+		}
+		// Right to left, the range's left side is exclusive and its right inclusive.
+		match all.get(idx) {
+			Some(g) if g.safe_to_break	=> Some(idx + usize::from(!ltr)),
+			_							=> None,
+		}
 	}
 
 	/// A hyphen in the run's style, from the first family whose face has one: a soft hyphen's glyph when
@@ -1522,6 +1602,7 @@ impl ShapedRun {
 				c:				if soft { '\u{00AD}' } else { '-' },
 				justifiable:	false,
 				script:			Script::Common,
+				safe_to_break:	true,
 			};
 			return Some(ShapedRun {
 				base:	pos,
@@ -1529,6 +1610,7 @@ impl ShapedRun {
 				rtl:	self.rtl,
 				props:	props.clone(),
 				glyphs:	Arc::new(vec![g]),
+				span:	(0, 1),
 				kept:	(0, 1),
 			});
 		}
@@ -1545,7 +1627,8 @@ impl ShapedRun {
 		let (top, bottom) = self.measure(book);
 		let mut out: Vec<Node> = Vec::new();
 		let mut offset = 0.0f64;
-		let all = self.glyphs.as_slice();
+		let all = self.all();
+		let at = self.span.0;
 		let mut i = 0;
 		while i < all.len() {
 			let key = (all[i].face, all[i].y_offset, all[i].size);
@@ -1560,7 +1643,8 @@ impl ShapedRun {
 			let mut run_glyphs: Vec<RunGlyph> = Vec::with_capacity(group.len());
 			let mut pen = 0.0f64;
 			for (gi, g) in group.iter().enumerate() {
-				let kept = (i + gi) >= self.kept.0 && (i + gi) < self.kept.1;
+				let k = at + i + gi;
+				let kept = k >= self.kept.0 && k < self.kept.1;
 				let (adv, xoff) = if kept {
 					let left = if ratio < 0.0 { g.shrink.0 } else { g.stretch.0 };
 					let right = if ratio < 0.0 { g.shrink.1 } else { g.stretch.1 };
@@ -1580,6 +1664,7 @@ impl ShapedRun {
 					y:			0.0,
 					adv:		(adv * gsize) as f32,
 					cluster:	g.range.0.saturating_sub(lo),
+					safe_to_break:	g.safe_to_break,
 				});
 				pen += adv;
 			}
@@ -1762,6 +1847,7 @@ pub fn shape(engine: &mut Engine, text: &str, styles: &StyleChain) -> Outcome<Sh
 			y:			(g.y_offset * size) as f32,
 			adv:		(g.x_advance * g.size) as f32,
 			cluster:	g.range.0,
+			safe_to_break:	g.safe_to_break,
 		});
 		pen += g.x_advance * g.size;
 	}

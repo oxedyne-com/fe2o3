@@ -50,7 +50,11 @@ use oxedyne_fe2o3_austenite::flow::par::{
 	layout_with,
 	ConfigBase,
 };
-use oxedyne_fe2o3_austenite::flow::text::locale;
+use oxedyne_fe2o3_austenite::flow::text::{
+	locale,
+	props,
+	shape_run,
+};
 use oxedyne_fe2o3_austenite::flow::Region;
 use oxedyne_fe2o3_austenite::fonts::{
 	FaceVariant,
@@ -1016,5 +1020,52 @@ fn set_text_lang_reaches_the_language_a_chain_gives() -> Outcome<()> {
 		let (l, r) = res!(locale(&pars[0].styles));
 		assert_eq!((l, r), (lang, region), "{}: the chain's language and region differ from typst's ({})", name, json.trim());
 	}
+	Ok(())
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ SAFE-TO-BREAK SLICING                                                      │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A line's piece of a run shares the run's glyphs when the shaper marked both its ends safe to break,
+/// and draws exactly what shaping the piece afresh draws; a cut inside a ligature or a kern pair is
+/// shaped afresh, and changing a shared piece copies its own glyphs alone.
+#[test]
+fn a_cut_run_shares_its_glyphs_at_safe_breaks_and_reshapes_inside_a_ligature() -> Outcome<()> {
+	let book = res!(FontBook::embedded());
+	let styles = text_chain(10.0, "normal", "regular");
+	let tp = Arc::new(res!(props(&styles)));
+	let text = "office affinity waffle";
+	let run = res!(shape_run(&book, 0, text, &tp, false));
+
+	// A kern pair is where the shaper says no: the flag reaches the run.
+	let kerned = res!(shape_run(&book, 0, "AVAV", &tp, false));
+	assert!(kerned.all().iter().any(|g| !g.safe_to_break), "no glyph of a kerned AVAV is unsafe to break");
+	let half = res!(kerned.reshape(&book, 0, 2));
+	assert!(!Arc::ptr_eq(&half.glyphs, &kerned.glyphs), "a cut inside a kern pair shared the pair");
+
+	// At a word boundary: the same list, and the same glyphs a fresh shaping gives.
+	let piece = res!(run.reshape(&book, 7, 22));
+	assert!(Arc::ptr_eq(&piece.glyphs, &run.glyphs), "a cut at a space was shaped afresh");
+	let fresh = res!(shape_run(&book, 7, &text[7..], &tp, false));
+	let ids = |r: &oxedyne_fe2o3_austenite::flow::text::ShapedRun| -> Vec<(u32, u64, (usize, usize))> {
+		r.kept().iter().map(|g| (g.id, g.x_advance.to_bits(), g.range)).collect()
+	};
+	assert_eq!(ids(&piece), ids(&fresh));
+	assert_eq!(piece.width().to_bits(), fresh.width().to_bits());
+
+	// Inside "ffi": shaped afresh, so the line ends in an "f" and not half a ligature.
+	let cut = res!(run.reshape(&book, 0, 2));
+	assert!(!Arc::ptr_eq(&cut.glyphs, &run.glyphs), "a cut inside a ligature shared the ligature");
+	assert_eq!(ids(&cut), ids(&res!(shape_run(&book, 0, &text[..2], &tp, false))));
+
+	// Changing a shared piece copies its span, leaving the run whole.
+	let mut owned = piece.clone();
+	if let Some(g) = owned.kept_mut().first_mut() {
+		g.x_advance += 1.0;
+	}
+	assert_eq!(owned.glyphs.len(), piece.all().len());
+	let again = res!(run.reshape(&book, 7, 22));
+	assert_eq!(ids(&again), ids(&piece));
 	Ok(())
 }

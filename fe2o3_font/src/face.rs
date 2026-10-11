@@ -539,6 +539,7 @@ impl Face {
 				y:		(p.y_offset as f32) * scale,
 				adv,
 				cluster:	(i.cluster as usize) + at,
+				safe_to_break:	!i.unsafe_to_break(),
 			});
 			pen += adv;
 		}

@@ -1096,7 +1096,8 @@ fn collect_range(
 		}
 		// Nothing is kept per attempt: the breaker tries several lines for every breakpoint, and a store
 		// of each one's glyphs grew with the paragraph (2.6 GB in the browser for 20,000 words in one).
-		// The font book's bounded shape cache answers a repeat.
+		// A cut run shares the item's glyphs when both its ends are safe to break, as Typst's does, so
+		// an attempt neither copies nor reshapes; otherwise the book's bounded shape cache answers.
 		let mut run = if split { res!(shaped.reshape(&p.book, a, b)) } else { shaped.clone() };
 		if trim.layout < end {
 			let lim = trim.layout;

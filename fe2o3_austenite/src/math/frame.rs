@@ -282,6 +282,7 @@ fn glyph_text(run: &GlyphRun) -> Outcome<ShapedText> {
 			y:		((py + g.y_offset) * run.size) as f32,	// up from the baseline
 			adv:	(g.x_advance * run.size) as f32,
 			cluster: if each { starts[i] } else { 0 },
+			safe_to_break: true,
 		});
 		px += g.x_advance;
 		py += g.y_advance;

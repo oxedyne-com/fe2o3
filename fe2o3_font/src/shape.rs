@@ -66,6 +66,7 @@ pub struct Glyph {
 	pub y:		f32,	// vertical offset from the baseline, pixels, upwards
 	pub adv:	f32,	// pen movement, kept not inferred: a mark's advance is nought, its x is not
 	pub cluster:	usize,	// byte offset into the ORIGINAL string, so a caret moves by cluster
+	pub safe_to_break:	bool,	// the shaper's own word: cutting the text before this cluster changes no glyph
 }
 
 /// A run of shaped text: one string, one font, one size, one direction.
