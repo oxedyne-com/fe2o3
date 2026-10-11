@@ -132,11 +132,11 @@ mod member {
         assert_eq!(sess.created, T0);
 
         // The cookie form round-trips, and a token never formats as its bytes.
-        let cookie = tok.to_cookie();
+        let cookie = tok.to_hex();
         assert_eq!(cookie.len(), 64);
-        let back = res!(Token::from_cookie(&cookie));
+        let back = res!(Token::from_hex(&cookie));
         assert!(res!(ss.check(&s.db, &back)).is_some());
-        assert!(Token::from_cookie("short").is_err());
+        assert!(Token::from_hex("short").is_err());
         let shown = fmt!("{:?} {:?} {:?}", tok, sess, ss.list(b"alice"));
         assert!(!shown.to_lowercase().contains(&cookie.to_lowercase()), "{}", shown);
         assert_ne!(sess.id.to_lowercase(), cookie.to_lowercase());
@@ -146,7 +146,7 @@ mod member {
         assert!(!res!(ss.end(&s.db, &tok)));
         assert!(res!(keys(&s)).is_empty());
         // A token nobody issued checks as nothing.
-        let stranger = res!(Token::from_cookie(&"ab".repeat(32)));
+        let stranger = res!(Token::from_hex(&"ab".repeat(32)));
         assert!(res!(ss.check(&s.db, &stranger)).is_none());
         Ok(())
     }
@@ -282,7 +282,7 @@ mod member {
         let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
         let tok = res!(ss.start(&s.db, b"jo", dat!("laptop")));
         let id = res!(ss.list(b"jo"))[0].id.clone();
-        let cookie = tok.to_cookie();
+        let cookie = tok.to_hex();
         assert_eq!(res!(keys(&s)), vec![fmt!("t/s/{}", id)]);
         // The hash of the token, not the token.
         assert_ne!(id, cookie);

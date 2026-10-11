@@ -45,48 +45,41 @@
 //! presented. Steel's own WebSocket member login (`sess_meta:<sid>`) also stores its id raw and is
 //! a candidate for the same move.
 
+pub use super::{
+    Clock,
+    Token,
+    TOKEN_LEN,
+};
+
+use super::{
+    Hash32,
+    hash_of_key,
+    hex,
+    short,
+};
 use crate::{
     app::server::VhostDb,
     srv::id::Uid,
 };
 
-use oxedyne_fe2o3_core::{
-    prelude::*,
-    rand::Rand,
-};
-use oxedyne_fe2o3_hash::hash::HashScheme;
+use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_db::api::{
     Database,
     ScanOpts,
 };
-use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::prelude::*;
-use oxedyne_fe2o3_text::base2x;
 
 use std::{
     collections::{
         BTreeSet,
         HashMap,
     },
-    fmt,
     sync::{
-        atomic::{
-            AtomicU64,
-            Ordering,
-        },
         Arc,
         Mutex,
         RwLock,
     },
-    time::{
-        SystemTime,
-        UNIX_EPOCH,
-    },
 };
-
-pub const TOKEN_LEN: usize = 32; // bytes
-
-type Hash32 = [u8; TOKEN_LEN];
 
 #[derive(Clone, Debug)]
 pub struct SessionCfg {
@@ -132,51 +125,6 @@ impl SessionCfg {
     }
 }
 
-/// The secret a member's browser holds. It never prints: neither `Debug` nor any formatting shows
-/// its bytes, and only `to_cookie` gives them out, for the `Set-Cookie` that carries it.
-pub struct Token(Hash32);
-
-impl Token {
-    fn generate() -> Self {
-        let mut b = [0u8; TOKEN_LEN];
-        Rand::fill_u8(&mut b);
-        Self(b)
-    }
-
-    pub fn to_cookie(&self) -> String {
-        hex(&self.0)
-    }
-
-    pub fn from_cookie(s: &str) -> Outcome<Self> {
-        if s.len() != TOKEN_LEN * 2 {
-            return Err(err!(
-                "A member session token must be {} hex characters, this one has {}.",
-                TOKEN_LEN * 2, s.len();
-                Invalid, Input));
-        }
-        let v = res!(base2x::HEX.from_str(&s.to_ascii_uppercase())); // either case
-        let b: Hash32 = res!(v.try_into().map_err(|_| err!(
-            "A member session token did not decode to {} bytes.", TOKEN_LEN;
-            Invalid, Input)));
-        Ok(Self(b))
-    }
-
-    fn hash(&self) -> Outcome<Hash32> {
-        let h = HashScheme::new_sha3_256().hash(&[&self.0], []);
-        let v = h.as_hashform().as_vec();
-        let b: Hash32 = res!(v.try_into().map_err(|_| err!(
-            "A SHA3-256 hash was not {} bytes.", TOKEN_LEN;
-            Unexpected, Size)));
-        Ok(b)
-    }
-}
-
-impl fmt::Debug for Token {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Token(..)")
-    }
-}
-
 /// A live session as a caller sees it. `id` is the hex hash of the token: it names the session,
 /// for a list of a member's devices say, and cannot be used to present it.
 #[derive(Clone, Debug, PartialEq)]
@@ -186,23 +134,6 @@ pub struct Session {
     pub data:       Dat,
     pub created:    u64,    // Unix seconds
     pub last_seen:  u64,    // Unix seconds
-}
-
-/// Where `Sessions` reads the time. A test steps a `Manual` clock to cross an expiry.
-#[derive(Clone, Debug)]
-pub enum Clock {
-    System,
-    Manual(Arc<AtomicU64>), // Unix seconds
-}
-
-impl Clock {
-    pub fn now(&self) -> Outcome<u64> {
-        match self {
-            Self::System    => Ok(res!(SystemTime::now().duration_since(UNIX_EPOCH),
-                System, Invalid).as_secs()),
-            Self::Manual(t) => Ok(t.load(Ordering::SeqCst)),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -588,24 +519,4 @@ impl Sessions {
 fn expired(cfg: &SessionCfg, e: &Entry, now: u64) -> bool {
     now >= e.last_seen.saturating_add(cfg.idle_secs)
         || now >= e.created.saturating_add(cfg.absolute_secs)
-}
-
-fn hex(b: &[u8]) -> String {
-    base2x::HEX.to_string(b)
-}
-
-fn hash_of_key(s: &str) -> Option<Hash32> {
-    if s.len() != TOKEN_LEN * 2 {
-        return None;
-    }
-    match base2x::HEX.from_str(&s.to_ascii_uppercase()) {
-        Ok(v)   => v.try_into().ok(),
-        Err(_)  => None,
-    }
-}
-
-fn short(hash: &Hash32) -> String {
-    let mut s = hex(hash);
-    s.truncate(8);
-    s
 }
