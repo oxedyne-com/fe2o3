@@ -9,6 +9,9 @@
 //! by the key's full dotted name before anything compiles. So is a setting that nothing reads under the
 //! chosen `colour.space`, and a profile that cannot be read or does not suit its role
 //! ([`Settings::check_built`], [`Settings::pdf_options`]), rather than being ignored.
+//!
+//! Plain `austenite SOURCE.typ` reads one key of this file, `engine`, and nothing else: `"engine": "curated"`
+//! sends that book back to the frozen curated reader (2026-10-11, FIRE-2), which `watch` and `build` refuse.
 
 use crate::emit::pdf::PdfOptions;
 
@@ -66,6 +69,7 @@ const INTENTS:	&[&str] = &["perceptual", "relative", "saturation", "absolute"];
 const BLACKS:	&[&str] = &["k", "rich"];
 const VERSIONS:	&[&str] = &["1.4", "1.5", "1.6", "1.7"];
 const DIAGS:	&[&str] = &["errors", "summary"];
+const ENGINES:	&[&str] = &["evaluator", "curated"];
 
 // Every key, by its dotted path.
 const KEYS: &[(&str, Kind)] = &[
@@ -75,6 +79,7 @@ const KEYS: &[(&str, Kind)] = &[
 	("output",				Kind::Text),
 	("strict",				Kind::Bool),
 	("diagnostics",			Kind::Pick(DIAGS)),
+	("engine",				Kind::Pick(ENGINES)),
 	("watch.poll_ms",		Kind::Num(10, 60_000)),
 	("watch.warm",			Kind::Bool),
 	("figs.dir",			Kind::Text),
@@ -184,6 +189,7 @@ pub struct Settings {
 	#[optional] pub output:			String,
 	#[optional] pub strict:			bool,
 	#[optional] pub diagnostics:	String,
+	#[optional] pub engine:		String,		// "curated" sends plain `austenite` back to the frozen book reader
 	#[skip] pub watch:		Watch,
 	#[skip] pub figs:		Figs,
 	#[skip] pub colour:		Colour,
@@ -202,6 +208,7 @@ impl Default for Settings {
 			output:			"{stem}.pdf".to_string(),
 			strict:			false,
 			diagnostics:	"errors".to_string(),
+			engine:			"evaluator".to_string(),
 			watch:			Watch::default(),
 			figs:			Figs::default(),
 			colour:			Colour::default(),
@@ -565,6 +572,17 @@ fn parse_set(arg: &str) -> Outcome<(String, Dat)> {
 	};
 	res!(suits(key, kind, &val));
 	Ok((key.to_string(), val))
+}
+
+/// The settings file that sends `source` back to the curated reader: the first `austenite.jdat` at or above
+/// it, when that sets `engine` to `"curated"`. A file that cannot be read is refused, as `build` refuses it.
+pub fn curated_by(source: &Path) -> Outcome<Option<PathBuf>> {
+	let file = match find(source) {
+		Some(f)	=> f,
+		None	=> return Ok(None),
+	};
+	let s = res!(Settings::resolve(Some(&file), &[]));
+	Ok(if s.engine == "curated" { Some(file) } else { None })
 }
 
 /// The settings file for a source: the first `austenite.jdat` in its directory or above it.

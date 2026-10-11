@@ -150,6 +150,7 @@ pub struct Report {
 	pub bytes:	usize,
 	pub skip:	Option<String>,	// the terse `skipped:` line, when the caller folds it into its status line
 	pub secs:	f64,
+	pub sites:	Vec<crate::compile::Diagnostic>,	// every site not set as written, at its line and column, for `--explain`
 }
 
 /// Compiles `spec.main` through the evaluator under `session` and writes the PDF to `spec.out`.
@@ -184,7 +185,7 @@ pub fn compile_pdf(
 	let mut sink = res!(PdfSink::with_options(spec.pdf.clone()));
 	let mut done = res!(session.compile(&spec.main, &spec.root, &mut sink, timings, None, cold));
 	*read = done.files_read();
-	let report = done.report();
+	let mut report = done.report();
 	let mut skip = None;
 	if let Some(line) = &report.skipped {
 		if fold {
@@ -251,6 +252,7 @@ pub fn compile_pdf(
 		bytes:	out.len(),
 		skip,
 		secs:	t.elapsed().as_secs_f64(),
+		sites:	std::mem::take(&mut report.diagnostics),
 	})
 }
 
@@ -387,6 +389,14 @@ impl Plan {
 
 	// The plan for settings already read, a canonical `main`, and the `base` the root and the profiles are named from.
 	fn settle(settings: Settings, file: Option<PathBuf>, base: PathBuf, main: PathBuf, timings: Option<&Path>) -> Outcome<Self> {
+		// A book opted back to the curated reader is not compiled here under the evaluator in its place.
+		if settings.engine == "curated" {
+			return Err(err!(
+				"The setting 'engine' is \"curated\"{}, and austenite watch and austenite build compile only through \
+				the evaluator. Run `austenite {}` for the curated reader, or remove the setting.",
+				file.as_ref().map(|f| fmt!(" in {}", f.display())).unwrap_or_default(), main.display();
+				Input, Invalid));
+		}
 		let doc_dir = main.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| base.clone());
 		let warned = res!(settings.check_built(&doc_dir));
 		for w in &warned {
