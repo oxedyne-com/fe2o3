@@ -25,6 +25,8 @@
 //! Reference: WebAuthn Level 2, §5.8.1 (attested/authenticator data) and §7.2
 //! (verifying an authentication assertion).
 
+pub mod challenge;
+
 use crate::acme::jose::base64url_decode;
 use crate::ecdsa::verify_p256_sha256_asn1;
 
