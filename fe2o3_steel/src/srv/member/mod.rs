@@ -44,6 +44,13 @@ impl Token {
         Self(b)
     }
 
+    /// An app's pre-existing secret, taken as the token, for a session `Sessions::adopt` moves
+    /// across from a store that held it raw. The bytes are used as they are, so the same secret
+    /// always names the same session.
+    pub fn from_secret(b: [u8; TOKEN_LEN]) -> Self {
+        Self(b)
+    }
+
     pub fn to_hex(&self) -> String {
         hex(&self.0)
     }
