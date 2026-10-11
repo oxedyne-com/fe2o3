@@ -598,18 +598,34 @@ fn collect(
 	Ok((c.full, c.segments))
 }
 
-/// Can the breaks of these children be kept from one compile to the next? They can when every child is one
-/// of the kinds below, whose preparation depends on nothing but their own content, their style chain and the
-/// region's width. The list is an allowlist, so a kind added to `collect` is left out until it is considered
-/// here. An inline box or equation is laid out through the engine as it is collected, where it may read the
-/// region's height and base and ask the introspector, none of which a fingerprint of the children holds.
-pub fn keepable(children: &[Pair]) -> bool {
-	children.iter().all(|c| c.is_tag() || match c.content.kind() {
-		None	=> true,	// empty, skipped by `collect`
-		Some(k)	=> matches!(k,
-			ElemKind::Tag | ElemKind::Space | ElemKind::Text | ElemKind::Symbol | ElemKind::H
-			| ElemKind::Linebreak | ElemKind::SmartQuote),
-	})
+/// How far the breaks of these children can be kept from one compile to the next. Every child must be one of
+/// the kinds below; the list is an allowlist, so a kind added to `collect` is left out until it is
+/// considered here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+	No,		// a child of a kind not considered
+	Width,	// text-like children, prepared from their content, chain and the region's width alone
+	Region,	// an inline box or equation as well, laid out through the engine against the whole region
+}
+
+/// Which [`Keep`] these children allow. An inline box or equation may also ask the introspector as it is
+/// laid out, which no fingerprint of the children holds, so the caller keeps such a paragraph only where
+/// its preparation asked nothing ([`crate::eval::intro::ReadLog::asks`]).
+pub fn keepable(children: &[Pair]) -> Keep {
+	let mut keep = Keep::Width;
+	for c in children {
+		if c.is_tag() {
+			continue;
+		}
+		match c.content.kind() {
+			None => (),	// empty, skipped by `collect`
+			Some(ElemKind::Tag | ElemKind::Space | ElemKind::Text | ElemKind::Symbol | ElemKind::H
+				| ElemKind::Linebreak | ElemKind::SmartQuote) => (),
+			Some(ElemKind::Box | ElemKind::Equation) => keep = Keep::Region,
+			Some(_) => return Keep::No,
+		}
+	}
+	keep
 }
 
 /// A laid-out node as an inline frame, its baseline its height above the baseline.

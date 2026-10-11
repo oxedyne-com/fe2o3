@@ -7,7 +7,9 @@
 //!   a hit too.
 //! - Each field of the key, changed alone, is a miss that comes out as a cold layout does: the text, the
 //!   style chain, the `Config` (through a `par` that no child's chain names), the width and the situation.
-//! - A paragraph with an inline box or an equation is never kept; one that warns is, and warns on a hit too.
+//! - U10: a paragraph with an inline box or an equation is kept when laying them out asked the introspector
+//!   nothing, under a key that adds the region's height and base, and its hit is its miss to the bit; one whose
+//!   box asks, even a question asked before, is never kept. One that warns is kept, and warns on a hit too.
 //! - A hit puts the current source's tag spans in the lines.
 //! - A hit is a miss to the bit across the kinds of break: hyphenated, mandatory, right to left, first fit.
 //! - The budget: nothing is kept at none, and a small one refuses and changes nothing the compile makes.
@@ -212,31 +214,100 @@ fn a_par_setting_no_child_names_is_in_the_key() -> Outcome<()> {
 /// A paragraph with an inline box or an equation is never kept. One that warns is kept, and a hit warns as the
 /// miss did, because a hit prepares the paragraph again.
 #[test]
-fn a_paragraph_with_a_box_or_an_equation_is_never_kept_and_a_hit_warns_again() -> Outcome<()> {
+fn a_paragraph_with_a_box_or_an_equation_is_kept_and_a_hit_is_the_miss() -> Outcome<()> {
 	let sources = [
 		("box",			fmt!("{} #box(width: 20pt, height: 8pt, fill: gray) and on.\n", PROSE)),
+		("framed box",	fmt!("{} wait #box(stroke: 0.5pt, inset: 1pt)[two] minutes and on.\n", PROSE)),
 		("equation",	fmt!("{} $x^2 + y$ and on.\n", PROSE)),
+		("both",		fmt!("{} tilt by $theta = pi/6$, wait #box(stroke: 0.5pt, inset: 1pt)[two] and on.\n", PROSE)),
 	];
 	for (name, src) in sources {
 		let (mut engine, pars) = res!(paragraphs(&src));
 		assert_eq!(pars.len(), 1, "{}: one paragraph", name);
+		// A box with a body holds a paragraph of its own, laid out and counted with the outer one.
 		let one = res!(set(&mut engine, &pars[0], region(150.0, 10_000.0), ParSituation::First));
+		let (_, laid) = counts(&engine);
 		let two = res!(set(&mut engine, &pars[0], region(150.0, 10_000.0), ParSituation::First));
-		assert_eq!(counts(&engine), (0, 2), "{}: a paragraph that cannot be kept was a hit", name);
-		assert_eq!(engine.caches.pars.len(), 0, "{}: and was kept", name);
-		assert!(sig(&one) == sig(&two), "{}: laid out twice it came out differently", name);
+		assert_eq!(counts(&engine), (laid, laid), "{}: the paragraph set again was not a hit", name);
+		assert_eq!(engine.caches.pars.len() as u64, laid, "{}: and was not kept", name);
+		assert!(sig(&one) == sig(&two), "{}: the hit came out differently from the miss", name);
+		assert!(sig(&two) == res!(cold(&src, 150.0, ParSituation::First)), "{}: the hit is not a cold layout", name);
+		assert!(one.len() >= 3, "{}: the paragraph sets in {} lines, too few to test with", name, one.len());
 	}
-	// The warning is the engine's, so a hit on a fresh engine that holds the memo shows it raised again.
-	let src = fmt!("{} #link((page: 1, x: 0pt, y: 0pt))[and a link to a position] and on.\n", PROSE);
-	let (mut a, pars_a) = res!(paragraphs(&src));
-	let miss = res!(set(&mut a, &pars_a[0], region(150.0, 10_000.0), ParSituation::First));
-	assert_eq!(a.diags.len(), 1, "the miss warns");
-	let (mut b, pars_b) = res!(paragraphs(&src));
-	b.caches = std::mem::take(&mut a.caches);
-	let hit = res!(set(&mut b, &pars_b[0], region(150.0, 10_000.0), ParSituation::First));
-	assert_eq!(counts(&b), (1, 1), "the warning paragraph was kept and hit");
-	assert_eq!(b.diags.len(), 1, "and the hit warned as the miss did");
-	assert!(sig(&hit) == sig(&miss), "the hit came out differently from the miss");
+	// The warning is the engine's, so a hit on a fresh engine that holds the memo shows it raised again, from
+	// the paragraph itself and from inside a box.
+	let sources = [
+		("paragraph",	fmt!("{} #link((page: 1, x: 0pt, y: 0pt))[and a link to a position] and on.\n", PROSE)),
+		("box",			fmt!("{} #box[#link((page: 1, x: 0pt, y: 0pt))[a link to a position]] and on.\n", PROSE)),
+	];
+	for (name, src) in sources {
+		let (mut a, pars_a) = res!(paragraphs(&src));
+		let miss = res!(set(&mut a, &pars_a[0], region(150.0, 10_000.0), ParSituation::First));
+		assert_eq!(a.diags.len(), 1, "{}: the miss warns", name);
+		let (_, laid) = counts(&a);	// with a box's body
+		let (mut b, pars_b) = res!(paragraphs(&src));
+		b.caches = std::mem::take(&mut a.caches);
+		let hit = res!(set(&mut b, &pars_b[0], region(150.0, 10_000.0), ParSituation::First));
+		assert_eq!(counts(&b), (laid, laid), "{}: the warning paragraph was not kept and hit", name);
+		assert_eq!(b.diags.len(), 1, "{}: the hit did not warn as the miss did", name);
+		assert!(sig(&hit) == sig(&miss), "{}: the hit came out differently from the miss", name);
+	}
+	Ok(())
+}
+
+/// A box or equation is laid out against the whole region, so a paragraph holding one keys on the region's
+/// height and base as well, where a text-like paragraph does not.
+#[test]
+fn a_paragraph_with_a_box_keys_on_the_region_height_and_base() -> Outcome<()> {
+	let src = fmt!("{} wait #box(height: 10%, width: 12pt, fill: gray) and on.\n", PROSE);
+	let (mut engine, pars) = res!(paragraphs(&src));
+	let tall = region(150.0, 10_000.0);
+	let _ = res!(set(&mut engine, &pars[0], tall, ParSituation::First));
+	// `Region::new` sets the base from the size, so the shorter region keeps the tall one's base and differs
+	// in height alone.
+	let mut low = region(150.0, 300.0);
+	low.base = tall.base;
+	let short = res!(set(&mut engine, &pars[0], low, ParSituation::First));
+	assert_eq!(counts(&engine), (0, 2), "a shorter region was a hit for a box paragraph");
+	let again = res!(set(&mut engine, &pars[0], low, ParSituation::First));
+	assert_eq!(counts(&engine), (1, 2), "the same shorter region was not a hit");
+	assert!(sig(&short) == sig(&again), "the hit came out differently from the miss");
+	let mut based = low;
+	based.base = (Sp::from_pt(150.0), Sp::from_pt(600.0));
+	let _ = res!(set(&mut engine, &pars[0], based, ParSituation::First));
+	assert_eq!(counts(&engine), (1, 3), "another base was a hit for a box paragraph");
+	Ok(())
+}
+
+/// A box whose content asks the introspector as it is laid out is never kept: its answers are in no key. The
+/// second setting asks the question the first already asked, which the read log keeps once, so only the ask
+/// count shows it was asked again.
+#[test]
+fn a_box_that_asks_the_introspector_is_never_kept_even_asking_again() -> Outcome<()> {
+	let src = fmt!("= One\n\n{} section #box[#context counter(heading).get().first()] and on.\n", PROSE);
+	let (mut engine, pars) = res!(paragraphs(&src));
+	assert_eq!(pars.len(), 1, "one paragraph");
+	let asks = engine.reads.asks();
+	let one = res!(set(&mut engine, &pars[0], region(150.0, 10_000.0), ParSituation::First));
+	let reads = engine.reads.all.len();
+	assert!(engine.reads.asks() > asks, "laying the box out asked nothing, so the test tests nothing");
+	let two = res!(set(&mut engine, &pars[0], region(150.0, 10_000.0), ParSituation::First));
+	assert_eq!(engine.reads.all.len(), reads, "the second setting logged a new read, so it is not a repeat");
+	// The box's own body is a paragraph of the answer's text, which asks nothing, so it is kept and hits; the
+	// outer paragraph misses both times.
+	assert_eq!(counts(&engine), (1, 3), "a box that asks was kept and hit");
+	assert_eq!(engine.caches.pars.len(), 1, "a box that asks was kept");
+	assert!(sig(&one) == sig(&two), "laid out twice it came out differently");
+	Ok(())
+}
+
+/// The ask count grows for every question put, where the log of distinct reads does not grow for a repeat.
+#[test]
+fn the_ask_count_grows_for_a_repeated_question() -> Outcome<()> {
+	let (once, _) = res!(paragraphs("= One\n\n#context query(heading).len()\n"));
+	let (twice, _) = res!(paragraphs("= One\n\n#context query(heading).len() #context query(heading).len()\n"));
+	assert_eq!(twice.reads.all.len(), once.reads.all.len(), "the repeated query logged another read");
+	assert_eq!(twice.reads.asks(), once.reads.asks() + 1, "the repeated query was not counted");
 	Ok(())
 }
 
@@ -435,22 +506,52 @@ fn a_changed_key_field_leaves_the_earlier_entries_unread() {
 	}
 }
 
-/// A paragraph with an inline box or an equation is laid afresh every compile, and the document is still the
-/// cold bytes.
+/// U10: a paragraph with an inline box or an equation is kept like any other, so an unchanged recompile hits
+/// it and an edit misses the edited paragraph alone, and the document is the cold bytes with the memo on and
+/// off.
 #[test]
-fn paragraphs_with_boxes_and_equations_are_laid_afresh() {
+fn paragraphs_with_boxes_and_equations_are_kept_and_warm_equals_cold() {
 	let dir = scratch("gate");
-	let mut text = doc("", None);
-	text.push_str("A paragraph with an inline #box(width: 14pt, height: 7pt, fill: gray) box in it, run on a while.\n\n");
-	text.push_str("A paragraph with an equation $x^2 + y$ in it, run on a while longer to wrap the line.\n\n");
+	let inline = |edit: bool| {
+		let mut text = doc("", None);
+		text.push_str("A paragraph with an inline #box(width: 14pt, height: 7pt, fill: gray) box in it, run on a while.\n\n");
+		text.push_str(&format!("A paragraph with an equation $x^2 + y${} in it, run on a while longer to wrap the line.\n\n",
+			if edit { " edited" } else { "" }));
+		text.push_str("Tilt by $theta = pi/6$, wait #box(stroke: 0.5pt, inset: 1pt)[two] minutes, and run on to a second line.\n\n");
+		text
+	};
 	let mut s = session(Budgets::default());
-	let _ = build(&mut s, &dir, &text);
-	let (second, c) = build(&mut s, &dir, &text);
-	assert!(c.par_misses >= 2, "the box and equation paragraphs were kept: {:?}", c);
-	assert!(c.par_hits >= 8, "the eight plain ones were not hits: {:?}", c);
-	assert_eq!(s.caches().pars.len(), 8, "only the eight plain paragraphs are kept");
-	let (cold, _) = build(&mut session(Budgets::default()), &scratch("gate_cold"), &text);
+	let _ = build(&mut s, &dir, &inline(false));
+	let (second, c) = build(&mut s, &dir, &inline(false));
+	assert_eq!(c.par_misses, 0, "a box or equation paragraph was laid afresh: {:?}", c);
+	assert!(c.par_hits >= 11, "the eleven paragraphs were not all hits: {:?}", c);
+	assert_eq!(s.caches().pars.len(), 12, "the memo does not hold the eleven paragraphs and the box's body");
+	let (cold, _) = build(&mut session(Budgets::default()), &scratch("gate_cold"), &inline(false));
 	assert!(second == cold, "warm bytes differ from cold bytes");
+	let (edited, c) = build(&mut s, &dir, &inline(true));
+	assert_eq!(c.par_misses, 1, "the edit laid more than the edited paragraph: {:?}", c);
+	let off = Budgets { pars: 0, ..Budgets::default() };
+	let (cold_off, _) = build(&mut session(off), &scratch("gate_off"), &inline(true));
+	let (cold_on, _) = build(&mut session(Budgets::default()), &scratch("gate_on"), &inline(true));
+	assert!(edited == cold_off, "warm bytes differ from cold bytes with the memo off");
+	assert!(edited == cold_on, "warm bytes differ from cold bytes with the memo on");
+}
+
+/// A box that shows what a `context` reads is laid afresh each compile, so when an edit above changes the
+/// answer the document is still the cold bytes.
+#[test]
+fn a_box_reading_context_is_laid_afresh_and_warm_equals_cold() {
+	let dir = scratch("box_context");
+	let tail = "= Last\n\nThis paragraph holds a box #box(stroke: 0.5pt)[#context counter(heading).get().first()] \
+		that counts the headings, and runs on a little to wrap.\n\n";
+	let base = format!("{}{}", doc("", None), tail);
+	let mut s = session(Budgets::default());
+	let _ = build(&mut s, &dir, &base);
+	let edited = format!("{}= Another\n\n{}", doc("", None), tail);
+	let (warm, c) = build(&mut s, &dir, &edited);
+	assert!(c.par_misses >= 1, "the box that reads was kept: {:?}", c);
+	let (cold, _) = build(&mut session(Budgets::default()), &scratch("box_context_cold"), &edited);
+	assert!(warm == cold, "warm bytes differ from cold bytes after the read changed");
 }
 
 /// A small budget refuses entries and changes nothing the compile makes; a budget of none keeps none.

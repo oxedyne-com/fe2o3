@@ -725,6 +725,7 @@ struct Fold<T> {
 pub struct ReadLog {
 	pub all:	Vec<Read>,
 	seen:		HashSet<Fingerprint>,
+	asks:		u64,									// every question put, new or repeated
 	subject:	Option<Arc<str>>,						// the counter or state being folded
 	memo_of:	usize,									// the introspector the memo was folded against
 	counters:	HashMap<Fingerprint, Arc<Fold<(Vec<u64>, u32)>>>,
@@ -735,6 +736,7 @@ impl ReadLog {
 	/// Records a question the pass has not asked yet. The question is built, and its answer hashed,
 	/// only when it is new, so a repeated question costs a key and a lookup.
 	fn note<F: FnOnce() -> Question>(&mut self, key: Fingerprint, intro: &Introspector, make: F) -> Outcome<()> {
+		self.asks += 1;
 		if self.seen.contains(&key) {
 			return Ok(());
 		}
@@ -742,6 +744,13 @@ impl ReadLog {
 		let answer = res!(question.answer(intro));
 		self.push(key, question, answer);
 		Ok(())
+	}
+
+	/// How many questions the pass has put, a repeated one counted again, which `all` does not grow for. Equal
+	/// counts either side of a piece of work prove it asked nothing, so what it made may be kept without its
+	/// reads.
+	pub fn asks(&self) -> u64 {
+		self.asks
 	}
 
 	// Stores a new read whose answer the caller already knows.
@@ -1116,6 +1125,7 @@ fn apply_update(engine: &mut Engine, span: Span, state: &[u64], update: CounterU
 fn stop_at<T: Clone>(engine: &mut Engine, fold: &Fold<T>, loc: Location) -> Outcome<T> {
 	let at = engine.intro.order(loc);
 	let key = Question::count_key(fold.fp, loc);
+	engine.reads.asks += 1;
 	if !engine.reads.seen.contains(&key) {
 		// The count of every match at or before `loc`, as `Introspector::count_before` answers it.
 		let n = match at {

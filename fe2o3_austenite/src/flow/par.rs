@@ -29,6 +29,7 @@ use crate::flow::inline::{
 	fixed_align,
 	keepable,
 	lang_of,
+	Keep,
 	prepare,
 	Config,
 	Frame,
@@ -235,14 +236,16 @@ fn configuration(
 
 /// The paragraphs a session has broken into lines, as the break that ends each line, on a generation-swept
 /// map under the `pars` budget. A paragraph is kept only where [`keepable`] says its preparation depends on
-/// nothing but the key below. A hit prepares the paragraph again, which puts the current source's tags and
+/// nothing but the key below, and where the preparation asked the introspector nothing, which the read
+/// log's ask count proves. A hit prepares the paragraph again, which puts the current source's tags and
 /// spans in its items and repeats whatever the preparation reads or says, and builds each line from its
 /// kept break, taking its shaped runs from the shaped-run cache; only the search for the breaks is saved.
 ///
 /// The key is the configuration the caches stand under, the paragraph's [`Config`], the region's width
-/// and each child [`Pair`]'s fingerprint in order. The region's height and base, and `expand`, are left
-/// out: no kept paragraph reads them in `prepare` or `linebreak`, and the width the lines fill is worked
-/// out again from `expand` and the lines on every call, as is each line's box.
+/// and each child [`Pair`]'s fingerprint in order. A paragraph holding an inline box or equation
+/// ([`Keep::Region`]) adds the region's height, base and expansion, which laying those out reads. A
+/// text-like paragraph leaves them out, with `expand`: nothing it prepares reads them, and the width the
+/// lines fill is worked out again from `expand` and the lines on every call, as is each line's box.
 #[derive(Debug)]
 pub struct ParMemo {
 	map:	GenMap<Fingerprint, Arc<Vec<LineEnd>>>,
@@ -284,7 +287,7 @@ impl ParMemo {
 	}
 }
 
-fn memo_key(caches: Option<Fingerprint>, config: &Config, region: Region, children: &[Pair]) -> Fingerprint {
+fn memo_key(caches: Option<Fingerprint>, config: &Config, region: Region, keep: Keep, children: &[Pair]) -> Fingerprint {
 	let mut f = Fingerprinter::new();
 	match caches {
 		Some(c)	=> { f.write_u8(1); f.write_fingerprint(c); }
@@ -292,6 +295,13 @@ fn memo_key(caches: Option<Fingerprint>, config: &Config, region: Region, childr
 	}
 	f.write_fingerprint(config.fingerprint());
 	f.write_i32(region.width.raw());
+	if keep == Keep::Region {
+		f.write_i32(region.height.raw());
+		f.write_i32(region.base.0.raw());
+		f.write_i32(region.base.1.raw());
+		f.write_bool(region.expand_x);
+		f.write_bool(region.expand_y);
+	}
 	f.write_usize(children.len());
 	for c in children {
 		f.write_fingerprint(c.fingerprint());
@@ -317,12 +327,17 @@ pub fn layout_with(
 	let config = res!(configuration(base, children, styles, situation));
 	let hang = config.hanging_indent;
 	let region_w = region.width.to_pt();
-	let key = if engine.caches.pars.on() && keepable(children) {
-		Some(memo_key(engine.caches.config(), &config, region, children))
-	} else {
-		None
+	let keep = if engine.caches.pars.on() { keepable(children) } else { Keep::No };
+	let key = match keep {
+		Keep::No	=> None,
+		_			=> Some(memo_key(engine.caches.config(), &config, region, keep, children)),
 	};
+	let asks = engine.reads.asks();
 	let p = res!(prepare(engine, children, config, region));
+	// A preparation that asked the introspector made its items from answers the key does not hold, so its
+	// breaks are neither taken nor kept. A repeated question counts too, which the read log alone would not
+	// show.
+	let key = key.filter(|_| engine.reads.asks() == asks);
 
 	// Kept breaks are taken only when they end at the end of the text, which a key that matches assures.
 	let kept = match &key {
