@@ -18,7 +18,11 @@ use crate::{
             Alerter,
         },
         cert::Certificate,
-        cfg::ServerConfig,
+        api::ApiHandlerRegistry,
+        cfg::{
+            ApiRoute,
+            ServerConfig,
+        },
         constant as srv_const,
         context::{
             new_db,
@@ -253,6 +257,8 @@ impl AppShellContext {
         >> = Arc::new(RwLock::new(HashMap::new()));
 
         let mut db_specs: Vec<VhostDbSpec> = Vec::new();
+        // The in-process routes of each vhost with a database, whose handlers are told when it opens.
+        let mut db_routes: HashMap<String, Vec<ApiRoute>> = HashMap::new();
         for vh in &vhosts_cfg {
             let primary_lc = vh.primary_hostname().to_lowercase();
             let db_dir = match res!(vh.get_db_dir(&root_path)) {
@@ -265,6 +271,10 @@ impl AppShellContext {
             };
             info!("Vhost '{}' has a database at {:?}; it will be opened on unseal.",
                 primary_lc, db_dir);
+            db_routes.insert(primary_lc.clone(), vh.api_routes.iter()
+                .filter(|r| r.handler.is_some())
+                .cloned()
+                .collect());
             db_specs.push(VhostDbSpec {
                 vhost_key:      primary_lc,
                 db_dir,
@@ -841,6 +851,8 @@ impl AppShellContext {
             db_specs,
             uid,
             outboxes,
+            self.api_handler_registry.clone(),
+            db_routes,
         ));
 
         info!("Starting server...");
@@ -1006,6 +1018,8 @@ async fn open_dbs_on_unseal(
                         Arc<crate::srv::publish::PublishConfig>,
                         Arc<crate::srv::publish::send::MailSender>,
                     )>,
+    handlers:       Arc<ApiHandlerRegistry>,
+    db_routes:      HashMap<String, Vec<ApiRoute>>,
 ) {
     if db_specs.is_empty() {
         return;
@@ -1044,9 +1058,21 @@ async fn open_dbs_on_unseal(
             // Publish as soon as each database is up, rather than
             // batching at the end: a vhost whose database is ready has
             // no reason to keep answering 503 while a later one starts.
+            let db = Arc::new(RwLock::new(db));
+            // Each in-process handler on the vhost does its start-up work over the store before
+            // any request can reach it with the store (`ApiHandler::db_opened`).
+            for route in db_routes.get(&spec.vhost_key).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let handler = match route.handler.as_deref().and_then(|n| handlers.get(n)) {
+                    Some(h) => h,
+                    None    => continue,
+                };
+                if let Err(e) = handler.db_opened(route, (db.clone(), uid)) {
+                    error!(e, "Vhost '{}': the handler of route '{}' failed its start-up over \
+                        the database.", spec.vhost_key, route.path);
+                }
+            }
             let mut guard = lock_write!(vhost_dbs,
                 "Attaching the database for vhost '{}'.", spec.vhost_key);
-            let db = Arc::new(RwLock::new(db));
             guard.insert(spec.vhost_key.clone(), (db.clone(), uid));
             // The outbox drains from the moment its database is up. One task for each vhost that
             // publishes, all sharing the sender's pacer, so the host's ceiling is one ceiling.

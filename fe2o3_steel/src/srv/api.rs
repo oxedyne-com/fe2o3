@@ -96,6 +96,17 @@ pub trait ApiHandler: Send + Sync + 'static {
             Ok(Some(resp))
         })
     }
+
+    /// Called once for each `api_routes` entry that names this handler, when its vhost's database
+    /// has been opened after unseal and before it is attached, so no request reaches the handler
+    /// with that database until this returns. The place for start-up work over the store, which
+    /// Steel's handlers otherwise see only per request: an index rebuilt by one prefix scan, a
+    /// first load into an empty store. It runs on a blocking thread. An error is logged and the
+    /// database is attached all the same, since other routes of the vhost may use it; a handler
+    /// that failed here knows it, and answers accordingly.
+    fn db_opened(&self, _route: &ApiRoute, _db: (Arc<RwLock<VhostDb>>, Uid)) -> Outcome<()> {
+        Ok(())
+    }
 }
 
 /// Everything `ApiHandler::handle` is given, and what it is not: the connection's peer, the
