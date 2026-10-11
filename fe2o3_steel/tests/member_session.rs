@@ -298,4 +298,162 @@ mod member {
         assert!(!shown.to_lowercase().contains(&cookie.to_lowercase()), "{}", shown);
         Ok(())
     }
+
+    // A legacy token: an app's own 32 ASCII characters, adopted rather than reissued.
+    const LEGACY: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+    fn legacy() -> Token {
+        Token::from_secret(*LEGACY)
+    }
+
+    #[test]
+    fn an_adopted_secret_checks_across_a_reload() -> Outcome<()> {
+        let s = res!(store("adopt"));
+        let (clk, _) = clock();
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        assert!(res!(ss.adopt(&s.db, &legacy(), b"kit", dat!("tablet"), T0 - 500, T0 - 50)));
+        assert_eq!(res!(keys(&s)).len(), 1);
+        drop(ss);
+
+        // A fresh token from the same bytes finds it after a restart, with its times intact.
+        let (clk, _) = clock();
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        let got = res!(res!(ss.peek(&s.db, &Token::from_secret(*LEGACY)))
+            .ok_or_else(|| err!("The adopted session was lost at restart."; Test)));
+        assert_eq!(got.principal, b"kit".to_vec());
+        assert_eq!(got.data, dat!("tablet"));
+        assert_eq!(got.created, T0 - 500);
+        assert_eq!(got.last_seen, T0 - 50);
+        assert!(res!(ss.check(&s.db, &legacy())).is_some());
+        // Ended like any other.
+        assert!(res!(ss.end(&s.db, &legacy())));
+        assert!(res!(keys(&s)).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn adoption_carries_both_expiries_exactly() -> Outcome<()> {
+        let s = res!(store("adopt_exp"));
+        let (clk, t) = clock();
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        // Idle: last seen 60 s ago, so 40 s remain.
+        let idle = Token::from_secret([1u8; 32]);
+        assert!(res!(ss.adopt(&s.db, &idle, b"lou", Dat::Empty, T0 - 100, T0 - 60)));
+        // Absolute: created 950 s ago, so 50 s remain however busy it is.
+        let abs = Token::from_secret([2u8; 32]);
+        assert!(res!(ss.adopt(&s.db, &abs, b"lou", Dat::Empty, T0 - 950, T0 - 10)));
+        t.store(T0 + 39, Ordering::SeqCst);
+        assert!(res!(ss.peek(&s.db, &idle)).is_some());
+        t.store(T0 + 40, Ordering::SeqCst);
+        assert!(res!(ss.peek(&s.db, &idle)).is_none(), "the idle window ran out at the adopted time");
+        t.store(T0 + 49, Ordering::SeqCst);
+        assert!(res!(ss.check(&s.db, &abs)).is_some());
+        t.store(T0 + 50, Ordering::SeqCst);
+        assert!(res!(ss.check(&s.db, &abs)).is_none(), "the absolute ceiling held from the adopted creation");
+        assert!(res!(keys(&s)).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn adopting_an_expired_session_writes_nothing() -> Outcome<()> {
+        let s = res!(store("adopt_dead"));
+        let (clk, _) = clock();
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        assert!(!res!(ss.adopt(&s.db, &legacy(), b"max", Dat::Empty, T0 - 200, T0 - 100)), "idle");
+        assert!(!res!(ss.adopt(&s.db, &legacy(), b"max", Dat::Empty, T0 - 1_000, T0)), "absolute");
+        assert!(res!(keys(&s)).is_empty());
+        assert_eq!(res!(ss.len()), 0);
+        assert!(res!(ss.check(&s.db, &legacy())).is_none());
+        // Nonsense times are refused rather than stored.
+        assert!(ss.adopt(&s.db, &legacy(), b"max", Dat::Empty, T0 - 10, T0 - 20).is_err(), "seen before made");
+        assert!(ss.adopt(&s.db, &legacy(), b"max", Dat::Empty, T0 - 10, T0 + 5).is_err(), "seen in the future");
+        assert!(res!(keys(&s)).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn adopting_twice_leaves_one_record_and_the_later_use() -> Outcome<()> {
+        let s = res!(store("adopt_twice"));
+        let (clk, _) = clock();
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        assert!(res!(ss.adopt(&s.db, &legacy(), b"ned", dat!(1u8), T0 - 300, T0 - 20)));
+        // A re-run from an older copy must not wind the use back.
+        assert!(res!(ss.adopt(&s.db, &legacy(), b"ned", dat!(1u8), T0 - 300, T0 - 80)));
+        assert_eq!(res!(keys(&s)).len(), 1);
+        assert_eq!(res!(ss.len()), 1);
+        let listed = res!(ss.list(b"ned"));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].last_seen, T0 - 20);
+        drop(ss);
+        let (clk, _) = clock();
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        let listed = res!(ss.list(b"ned"));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].last_seen, T0 - 20, "the store kept the later use too");
+        // The same secret cannot be moved to another principal.
+        assert!(ss.adopt(&s.db, &legacy(), b"oz", dat!(1u8), T0 - 300, T0 - 20).is_err());
+        assert!(res!(ss.list(b"oz")).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn adoption_honours_the_cap_oldest_first() -> Outcome<()> {
+        let s = res!(store("adopt_cap"));
+        let (clk, _) = clock();
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        for i in 0..3u8 {
+            let tok = Token::from_secret([10 + i; 32]);
+            assert!(res!(ss.adopt(&s.db, &tok, b"pia", dat!(i), T0 - 50 + i as u64, T0)));
+        }
+        // Older than all three: it would be the first ended, so it is never written.
+        let older = Token::from_secret([20u8; 32]);
+        assert!(!res!(ss.adopt(&s.db, &older, b"pia", dat!(9u8), T0 - 90, T0)));
+        assert!(res!(ss.peek(&s.db, &older)).is_none());
+        // Newer than all three: the oldest makes room.
+        let newer = Token::from_secret([21u8; 32]);
+        assert!(res!(ss.adopt(&s.db, &newer, b"pia", dat!(7u8), T0 - 5, T0)));
+        assert_eq!(res!(ss.list(b"pia")).iter().map(|x| x.data.clone()).collect::<Vec<_>>(),
+            vec![dat!(1u8), dat!(2u8), dat!(7u8)]);
+        assert_eq!(res!(keys(&s)).len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn peek_never_moves_last_seen() -> Outcome<()> {
+        let s = res!(store("peek"));
+        let (clk, t) = clock();
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        let tok = res!(ss.start(&s.db, b"quin", Dat::Empty));
+        // Well past `touch_secs`, where a check would write a touch through.
+        t.store(T0 + 60, Ordering::SeqCst);
+        let got = res!(res!(ss.peek(&s.db, &tok)).ok_or_else(|| err!("A live session must peek."; Test)));
+        assert_eq!(got.last_seen, T0);
+        drop(ss);
+        let (clk, t2) = clock();
+        t2.store(T0 + 61, Ordering::SeqCst);
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        assert_eq!(res!(ss.list(b"quin"))[0].last_seen, T0, "a peek wrote a touch");
+        // Peeking does not keep it alive: it ends at the idle window from its last real use.
+        t2.store(T0 + 99, Ordering::SeqCst);
+        assert!(res!(ss.peek(&s.db, &tok)).is_some());
+        t2.store(T0 + 100, Ordering::SeqCst);
+        assert!(res!(ss.peek(&s.db, &tok)).is_none());
+        assert!(res!(keys(&s)).is_empty(), "an expired session found by a peek is ended");
+        Ok(())
+    }
+
+    #[test]
+    fn an_adopted_secret_never_reaches_the_store() -> Outcome<()> {
+        let s = res!(store("adopt_hash"));
+        let (clk, _) = clock();
+        let ss = res!(Sessions::load_with_clock(&s.db, cfg(), clk));
+        assert!(res!(ss.adopt(&s.db, &legacy(), b"rae", dat!("phone"), T0 - 10, T0)));
+        let id = res!(ss.list(b"rae"))[0].id.clone();
+        assert_eq!(res!(keys(&s)), vec![fmt!("t/s/{}", id)]);
+        let cookie = legacy().to_cookie();
+        assert!(!res!(files_contain(&s.root, LEGACY)), "the raw secret is in the store's files");
+        assert!(!res!(files_contain(&s.root, cookie.as_bytes())), "the secret's hex is in the store's files");
+        assert!(!res!(files_contain(&s.root, cookie.to_lowercase().as_bytes())));
+        Ok(())
+    }
 }

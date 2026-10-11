@@ -40,10 +40,15 @@
 //!   it cannot survive a restart or be revoked singly, which members need.
 //!
 //! The gateway's store is `O3db` with the same type parameters as `VhostDb`, so a migration needs
-//! only its `Store` to hand over its `Arc<RwLock<GwDb>>` and a `Uid`, and the live `sess:` records
-//! to be dropped (forcing one sign-in), since a raw token cannot become a hashed one without being
-//! presented. Steel's own WebSocket member login (`sess_meta:<sid>`) also stores its id raw and is
-//! a candidate for the same move.
+//! only its `Store` to hand over its `Arc<RwLock<GwDb>>` and a `Uid`. Its live `sess:` records
+//! move without a sign-in: the migration holds each raw token, so `Token::from_secret` of those
+//! 32 bytes and `Sessions::adopt` write the hashed record with the old creation and last-use
+//! times, each expiry carried exactly, and the raw record is then deleted. The browser keeps the
+//! cookie it has. Steel's own WebSocket member login (`sess_meta:<sid>`) also stores its id raw
+//! and is a candidate for the same move.
+//!
+//! A request that must not count as use (a background wake, a socket's re-check) authenticates
+//! with `peek`, which ends an expired session as `check` does but never moves `last_seen`.
 
 use crate::{
     app::server::VhostDb,
@@ -140,6 +145,13 @@ impl Token {
     fn generate() -> Self {
         let mut b = [0u8; TOKEN_LEN];
         Rand::fill_u8(&mut b);
+        Self(b)
+    }
+
+    /// An app's pre-existing secret, taken as the token, for a session `Sessions::adopt` moves
+    /// across from a store that held it raw. The bytes are used as they are, so the same secret
+    /// always names the same session.
+    pub fn from_secret(b: [u8; TOKEN_LEN]) -> Self {
         Self(b)
     }
 
@@ -419,12 +431,122 @@ impl Sessions {
         Ok(token)
     }
 
+    /// Takes over a session issued elsewhere under a secret the caller holds, keeping its
+    /// `created` and `last_seen` (Unix seconds), so that both expiries fall exactly where they
+    /// would have. Whether it was written: an adoptee already expired under this config, or one
+    /// the per-principal cap would end first (it is older than every session the principal holds
+    /// at the cap), is not.
+    ///
+    /// Adopting a hash already held is a re-run: the record is rewritten with the earlier
+    /// `created` and the later `last_seen`, so an older copy cannot wind a session's use back. A
+    /// hash held for another principal is refused. Adoption cannot revive a revoked session for
+    /// anyone but a holder of its secret; a migration should therefore delete each raw record
+    /// once it is adopted, and never adopt from a copy older than its last revocation.
+    pub fn adopt(
+        &self,
+        db:         &(Arc<RwLock<VhostDb>>, Uid),
+        token:      &Token,
+        principal:  &[u8],
+        data:       Dat,
+        created:    u64,
+        last_seen:  u64,
+    )
+        -> Outcome<bool>
+    {
+        let now = res!(self.clock.now());
+        if last_seen < created || last_seen > now {
+            return Err(err!(
+                "Adopting a member session: last_seen {} must lie between created {} and now {}.",
+                last_seen, created, now;
+                Invalid, Input));
+        }
+        let hash = res!(token.hash());
+        let (db_arc, uid) = db;
+        let mut state = lock_mutex!(self.state);
+        let mut e = Entry {
+            principal:      principal.to_vec(),
+            data,
+            created,
+            last_seen,
+            stored_seen:    last_seen,
+        };
+        if let Some(held) = state.by_hash.get(&hash) {
+            if held.principal != e.principal {
+                return Err(err!(
+                    "Adopting member session {}: it is already held for another principal.",
+                    short(&hash);
+                    Invalid, Input, Exists));
+            }
+            e.created = held.created.min(e.created);
+            e.last_seen = held.last_seen.max(e.last_seen);
+            e.stored_seen = e.last_seen;
+        }
+        if expired(&self.cfg, &e, now) {
+            debug!("member session: {} not adopted, already expired.", short(&hash));
+            return Ok(false);
+        }
+        let dbr = lock_read!(db_arc);
+        // The cap as `start` applies it, oldest first, counting the adoptee in its place.
+        loop {
+            let oldest = match state.by_principal.get(principal) {
+                Some(set) => {
+                    let others = set.iter().filter(|(_, h)| *h != hash).count();
+                    if others < self.cfg.per_principal {
+                        break;
+                    }
+                    match set.iter().find(|(_, h)| *h != hash) {
+                        Some(first) => *first,
+                        None        => break,
+                    }
+                }
+                None => break,
+            };
+            if (e.created, hash) < oldest {
+                debug!("member session: {} not adopted, older than its principal's {} held.",
+                    short(&hash), self.cfg.per_principal);
+                return Ok(false);
+            }
+            res!(dbr.delete(&self.cfg.key(&oldest.1), uid.clone(), None));
+            state.remove(&oldest.1);
+            debug!("member session: {} ended, its principal's oldest past the cap of {}.",
+                short(&oldest.1), self.cfg.per_principal);
+        }
+        res!(dbr.insert(self.cfg.key(&hash), e.to_dat(e.last_seen), uid.clone(), None));
+        state.remove(&hash); // its index entry may carry the old `created`
+        state.add(hash, e);
+        debug!("member session: {} adopted.", short(&hash));
+        Ok(true)
+    }
+
     /// The live session the token names, if any. An expired one is ended here; a live one has
     /// `last_seen` moved to now, written through at most once per `touch_secs`.
     pub fn check(
         &self,
         db:     &(Arc<RwLock<VhostDb>>, Uid),
         token:  &Token,
+    )
+        -> Outcome<Option<Session>>
+    {
+        self.find(db, token, true)
+    }
+
+    /// As `check`, ending an expired session, but a live one is left exactly as it was: nothing
+    /// is written and `last_seen` does not move. For a request that must not count as use.
+    pub fn peek(
+        &self,
+        db:     &(Arc<RwLock<VhostDb>>, Uid),
+        token:  &Token,
+    )
+        -> Outcome<Option<Session>>
+    {
+        self.find(db, token, false)
+    }
+
+    fn find(
+        &self,
+        db:     &(Arc<RwLock<VhostDb>>, Uid),
+        token:  &Token,
+        touch:  bool,
     )
         -> Outcome<Option<Session>>
     {
@@ -446,6 +568,9 @@ impl Sessions {
                     short(&hash), err);
             }
             return Ok(None);
+        }
+        if !touch {
+            return Ok(Some(e.session(&hash)));
         }
         let mut stored_seen = e.stored_seen;
         if now >= e.stored_seen.saturating_add(self.cfg.touch_secs) {
