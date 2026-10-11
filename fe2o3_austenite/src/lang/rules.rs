@@ -46,6 +46,7 @@ use crate::ir::{
 	Span,
 };
 use crate::theme::{
+	LeadingGap,
 	Theme,
 	ThemeHeadingLevelPatch,
 	ThemePatch,
@@ -2501,8 +2502,14 @@ fn read_inner_sets_em(content: &str, body_size: Sp, patch: &mut ThemePatch) {
 					}
 				}
 				if let Some(v) = named_value(&cargs, "leading") {
-					if let Some(sp) = resolve_len(&v, cur_size) {
-						patch.text.leading = Some(sp);
+					// Typst's line-box gap, an `em` kept relative; `Theme::apply` derives the pitch.
+					let v = v.trim();
+					let gap = match v.strip_suffix("em") {
+						Some(num)	=> num.trim().parse::<f64>().ok().map(|em| LeadingGap { abs: Sp::ZERO, em }),
+						None		=> length_pt(v).map(|pt| LeadingGap { abs: Sp::from_pt(pt), em: 0.0 }),
+					};
+					if let Some(gap) = gap {
+						patch.par.leading = Some(gap);
 					}
 				}
 			},

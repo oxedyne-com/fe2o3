@@ -127,6 +127,23 @@ pub struct ThemeText {
 	pub justify:	bool,	// reserved
 	pub fill:		Rgba,	// prose text colour from `#set text(fill:)`, default black
 	pub faces:		FaceSet,	// role -> family names, resolved to loaded faces at render
+	pub leading_gap:	Option<LeadingGap>,	// a `par(leading:)` in force, from which `leading` is derived
+}
+
+/// Typst's `par(leading:)`: the gap added between line boxes, an absolute part plus a part relative to the
+/// text size in force. The theme's `text.leading` is the pitch derived from it, so an `em` gap follows the
+/// body size of every scope it reaches, as Typst resolves it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LeadingGap {
+	pub abs:	Sp,
+	pub em:		f64,
+}
+
+impl LeadingGap {
+	/// The baseline-to-baseline pitch this gap sets at `size` over a line box `box_em` high.
+	pub fn pitch(&self, size: Sp, box_em: f64) -> Sp {
+		Sp::from_pt((box_em + self.em) * size.to_pt() + self.abs.to_pt())
+	}
 }
 
 impl Default for ThemeText {
@@ -140,6 +157,7 @@ impl Default for ThemeText {
 			justify:	true,
 			fill:		Rgba::BLACK,
 			faces:		FaceSet::default(),
+			leading_gap:	None,
 		}
 	}
 }
@@ -556,8 +574,9 @@ pub struct ThemeTextPatch {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThemeParPatch {
-	pub skip:	Option<Sp>,
-	pub indent:	Option<Sp>,
+	pub skip:		Option<Sp>,
+	pub indent:		Option<Sp>,
+	pub leading:	Option<LeadingGap>,	// becomes `text.leading_gap`, and `text.leading` at apply
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -724,6 +743,20 @@ impl Theme {
 		patch.furniture.apply(&mut self.furniture);
 		patch.colours.apply(&mut self.colours);
 		patch.calibration.apply(&mut self.calibration);
+		// Typst's `par(leading:)` is the gap added between line boxes, the theme's `text.leading` the
+		// baseline-to-baseline pitch: the calibrated line box at the body size in force plus the gap. The
+		// pitch is re-derived whenever the gap, the size or the calibration changes, so an `em` gap set at
+		// the document follows a smaller scope's text. A pitch named outright replaces any gap.
+		match patch.par.leading {
+			Some(gap)	=> self.text.leading_gap = Some(gap),
+			None		=> if patch.text.leading.is_some() { self.text.leading_gap = None; },
+		}
+		let moved = patch.par.leading.is_some()
+			|| patch.text.body_size.is_some()
+			|| patch.calibration.line_box_em.is_some();
+		if let (true, Some(gap)) = (moved, self.text.leading_gap) {
+			self.text.leading = gap.pitch(self.text.body_size, self.calibration.line_box_em);
+		}
 	}
 }
 
@@ -1074,19 +1107,36 @@ impl FaceSet {
 
 impl ThemeText {
 	fn to_dat(&self) -> Outcome<Dat> {
-		Ok(omapdat!{
-			"body_size"	=> sp_dat(self.body_size),
-			"leading"	=> sp_dat(self.leading),
-			"tracking"	=> sp_dat(self.tracking),
-			"ligatures"	=> dat!(self.ligatures),
-			"hyphenate"	=> dat!(self.hyphenate),
-			"justify"	=> dat!(self.justify),
-			"fill"		=> rgba_dat(self.fill),
-			"faces"		=> res!(self.faces.to_dat()),
-		})
+		let mut pairs: Vec<(Dat, Dat)> = vec![
+			(dat!("body_size".to_string()),	sp_dat(self.body_size)),
+			(dat!("leading".to_string()),	sp_dat(self.leading)),
+			(dat!("tracking".to_string()),	sp_dat(self.tracking)),
+			(dat!("ligatures".to_string()),	dat!(self.ligatures)),
+			(dat!("hyphenate".to_string()),	dat!(self.hyphenate)),
+			(dat!("justify".to_string()),	dat!(self.justify)),
+			(dat!("fill".to_string()),		rgba_dat(self.fill)),
+			(dat!("faces".to_string()),		res!(self.faces.to_dat())),
+		];
+		// The gap is written only when one is in force, so a theme with none serialises, and hashes, as it
+		// did before the field existed.
+		if let Some(g) = self.leading_gap {
+			pairs.push((dat!("leading_gap".to_string()), omapdat!{
+				"abs"		=> sp_dat(g.abs),
+				"em_bits"	=> dat!(g.em.to_bits()),
+			}));
+		}
+		Ok(create_dat_ordmap(pairs))
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
+		let leading_gap = match res!(d.map_remove(&dat!("leading_gap".to_string()))) {
+			Some(mut g)	=> Some(LeadingGap {
+				abs:	res!(sp_from(res!(map_must(&mut g, "abs")))),
+				em:		f64::from_bits(try_extract_dat!(res!(map_must(&mut g, "em_bits")), U64)),
+			}),
+			None		=> None,
+		};
 		Ok(Self {
+			leading_gap,
 			body_size:	res!(sp_from(res!(map_must(&mut d, "body_size")))),
 			leading:	res!(sp_from(res!(map_must(&mut d, "leading")))),
 			tracking:	res!(sp_from(res!(map_must(&mut d, "tracking")))),

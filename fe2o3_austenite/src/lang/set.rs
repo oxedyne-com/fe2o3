@@ -26,6 +26,7 @@ use crate::lang::lex::Place;
 use crate::lang::RefusalClass;
 use crate::lang::Refusals;
 use crate::theme::{
+	LeadingGap,
 	Theme,
 	ThemeHeadingLevelPatch,
 	ThemePatch,
@@ -235,19 +236,13 @@ fn lower_set_into(target: &str, list: &[lex::Arg], patch: &mut ThemePatch, em_ba
 			}
 		},
 		"par" => {
-			// `spacing` (the space between paragraphs) and `first-line-indent` are pure lengths: a `pt` value
-			// is taken verbatim, and a font-relative `em` -- the book/doc template idiom (`#set par(spacing:
+			// `spacing` (the space between paragraphs), `first-line-indent` and `leading` are lengths: a `pt`
+			// value is taken verbatim, and a font-relative `em` -- the book/doc template idiom (`#set par(spacing:
 			// 0.75em)`) -- resolves against the text size in force rather than being dropped and left at the
-			// theme default.
-			//
-			// `leading` is deliberately `pt`-only here. Typst's `par(leading:)` is the GAP added between line
-			// boxes, whereas the theme's `text.leading` is the baseline-to-baseline distance; converting one
-			// to the other needs the calibrated line-box height ([`crate::theme::ThemeCalibration`]), the way
-			// the book path's `build_style` does. Lowering an `em` (or even a `pt`) leading straight into the
-			// baseline field would set the line grid wrongly, so that conversion is left to a dedicated leading
-			// pass -- see this crate's parity notes. A `pt` leading keeps the pre-existing behaviour.
-			if let Some(pt) = named_length_pt(list, "leading") {
-				patch.text.leading = Some(Sp::from_pt(pt));
+			// theme default. `leading` keeps Typst's meaning, the GAP between line boxes, its `em` left
+			// unresolved: [`Theme::apply`] derives the baseline pitch at the body size of each scope it reaches.
+			if let Some(gap) = named_gap(list, "leading") {
+				patch.par.leading = Some(gap);
 				used.push("leading");
 			}
 			if let Some(pt) = named_length_pt_em(list, "spacing", em_base_pt) {
@@ -681,6 +676,16 @@ fn named_length_pt_em(list: &[lex::Arg], key: &str, em_base_pt: f64) -> Option<f
 	}
 }
 
+/// A `key:`'s length as a [`LeadingGap`]: a bare number or `pt` is absolute, an `em` stays relative to the
+/// text size in force where it is applied. Anything else is `None`, so the `#set` is refused.
+fn named_gap(list: &[lex::Arg], key: &str) -> Option<LeadingGap> {
+	match named_number_unit(list, key) {
+		Some((num, unit)) if unit.is_empty() || unit == "pt"	=> Some(LeadingGap { abs: Sp::from_pt(num), em: 0.0 }),
+		Some((num, unit)) if unit == "em"						=> Some(LeadingGap { abs: Sp::ZERO, em: num }),
+		_														=> None,
+	}
+}
+
 const MM_PER_PT: f64 = 72.0 / 25.4;	// points in one millimetre
 
 /// The scaled-point length of a `key:`'s value, accepting `pt` or `mm` (a page dimension is usually set
@@ -751,15 +756,14 @@ mod tests {
 	/// text size IN FORCE AT LAYOUT, the template idiom (`#set par(spacing: 0.75em)`) that was silently
 	/// dropped before `em` was convertible. Typst resolves the `em` lazily -- the batch's final `text(size:)`
 	/// wins whether it precedes OR follows the `#set par` -- so source order does not change the result.
-	/// `leading` is deliberately NOT converted from `em` here: it is a line-box gap, not a baseline distance,
-	/// so it stays a visible refusal rather than a wrong write (see the `par` arm and [`named_length_pt_em`]).
+	/// `leading` lowers the same way, as Typst's line-box gap ([`ThemeParPatch::leading`]).
 	#[test]
 	fn set_par_lowers_em_pure_lengths_against_layout_text_size() {
-		// A lone `#set par` resolves spacing/indent em against the 11 pt house default; an em leading is left
-		// unlowered (its baseline conversion needs the calibrated line box, deferred to a leading pass).
+		// A lone `#set par` resolves every em against the 11 pt house default, leading included.
 		let patch = lower_set("par", "leading: 0.78em, spacing: 0.75em, first-line-indent: 1.5em");
 		assert_eq!(patch.par.skip,     Some(Sp::from_pt(0.75 * 11.0)));
 		assert_eq!(patch.par.indent,   Some(Sp::from_pt(1.5  * 11.0)));
+		assert_eq!(patch.par.leading,  Some(LeadingGap { abs: Sp::ZERO, em: 0.78 }));
 		assert_eq!(patch.text.leading, None);
 
 		// `text(size:)` BEFORE the `par` -- the em resolves against 12 pt.
@@ -781,9 +785,35 @@ mod tests {
 		lower_root_declarations("#set par(spacing: 1em)\n\n= Body\n", &mut theme);
 		assert_eq!(theme.par.skip, Sp::from_pt(12.0));
 
-		// A `pt` spacing is still taken verbatim, and a `pt` leading keeps its pre-existing pass-through.
-		assert_eq!(lower_set("par", "spacing: 9pt").par.skip,      Some(Sp::from_pt(9.0)));
-		assert_eq!(lower_set("par", "leading: 16pt").text.leading, Some(Sp::from_pt(16.0)));
+		// A `pt` spacing or leading is taken verbatim; the leading is a gap, not a baseline distance.
+		assert_eq!(lower_set("par", "spacing: 9pt").par.skip,     Some(Sp::from_pt(9.0)));
+		assert_eq!(lower_set("par", "leading: 16pt").par.leading, Some(LeadingGap { abs: Sp::from_pt(16.0), em: 0.0 }));
+		assert_eq!(lower_set("par", "leading: 16pt").text.leading, None);
+	}
+
+	/// A `par(leading:)` gap derives the pitch at the size of every scope it reaches: an `em` gap scales
+	/// with a smaller scope's text, a `pt` gap stays absolute, and a pitch named outright drops the gap.
+	#[test]
+	fn par_leading_gap_follows_the_scope_text_size() {
+		let box_em = Theme::default().calibration.line_box_em;
+		let mut small = ThemePatch::default();
+		small.text.body_size = Some(Sp::from_pt(9.9));
+
+		let mut theme = Theme::default();
+		theme.apply(&lower_set("par", "leading: 0.65em"));
+		assert_eq!(theme.text.leading, Sp::from_pt((box_em + 0.65) * 11.0));
+		theme.apply(&small);
+		assert_eq!(theme.text.leading, Sp::from_pt((box_em + 0.65) * 9.9));
+
+		let mut theme = Theme::default();
+		theme.apply(&lower_set("par", "leading: 8pt"));
+		theme.apply(&small);
+		assert_eq!(theme.text.leading, Sp::from_pt(box_em * 9.9 + 8.0));
+
+		// With no gap in force a size change leaves the pitch as it was.
+		let mut theme = Theme::default();
+		theme.apply(&small);
+		assert_eq!(theme.text.leading, Theme::default().text.leading);
 	}
 
 	/// `#set text(fill: rgb("#ff0000"))` lowers the prose fill, consuming the argument so it is not refused;
