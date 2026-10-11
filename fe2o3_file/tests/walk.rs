@@ -281,8 +281,8 @@ pub fn test_walk(filter: &'static str) -> Outcome<()> {
         assert_eq!(end, WalkEnd::Complete);
         assert_eq!(src.lists, 1, "only the start is listed");
         assert_eq!(src.reads, vec![
-            ".git/info/exclude", ".gitignore", ".oreignore",
-            "docs/.git/info/exclude", "docs/.gitignore", "docs/.oreignore",
+            ".git", ".git/info/exclude", ".gitignore", ".oreignore",
+            "docs/.git", "docs/.git/info/exclude", "docs/.gitignore", "docs/.oreignore",
             "docs/book/.gitignore",
         ]);
         // An ignored start, or one beneath an ignored directory, yields nothing.
@@ -302,7 +302,7 @@ pub fn test_walk(filter: &'static str) -> Outcome<()> {
         }
         let mut walk = Walk::new(100).beneath("docs");
         assert!(!walk.start_ignored());
-        assert_eq!(res!(walk.next()), Step::Read(b".git/info/exclude".to_vec()));
+        assert_eq!(res!(walk.next()), Step::Read(b".git".to_vec()));
         // An empty start is the root.
         let mut walk = Walk::new(100).beneath("/");
         assert_eq!(res!(walk.next()), Step::List(Vec::new()));
@@ -493,6 +493,91 @@ pub fn test_walk(filter: &'static str) -> Outcome<()> {
         assert_eq!(res!(default), Some(b"*.xdg\n".to_vec()), "XDG git/ignore when unset");
         assert_eq!(res!(absent), None);
         let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["A .git file's repository excludes are read through its pointer 000", "all", "walk"], || {
+        // A linked worktree: its gitdir names the main repository's worktrees entry, whose
+        // commondir leads back to the repository, where info/exclude lives.  A submodule: its
+        // gitdir is the superproject's modules entry, with no commondir.
+        let tree: &[(&str, &str)] = &[
+            ("repo/.git/info/exclude",          "*.secret\n"),
+            ("repo/.git/worktrees/wt/commondir", "../..\n"),
+            ("repo/.git/modules/sub/info/exclude", "*.key\n"),
+            ("repo/a.txt",                      ""),
+            ("wt/.git",                         "gitdir: ../repo/.git/worktrees/wt\n"),
+            ("wt/a.secret",                     ""),
+            ("wt/doc/b.secret",                 ""),
+            ("wt/doc/b.txt",                    ""),
+            ("repo/sub/.git",                   "gitdir: ../.git/modules/sub\r\n"),
+            ("repo/sub/k.key",                  ""),
+            ("repo/sub/k.txt",                  ""),
+        ];
+        let mut src = Mem::new(tree);
+        let (mut found, end) = res!(walk_all(Walk::new(1000), &mut src));
+        found.sort();
+        assert_eq!(end, WalkEnd::Complete);
+        assert!(!found.iter().any(|f| f.ends_with(".secret") || f.ends_with(".key")),
+            "a .git file's info/exclude is in force: {:?}", found);
+        assert!(found.contains(&"wt/doc/b.txt".to_string()));
+        assert!(found.contains(&"repo/sub/k.txt".to_string()));
+        assert!(src.reads.contains(&"repo/.git/worktrees/wt/commondir".to_string()));
+        // The same from a start beneath the worktree, where the .git file is never listed.
+        let mut src = Mem::new(tree);
+        let (found, _) = res!(walk_all(Walk::new(1000).beneath("wt/doc"), &mut src));
+        assert_eq!(found, vec!["wt/doc/b.txt"], "read blind above the start");
+        // Rules hand the layer back, named by the file that decided.
+        let mut src = Mem::new(tree);
+        let mut walk = Walk::new(1000);
+        loop {
+            match res!(walk.next()) {
+                Step::List(d)   => res!(walk.listed(res!(src.list(&d)))),
+                Step::Read(p)   => res!(walk.read(res!(src.read(&p)))),
+                Step::Done      => break,
+                _               => (),
+            }
+        }
+        assert_eq!(walk.rules().why(b"wt/x.secret", false), Some(b"repo/.git/info/exclude".to_vec()));
+        // A pointer that leaves the root, absolute or by climbing, is reported, not followed.
+        for target in ["/home/u/repo/.git/worktrees/wt", "../../elsewhere/.git"] {
+            let content = format!("gitdir: {}\n", target);
+            let mut src = Mem::new(&[("wt/.git", content.as_str()), ("wt/a.txt", "")]);
+            let mut walk = Walk::new(1000);
+            let mut beyond = Vec::new();
+            loop {
+                match res!(walk.next()) {
+                    Step::List(d)   => res!(walk.listed(res!(src.list(&d)))),
+                    Step::Read(p)   => res!(walk.read(res!(src.read(&p)))),
+                    Step::Beyond(p) => beyond.push(p),
+                    Step::Done      => break,
+                    _               => (),
+                }
+            }
+            assert_eq!(beyond, vec![b"wt/.git".to_vec()], "{}", target);
+            assert!(!src.reads.iter().any(|r| r.contains("elsewhere") || r.starts_with('/')), "{:?}", src.reads);
+        }
+        // So is a commondir that leaves it.
+        let mut src = Mem::new(&[
+            ("wt/.git",                 "gitdir: ../g\n"),
+            ("g/commondir",             "/abs/repo/.git\n"),
+            ("wt/a.txt",                ""),
+        ]);
+        let mut walk = Walk::new(1000);
+        let mut beyond = Vec::new();
+        loop {
+            match res!(walk.next()) {
+                Step::List(d)   => res!(walk.listed(res!(src.list(&d)))),
+                Step::Read(p)   => res!(walk.read(res!(src.read(&p)))),
+                Step::Beyond(p) => beyond.push(p),
+                Step::Done      => break,
+                _               => (),
+            }
+        }
+        assert_eq!(beyond, vec![b"wt/.git".to_vec()]);
+        // A .git file that is no pointer names no repository, as git refuses it.
+        let mut src = Mem::new(&[("wt/.git", "not a pointer\n"), ("wt/a.txt", "")]);
+        let (found, end) = res!(walk_all(Walk::new(1000), &mut src));
+        assert_eq!((found, end), (vec!["wt/.git".to_string(), "wt/a.txt".to_string()], WalkEnd::Complete));
         Ok(())
     }));
 

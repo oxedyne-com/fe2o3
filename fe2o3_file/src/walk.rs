@@ -33,8 +33,12 @@
 //!
 //! Two more layers sit where git puts them. A directory holding a `.git` directory has its
 //! `.git/info/exclude` read first and laid at that directory beneath its own ignore files, so it
-//! ranks below every in-tree file of the repository. A `.git` file (a linked worktree or a
-//! submodule) points outside the tree and is not followed. Global excludes, git's
+//! ranks below every in-tree file of the repository. A `.git` FILE (a linked worktree or a
+//! submodule) is read as git reads it: its `gitdir:` names the repository's directory, and that
+//! directory's `commondir`, when there is one, names the shared one whose `info/exclude` is laid
+//! in the same place. A pointer that leaves the root, absolute or by climbing past it, cannot be
+//! followed through a source that sees only the root, so the walk reports it as
+//! [`Step::Beyond`] and leaves the caller to judge a rule it cannot know. Global excludes, git's
 //! `core.excludesFile`, are given with [`Walk::with_excludes`] and lie just above the defaults; on
 //! a native target [`git_global_excludes`] finds and reads them. A browser cannot see the user's
 //! git configuration, so a walk there has no global layer unless the caller supplies one.
@@ -121,6 +125,7 @@ pub enum Step {
     List(Vec<u8>),          // list this directory, then call `listed`
     Read(Vec<u8>),          // read this ignore file, then call `read`
     Entry(WalkEntry),       // a kept file or directory
+    Beyond(Vec<u8>),        // this `.git` file's repository lies outside the root; its excludes are unread
     Stopped(WalkBudget),    // the budget ran out; the walk is over
     Done,                   // everything not ignored has been yielded
 }
@@ -128,7 +133,7 @@ pub enum Step {
 /// How [`Walk::run`] ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WalkEnd {
-    Complete,
+    Complete,               // a `.git` file pointing outside the root is passed over, see Walk::run
     Budget(WalkBudget),
     Halted,                 // the visitor asked to stop
 }
@@ -158,11 +163,26 @@ struct Layer {
     below:  Option<usize>,
 }
 
-// An ignore file still to be read.
+// What an owed read is for.
+#[derive(Clone, Debug)]
+enum Owe {
+    Rules,                                          // an ignore file, laid as a layer
+    Link,                                           // a `.git` file, perhaps a `gitdir:` pointer
+    Common { link: Vec<u8>, gitdir: Vec<u8> },      // that repository's `commondir`, perhaps absent
+}
+
+// A file still to be read.
 #[derive(Clone, Debug)]
 struct Owed {
     path:   Vec<u8>,
     rank:   usize,
+    owe:    Owe,
+}
+
+impl Owed {
+    fn rules(path: Vec<u8>, rank: usize) -> Self {
+        Self { path, rank, owe: Owe::Rules }
+    }
 }
 
 /// An ignore-aware depth-first walk. See the module documentation.
@@ -180,6 +200,7 @@ pub struct Walk {
     entries:    VecDeque<Listed>,               // its listing, not yet judged
     reads:      VecDeque<Owed>,                 // its ignore files, not yet read
     children:   Vec<Vec<u8>>,                   // its kept subdirectories
+    beyond:     VecDeque<Vec<u8>>,              // `.git` files pointing outside the root, unreported
     want:       Want,
     budget:     usize,
     kept:       usize,
@@ -206,6 +227,7 @@ impl Walk {
             entries:    VecDeque::new(),
             reads:      VecDeque::new(),
             children:   Vec::new(),
+            beyond:     VecDeque::new(),
             want:       Want::Nothing,
             budget,
             kept:       0,
@@ -292,6 +314,9 @@ impl Walk {
                 String::from_utf8_lossy(self.reads.front().map(|o| o.path.as_slice()).unwrap_or(b"")); Order)),
         }
         loop {
+            if let Some(link) = self.beyond.pop_front() {
+                return Ok(Step::Beyond(link));
+            }
             if self.over {
                 return Ok(Step::Done);
             }
@@ -313,10 +338,12 @@ impl Walk {
                 self.pending.push((dir, self.top)); // the start itself, listed as usual
             } else {
                 // Blind reads: the directory is never listed, so a source answers None for a gap.
+                // At most one of `.git` as a file and `.git/info/exclude` answers.
                 self.dir = dir;
-                self.reads.push_back(Owed { path: Self::join(&self.dir, REPO_EXCLUDE.as_bytes()), rank: 0 });
+                self.reads.push_back(Owed { path: Self::join(&self.dir, b".git"), rank: 0, owe: Owe::Link });
+                self.reads.push_back(Owed::rules(Self::join(&self.dir, REPO_EXCLUDE.as_bytes()), 0));
                 for (i, name) in self.names.iter().enumerate() {
-                    self.reads.push_back(Owed { path: Self::join(&self.dir, name), rank: i + 1 });
+                    self.reads.push_back(Owed::rules(Self::join(&self.dir, name), i + 1));
                 }
             }
         }
@@ -372,12 +399,14 @@ impl Walk {
         }
         self.want = Want::Nothing;
         // A repository's own excludes rank below its ignore files, so they are laid first.
-        if entries.iter().any(|e| e.is_dir && e.name == b".git") {
-            self.reads.push_back(Owed { path: Self::join(&self.dir, REPO_EXCLUDE.as_bytes()), rank: 0 });
+        match entries.iter().find(|e| e.name == b".git") {
+            Some(e) if e.is_dir => self.reads.push_back(Owed::rules(Self::join(&self.dir, REPO_EXCLUDE.as_bytes()), 0)),
+            Some(_)             => self.reads.push_back(Owed { path: Self::join(&self.dir, b".git"), rank: 0, owe: Owe::Link }),
+            None                => (),
         }
         for (i, name) in self.names.iter().enumerate() {
             if entries.iter().any(|e| !e.is_dir && &e.name == name) {
-                self.reads.push_back(Owed { path: Self::join(&self.dir, name), rank: i + 1 });
+                self.reads.push_back(Owed::rules(Self::join(&self.dir, name), i + 1));
             }
         }
         self.entries = entries.into();
@@ -394,7 +423,37 @@ impl Walk {
             Some(owed)  => owed,
             None        => return Err(err!("Walk::read found no owed ignore file to record."; Bug)),
         };
-        if let Some(bytes) = bytes {
+        let bytes = match (owed.owe, bytes) {
+            (Owe::Rules, Some(bytes))   => bytes,
+            // A `.git` file that is no pointer names no repository; git refuses it too.
+            (Owe::Link, Some(bytes))    => {
+                if let Some(to) = Self::gitdir(&bytes) {
+                    match Self::resolve(&self.dir, to) {
+                        Some(gitdir) => self.reads.push_front(Owed {
+                            path:   Self::join(&gitdir, b"commondir"),
+                            rank:   0,
+                            owe:    Owe::Common { link: owed.path, gitdir },
+                        }),
+                        None => self.beyond.push_back(owed.path),
+                    }
+                }
+                return Ok(());
+            },
+            // Present or not, the shared directory's info/exclude is the one git reads.
+            (Owe::Common { link, gitdir }, bytes) => {
+                let common = match bytes {
+                    Some(b) => Self::resolve(&gitdir, trim(&b)),
+                    None    => Some(gitdir),
+                };
+                match common {
+                    Some(common) => self.reads.push_front(Owed::rules(Self::join(&common, b"info/exclude"), 0)),
+                    None         => self.beyond.push_back(link),
+                }
+                return Ok(());
+            },
+            (_, None)                   => return Ok(()),
+        };
+        {
             let file = IgnoreFile::parse(&bytes);
             if !file.is_empty() {
                 self.layers.push(Layer {
@@ -422,6 +481,9 @@ impl Walk {
                 Step::List(dir)		=> res!(self.listed(res!(src.list(&dir)))),
                 Step::Read(path)	=> res!(self.read(res!(src.read(&path)))),
                 Step::Entry(entry)	=> if !res!(visit(entry)) { return Ok(WalkEnd::Halted); },
+                // A source that sees only the root cannot read beyond it; that repository's
+                // excludes go unheard, as they did before `.git` files were followed.
+                Step::Beyond(_)		=> (),
                 Step::Stopped(rep)	=> return Ok(WalkEnd::Budget(rep)),
                 Step::Done			=> return Ok(WalkEnd::Complete),
             }
@@ -443,6 +505,32 @@ impl Walk {
             return ignored;
         }
         self.defaults.ignores(path, is_dir)
+    }
+
+    // The target of a `gitdir: <path>` pointer, as git's read_gitfile takes it.
+    fn gitdir(bytes: &[u8]) -> Option<&[u8]> {
+        let rest = match trim(bytes).strip_prefix(b"gitdir:") {
+            Some(rest)  => trim(rest),
+            None        => return None,
+        };
+        if rest.is_empty() { None } else { Some(rest) }
+    }
+
+    // `to` read from beside `base`, both relative to the root, or None when it leaves the root.
+    fn resolve(base: &[u8], to: &[u8]) -> Option<Vec<u8>> {
+        let drive = to.len() > 1 && to[1] == b':';
+        if to.first() == Some(&b'/') || to.first() == Some(&b'\\') || drive {
+            return None;
+        }
+        let mut parts: Vec<&[u8]> = base.split(|b| *b == b'/').filter(|c| !c.is_empty()).collect();
+        for c in to.split(|b| *b == b'/') {
+            match c {
+                b"" | b"."  => (),
+                b".."       => if parts.pop().is_none() { return None; },
+                _           => parts.push(c),
+            }
+        }
+        Some(parts.join(&b'/'))
     }
 
     fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
