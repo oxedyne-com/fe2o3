@@ -38,10 +38,14 @@ use std::time::{
 	Instant,
 };
 
+const TEST_FUEL: u64 = 1_000_000_000;
+
 // Evaluates `code` from a source beside the fixture modules, answering the first error's kind and message.
 fn first_error(code: &str) -> Outcome<(DiagnosticKind, String)> {
 	let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval/plugin");
 	let mut engine = Engine::new(World::new(dir.clone()));
+	// The default, FUEL, takes a loop about 26 minutes to spend; the mechanism is the same at any figure.
+	engine.plugin_fuel = TEST_FUEL;
 	let id = res!(engine.world.add_source(dir.join("case.typ"), String::new()));
 	let _ = eval_string(&mut engine, code, EvalMode::Code, Scope::new(), Span::new(id, 0, 0));
 	match engine.diags.iter().find(|d| d.is_error()) {
@@ -86,7 +90,9 @@ fn a_declared_memory_past_the_ceiling_fails_the_load() -> Outcome<()> {
 #[test]
 fn the_limits_are_named_in_the_message() -> Outcome<()> {
 	let (_, msg) = res!(first_error("plugin(\"spin.wasm\").spin()"));
-	assert!(msg.contains(&FUEL.to_string()), "'{}' does not give the fuel figure {}", msg, FUEL);
+	assert!(msg.contains(&TEST_FUEL.to_string()), "'{}' does not give the fuel figure {}", msg, TEST_FUEL);
+	// No document Typst compiles may meet the default: the corpus's most is 84,908,412,112 (jogs 0.2.4).
+	assert!(FUEL >= 10 * 84_908_412_112);
 	Ok(())
 }
 

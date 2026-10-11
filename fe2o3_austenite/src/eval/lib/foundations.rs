@@ -634,7 +634,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let v = res!(need(engine, &mut args, "source"));
 			res!(finish(engine, args));
 			let bytes = res!(crate::eval::lib::data::source(engine, at, v));
-			let p = match engine.caches.plugin_load(&bytes) {
+			let p = match engine.caches.plugin_load(&bytes, engine.plugin_fuel) {
 				Ok(p)	=> p,
 				Err(e)	=> return Err(plugin_error(engine, at, e)),
 			};
@@ -650,7 +650,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				_								=> return Err(engine.error(DiagnosticKind::Type, at, "expected plugin function")),
 			};
 			let bytes = res!(plugin_args(engine, args));
-			match engine.caches.plugin_transition(&p, bytes) {
+			match engine.caches.plugin_transition(&p, bytes, engine.plugin_fuel) {
 				Ok(q)	=> Value::Module(Arc::new(crate::eval::plugin::Plugin::into_module(q))),
 				Err(e)	=> return Err(plugin_error(engine, span, e)),
 			}
@@ -1698,7 +1698,7 @@ fn plugin_error(engine: &mut Engine, span: Span, e: Error<ErrTag>) -> Error<ErrT
 pub fn call_plugin(engine: &mut Engine, p: &crate::eval::plugin::PluginFunc, args: Args) -> Outcome<Value> {
 	let span = args.span;
 	let bytes = res!(plugin_args(engine, args));
-	match engine.caches.plugin_call(p, bytes) {
+	match engine.caches.plugin_call(p, bytes, engine.plugin_fuel) {
 		Ok(out)	=> Ok(Value::Bytes(out)),
 		Err(e)	=> Err(plugin_error(engine, span, e)),
 	}

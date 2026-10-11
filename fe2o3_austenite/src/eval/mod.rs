@@ -173,6 +173,8 @@ pub struct Engine {
 	pub depth:		usize,				// current closure call depth
 	pub route:		usize,				// layout layers and show rules entered, Typst's route; the document is the first
 	pub fuel:		Option<u64>,		// loop iterations remaining; none is unbounded, as Typst is
+	#[cfg(feature = "plugin")]
+	pub plugin_fuel:	u64,			// wasmi fuel for each plugin load and call, `plugin::FUEL` unless the host sets it
 	pub context:	Context,
 	pub reads:		ReadLog,			// introspection reads recorded for the fixpoint (U8)
 	pub fonts:		FontStore,			// faces for shaping and `measure` (U6a)
@@ -200,6 +202,8 @@ impl Engine {
 			depth:		0,
 			route:		1,
 			fuel:		None,
+			#[cfg(feature = "plugin")]
+			plugin_fuel:	crate::eval::plugin::FUEL,
 			context:	Context::default(),
 			reads:		ReadLog::default(),
 			fonts:		FontStore::default(),

@@ -281,42 +281,46 @@ fn plugin_key(tag: u8, f: &PluginFunc, args: &[Arc<Vec<u8>>]) -> Fingerprint {
 #[cfg(feature = "plugin")]
 impl Caches {
 	/// `plugin(source)`, memoised on the module's bytes.
-	pub fn plugin_load(&mut self, bytes: &[u8]) -> Outcome<Arc<Plugin>> {
+	pub fn plugin_load(&mut self, bytes: &[u8], fuel: u64) -> Outcome<Arc<Plugin>> {
 		let key = Fingerprint::of(bytes);
 		if let Some(p) = self.plugins.loads.get(&key) {
 			self.counters.plugin_hits += 1;
 			return Ok(p.clone());
 		}
 		self.counters.plugin_misses += 1;
-		let p = Arc::new(res!(Plugin::load(bytes)));
+		let p = Arc::new(res!(Plugin::load(bytes, fuel)));
 		let size = p.size();
 		self.plugins.loads.insert(key, p.clone(), size);
 		Ok(p)
 	}
 
 	/// `plugin.transition(f, ..args)`, memoised on the function and the arguments' bytes.
-	pub fn plugin_transition(&mut self, f: &PluginFunc, args: Vec<Arc<Vec<u8>>>) -> Outcome<Arc<Plugin>> {
+	pub fn plugin_transition(&mut self, f: &PluginFunc, args: Vec<Arc<Vec<u8>>>, fuel: u64)
+		-> Outcome<Arc<Plugin>>
+	{
 		let key = plugin_key(b't', f, &args);
 		if let Some(p) = self.plugins.steps.get(&key) {
 			self.counters.plugin_hits += 1;
 			return Ok(p.clone());
 		}
 		self.counters.plugin_misses += 1;
-		let p = Arc::new(res!(f.transition(args)));
+		let p = Arc::new(res!(f.transition(args, fuel)));
 		let size = p.size();
 		self.plugins.steps.insert(key, p.clone(), size);
 		Ok(p)
 	}
 
 	/// `f(..args)` for a plugin function, memoised on the function and the arguments' bytes.
-	pub fn plugin_call(&mut self, f: &PluginFunc, args: Vec<Arc<Vec<u8>>>) -> Outcome<Arc<Vec<u8>>> {
+	pub fn plugin_call(&mut self, f: &PluginFunc, args: Vec<Arc<Vec<u8>>>, fuel: u64)
+		-> Outcome<Arc<Vec<u8>>>
+	{
 		let key = plugin_key(b'c', f, &args);
 		if let Some(out) = self.plugins.calls.get(&key) {
 			self.counters.plugin_hits += 1;
 			return Ok(out.clone());
 		}
 		self.counters.plugin_misses += 1;
-		let out = Arc::new(res!(f.call(args)));
+		let out = Arc::new(res!(f.call(args, fuel)));
 		self.plugins.calls.insert(key, out.clone(), out.len() + std::mem::size_of::<Vec<u8>>());
 		Ok(out)
 	}

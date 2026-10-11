@@ -10,7 +10,7 @@
 //!
 //! Typst sets no limit on a plugin. Austenite runs untrusted modules in a browser tab and a compile server,
 //! so it adds three, each counted rather than timed so a document's outcome never depends on the machine:
-//! fuel (`FUEL` instructions, about a second's work, for a load and again for each call), a ceiling on
+//! fuel (`FUEL` by default, for a load and again for each call; `Engine::plugin_fuel` may set another), a ceiling on
 //! linear memory (`MEMORY`), and wasmi's own recursion limit. Both limits hold while the module loads as well
 //! as on a call, because loading runs the module's `start` function and allocates its declared memory.
 
@@ -34,7 +34,13 @@ use std::sync::{
 use wasmi_core::LimiterError;
 
 // Limits
-pub const FUEL:			u64		= 1_000_000_000;	// wasmi fuel for a load or a call, about one per instruction
+// The default fuel for a load or a call, `Engine::plugin_fuel`. Typst sets none, so a document Typst compiles
+// must never meet it: the most the corpus spends is 84,908,412,112, by jogs 0.2.4's `call_function`
+// (classy-german-invoice, german-fx-invoice; ctxjs 0.5.0's `new_context` in starchy-junia spends
+// 4,204,020,394), most of it charged for bulk memory copies, so that call takes about a second. This allows
+// 11.8 times that. A plain loop spends it in 1,577 s natively (release, 2026-10-12), about 26 minutes, so
+// the bound that stops a hostile module sooner is the host's.
+pub const FUEL:			u64		= 1_000_000_000_000;
 #[cfg(not(target_arch = "wasm32"))]
 pub const MEMORY:		usize	= 1 << 30;			// bytes of linear memory an instance may hold
 #[cfg(target_arch = "wasm32")]
@@ -140,13 +146,13 @@ impl PluginFunc {
 	}
 
 	/// Runs the function on `args`, answering its result bytes or Typst's message for the failure.
-	pub fn call(&self, args: Vec<Arc<Vec<u8>>>) -> Outcome<Vec<u8>> {
-		self.plugin.call(&self.name, args)
+	pub fn call(&self, args: Vec<Arc<Vec<u8>>>, fuel: u64) -> Outcome<Vec<u8>> {
+		self.plugin.call(&self.name, args, fuel)
 	}
 
 	/// `plugin.transition(f, ..args)`: a new plugin whose instances start from the memory this call leaves.
-	pub fn transition(&self, args: Vec<Arc<Vec<u8>>>) -> Outcome<Plugin> {
-		self.plugin.transition(&self.name, args)
+	pub fn transition(&self, args: Vec<Arc<Vec<u8>>>, fuel: u64) -> Outcome<Plugin> {
+		self.plugin.transition(&self.name, args, fuel)
 	}
 }
 
@@ -165,7 +171,7 @@ impl fmt::Debug for Plugin {
 impl Plugin {
 	/// Loads a module from its bytes, as `plugin(source)` does: it must validate and export its memory, and
 	/// one instance is made at once, so a module that cannot start fails here rather than at its first call.
-	pub fn load(bytes: &[u8]) -> Outcome<Self> {
+	pub fn load(bytes: &[u8], fuel: u64) -> Outcome<Self> {
 		let mut config = wasmi::Config::default();
 		config.wasm_relaxed_simd(false);	// as Typst: relaxed SIMD may differ between hosts
 		config.consume_fuel(true);
@@ -185,7 +191,7 @@ impl Plugin {
 			return Err(err!("cannot link {}: {}", WRITE_ARGS, e; Init));
 		}
 		let base = Arc::new(Base { id: Fingerprint::of(bytes), size: bytes.len(), module, linker });
-		let first = res!(Instance::new(&base, None));
+		let first = res!(Instance::new(&base, None, fuel));
 		Ok(Self {
 			base,
 			pool:		Mutex::new(vec![first]),
@@ -216,16 +222,16 @@ impl Plugin {
 		Module::new("", scope)
 	}
 
-	fn call(&self, name: &str, args: Vec<Arc<Vec<u8>>>) -> Outcome<Vec<u8>> {
-		let mut inst = res!(self.acquire());
+	fn call(&self, name: &str, args: Vec<Arc<Vec<u8>>>, fuel: u64) -> Outcome<Vec<u8>> {
+		let mut inst = res!(self.acquire(fuel));
 		// A failed instance is dropped, never pooled again.
-		let out = res!(inst.call(name, args));
+		let out = res!(inst.call(name, args, fuel));
 		let mut pool = lock_mutex!(self.pool);
 		pool.push(inst);
 		Ok(out)
 	}
 
-	fn transition(&self, name: &str, args: Vec<Arc<Vec<u8>>>) -> Outcome<Self> {
+	fn transition(&self, name: &str, args: Vec<Arc<Vec<u8>>>, fuel: u64) -> Outcome<Self> {
 		let mut f = Fingerprinter::new();
 		f.write_fingerprint(self.print);
 		f.write_str(name);
@@ -235,8 +241,8 @@ impl Plugin {
 			f.write_fingerprint(Fingerprint::of(a));
 		}
 		let print = f.finish();
-		let mut inst = res!(self.acquire());
-		res!(inst.call(name, args));
+		let mut inst = res!(self.acquire(fuel));
+		res!(inst.call(name, args, fuel));
 		let snapshot = Arc::new(res!(inst.snapshot()));
 		// The instance that made the change moves into the new plugin, so the old one never sees it.
 		Ok(Self {
@@ -247,29 +253,29 @@ impl Plugin {
 		})
 	}
 
-	fn acquire(&self) -> Outcome<Instance> {
+	fn acquire(&self, fuel: u64) -> Outcome<Instance> {
 		let held = {
 			let mut pool = lock_mutex!(self.pool);
 			pool.pop()
 		};
 		match held {
 			Some(i)	=> Ok(i),
-			None	=> Instance::new(&self.base, self.snapshot.as_deref()),
+			None	=> Instance::new(&self.base, self.snapshot.as_deref(), fuel),
 		}
 	}
 }
 
 impl Instance {
-	fn new(base: &Base, snapshot: Option<&Snapshot>) -> Outcome<Self> {
+	fn new(base: &Base, snapshot: Option<&Snapshot>, fuel: u64) -> Outcome<Self> {
 		let mut store = wasmi::Store::new(base.linker.engine(), CallData::default());
 		store.limiter(|d: &mut CallData| &mut d.cap as &mut dyn wasmi::ResourceLimiter);
 		// The fuel is set before the start function runs, so a module that loops in `start` stops too.
-		if let Err(e) = store.set_fuel(FUEL) {
+		if let Err(e) = store.set_fuel(fuel) {
 			return Err(err!("cannot fuel the plugin's store: {}", e; Init));
 		}
 		let instance = match base.linker.instantiate_and_start(&mut store, &base.module) {
 			Ok(i)	=> i,
-			Err(e)	=> return Err(limit_or(&store, &e, fmt!("{}", e))),
+			Err(e)	=> return Err(limit_or(&store, &e, fmt!("{}", e), fuel)),
 		};
 		let mut out = Self { instance, store };
 		if let Some(s) = snapshot {
@@ -285,7 +291,7 @@ impl Instance {
 		}
 	}
 
-	fn call(&mut self, name: &str, args: Vec<Arc<Vec<u8>>>) -> Outcome<Vec<u8>> {
+	fn call(&mut self, name: &str, args: Vec<Arc<Vec<u8>>>, fuel: u64) -> Outcome<Vec<u8>> {
 		let handle = match self.instance.get_func(&self.store, name) {
 			Some(f)	=> f,
 			None	=> return Err(err!("plugin has no function `{}`", name; Input, Invalid)),
@@ -315,12 +321,12 @@ impl Instance {
 			data.output	= Vec::new();
 			data.fault	= None;
 		}
-		if let Err(e) = self.store.set_fuel(FUEL) {
+		if let Err(e) = self.store.set_fuel(fuel) {
 			return Err(err!("cannot fuel the plugin's store: {}", e; Init));
 		}
 		let mut code = [wasmi::Val::I32(-1)];
 		if let Err(e) = handle.call(&mut self.store, &lengths, &mut code) {
-			return Err(limit_or(&self.store, &e, fmt!("plugin panicked: {}", e)));
+			return Err(limit_or(&self.store, &e, fmt!("plugin panicked: {}", e), fuel));
 		}
 		let data = self.store.data_mut();
 		if let Some(Fault { offset, length, write }) = data.fault.take() {
@@ -362,10 +368,10 @@ impl Instance {
 }
 
 // A failure that one of Austenite's limits caused is named as such; any other keeps the message given.
-fn limit_or(store: &wasmi::Store<CallData>, e: &wasmi::Error, msg: String) -> Error<ErrTag> {
+fn limit_or(store: &wasmi::Store<CallData>, e: &wasmi::Error, msg: String, fuel: u64) -> Error<ErrTag> {
 	if e.as_trap_code() == Some(wasmi::TrapCode::OutOfFuel) {
 		return err!("plugin exceeded its fuel of {} instructions, so it was stopped (does it loop forever?)",
-			FUEL; LimitReached);
+			fuel; LimitReached);
 	}
 	if store.data().cap.hit {
 		return err!("plugin exceeded its memory limit of {} MiB", MEMORY >> 20; LimitReached);
