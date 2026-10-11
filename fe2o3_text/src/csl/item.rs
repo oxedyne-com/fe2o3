@@ -1,9 +1,12 @@
 //! Ported from hayagriva 0.10.1, Copyright (c) Martin Haug and the hayagriva contributors,
 //! MIT OR Apache-2.0 (`src/types/strings.rs`, `src/types/numeric.rs`, `src/csl/taxonomy.rs`).
 //!
-//! The item model is the least the renderers read. Names, dates and page ranges arrive with B2b
-//! through the hooks named on [`Item`].
-use crate::csl::style::VarForm;
+//! The item model is the least the renderers read.
+use crate::csl::{
+	page::PageVal,
+	person::Person,
+	style::VarForm,
+};
 
 
 
@@ -227,6 +230,25 @@ impl NumVal {
 	}
 }
 
+// Dates
+/// A date as hayagriva holds it, one-based. A BibTeX range such as `2019/2021` arrives as its end
+/// date, as biblatex hands hayagriva only that, and an approximate date (`2015~`, `2015?`) renders
+/// like any other: `approximate` only answers `is-uncertain-date`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DateVal {
+	pub year:		i32,
+	pub month:		Option<u8>,	// 1-12
+	pub day:		Option<u8>,	// 1-31
+	pub season:		Option<u8>,	// 1-4, used when there is no month
+	pub approximate:	bool,
+}
+
+impl DateVal {
+	pub fn year(year: i32) -> Self {
+		Self { year, ..Self::default() }
+	}
+}
+
 // Variable taxonomy
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VarKind { Standard, Number, Page, Date, Name }
@@ -281,8 +303,8 @@ pub trait Item {
 	/// A number variable's raw value. The renderer parses it.
 	fn number(&self, var: &str) -> Option<String>;
 
-	/// The `page` variable's raw value. B2b turns it into page ranges.
-	fn page(&self) -> Option<String> { None }
+	/// The `page` variable, typed when it parses as page ranges (`PageVal::from_str`).
+	fn page(&self) -> Option<PageVal> { None }
 
 	/// The CSL item type, such as `article-journal`.
 	fn csl_type(&self) -> &str;
@@ -293,9 +315,8 @@ pub trait Item {
 	/// Is the entry in English? `None` when its language is unknown.
 	fn is_english(&self) -> Option<bool> { None }
 
-	/// Hook for B2b: how many names a name variable holds.
-	fn name_count(&self, _var: &str) -> usize { 0 }
+	/// The people of a name variable, empty when it is absent.
+	fn names(&self, _var: &str) -> &[Person] { &[] }
 
-	/// Hook for B2b: whether a date variable is present, and if so whether it is approximate.
-	fn date_state(&self, _var: &str) -> Option<bool> { None }
+	fn date(&self, _var: &str) -> Option<DateVal> { None }
 }

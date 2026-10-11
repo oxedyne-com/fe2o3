@@ -246,7 +246,7 @@ pub struct DatePart {
 pub struct Date {
 	pub var:	String,
 	pub form:	Option<DateForm>,	// localised where set
-	pub parts_sel:	DateParts,
+	pub parts_sel:	Option<DateParts>,	// `None` takes the localised form's, then all three
 	pub parts:	Vec<DatePart>,
 	pub delimiter:	Option<String>,
 	pub look:	Look,
@@ -920,9 +920,10 @@ impl<'a> Rd<'a> {
 				Some(v)		=> return Err(self.bad(e, "form", v)),
 			},
 			parts_sel:	match e.attr("date-parts") {
-				None | Some("year-month-day")	=> DateParts::YearMonthDay,
-				Some("year-month")		=> DateParts::YearMonth,
-				Some("year")			=> DateParts::Year,
+				None				=> None,
+				Some("year-month-day")		=> Some(DateParts::YearMonthDay),
+				Some("year-month")		=> Some(DateParts::YearMonth),
+				Some("year")			=> Some(DateParts::Year),
 				Some(v)				=> return Err(self.bad(e, "date-parts", v)),
 			},
 			parts,

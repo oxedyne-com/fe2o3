@@ -3,9 +3,9 @@
 //! `rendering/names.rs`, the element renderers; citationberg 0.7.0 `OrdinalLookup`, same
 //! licence).
 //!
-//! Hooks B2b fills: non-empty names (`render_name_list`), dates (`render_date`), typed page ranges
-//! with `page-range-format` and their label plural (`page_plural`, `is_numeric_page`). B3 adds the
-//! special forms, sorting, the citation layout and second-field-align.
+//! Dates are hayagriva's `rendering/mod.rs` 624-905 and names `rendering/names.rs` 190-868. B3
+//! adds the special forms, sorting (which reverses names and strips institutional articles), name
+//! disambiguation, the implicit year-suffix, the citation layout and second-field-align.
 use crate::csl::{
 	case::{
 		is_language_dependent,
@@ -16,6 +16,7 @@ use crate::csl::{
 		is_number_of,
 		var_kind,
 		Chunked,
+		DateVal,
 		Item,
 		NumDelim,
 		NumVal,
@@ -35,21 +36,38 @@ use crate::csl::{
 		Meta,
 		Node,
 	},
+	page::PageVal,
+	person::Person,
 	style::{
+		And,
 		Choose,
 		Cond,
 		Date,
+		DatePart,
+		DatePartForm,
+		DatePartName,
+		DateParts,
+		DelimRule,
+		Demote,
 		Display,
 		Elem,
+		EtAl,
 		Fmt,
 		Group,
 		Label,
+		Look,
 		Match,
+		Name,
+		NameForm,
+		NameOpts,
+		NamePart,
 		Names,
 		NumForm,
 		Number,
 		Plural,
+		PartName,
 		Position,
+		SortOrder,
 		Style,
 		Test,
 		Text,
@@ -282,6 +300,21 @@ impl Writer {
 		self.top_non_empty_mut().and_then(|l| node::last_text_mut(l))
 	}
 
+	/// A space after what is written, unless it already ends in a space or NBSP. With the buffer
+	/// empty it goes on the top level's last text.
+	fn ensure_space(&mut self) {
+		if !self.buf.is_empty() {
+			let s = self.buf.as_str();
+			if !s.ends_with(' ') && !s.ends_with('\u{a0}') {
+				self.buf.push(' ');
+			}
+		} else if let Some(l) = node::last_text_mut(self.top_mut()) {
+			if !l.ends_with(' ') && !l.ends_with('\u{a0}') {
+				l.push(' ');
+			}
+		}
+	}
+
 	fn len(&self) -> usize {
 		self.buf.len()
 			+ self.base.iter().map(Node::str_len).sum::<usize>()
@@ -322,15 +355,143 @@ fn url_prefix(var: &str) -> Option<&'static str> {
 	}
 }
 
-/// Is a page value plural for its label? Hook for B2b, which types page ranges; until then a
-/// string that reads as several numbers counts as plural.
-fn page_plural(s: &str) -> bool {
-	Numeric::parse(s).map_or(false, |n| n.nums.len() > 1)
+/// Formatting laid over a base: each attribute `top` sets wins.
+fn fmt_over(top: &Fmt, base: &Fmt) -> Fmt {
+	Fmt {
+		style:		top.style.or(base.style),
+		variant:	top.variant.or(base.variant),
+		weight:		top.weight.or(base.weight),
+		deco:		top.deco.or(base.deco),
+		valign:		top.valign.or(base.valign),
+	}
 }
 
-/// Does a page value parse as page ranges? Hook for B2b, approximated by `Numeric`.
-fn is_numeric_page(s: &str) -> bool {
-	Numeric::parse(s).is_some()
+/// A date part's form, defaulting to numeric days, long months and long years.
+fn part_form(p: &DatePart) -> DatePartForm {
+	match (p.form, p.name) {
+		(Some(f), _)			=> f,
+		(None, DatePartName::Day)	=> DatePartForm::Numeric,
+		(None, _)			=> DatePartForm::Long,
+	}
+}
+
+// Names
+/// hayagriva's `DisambiguatedNameForm`, before B3's disambiguation widens it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NForm { Count, ShortInit, ShortFull, LongInit, LongFull }
+
+/// citationberg's `NameOptions`: a `name`'s options over those it inherits, with CSL's defaults.
+#[derive(Clone, Debug)]
+struct NOpts {
+	and:		Option<And>,
+	delim:		String,
+	prec_et_al:	DelimRule,
+	prec_last:	DelimRule,
+	min:		Option<u32>,
+	use_first:	Option<u32>,
+	sub_min:	Option<u32>,
+	sub_first:	Option<u32>,
+	use_last:	bool,
+	form:		NameForm,
+	initialize:	bool,
+	init_with:	Option<String>,
+	sort_order:	Option<SortOrder>,
+	sort_sep:	String,
+}
+
+impl NOpts {
+
+	fn new(o: NameOpts) -> Self {
+		Self {
+			and:		o.and,
+			delim:		o.delimiter.unwrap_or_else(|| ", ".to_string()),
+			prec_et_al:	o.delim_precedes_et_al.unwrap_or(DelimRule::Contextual),
+			prec_last:	o.delim_precedes_last.unwrap_or(DelimRule::Contextual),
+			min:		o.et_al_min,
+			use_first:	o.et_al_use_first,
+			sub_min:	o.et_al_subsequent_min,
+			sub_first:	o.et_al_subsequent_use_first,
+			use_last:	o.et_al_use_last.unwrap_or(false),
+			form:		o.form.unwrap_or(NameForm::Long),
+			initialize:	o.initialize.unwrap_or(true),
+			init_with:	o.initialize_with,
+			sort_order:	o.name_as_sort_order,
+			sort_sep:	o.sort_separator.unwrap_or_else(|| ", ".to_string()),
+		}
+	}
+
+	fn form(&self) -> NForm {
+		match (self.init_with.is_some() && self.initialize, self.form) {
+			(true, NameForm::Short)		=> NForm::ShortInit,
+			(true, _)			=> NForm::LongInit,
+			(false, NameForm::Short)	=> NForm::ShortFull,
+			(false, NameForm::Count)	=> NForm::Count,
+			(false, NameForm::Long)		=> NForm::LongFull,
+		}
+	}
+
+	/// Is the name at `i` of `len` cut by et al.? The last name never is under et-al-use-last.
+	fn is_suppressed(&self, i: usize, len: usize, subsequent: bool) -> bool {
+		let (min, first) = match subsequent {
+			true	=> (self.sub_min.or(self.min), self.sub_first.or(self.use_first)),
+			false	=> (self.min, self.use_first),
+		};
+		if self.use_last && i + 1 == len {
+			return false;
+		}
+		match (min, first) {
+			(Some(m), Some(f))	=> len >= m as usize && i + 1 > f as usize,
+			_			=> false,
+		}
+	}
+}
+
+/// A `names` element as rendered. Inside a `substitute`, a `names` with no `name`, `et-al` or
+/// `substitute` of its own takes its parent's name, et-al, label, delimiter, affixes, display and
+/// formatting, and its variables when it names none.
+#[derive(Clone, Copy)]
+struct NamesView<'a> {
+	vars:		&'a [String],
+	delimiter:	Option<&'a str>,
+	name:		Option<&'a Name>,
+	et_al:		Option<&'a EtAl>,
+	label:		Option<&'a Label>,
+	label_first:	bool,
+	look:		&'a Look,
+	substitute:	Option<&'a [Elem]>,
+}
+
+impl<'a> NamesView<'a> {
+
+	fn of(n: &'a Names) -> Self {
+		Self {
+			vars:		&n.vars,
+			delimiter:	n.delimiter.as_deref(),
+			name:		n.name.as_ref(),
+			et_al:		n.et_al.as_ref(),
+			label:		n.label.as_ref(),
+			label_first:	n.label_first,
+			look:		&n.look,
+			substitute:	n.substitute.as_deref(),
+		}
+	}
+
+	fn substitute_child(self, c: &'a Names) -> Self {
+		if c.name.is_some() || c.et_al.is_some() || c.substitute.is_some() {
+			return Self::of(c);
+		}
+		let (label, label_first) = match &c.label {
+			Some(l)	=> (Some(l), c.label_first),
+			None	=> (self.label, self.label_first),
+		};
+		Self {
+			vars:		if c.vars.is_empty() { self.vars } else { &c.vars },
+			label,
+			label_first,
+			substitute:	None,
+			..self
+		}
+	}
 }
 
 fn roman(n: i32) -> Option<String> {
@@ -463,7 +624,7 @@ impl<'a> Ords<'a> {
 enum Target<'a> {
 	Std(&'a str, Chunked),
 	Num(&'a str, NumVal),
-	Page(String),
+	Page(PageVal),
 	Macro(&'a [Elem]),
 	Term(&'a str),
 	Value(&'a str),
@@ -471,7 +632,7 @@ enum Target<'a> {
 
 enum NumOrPage {
 	Num(NumVal),
-	Page(String),
+	Page(PageVal),
 }
 
 /// One rendering of one entry: the style, the locale chain, the item and the citation, over a
@@ -767,7 +928,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 		}
 	}
 
-	fn resolve_page(&mut self) -> Option<String> {
+	fn resolve_page(&mut self) -> Option<PageVal> {
 		if !self.prepare("page") {
 			return None;
 		}
@@ -781,18 +942,19 @@ impl<'a, I: Item> Ctx<'a, I> {
 		}
 	}
 
-	fn resolve_date(&mut self, var: &str) -> Option<bool> {
+	fn resolve_date(&mut self, var: &str) -> Option<DateVal> {
 		if !self.prepare(var) {
 			return None;
 		}
-		self.item.date_state(var)
+		self.item.date(var)
 	}
 
-	fn resolve_names(&mut self, var: &str) -> usize {
+	fn resolve_names(&mut self, var: &str) -> &'a [Person] {
 		if !self.prepare(var) {
-			return 0;
+			return &[];
 		}
-		self.item.name_count(var)
+		let item: &'a I = self.item;
+		item.names(var)
 	}
 
 	// Rendering
@@ -882,8 +1044,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 				NumVal::Str(s)					=> self.push_str(&s),
 				NumVal::Transparent(i)				=> self.push_transparent(i),
 			},
-			// B2b: a typed page range goes through `page-range-format`.
-			Target::Page(s) => self.push_str(&s.replace('-', "–")),
+			Target::Page(p) => self.push_page(p, true),
 			Target::Macro(m) => {
 				should_render = self.text_info(t).1.should_render_group();
 				if should_render {
@@ -977,6 +1138,21 @@ impl<'a, I: Item> Ctx<'a, I> {
 		}
 	}
 
+	/// A page value: typed ranges through `page-range-format` and the locale's range delimiter. An
+	/// untyped value has its hyphens made en dashes in `text` but is written as given by `number`
+	/// (hayagriva).
+	fn push_page(&mut self, p: PageVal, in_text: bool) {
+		match p {
+			PageVal::Typed(r) => {
+				let fmt = self.style.page_range_format;
+				let delim = self.term("page-range-delimiter", TermForm::Long, false);
+				r.write(self, fmt, delim);
+			}
+			PageVal::Str(s) if in_text	=> self.push_str(&s.replace('-', "–")),
+			PageVal::Str(s)			=> self.push_str(&s),
+		}
+	}
+
 	/// `number`. The gender for ordinals is that of the variable's own long term.
 	fn render_number(&mut self, n: &'a Number) {
 		let value = self.resolve_num_or_page(&n.var);
@@ -989,8 +1165,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 			Some(NumOrPage::Num(NumVal::Typed(num)))	=> { let _ = write!(self, "{}", num); }
 			Some(NumOrPage::Num(NumVal::Str(s)))		=> self.push_str(&s),
 			Some(NumOrPage::Num(NumVal::Transparent(i)))	=> self.push_transparent(i),
-			// B2b: a typed page range goes through `page-range-format`.
-			Some(NumOrPage::Page(s))			=> self.push_str(&s),
+			Some(NumOrPage::Page(p))			=> self.push_page(p, false),
 			None						=> {}
 		}
 		self.w.pop_case(cidx);
@@ -1020,7 +1195,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 		let plural = match var_kind(&l.var) {
 			// hayagriva ignores the label's `plural` attribute for pages.
 			VarKind::Page => match self.resolve_page() {
-				Some(p)	=> page_plural(&p),
+				Some(p)	=> p.is_plural(),
 				None	=> return None,
 			},
 			_ => match self.resolve_num(&l.var) {
@@ -1065,43 +1240,360 @@ impl<'a, I: Item> Ctx<'a, I> {
 	}
 
 	/// `names`. An empty list with a `substitute` renders the first substitute child that writes
-	/// anything, with suppression on so the variable it used is not repeated later. A non-empty
-	/// list is B2b's (`render_name_list`).
+	/// anything, with suppression on so the variable it used is not repeated later.
 	fn render_names(&mut self, n: &'a Names) {
-		// B2b: editor and translator merge into editor-translator when equal.
-		let mut empty = true;
-		for v in &n.vars {
-			if self.resolve_names(v) > 0 {
-				empty = false;
+		self.render_names_view(NamesView::of(n));
+	}
+
+	/// The variables' people. editor and translator merge into editor-translator when both are
+	/// asked for, the locale has the term, and the lists are equal.
+	fn people(&mut self, v: NamesView<'a>) -> Vec<(&'a [Person], &'a str)> {
+		let has = |s: &str| v.vars.iter().any(|x| x == s);
+		if v.vars.len() == 2 && has("editor") && has("translator")
+			&& self.term("editor-translator", TermForm::Long, false).is_some()
+		{
+			let eds = self.resolve_names("editor");
+			let trs = self.resolve_names("translator");
+			let mut out = Vec::new();
+			if !eds.is_empty() && eds == trs {
+				out.push((eds, "editor-translator"));
+			} else {
+				if !eds.is_empty() {
+					out.push((eds, "editor"));
+				}
+				if !trs.is_empty() {
+					out.push((trs, "translator"));
+				}
 			}
+			return out;
 		}
-		if !empty {
-			self.render_name_list(n);
+		v.vars.iter().map(|x| (self.resolve_names(x), x.as_str())).collect()
+	}
+
+	fn render_names_view(&mut self, v: NamesView<'a>) {
+		let people = self.people(v);
+		if people.iter().any(|(p, _)| !p.is_empty()) {
+			self.render_name_list(v, &people);
 			return;
 		}
-		if let Some(sub) = &n.substitute {
+		if let Some(sub) = v.substitute {
 			self.w.suppressing = true;
-			let depth = self.w.push_elem(&n.look.fmt);
+			let depth = self.w.push_elem(&v.look.fmt);
 			for c in sub {
 				let len = self.w.len();
-				// B2b: a `names` child inherits this element's options.
-				self.render(c);
+				match c {
+					Elem::Names(cn)	=> self.render_names_view(v.substitute_child(cn)),
+					_		=> self.render(c),
+				}
 				if len < self.w.len() {
 					break;
 				}
 			}
-			self.w.commit_elem(depth, n.look.display, Some(Meta::Names));
+			self.w.commit_elem(depth, v.look.display, Some(Meta::Names));
 			self.w.suppressing = false;
 		}
 	}
 
-	/// Hook for B2b: renders a non-empty name list.
-	fn render_name_list(&mut self, _n: &'a Names) {}
+	/// The name options a `name` inherits: the bibliography's or citation's over the style's, and
+	/// the delimiter between variables likewise.
+	fn inherited_names(&self) -> (NameOpts, Option<&'a str>) {
+		let style: &'a Style = self.style;
+		let (o, d) = match (self.bib, style.bibliography.as_ref()) {
+			(true, Some(b))	=> (&b.names, b.names_delimiter.as_deref()),
+			_		=> (&style.citation.names, style.citation.names_delimiter.as_deref()),
+		};
+		(o.over(&style.names), d.or(style.names_delimiter.as_deref()))
+	}
+
+	/// A non-empty name list, each variable's names after the delimiter between variables, with
+	/// the label before or after them. B3 adds name disambiguation, which changes the forms.
+	fn render_name_list(&mut self, v: NamesView<'a>, people: &[(&'a [Person], &'a str)]) {
+		let depth = self.w.push_elem(&v.look.fmt);
+		let a = self.w.apply_prefix(v.look.prefix.as_deref());
+		let (base, names_delim) = self.inherited_names();
+		let plain = Name::default();
+		let name = v.name.unwrap_or(&plain);
+		let o = NOpts::new(name.opts.over(&base));
+		let form = o.form();
+		// hayagriva asks the cite whether it is the entry's first; a bibliography inherits the
+		// first citation's answer.
+		let subsequent = !self.cite.first;
+		if form == NForm::Count {
+			// Only the names that would be written are counted.
+			let n: usize = people.iter()
+				.map(|(p, _)| (0..p.len()).filter(|&i| !o.is_suppressed(i, p.len(), subsequent)).count())
+				.sum();
+			self.push_str(&n.to_string());
+			self.apply_suffix(v.look.suffix.as_deref(), a);
+			self.w.commit_elem(depth, v.look.display, Some(Meta::Names));
+			return;
+		}
+		for (i, (persons, var)) in people.iter().filter(|(p, _)| !p.is_empty()).enumerate() {
+			let forms: Vec<Option<NForm>> = (0..persons.len())
+				.map(|j| if o.is_suppressed(j, persons.len(), subsequent) { None } else { Some(form) })
+				.collect();
+			let plural = persons.len() != 1;
+			if i > 0 {
+				let d = v.delimiter.or(names_delim).unwrap_or("");
+				if !d.is_empty() {
+					self.push_str(d);
+				}
+			}
+			if let (Some(l), true) = (v.label, v.label_first) {
+				let t = self.term(var, l.form, plural).unwrap_or("");
+				self.render_label_with_var(l, t);
+			}
+			let fi = self.w.push_format(&name.look.fmt);
+			self.add_names(v, persons, name, &o, &forms, var);
+			self.w.pop_format(fi);
+			if let (Some(l), false) = (v.label, v.label_first) {
+				let t = self.term(var, l.form, plural).unwrap_or("");
+				self.render_label_with_var(l, t);
+			}
+		}
+		self.apply_suffix(v.look.suffix.as_deref(), a);
+		self.w.commit_elem(depth, v.look.display, Some(Meta::Names));
+	}
+
+	/// A label inside `names`, its term chosen by the caller.
+	fn render_label_with_var(&mut self, l: &Label, content: &str) {
+		if content.is_empty() {
+			return;
+		}
+		let fi = self.w.push_format(&l.look.fmt);
+		let a = self.w.apply_prefix(l.look.prefix.as_deref());
+		self.w.strip_periods = l.look.strip_periods;
+		let cidx = self.push_case(l.look.text_case);
+		self.push_str(content);
+		self.w.pop_case(cidx);
+		self.w.strip_periods = false;
+		self.apply_suffix(l.look.suffix.as_deref(), a);
+		self.w.pop_format(fi);
+	}
+
+	fn and_text(&self, a: And) -> &'a str {
+		match a {
+			And::Text	=> self.term("and", TermForm::Long, false).unwrap_or(""),
+			And::Symbol	=> "&",
+		}
+	}
+
+	/// One variable's names. The "and" goes in only when there is no et al., and an
+	/// et-al-use-last list ends in the delimiter, an ellipsis and the last name.
+	fn add_names(
+		&mut self,
+		v:		NamesView<'a>,
+		persons:	&[Person],
+		name:		&Name,
+		o:		&NOpts,
+		forms:		&[Option<NForm>],
+		var:		&str,
+	) {
+		let has_et_al = forms.iter().any(Option::is_none);
+		let take = forms.iter().position(Option::is_none).unwrap_or(persons.len());
+		let use_last = match o.use_last && has_et_al {
+			true	=> forms.last().copied().flatten(),
+			false	=> None,
+		};
+		// Sort-only demotion is B3's: without sorting it keeps the particle.
+		let demote = self.style.demote_particle == Demote::DisplayAndSort;
+		let mut last_inverted = false;
+		for (i, (p, f)) in persons.iter().take(take).zip(forms).enumerate() {
+			let f = match f {
+				Some(f)	=> *f,
+				None	=> continue,
+			};
+			if i > 0 {
+				let and = match i + 1 == take && !has_et_al {
+					true	=> o.and,
+					false	=> None,
+				};
+				match and {
+					None => self.push_str(&o.delim),
+					Some(and) => {
+						let with_delim = match o.prec_last {
+							DelimRule::Contextual		=> i >= 2,
+							DelimRule::AfterInvertedName	=> last_inverted,
+							DelimRule::Always		=> true,
+							DelimRule::Never		=> false,
+						};
+						if with_delim {
+							self.push_str(&o.delim);
+						} else {
+							self.push_str(" ");
+						}
+						let t = self.and_text(and);
+						self.push_str(t);
+						self.w.ensure_space();
+					}
+				}
+			}
+			let reverse = match o.sort_order {
+				Some(SortOrder::First)	=> i == 0,
+				Some(SortOrder::All)	=> true,
+				None			=> false,
+			};
+			self.write_name(p, f, reverse, demote, name, o, var, i);
+			last_inverted = reverse;
+		}
+		if let Some(f) = use_last {
+			if let Some(p) = persons.last() {
+				self.push_str(&o.delim);
+				self.push_str("… ");
+				let reverse = o.sort_order == Some(SortOrder::All);
+				self.write_name(p, f, reverse, demote, name, o, var, persons.len() - 1);
+			}
+		} else if has_et_al {
+			let (tname, fmt) = match v.et_al {
+				Some(e)	=> (e.term.as_str(), e.look.fmt),
+				None	=> ("et-al", Fmt::default()),
+			};
+			if let Some(t) = self.term(tname, TermForm::Long, false) {
+				let with_delim = match o.prec_et_al {
+					DelimRule::Always		=> true,
+					DelimRule::Contextual		=> take >= 2,
+					DelimRule::AfterInvertedName	=> last_inverted,
+					DelimRule::Never		=> false,
+				};
+				if with_delim {
+					self.push_str(&o.delim);
+				}
+				let fi = self.w.push_format(&fmt);
+				self.w.ensure_space();
+				self.push_str(t);
+				self.w.pop_format(fi);
+			}
+		}
+	}
+
+	/// The given name: initials with `initialize-with` when initialising, else the given names
+	/// joined by it.
+	fn first_name(&mut self, p: &Person, form: NForm, o: &NOpts) {
+		let given = match &p.given {
+			Some(g)	=> g,
+			None	=> return,
+		};
+		let hyphen = self.style.initialize_with_hyphen;
+		match &o.init_with {
+			Some(w) if form == NForm::LongInit	=> { let _ = p.initials(self, Some(w), hyphen); }
+			Some(w)					=> { let _ = p.given_with_delimiter(self, Some(w)); }
+			None					=> self.push_str(given),
+		}
+	}
+
+	/// Opens a name part's formatting and case and writes its prefix; `close_part` ends it.
+	fn open_part(&mut self, part: Option<&NamePart>, cased: bool) -> (usize, usize) {
+		let fi = self.w.push_format(&part.map(|x| x.look.fmt).unwrap_or_default());
+		let ci = self.push_case(if cased { part.and_then(|x| x.look.text_case) } else { None });
+		if let Some(pre) = part.and_then(|x| x.look.prefix.as_deref()) {
+			self.push_str(pre);
+		}
+		(fi, ci)
+	}
+
+	fn close_part(&mut self, (fi, ci): (usize, usize)) {
+		self.w.pop_case(ci);
+		self.w.pop_format(fi);
+	}
+
+	fn part_suffix(&mut self, part: Option<&NamePart>) {
+		if let Some(suf) = part.and_then(|x| x.look.suffix.as_deref()) {
+			self.push_str(suf);
+		}
+	}
+
+	/// One name in its own element. Institutional and short names are the family part alone, a
+	/// long CJK name is family then given, unspaced, and a reversed name is family first after
+	/// which the sort separator.
+	#[allow(clippy::too_many_arguments)]
+	fn write_name(
+		&mut self,
+		p:		&Person,
+		form:		NForm,
+		reverse:	bool,
+		demote:		bool,
+		name:		&Name,
+		o:		&NOpts,
+		var:		&str,
+		idx:		usize,
+	) {
+		let giv = name.parts.iter().find(|x| x.part == PartName::Given);
+		let fam = name.parts.iter().find(|x| x.part == PartName::Family);
+		let loc = self.w.push_elem(&Fmt::default());
+		let long = matches!(form, NForm::LongInit | NForm::LongFull);
+		if p.is_institutional() || !long {
+			let s = self.open_part(fam, true);
+			self.push_str(&p.family);
+			self.close_part(s);
+			self.part_suffix(fam);
+		} else if p.is_cjk() {
+			// hayagriva applies neither part's case here.
+			let s = self.open_part(fam, false);
+			self.push_str(&p.family);
+			self.close_part(s);
+			self.part_suffix(fam);
+			if let Some(g) = &p.given {
+				let s = self.open_part(giv, false);
+				self.push_str(g);
+				self.close_part(s);
+				self.part_suffix(giv);
+			}
+		} else if reverse {
+			let s = self.open_part(fam, true);
+			self.push_str(if demote { p.family_without_particle() } else { p.family.as_str() });
+			self.close_part(s);
+			self.part_suffix(fam);
+			if p.given.is_some() {
+				self.push_str(&o.sort_sep);
+				let s = self.open_part(giv, true);
+				self.first_name(p, form, o);
+				if let Some(pt) = &p.particle {
+					self.w.ensure_space();
+					self.push_str(pt);
+				}
+				self.close_part(s);
+				if demote {
+					if let Some(pt) = p.particle_in_family() {
+						self.w.ensure_space();
+						self.push_str(pt);
+					}
+				}
+				self.part_suffix(giv);
+			}
+			if let Some(s) = &p.suffix {
+				self.push_str(&o.sort_sep);
+				self.push_str(s);
+			}
+		} else {
+			let s = self.open_part(giv, true);
+			self.first_name(p, form, o);
+			if let Some(pt) = &p.particle {
+				self.w.ensure_space();
+				self.push_str(pt);
+			}
+			self.close_part(s);
+			self.part_suffix(giv);
+			self.w.ensure_space();
+			let s = self.open_part(fam, true);
+			self.push_str(&p.family);
+			self.close_part(s);
+			if let Some(sx) = &p.suffix {
+				if p.comma_suffix {
+					self.push_str(&o.sort_sep);
+				}
+				self.w.ensure_space();
+				self.push_str(sx);
+			}
+			// The family part's suffix follows the name's suffix (hayagriva).
+			self.part_suffix(fam);
+		}
+		self.w.commit_elem(loc, None, Some(Meta::Name(var.to_string(), idx)));
+	}
 
 	fn names_info(&mut self, n: &'a Names) -> (bool, Usage) {
 		let s = self.w.suppressing;
 		self.w.suppressing = false;
-		let counts: Vec<usize> = n.vars.iter().map(|v| self.resolve_names(v)).collect();
+		let counts: Vec<usize> = n.vars.iter().map(|v| self.resolve_names(v).len()).collect();
 		let mut empty = counts.iter().all(|&c| c == 0);
 		let mut sub = (false, Usage::default());
 		if let Some(elems) = &n.substitute {
@@ -1123,12 +1615,131 @@ impl<'a, I: Item> Ctx<'a, I> {
 		(visible, if empty { sub.1 } else { Usage { vars: true, non_empty: true, ..Usage::default() } })
 	}
 
-	/// `date`. An absent date writes nothing; a present one is B2b's.
+	/// `date`. hayagriva renders no date ranges (a BibTeX range reaches it as its end date) and
+	/// nothing for circa, which only answers `is-uncertain-date`. A localised form takes the
+	/// locale's parts and delimiter, each part overridden by the style's part of the same name,
+	/// and the cs:date's own delimiter is ignored, as CSL 1.0.2 says.
 	fn render_date(&mut self, d: &'a Date) {
-		if d.var.is_empty() || self.resolve_date(&d.var).is_none() {
+		if d.var.is_empty() {
 			return;
 		}
-		// B2b: render the date parts.
+		let date = match self.resolve_date(&d.var) {
+			Some(x)	=> x,
+			None	=> return,
+		};
+		let base: Option<&'a Date> = match d.form {
+			// A locale without the form prints nothing.
+			Some(f) => match self.chain.date(f) {
+				Some(b)	=> Some(b),
+				None	=> return,
+			},
+			None => None,
+		};
+		let fmt = match base {
+			Some(b)	=> fmt_over(&d.look.fmt, &b.look.fmt),
+			None	=> d.look.fmt,
+		};
+		let depth = self.w.push_elem(&fmt);
+		let a = self.w.apply_prefix(d.look.prefix.as_deref());
+		let cidx = self.push_case(d.look.text_case.or(base.and_then(|b| b.look.text_case)));
+		let sel = d.parts_sel.or(base.and_then(|b| b.parts_sel)).unwrap_or(DateParts::YearMonthDay);
+		let delim = match base {
+			Some(b)	=> b.delimiter.as_deref(),
+			None	=> d.delimiter.as_deref(),
+		};
+		let mut last_empty = true;
+		for part in &base.unwrap_or(d).parts {
+			match part.name {
+				DatePartName::Month if sel == DateParts::Year && date.season.is_none()	=> continue,
+				DatePartName::Day if sel != DateParts::YearMonthDay			=> continue,
+				_									=> {}
+			}
+			let cursor = self.w.len();
+			if !last_empty {
+				if let Some(dl) = delim {
+					self.push_str(dl);
+				}
+			}
+			let over = match base {
+				Some(_)	=> d.parts.iter().find(|p| p.name == part.name),
+				None	=> None,
+			};
+			self.render_date_part(part, &date, over);
+			last_empty = cursor == self.w.len();
+		}
+		self.w.pop_case(cidx);
+		self.apply_suffix(d.look.suffix.as_deref(), a);
+		self.w.commit_elem(depth, d.look.display, Some(Meta::Date));
+	}
+
+	/// One date part. A style part overriding a localised one replaces its form whole (an unset
+	/// form being the default), lays its formatting over it and wins on case; the affixes and
+	/// strip-periods stay the locale's.
+	fn render_date_part(&mut self, part: &DatePart, date: &DateVal, over: Option<&DatePart>) {
+		let val = match part.name {
+			DatePartName::Day	=> date.day.map(i32::from),
+			DatePartName::Month	=> date.month.or(date.season).map(i32::from),
+			DatePartName::Year	=> Some(date.year),
+		};
+		let val = match val {
+			Some(v)	=> v,
+			None	=> return,
+		};
+		let form = part_form(over.unwrap_or(part));
+		let fmt = match over {
+			Some(o)	=> fmt_over(&o.look.fmt, &part.look.fmt),
+			None	=> part.look.fmt,
+		};
+		let fi = self.w.push_format(&fmt);
+		let a = self.w.apply_prefix(part.look.prefix.as_deref());
+		if part.name == DatePartName::Month {
+			self.w.strip_periods = part.look.strip_periods;
+		}
+		let cidx = self.push_case(over.and_then(|o| o.look.text_case).or(part.look.text_case));
+		match (part.name, form) {
+			(DatePartName::Month, _) if date.month.is_none() => {
+				// A season. hayagriva returns early when the locale lacks the term, leaving its
+				// stacks pushed; here the part is closed as usual.
+				if let Some(t) = self.term(&format!("season-{:02}", val), TermForm::Short, false) {
+					self.push_str(t);
+				}
+			}
+			(DatePartName::Year, DatePartForm::Short) if val >= 1000 => {
+				self.push_str(&format!("{:02}", val % 100));
+			}
+			(DatePartName::Year, _) => {
+				let mut s = if val > 0 { val.to_string() } else { (val.abs() + 1).to_string() };
+				if val < 1000 {
+					let era = match val <= 0 {
+						true	=> self.term("bc", TermForm::Long, false).unwrap_or(" BC"),
+						false	=> self.term("ad", TermForm::Long, false).unwrap_or(" AD"),
+					};
+					s.push_str(era);
+				}
+				self.push_str(&s);
+			}
+			(_, DatePartForm::NumericLeadingZeros) => self.push_str(&format!("{:02}", val)),
+			(DatePartName::Day, DatePartForm::Ordinal) if val == 1 || !self.chain.limit_ordinals_to_day_1() => {
+				let gender = date.month
+					.and_then(|m| self.chain.term(&format!("month-{:02}", m), TermForm::Long))
+					.and_then(|t| t.gender);
+				let ords = Ords::new(self.chain);
+				self.push_str(&val.to_string());
+				self.push_str(ords.lookup(val, gender).unwrap_or(""));
+			}
+			(DatePartName::Month, DatePartForm::Long | DatePartForm::Short) => {
+				let tf = if form == DatePartForm::Long { TermForm::Long } else { TermForm::Short };
+				match self.term(&format!("month-{:02}", val), tf, false) {
+					Some(t)	=> self.push_str(t),
+					None	=> self.push_str(&val.to_string()),
+				}
+			}
+			_ => self.push_str(&val.to_string()),
+		}
+		self.apply_suffix(part.look.suffix.as_deref(), a);
+		self.w.strip_periods = false;
+		self.w.pop_case(cidx);
+		self.w.pop_format(fi);
 	}
 
 	/// The date is queried after suppression is restored, so it is recorded (hayagriva).
@@ -1261,10 +1872,10 @@ impl<'a, I: Item> Ctx<'a, I> {
 			Test::IsNumeric(v) => match var_kind(v) {
 				VarKind::Standard	=> self.resolve_std(v, VarForm::Long).map_or(false, |c| Numeric::parse(&c.to_string()).is_some()),
 				VarKind::Number		=> matches!(self.resolve_num(v), Some(NumVal::Typed(_))),
-				VarKind::Page		=> self.resolve_page().map_or(false, |p| is_numeric_page(&p)),
+				VarKind::Page		=> matches!(self.resolve_page(), Some(PageVal::Typed(_))),
 				_			=> false,
 			},
-			Test::IsUncertainDate(v)	=> self.resolve_date(v) == Some(true),
+			Test::IsUncertainDate(v)	=> self.resolve_date(v).map_or(false, |d| d.approximate),
 			Test::Locator(l)		=> self.cite.locator.as_ref().map_or(false, |(k, _)| k == l),
 			Test::Position(p) => match p {
 				Position::First			=> self.cite.first,
@@ -1278,7 +1889,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 				VarKind::Standard	=> self.resolve_std(v, VarForm::Long).map_or(false, |c| !c.is_blank()),
 				VarKind::Number		=> self.resolve_num(v).is_some(),
 				VarKind::Date		=> self.resolve_date(v).is_some(),
-				VarKind::Name		=> self.resolve_names(v) > 0,
+				VarKind::Name		=> !self.resolve_names(v).is_empty(),
 				VarKind::Page		=> self.resolve_page().is_some(),
 			},
 		}
