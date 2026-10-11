@@ -659,6 +659,7 @@ impl<
                                             proxy_route,
                                             &mut write_stream,
                                             src_addr,
+                                            plain,
                                             &id,
                                         ).await;
 
@@ -849,18 +850,14 @@ impl<
                             // Never over plain HTTP, where the header means nothing.
                             // Like the baseline below, it fills only an empty field: a
                             // handler that sets its own policy is not given a second one.
-                            if !plain
-                                && self.cfg.hsts_max_age_secs > 0
-                                && msg.header.fields.get_all(&HeaderName::StrictTransportSecurity).is_none()
-                            {
-                                msg.header.fields.insert(
-                                    HeaderName::StrictTransportSecurity,
-                                    HeaderFieldValue::Generic(fmt!(
-                                        "max-age={}; includeSubDomains",
-                                        self.cfg.hsts_max_age_secs,
-                                    )),
-                                    None,
-                                );
+                            if let Some(hsts) = self.hsts_value(plain) {
+                                if msg.header.fields.get_all(&HeaderName::StrictTransportSecurity).is_none() {
+                                    msg.header.fields.insert(
+                                        HeaderName::StrictTransportSecurity,
+                                        HeaderFieldValue::Generic(hsts),
+                                        None,
+                                    );
+                                }
                             }
                             // Baseline security response headers: cheap defence in depth
                             // against content sniffing, clickjacking and referrer leakage.
@@ -1098,12 +1095,22 @@ impl<
         None
     }
 
+    /// The `Strict-Transport-Security` value this server gives a response that sets none: never
+    /// over plain HTTP, where the header means nothing, and never when `hsts_max_age_secs` is 0.
+    fn hsts_value(&self, plain: bool) -> Option<String> {
+        match !plain && self.cfg.hsts_max_age_secs > 0 {
+            true    => Some(fmt!("max-age={}; includeSubDomains", self.cfg.hsts_max_age_secs)),
+            false   => None,
+        }
+    }
+
     async fn handle_proxy_http<W>(
         &self,
         request:    HttpMessage,
         route:      &ProxyRoute,
         client_w:   &mut W,
         src_addr:   SocketAddr,
+        plain:      bool,       // the visitor came over the loopback listener, not TLS
         id:         &str,
     )
         -> Outcome<(u16, Option<u64>)>
@@ -1214,8 +1221,20 @@ impl<
                         }
                     }
 
-                    // Forward the response headers to the client.
-                    match client_w.write_all(header_bytes).await {
+                    // Forward the response headers to the client. TLS ends at this hop, so
+                    // this hop is where HSTS belongs: the upstream behind it speaks plain
+                    // loopback HTTP and rightly sends none. Filled as on Steel's own responses,
+                    // only where the upstream left the field empty, so its own is never doubled.
+                    let filled = match self.hsts_value(plain) {
+                        Some(hsts)  => fwd::fill_head_field(
+                            header_bytes, "Strict-Transport-Security", &hsts),
+                        None        => None,
+                    };
+                    let head_out = match &filled {
+                        Some(h) => h.as_slice(),
+                        None    => header_bytes,
+                    };
+                    match client_w.write_all(head_out).await {
                         Ok(()) => (),
                         Err(e) => return Err(err!(e,
                             "{}: proxy: failed to write response headers to client.", id;

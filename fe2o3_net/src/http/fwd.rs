@@ -347,6 +347,36 @@ pub fn build_upgrade_request_head(
     req
 }
 
+/// Does a raw message head carry a field of this name?
+///
+/// `head` is the bytes a hop relays verbatim: a start line, then fields, each ending in CRLF. The
+/// start line is never read as a field, and names compare ASCII case-insensitively.
+pub fn head_has_field(head: &[u8], name: &str) -> bool {
+    head.split(|&b| b == b'\n')
+        .skip(1)
+        .filter_map(|line| line.iter().position(|&b| b == b':').map(|i| &line[..i]))
+        .any(|n| n.eq_ignore_ascii_case(name.as_bytes()))
+}
+
+/// A relayed head with `name: value` added before its closing blank line, when the head carries
+/// no field of that name and ends in CRLF CRLF; `None` otherwise, and the head goes on as it came.
+///
+/// This is how a hop fills a field the upstream left empty without parsing and re-serialising a
+/// response it streams: an upstream's own value is relayed as sent and never joined by a second.
+pub fn fill_head_field(head: &[u8], name: &str, value: &str) -> Option<Vec<u8>> {
+    if !head.ends_with(b"\r\n\r\n") || head_has_field(head, name) {
+        return None;
+    }
+    let cut = head.len() - 2;
+    let mut out = Vec::with_capacity(head.len() + name.len() + value.len() + 4);
+    out.extend_from_slice(&head[..cut]);
+    out.extend_from_slice(name.as_bytes());
+    out.extend_from_slice(b": ");
+    out.extend_from_slice(value.as_bytes());
+    out.extend_from_slice(b"\r\n\r\n");
+    Some(out)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -561,5 +591,18 @@ mod tests {
             }
         }
         Ok(())
+    }
+    /// A relayed head gains a field only where it has none of that name, whatever the case.
+    #[test]
+    fn test_fill_head_field_00() {
+        let bare = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n";
+        let filled = fill_head_field(bare, "Strict-Transport-Security", "max-age=1");
+        assert_eq!(filled.as_deref(), Some(&b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\
+            Strict-Transport-Security: max-age=1\r\n\r\n"[..]));
+        let own = b"HTTP/1.1 200 OK\r\nstrict-transport-security: max-age=60\r\n\r\n";
+        assert_eq!(fill_head_field(own, "Strict-Transport-Security", "max-age=1"), None);
+        // The start line is not a field, and a head cut short is left alone.
+        assert!(!head_has_field(b"Strict-Transport-Security: x\r\n\r\n", "strict-transport-security"));
+        assert_eq!(fill_head_field(b"HTTP/1.1 200 OK\r\n", "X-A", "b"), None);
     }
 }
