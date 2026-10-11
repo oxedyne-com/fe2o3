@@ -15,7 +15,12 @@ use oxedyne_fe2o3_core::{
 	test::test_it,
 };
 use oxedyne_fe2o3_text::doc::{
+	Align,
 	Block,
+	Cell,
+	Doc,
+	Inline,
+	Row,
 	markdown,
 };
 use oxedyne_fe2o3_text::xml::Xml;
@@ -406,6 +411,57 @@ pub fn test_office(filter: &'static str) -> Outcome<()> {
 		assert!(text.contains("kept plain"), "got {:?}", text);
 		assert!(!text.contains("gone"), "removed text is not what the document says: {:?}", text);
 		assert_eq!(r.tracked, 1, "and the insertion is counted, so a reader can be told");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A table keeps its caption and its row headers 013", "all", "office"], || {
+		// Written and read back: the caption is the table's, not a paragraph beside it, and a cell that
+		// heads its row still does.
+		let t = |s: &str| vec![Inline::Text(s.to_string())];
+		let doc = Doc { blocks: vec![
+			Block::Table {
+				head:		Some(Row(vec![Cell::new(t("Region")), Cell::new(t("Units"))])),
+				rows:		vec![
+					Row(vec![Cell { content: t("North"), header: true }, Cell::new(t("120"))]),
+					Row(vec![Cell { content: t("South"), header: true }, Cell::new(t("80"))]),
+				],
+				cols:		vec![Align::None; 2],
+				caption:	t("Units by region"),
+			},
+			Block::Para(t("After the table.")),
+		]};
+		let (bytes, _) = res!(docx::write(&doc));
+		let r = res!(docx::read(&bytes));
+		match r.doc.blocks.as_slice() {
+			[Block::Table { head: Some(head), rows, caption, .. }, Block::Para(after)] => {
+				assert_eq!(oxedyne_fe2o3_text::doc::text_of(caption), "Units by region");
+				assert!(head.0.iter().all(|c| !c.header), "a header row's cells are not flagged");
+				assert!(rows.iter().all(|r| r.0[0].header && !r.0[1].header), "got {:?}", rows);
+				assert_eq!(oxedyne_fe2o3_text::doc::text_of(after), "After the table.");
+			}
+			other => return Err(err!("unexpected blocks: {:?}", other; Invalid)),
+		}
+
+		// Word's own placement: the caption above, and a first column named by the table's look.
+		let mut zip = res!(Zip::read(bytes));
+		let body = "<w:p><w:pPr><w:pStyle w:val=\"Caption\"/></w:pPr><w:r><w:t>Table 1</w:t></w:r></w:p>\
+			<w:tbl><w:tblPr><w:tblLook w:val=\"04A0\"/></w:tblPr>\
+			<w:tr><w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc></w:tr>\
+			</w:tbl><w:p><w:pPr><w:pStyle w:val=\"Caption\"/></w:pPr><w:r><w:t>Stray caption</w:t></w:r></w:p>";
+		let part = fmt!(
+			"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+			<w:document xmlns:w=\"{}\"><w:body>{}</w:body></w:document>",
+			docx::NS_W, body);
+		zip.set("word/document.xml", part.into_bytes(), oxedyne_fe2o3_file::zip::Method::Deflate);
+		let r = res!(docx::read(&res!(zip.write())));
+		match r.doc.blocks.as_slice() {
+			[Block::Table { rows, caption, .. }, Block::Para(after)] => {
+				assert_eq!(oxedyne_fe2o3_text::doc::text_of(caption), "Table 1", "the one above wins");
+				assert!(rows[0].0[0].header, "0x0080 in the look names the first column");
+				assert_eq!(oxedyne_fe2o3_text::doc::text_of(after), "Stray caption");
+			}
+			other => return Err(err!("unexpected blocks: {:?}", other; Invalid)),
+		}
 		Ok(())
 	}));
 

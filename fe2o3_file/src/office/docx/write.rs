@@ -195,9 +195,10 @@ impl Build {
 			Block::Rule				=> res!(self.rule()),
 			Block::Table { head, rows, cols, caption } => {
 				res!(self.table(head, rows, cols));
-				// Its caption is the paragraph after it, which is where a reader looks for one.
+				// Its caption is the paragraph after it, which is where a reader looks for one, and wears
+				// Word's own caption style so that a reader can tell it from the prose that follows.
 				if !caption.is_empty() {
-					res!(self.para(caption, ctx));
+					res!(self.para(caption, Ctx { style: Some("Caption"), num: None }));
 				}
 			}
 			Block::Figure { .. } | Block::Terms { .. } => res!(self.blocks(&block.as_plain(), ctx)),
