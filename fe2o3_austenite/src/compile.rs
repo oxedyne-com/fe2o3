@@ -175,6 +175,8 @@ where
 	// resolves its `em` insets against the file's own body size.
 	let mut style = Theme::default();
 	lang::set::lower_root_declarations(&src, &mut style);
+	// A lone file sets on A4 unless its own `#set page` says otherwise.
+	let geom = style.page.body.default.over(PageGeometry::a4());
 	// Collect the lone file's whole `#let` scope -- its own furniture (an `#aside-box`/`#pr-note` defined in
 	// the file), its content bindings, and everything the files it `#import`s supply -- so a lone chapter
 	// honours its furniture and content bindings exactly as the book assembler does for a whole book. A
@@ -200,8 +202,8 @@ where
 	// the theme's own heading sizes (byte-neutral); the file's own `#show <selector>: <transform>` rules are
 	// appended, refused where a transform reads the page or an unread field.
 	let rules = lang::rules::rule_set_for(&style, &src, &main_file, &mut refusals);
-	// A lone file sets on A4 (its geometry below), so the placement width a template resolves against is A4's.
-	lang::rules::apply_rules(&mut blocks, &rules, PageGeometry::a4().content_width());
+	// The placement width a template resolves against is the page's own, A4 or as the file sets it.
+	lang::rules::apply_rules(&mut blocks, &rules, geom.content_width());
 	// A lone file may name a heading font in its own `#show: doc.with(...)`, or a rule/scope inside its own
 	// block tree may name one; resolve against the union of both against the tree's assets, the same way a
 	// whole book or doc does, so a lone chapter's heading face reaches the page whichever source names it. A
@@ -221,7 +223,7 @@ where
 	let assembled = Assembled {
 		blocks,
 		fonts,
-		geom:	PageGeometry::a4(),
+		geom,
 		style,
 		title:	String::new(),
 		faces,
@@ -260,13 +262,14 @@ pub fn author_and_run_memo(a: Assembled, memo: Option<&mut crate::memo::Memo>) -
 	let footer_logo	= a.front.as_ref().and_then(|f| f.footer_logo.as_deref().map(|p| (p, &f.sites.footer_logo)));
 	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &a.fonts, &a.style, a.geom, &a.title, footer_logo, &mut answers));
 
-	// Mirror the margins: the driver laid every page at the recto split (binding on the left). A verso page
-	// -- an even folio -- is that whole frame shifted to the fore-edge, so the binding margin sits at the
-	// spine on both sides of the leaf. Uniform margins give a zero shift, so a non-book run is untouched.
+	// Mirror the margins: the driver laid every page at the recto split (binding on the left). A page the
+	// geometry swaps -- an even folio in a book -- is that whole frame shifted to the fore-edge, so the
+	// binding margin sits at the spine on both sides of the leaf. A one-sided geometry swaps no page, so
+	// unequal left and right margins stay where the document set them.
 	let shift = a.geom.mirror_shift();
 	if shift.raw() != 0 {
 		for page in &mut out.pages {
-			if page.number % 2 == 0 {
+			if a.geom.swap.applies(page.number) {
 				for placed in &mut page.frame.placed {
 					placed.x = placed.x + shift;
 				}

@@ -24,7 +24,7 @@ use oxedyne_fe2o3_graphics::path::Path;
 /// verso -- a mirror. The driver lays every page at the recto split (`content_left` = inside); a verso
 /// page is the same frame shifted by [`mirror_shift`](Self::mirror_shift), which is why the geometry
 /// keeps both margins rather than one left edge.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageGeometry {
 	pub width:	Sp,
 	pub height:	Sp,
@@ -63,9 +63,10 @@ impl PageGeometry {
 		Self { width, height, inside: margin, outside: margin, top: margin, bottom: margin, swap: Swap::None }
 	}
 
-	/// A book geometry with mirror margins: `inside` binds, `outside` is the fore-edge.
+	/// A book geometry with mirror margins: `inside` binds, `outside` is the fore-edge, and an even page
+	/// takes them exchanged (Typst's `binding: left`).
 	pub fn with_margins(width: Sp, height: Sp, inside: Sp, outside: Sp, top: Sp, bottom: Sp) -> Self {
-		Self { width, height, inside, outside, top, bottom, swap: Swap::None }
+		Self { width, height, inside, outside, top, bottom, swap: Swap::Even }
 	}
 
 	/// The geometry physical page `number` takes: the side margins exchanged when the layout is two-sided

@@ -19,6 +19,7 @@
 //! heading faces and the config file's `#let` type scale are a later unit's work; the reserved theme
 //! fields those write are populated here only where a `#show: doc.with(...)` names them directly.
 
+use crate::ir::Length;
 use crate::ir::Sp;
 use crate::ir::Span;
 use crate::lang::lex;
@@ -27,6 +28,7 @@ use crate::lang::RefusalClass;
 use crate::lang::Refusals;
 use crate::theme::{
 	LeadingGap,
+	PageNumbering,
 	Theme,
 	ThemeHeadingLevelPatch,
 	ThemePatch,
@@ -193,7 +195,7 @@ const DEFAULT_BODY_PT: f64 = 11.0;
 fn lower_set_into(target: &str, list: &[lex::Arg], patch: &mut ThemePatch, em_base_pt: f64) -> Vec<&'static str> {
 	// The argument keys this set applied AND the renderer consumes -- the invariant is that every lowered
 	// field is either read by the renderer or refused with a diagnostic, never written-and-ignored. A key
-	// that lowers into a field nothing reads yet (an equation `numbering`, a `page` dimension) is deliberately NOT pushed here, so the refusal check ([`set_refusal_reason`]) sees it as
+	// that lowers into a field nothing reads yet (an equation `numbering`) is deliberately NOT pushed here, so the refusal check ([`set_refusal_reason`]) sees it as
 	// unapplied and records a visible "not yet supported" rather than a silent no-op. A key present in the
 	// source but absent for any other reason (unrecognised for the target, an `em` length, a bare `none`)
 	// is likewise not pushed.
@@ -261,7 +263,12 @@ fn lower_set_into(target: &str, list: &[lex::Arg], patch: &mut ThemePatch, em_ba
 		"heading" => {
 			// `numbering` applies across the levels, the way Typst's own `set heading(numbering: ...)` does:
 			// one group-level leaf the patch folds onto every level, whatever their count.
-			if let Some(pattern) = named_string(list, "numbering") {
+			// `none` is no numbering, as an empty pattern is.
+			let numbering = match lex::named(list, "numbering") {
+				Some(v) if v.trim() == "none"	=> Some(String::new()),
+				_								=> named_string(list, "numbering"),
+			};
+			if let Some(pattern) = numbering {
 				let pat = if pattern.is_empty() { None } else { Some(pattern) };
 				patch.heading.numbering_all = Some(pat);
 				used.push("numbering");
@@ -299,14 +306,51 @@ fn lower_set_into(target: &str, list: &[lex::Arg], patch: &mut ThemePatch, em_ba
 			}
 		},
 		"page" => {
-			// Page geometry lowers onto the body part's reserved override, but no unit consumes it yet (the
-			// driver still supplies the document geometry), so `width`/`height` are left unmarked and a lone
-			// `#set page(...)` is refused as not-yet-supported rather than silently doing nothing.
-			if let Some(pt) = named_length_mm_or_pt(list, "width") {
-				patch.page.body.default.width = Some(Some(pt));
+			// The page geometry lowers onto the body part's default, which every loader lays over its own
+			// base geometry: `paper` names Typst's table, and `width`/`height` override it.
+			let mut size: (Option<Sp>, Option<Sp>) = (None, None);
+			if let Some(name) = named_string(list, "paper") {
+				if let Some((w_mm, h_mm)) = crate::eval::lib::layout::paper(&name) {
+					size = (Some(Sp::from_pt(w_mm * MM_PER_PT)), Some(Sp::from_pt(h_mm * MM_PER_PT)));
+					used.push("paper");
+				}
 			}
-			if let Some(pt) = named_length_mm_or_pt(list, "height") {
-				patch.page.body.default.height = Some(Some(pt));
+			if let Some(sp) = named_abs_length(list, "width") {
+				size.0 = Some(sp);
+				used.push("width");
+			}
+			if let Some(sp) = named_abs_length(list, "height") {
+				size.1 = Some(sp);
+				used.push("height");
+			}
+			if let Some(w) = size.0 {
+				patch.page.body.default.width = Some(Some(w));
+			}
+			if let Some(h) = size.1 {
+				patch.page.body.default.height = Some(Some(h));
+			}
+			if let Some(expr) = lex::named(list, "margin") {
+				if let Some(m) = page_margins(expr) {
+					let geom = &mut patch.page.body.default;
+					// `left` is the binding edge of a recto, `right` the fore-edge.
+					if let Some(v) = m[0] { geom.margin_inside	= Some(Some(v)); }
+					if let Some(v) = m[1] { geom.margin_outside	= Some(Some(v)); }
+					if let Some(v) = m[2] { geom.margin_top		= Some(Some(v)); }
+					if let Some(v) = m[3] { geom.margin_bottom	= Some(Some(v)); }
+					used.push("margin");
+				}
+			}
+			// A pattern sets the number at the foot of every page; `none` sets no number at all.
+			if let Some(expr) = lex::named(list, "numbering") {
+				let numbering = if expr.trim() == "none" {
+					Some(PageNumbering::Off)
+				} else {
+					string_value(expr.trim()).filter(|p| !p.is_empty()).map(PageNumbering::Pattern)
+				};
+				if let Some(n) = numbering {
+					patch.page.numbering = Some(n);
+					used.push("numbering");
+				}
 			}
 			// The column count the body flows in, read by the author and the driver: a whole number of at
 			// least one.
@@ -688,15 +732,54 @@ fn named_gap(list: &[lex::Arg], key: &str) -> Option<LeadingGap> {
 
 const MM_PER_PT: f64 = 72.0 / 25.4;	// points in one millimetre
 
-/// The scaled-point length of a `key:`'s value, accepting `pt` or `mm` (a page dimension is usually set
-/// in millimetres). An `em` value is left to a later unit that knows the body size.
-fn named_length_mm_or_pt(list: &[lex::Arg], key: &str) -> Option<Sp> {
-	match named_number_unit(list, key) {
-		Some((num, unit)) if unit == "pt"	=> Some(Sp::from_pt(num)),
-		Some((num, unit)) if unit == "mm"	=> Some(Sp::from_pt(num * MM_PER_PT)),
-		_									=> None,
+/// The absolute length a `key:` names, in any unit [`crate::lang::parse::parse_length`] reads (`pt`,
+/// `mm`, `cm`, `in`). A ratio, an `em` or anything else is `None`, so the field stays unapplied.
+fn named_abs_length(list: &[lex::Arg], key: &str) -> Option<Sp> {
+	lex::named(list, key).and_then(abs_length)
+}
+
+fn abs_length(expr: &str) -> Option<Sp> {
+	match crate::lang::parse::parse_length(expr) {
+		Some(Length::Abs(pt))	=> Some(Sp::from_pt(pt)),
+		_						=> None,
 	}
 }
+
+/// The left, right, top and bottom margins a `#set page(margin: ..)` value names: one length for all four
+/// sides, or Typst's dictionary, where a side's own key beats `x`/`y`, which beat `rest`, and a side none
+/// of them names stays as the base geometry has it. `None` for anything unread -- a ratio, `auto`, an
+/// unknown key, or the two-sided `inside`/`outside`, which needs a binding this reader does not lower -- so
+/// the whole argument is refused rather than half applied.
+fn page_margins(expr: &str) -> Option<[Option<Sp>; 4]> {
+	let inner = match whole_group(expr.trim(), '(') {
+		Some(i)	=> i,
+		None	=> return abs_length(expr).map(|v| [Some(v); 4]),
+	};
+	let (mut sides, mut x, mut y, mut rest) = ([None; 4], None, None, None);
+	for arg in lex::args(inner) {
+		let (key, v) = match (arg.key.as_deref(), abs_length(&arg.value)) {
+			(Some(k), Some(v))	=> (k, v),
+			_					=> return None,
+		};
+		match key {
+			"left"		=> sides[0] = Some(v),
+			"right"		=> sides[1] = Some(v),
+			"top"		=> sides[2] = Some(v),
+			"bottom"	=> sides[3] = Some(v),
+			"x"			=> x = Some(v),
+			"y"			=> y = Some(v),
+			"rest"		=> rest = Some(v),
+			_			=> return None,
+		}
+	}
+	let axis = [x, x, y, y];
+	let mut out = [None; 4];
+	for i in 0..4 {
+		out[i] = sides[i].or(axis[i]).or(rest);
+	}
+	Some(out)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -737,8 +820,9 @@ mod tests {
 		assert_eq!(listed.text.faces.body, Some(vec!["Felipa".to_string(), "Libertinus Serif".to_string()]));
 		// A value that is not a literal family is left unapplied, so the set is refused.
 		assert_eq!(lower_set("text", "font: fonts.display").text.faces.body, None);
-		// The leading was not named, so it kept its default.
-		assert_eq!(theme.text.leading, Theme::default().text.leading);
+		// The leading was not named, so Typst's default 0.65em gap follows the new size.
+		let box_em = theme.calibration.line_box_em;
+		assert_eq!(theme.text.leading, Sp::from_pt((box_em + crate::theme::TYPST_LEADING_EM) * 12.0));
 	}
 
 	/// `#set page(columns: n)` lowers the body's column count and `#set columns(gutter: ..)` the space between
@@ -810,10 +894,16 @@ mod tests {
 		theme.apply(&small);
 		assert_eq!(theme.text.leading, Sp::from_pt(box_em * 9.9 + 8.0));
 
-		// With no gap in force a size change leaves the pitch as it was.
+		// With no gap set, Typst's default 0.65em follows the size; a pitch named outright stays as it is.
 		let mut theme = Theme::default();
 		theme.apply(&small);
-		assert_eq!(theme.text.leading, Theme::default().text.leading);
+		assert_eq!(theme.text.leading, Sp::from_pt((box_em + crate::theme::TYPST_LEADING_EM) * 9.9));
+		let mut pitch = ThemePatch::default();
+		pitch.text.leading = Some(Sp::from_pt(14.0));
+		let mut theme = Theme::default();
+		theme.apply(&pitch);
+		theme.apply(&small);
+		assert_eq!(theme.text.leading, Sp::from_pt(14.0));
 	}
 
 	/// `#set text(fill: rgb("#ff0000"))` lowers the prose fill, consuming the argument so it is not refused;
@@ -927,8 +1017,8 @@ mod tests {
 	}
 
 	/// H2: a lowerable `#set` whose named arguments the renderer does not consume -- an unknown key, an
-	/// unconvertible `em`, a bare `none`, or a field lowered but not yet read (an equation
-	/// `numbering`, a `page` dimension) -- is flagged for refusal, so it is a visible "not yet supported"
+	/// unconvertible `em`, or a field lowered but not yet read (an equation
+	/// `numbering`) -- is flagged for refusal, so it is a visible "not yet supported"
 	/// rather than a silent no-op; a set every one of whose arguments the renderer consumes is not.
 	#[test]
 	fn unconsumed_set_is_flagged_for_refusal() {
@@ -942,8 +1032,8 @@ mod tests {
 		assert!(set_refusal_reason("text", "lang: \"de\"").is_some());
 		// A recognised key whose value does not convert (an `em` needs a context this lowering has not).
 		assert!(set_refusal_reason("text", "size: 1em").is_some());
-		// A bare `none` is not a string the numbering reader accepts, so nothing is applied.
-		assert!(set_refusal_reason("heading", "numbering: none").is_some());
+		// A bare `none` is no heading numbering, Austenite's default, so it is consumed.
+		assert_eq!(set_refusal_reason("heading", "numbering: none"), None);
 		// A partially-applied set is still flagged, for the argument it dropped.
 		assert!(set_refusal_reason("text", "size: 12pt, weight: 700").is_some());
 		// A body font is read by the renderer now, so it is consumed; one that is not a literal family is not.
@@ -952,8 +1042,9 @@ mod tests {
 		// Lowered-but-unread fields are flagged, so a `#set` into one alone is refused rather than a no-op.
 		assert!(set_refusal_reason("math.equation", "numbering: \"(1)\"").is_some(),
 			"equation numbering lowers but the renderer always sets (N), so it must be refused");
-		assert!(set_refusal_reason("page", "width: 200mm").is_some(),
-			"page geometry lowers but no unit consumes it yet, so it must be refused");
+		// The page geometry is laid over each loader's base, so it is consumed; a two-sided margin is not.
+		assert_eq!(set_refusal_reason("page", "width: 200mm, paper: \"a5\", margin: 2.2cm, numbering: none"), None);
+		assert!(set_refusal_reason("page", "margin: (inside: 2cm, outside: 1cm)").is_some());
 
 		// declstyle_refusal drives it off a captured construct buffer, naming the set, and never flags a
 		// `#show: doc.with(...)`, whose non-theme arguments are front matter rather than a no-op.

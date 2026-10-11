@@ -514,6 +514,8 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str, mut skips: lang:
 	// top-level `#set` -- lowers onto the theme. The config file's `#let` type scale is read separately
 	// by `read_config` above; this reads only the root's own top-level declarations.
 	lang::set::lower_root_declarations(root_src, &mut style);
+	// A root `#set page` overrides the config's paper and margins, field by field.
+	let geom = style.page.body.default.over(geom);
 	// The book's `#let` scope -- its furniture functions (`#pr-note`, `#aside-box`) and content bindings --
 	// collected once against the document's body size so every `em` in a furniture definition resolves to an
 	// absolute, then threaded into every chapter the assembler reads so a call expands rather than being
@@ -608,6 +610,8 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str, mut skips: lang::
 	// The doc root's own `#show: doc.with(...)` application (and any lowerable top-level `#set`) lowers
 	// onto the theme; its per-format type scale is read from the config by `read_doc_config` above.
 	lang::set::lower_root_declarations(root_src, &mut style);
+	// A root `#set page` overrides the template's paper and margins, field by field.
+	let geom		= style.page.body.default.over(geom);
 	let title		= content_field(root_src, "title").unwrap_or_default();
 	// A doc tree sets `numbering: none`; how its top-level headings open turns first on the template
 	// idiom read above. A grid template (oxeweb) opens level 1 with a fixed logo/title grid and no
@@ -2256,8 +2260,11 @@ fn build_style(raw: &RawStyle) -> Theme {
 	let baseline = (style.calibration.line_box_em + raw.leading_em) * raw.body_pt;
 
 	style.text.body_size	= Sp::from_pt(raw.body_pt);
-	style.text.leading	= Sp::from_pt(baseline);
-	style.par.skip	= Sp::from_pt(raw.par_skip_em * raw.body_pt);
+	// The config's own leading and paragraph skip replace Typst's defaults as fixed lengths at its body size.
+	style.text.leading		= Sp::from_pt(baseline);
+	style.text.leading_gap	= None;
+	style.par.skip			= Sp::from_pt(raw.par_skip_em * raw.body_pt);
+	style.par.skip_em		= None;
 	style.par.indent	= Sp::from_pt(raw.indent_em * raw.body_pt);
 	style.opener.chap_num_size	= Sp::from_pt(raw.chap_num_pt);
 	style.opener.chap_grid		= [

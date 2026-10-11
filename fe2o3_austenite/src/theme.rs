@@ -31,6 +31,8 @@
 use crate::doc::HeadingStyle;
 use crate::ir::Length;
 use crate::ir::Sp;
+use crate::page::PageGeometry;
+use crate::table::Align;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
@@ -146,18 +148,25 @@ impl LeadingGap {
 	}
 }
 
+// Typst's own defaults, in ems of the text size in force: `par(leading:)`, the gap between line boxes,
+// and `par(spacing:)`, the space between paragraphs.
+pub const TYPST_LEADING_EM:		f64 = 0.65;
+pub const TYPST_PAR_SPACING_EM:	f64 = 1.2;
+
 impl Default for ThemeText {
 	fn default() -> Self {
+		let body_size	= Sp::from_pt(11.0);
+		let gap			= LeadingGap { abs: Sp::ZERO, em: TYPST_LEADING_EM };
 		Self {
-			body_size:	Sp::from_pt(11.0),
-			leading:	Sp::from_pt(13.2),	// 1.2x the body
+			body_size,
+			leading:	gap.pitch(body_size, ThemeCalibration::default().line_box_em),
 			tracking:	Sp::ZERO,
 			ligatures:	true,
 			hyphenate:	true,
 			justify:	true,
 			fill:		Rgba::BLACK,
 			faces:		FaceSet::default(),
-			leading_gap:	None,
+			leading_gap:	Some(gap),
 		}
 	}
 }
@@ -177,15 +186,19 @@ pub struct FaceSet {
 /// paragraph following another takes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemePar {
-	pub skip:	Sp,	// extra space between one paragraph and the next
-	pub indent:	Sp,	// first-line indent of a paragraph following another paragraph
+	pub skip:		Sp,				// extra space between one paragraph and the next
+	pub skip_em:	Option<f64>,	// the ems of the body size `skip` follows, while no length is set
+	pub indent:		Sp,				// first-line indent of a paragraph following another paragraph
+	pub align:		Align,			// where a line short of the measure sits, Typst's `align` in force
 }
 
 impl Default for ThemePar {
 	fn default() -> Self {
 		Self {
-			skip:	Sp::from_pt(6.0),
-			indent:	Sp::ZERO,	// no first-line indent unless a config sets one
+			skip:		Sp::from_pt(TYPST_PAR_SPACING_EM * ThemeText::default().body_size.to_pt()),
+			skip_em:	Some(TYPST_PAR_SPACING_EM),
+			indent:		Sp::ZERO,	// no first-line indent unless a config sets one
+			align:		Align::Left,
 		}
 	}
 }
@@ -441,6 +454,16 @@ pub struct ThemePage {
 	pub back:			ThemePagePart,
 	pub columns:		usize,
 	pub column_gutter:	Length,
+	pub numbering:		PageNumbering,
+}
+
+/// What a page carries for its number, from a document's `#set page(numbering:)`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum PageNumbering {
+	#[default]
+	Furniture,			// none set: the house running head and folio
+	Off,				// `numbering: none`: no number at all
+	Pattern(String),	// a Typst pattern such as "1", set at the foot's centre on every page
 }
 
 impl Default for ThemePage {
@@ -451,6 +474,23 @@ impl Default for ThemePage {
 			back:			ThemePagePart::default(),
 			columns:		1,
 			column_gutter:	Length::Rel(0.04),
+			numbering:		PageNumbering::Furniture,
+		}
+	}
+}
+
+impl ThemePageGeom {
+	/// The geometry `base` takes under this override: each field set here replaces the base's own, and
+	/// one left unset keeps it, so an override with nothing set returns `base` unchanged.
+	pub fn over(&self, base: PageGeometry) -> PageGeometry {
+		PageGeometry {
+			width:		self.width.unwrap_or(base.width),
+			height:		self.height.unwrap_or(base.height),
+			inside:		self.margin_inside.unwrap_or(base.inside),
+			outside:	self.margin_outside.unwrap_or(base.outside),
+			top:		self.margin_top.unwrap_or(base.top),
+			bottom:		self.margin_bottom.unwrap_or(base.bottom),
+			swap:		base.swap,
 		}
 	}
 }
@@ -576,6 +616,7 @@ pub struct ThemeTextPatch {
 pub struct ThemeParPatch {
 	pub skip:		Option<Sp>,
 	pub indent:		Option<Sp>,
+	pub align:		Option<Align>,
 	pub leading:	Option<LeadingGap>,	// becomes `text.leading_gap`, and `text.leading` at apply
 }
 
@@ -692,6 +733,7 @@ pub struct ThemePagePatch {
 	pub back:			ThemePagePartPatch,
 	pub columns:		Option<usize>,
 	pub column_gutter:	Option<Length>,
+	pub numbering:		Option<PageNumbering>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -757,6 +799,13 @@ impl Theme {
 		if let (true, Some(gap)) = (moved, self.text.leading_gap) {
 			self.text.leading = gap.pitch(self.text.body_size, self.calibration.line_box_em);
 		}
+		// The paragraph spacing follows the body size the same way until a length is set for it.
+		if patch.par.skip.is_some() {
+			self.par.skip_em = None;
+		}
+		if let (true, Some(em)) = (patch.text.body_size.is_some(), self.par.skip_em) {
+			self.par.skip = Sp::from_pt(em * self.text.body_size.to_pt());
+		}
 	}
 }
 
@@ -785,6 +834,7 @@ impl ThemeParPatch {
 	fn apply(&self, t: &mut ThemePar) {
 		patch_merge!(self.skip, t.skip);
 		patch_merge!(self.indent, t.indent);
+		patch_merge!(self.align, t.align);
 	}
 }
 
@@ -925,6 +975,7 @@ impl ThemePagePatch {
 		self.back.apply(&mut t.back);
 		patch_merge!(self.columns, t.columns);
 		patch_merge!(self.column_gutter, t.column_gutter);
+		patch_merge!(self.numbering, t.numbering);
 	}
 }
 
@@ -1151,15 +1202,43 @@ impl ThemeText {
 
 impl ThemePar {
 	fn to_dat(&self) -> Outcome<Dat> {
-		Ok(omapdat!{
-			"skip"		=> sp_dat(self.skip),
-			"indent"	=> sp_dat(self.indent),
-		})
+		let mut pairs: Vec<(Dat, Dat)> = vec![
+			(dat!("skip".to_string()),		sp_dat(self.skip)),
+			(dat!("indent".to_string()),	sp_dat(self.indent)),
+		];
+		// Written only when not the start edge, so an unaligned theme serialises, and hashes, as before.
+		let align = match self.align {
+			Align::Left		=> None,
+			Align::Centre	=> Some("centre"),
+			Align::Right	=> Some("right"),
+		};
+		if let Some(a) = align {
+			pairs.push((dat!("align".to_string()), dat!(a.to_string())));
+		}
+		if let Some(em) = self.skip_em {
+			pairs.push((dat!("skip_em_bits".to_string()), dat!(em.to_bits())));
+		}
+		Ok(create_dat_ordmap(pairs))
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
+		let align = match res!(d.map_remove(&dat!("align".to_string()))) {
+			None	=> Align::Left,
+			Some(a)	=> match try_extract_dat!(a, Str).as_str() {
+				"centre"	=> Align::Centre,
+				"right"		=> Align::Right,
+				other		=> return Err(err!(
+					"A theme paragraph alignment must be centre or right, found {:?}.", other; Input, Invalid)),
+			},
+		};
+		let skip_em = match res!(d.map_remove(&dat!("skip_em_bits".to_string()))) {
+			None	=> None,
+			Some(b)	=> Some(f64::from_bits(try_extract_dat!(b, U64))),
+		};
 		Ok(Self {
 			skip:	res!(sp_from(res!(map_must(&mut d, "skip")))),
+			skip_em,
 			indent:	res!(sp_from(res!(map_must(&mut d, "indent")))),
+			align,
 		})
 	}
 }
@@ -1404,16 +1483,30 @@ impl ThemePage {
 			Length::Rel(f)	=> ("rel", f),
 			Length::Abs(pt)	=> ("abs", pt),
 		};
-		Ok(omapdat!{
-			"front"			=> res!(self.front.to_dat()),
-			"body"			=> res!(self.body.to_dat()),
-			"back"			=> res!(self.back.to_dat()),
-			"columns"		=> dat!(self.columns as u64),
-			"gutter_kind"	=> dat!(kind.to_string()),
-			"gutter_bits"	=> dat!(value.to_bits()),
-		})
+		let mut pairs: Vec<(Dat, Dat)> = vec![
+			(dat!("front".to_string()),			res!(self.front.to_dat())),
+			(dat!("body".to_string()),			res!(self.body.to_dat())),
+			(dat!("back".to_string()),			res!(self.back.to_dat())),
+			(dat!("columns".to_string()),		dat!(self.columns as u64)),
+			(dat!("gutter_kind".to_string()),	dat!(kind.to_string())),
+			(dat!("gutter_bits".to_string()),	dat!(value.to_bits())),
+		];
+		// Written only when a document set it, so a theme without one serialises, and hashes, as before.
+		match &self.numbering {
+			PageNumbering::Furniture	=> {},
+			PageNumbering::Off			=> pairs.push((dat!("numbering".to_string()), dat!(false))),
+			PageNumbering::Pattern(p)	=> pairs.push((dat!("numbering".to_string()), dat!(p.clone()))),
+		}
+		Ok(create_dat_ordmap(pairs))
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
+		let numbering = match res!(d.map_remove(&dat!("numbering".to_string()))) {
+			None					=> PageNumbering::Furniture,
+			Some(Dat::Bool(false))	=> PageNumbering::Off,
+			Some(Dat::Str(p))		=> PageNumbering::Pattern(p),
+			Some(other)				=> return Err(err!(
+				"A theme page numbering must be false or a pattern string, found {:?}.", other; Input, Invalid)),
+		};
 		let columns	= try_extract_dat!(res!(map_must(&mut d, "columns")), U64) as usize;
 		let kind	= try_extract_dat!(res!(map_must(&mut d, "gutter_kind")), Str);
 		let value	= f64::from_bits(try_extract_dat!(res!(map_must(&mut d, "gutter_bits")), U64));
@@ -1429,6 +1522,7 @@ impl ThemePage {
 			back:	res!(ThemePagePart::from_dat(res!(map_must(&mut d, "back")))),
 			columns,
 			column_gutter,
+			numbering,
 		})
 	}
 }
@@ -1659,8 +1753,8 @@ mod tests {
 		assert_eq!(theme.opener.chap_num_size,			Sp::from_pt(48.0));
 		assert_eq!(theme.equation.numbering,			Some("(1)".to_string()));
 		assert_eq!(theme.page.body.default.width,		Some(Sp::from_pt(400.0)));
-		// A field the patch did not name kept its default.
-		assert_eq!(theme.text.leading,					Theme::default().text.leading);
+		// A field the patch did not name kept its default, the default leading gap following the new size.
+		assert_eq!(theme.text.leading,					Sp::from_pt((theme.calibration.line_box_em + TYPST_LEADING_EM) * 12.0));
 		assert_eq!(theme.page.body.recto.width,			None);
 
 		// An `Option<Option<..>>` leaf set to `Some(None)` clears the theme's own value, and an empty family

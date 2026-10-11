@@ -79,6 +79,7 @@ use crate::page::{
 };
 use crate::lang::RefusalClass;
 use crate::theme::{
+	PageNumbering,
 	Theme,
 	ThemePatch,
 };
@@ -6130,7 +6131,21 @@ pub fn decorate(
 	// folio is its physical page less the front matter before it. A run with no headings (a lone
 	// manuscript) leaves `body_start_page` zero, so the whole document is body and the folio is physical.
 	let body_start		= ledger.body_start_page.max(1);
+	let total			= pages.len() as u32;
 	for page in pages.iter_mut() {
+		// A document's own `#set page(numbering:)` replaces the house furniture: Typst's numbering on every
+		// page, or none at all, with no running head either way.
+		match &style.page.numbering {
+			PageNumbering::Furniture	=> {},
+			PageNumbering::Off			=> continue,
+			PageNumbering::Pattern(p)	=> {
+				// As Typst does, a pattern with two counting symbols ("1 / 1") shows the total beside the page.
+				let both	= p.chars().filter(|c| matches!(c, '1' | 'a' | 'A' | 'i' | 'I')).count() >= 2;
+				let nums	= if both { vec![page.number, total] } else { vec![page.number] };
+				res!(place_page_number(page, fonts, style, geom, &format_numbering(p, &nums)));
+				continue;
+			},
+		}
 		// Front matter -- the cover, title, imprint and contents leaves before the body -- carries no
 		// running head and no folio, exactly as the template sets `numbering: none` there.
 		if page.number < body_start {
@@ -6292,6 +6307,29 @@ fn draw_marginalia(
 
 /// The x that centres a box of width `w` in the text block. A box wider than the measure starts at
 /// the left edge rather than hanging off it.
+/// Sets `num` centred at the foot of `page` at the body size, as Typst's `numbering` sets it: the cap
+/// top three-tenths of the bottom margin below the text block.
+fn place_page_number(page: &mut Page, fonts: &Arc<FontSet>, style: &Theme, geom: PageGeometry, num: &str)
+	-> Outcome<()>
+{
+	if num.is_empty() {
+		return Ok(());
+	}
+	let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, num));
+	let d		= shaped.dims();
+	// The cap height from the face, else the ink of the number itself (figures stand at cap height).
+	let face	= res!(shaped.font().face(0));
+	let m		= res!(face.layout_metrics());
+	let cap		= match m.cap_height {
+		Some(c) if m.units_per_em > 0.0	=> Sp::from_pt((c / m.units_per_em * shaped.size()) as f64),
+		_									=> res!(shaped.ink_extent()).0,
+	};
+	let cap_top	= geom.content_top() + geom.content_height() + Sp::from_pt(geom.bottom.to_pt() * 0.3);
+	let y		= cap_top - (d.height - cap);
+	page.frame.push(Placed::new(centre_x(geom, d.width), y, d, PlacedKind::Text(shaped)));
+	Ok(())
+}
+
 fn centre_x(geom: PageGeometry, w: Sp) -> Sp {
 	let slack = (geom.content_width().raw() - w.raw()).max(0) / 2;
 	geom.content_left() + Sp(slack)
