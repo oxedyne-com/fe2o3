@@ -241,106 +241,117 @@ pub fn retarget<F>(doc: &Doc, map: F) -> Doc
 where
 	F: Fn(&str) -> Option<String>,
 {
-	Doc { blocks: retarget_blocks(&doc.blocks, &map) }
+	map_inlines(doc, |item| match item {
+		Inline::Link { to, content } => match map(&to) {
+			Some(there)	=> vec![Inline::Link { to: there, content }],
+			// The words stay and the destination goes, which is what a refused destination
+			// already does. See [`retarget`].
+			None		=> content,
+		},
+		Inline::Image { src, alt, attrs } => match map(&src) {
+			Some(there)			=> vec![Inline::Image { src: there, alt, attrs }],
+			None if !alt.trim().is_empty()	=> vec![Inline::Text(alt)],
+			None				=> Vec::new(),
+		},
+		other => vec![other],
+	})
 }
 
-/// The blocks, their destinations rewritten.
-fn retarget_blocks<F>(items: &[Block], map: &F) -> Vec<Block>
+/// Every inline of the document, wherever it sits (paragraph, heading, list, table cell, caption,
+/// term, figure or division), handed to `f` after its own content has been, so the innermost is
+/// rewritten first. `f` returns what replaces the inline: itself, something else, several things,
+/// or nothing. Block structure is kept as it is.
+///
+/// This is the walk [`retarget`] is built on, for a rewrite that is not a destination: an image's
+/// attributes filled in from a store, say, or a source moved to a new address along with them.
+pub fn map_inlines<F>(doc: &Doc, f: F) -> Doc
 where
-	F: Fn(&str) -> Option<String>,
+	F: Fn(Inline) -> Vec<Inline>,
+{
+	Doc { blocks: map_blocks(&doc.blocks, &f) }
+}
+
+fn map_blocks<F>(items: &[Block], f: &F) -> Vec<Block>
+where
+	F: Fn(Inline) -> Vec<Inline>,
 {
 	let mut out = Vec::with_capacity(items.len());
 	for item in items {
 		out.push(match item {
 			Block::Heading { level, content } => Block::Heading {
 				level:		*level,
-				content:	retarget_inlines(content, map),
+				content:	map_list(content, f),
 			},
-			Block::Para(content)	=> Block::Para(retarget_inlines(content, map)),
+			Block::Para(content)	=> Block::Para(map_list(content, f)),
 			Block::List { ordered, items } => Block::List {
 				ordered:	*ordered,
-				items:		items.iter().map(|it| retarget_blocks(it, map)).collect(),
+				items:		items.iter().map(|it| map_blocks(it, f)).collect(),
 			},
-			Block::Quote(inner)		=> Block::Quote(retarget_blocks(inner, map)),
+			Block::Quote(inner)		=> Block::Quote(map_blocks(inner, f)),
 			Block::Table { head, rows, cols, caption } => Block::Table {
-				head:		head.as_ref().map(|h| retarget_row(h, map)),
-				rows:		rows.iter().map(|r| retarget_row(r, map)).collect(),
+				head:		head.as_ref().map(|h| map_row(h, f)),
+				rows:		rows.iter().map(|r| map_row(r, f)).collect(),
 				cols:		cols.clone(),
-				caption:	retarget_inlines(caption, map),
+				caption:	map_list(caption, f),
 			},
 			Block::Figure { attrs, content, caption } => Block::Figure {
 				attrs:		attrs.clone(),
-				content:	retarget_blocks(content, map),
-				caption:	retarget_inlines(caption, map),
+				content:	map_blocks(content, f),
+				caption:	map_list(caption, f),
 			},
 			Block::Terms { attrs, items } => Block::Terms {
 				attrs:	attrs.clone(),
 				items:	items.iter().map(|t| Term {
-					term:	retarget_inlines(&t.term, map),
-					defs:	t.defs.iter().map(|d| retarget_blocks(d, map)).collect(),
+					term:	map_list(&t.term, f),
+					defs:	t.defs.iter().map(|d| map_blocks(d, f)).collect(),
 				}).collect(),
 			},
 			Block::Div { attrs, content } => Block::Div {
 				attrs:		attrs.clone(),
-				content:	retarget_blocks(content, map),
+				content:	map_blocks(content, f),
 			},
-			// A code block and a rule hold no destination, so there is nothing here to rewrite.
+			// A code block and a rule hold no inline.
 			Block::Code { .. } | Block::Rule	=> item.clone(),
 		});
 	}
 	out
 }
 
-/// A row, its cells' destinations rewritten.
-fn retarget_row<F>(r: &Row, map: &F) -> Row
+fn map_row<F>(r: &Row, f: &F) -> Row
 where
-	F: Fn(&str) -> Option<String>,
+	F: Fn(Inline) -> Vec<Inline>,
 {
-	Row(r.0.iter().map(|c| Cell { content: retarget_inlines(&c.content, map), header: c.header }).collect())
+	Row(r.0.iter().map(|c| Cell { content: map_list(&c.content, f), header: c.header }).collect())
 }
 
-/// The inlines, their destinations rewritten.
-fn retarget_inlines<F>(items: &[Inline], map: &F) -> Vec<Inline>
+/// The inlines, each one's content first and then the inline itself.
+fn map_list<F>(items: &[Inline], f: &F) -> Vec<Inline>
 where
-	F: Fn(&str) -> Option<String>,
+	F: Fn(Inline) -> Vec<Inline>,
 {
 	let mut out = Vec::with_capacity(items.len());
 	for item in items {
-		match item {
-			Inline::Link { to, content } => {
-				let kept = retarget_inlines(content, map);
-				match map(to) {
-					Some(there)	=> out.push(Inline::Link { to: there, content: kept }),
-					// The words stay and the destination goes, which is what a refused
-					// destination already does. See [`retarget`].
-					None		=> out.extend(kept),
-				}
-			}
-			Inline::Image { src, alt, attrs } => match map(src) {
-				Some(there)	=> out.push(Inline::Image {
-					src:	there,
-					alt:	alt.clone(),
-					attrs:	attrs.clone(),
-				}),
-				None if !alt.trim().is_empty()	=> out.push(Inline::Text(alt.clone())),
-				None		=> {},
+		let inner = match item {
+			Inline::Link { to, content } => Inline::Link {
+				to:		to.clone(),
+				content:	map_list(content, f),
 			},
-			Inline::Emph { strong, content } => out.push(Inline::Emph {
+			Inline::Emph { strong, content } => Inline::Emph {
 				strong:		*strong,
-				content:	retarget_inlines(content, map),
-			}),
-			Inline::Span { attrs, content } => out.push(Inline::Span {
+				content:	map_list(content, f),
+			},
+			Inline::Span { attrs, content } => Inline::Span {
 				attrs:		attrs.clone(),
-				content:	retarget_inlines(content, map),
-			}),
-			Inline::Sup(content)	=> out.push(Inline::Sup(retarget_inlines(content, map))),
-			Inline::Sub(content)	=> out.push(Inline::Sub(retarget_inlines(content, map))),
-			Inline::Text(_) | Inline::Code(_) | Inline::Break	=> out.push(item.clone()),
-		}
+				content:	map_list(content, f),
+			},
+			Inline::Sup(content)	=> Inline::Sup(map_list(content, f)),
+			Inline::Sub(content)	=> Inline::Sub(map_list(content, f)),
+			Inline::Image { .. } | Inline::Text(_) | Inline::Code(_) | Inline::Break	=> item.clone(),
+		};
+		out.extend(f(inner));
 	}
 	out
 }
-
 
 /// The blocks that survive, at a given depth.
 fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
@@ -796,6 +807,42 @@ mod tests {
 		for gone in ["evil", "onload", "id="] {
 			assert!(!html.contains(gone), "{:?} survived: {}", gone, html);
 		}
+		Ok(())
+	}
+
+	/// An image deep in a table cell and a link is reached, rewritten with its attributes, and the
+	/// rest of the tree is as it was.
+	#[test]
+	fn test_every_inline_can_be_rewritten_11() -> Outcome<()> {
+		let img = Inline::Image {
+			src:	fmt!("img/a.jpg"),
+			alt:	fmt!("a"),
+			attrs:	Attrs { id: None, classes: Vec::new(), pairs: vec![(fmt!("width"), fmt!("9"))] },
+		};
+		let doc = Doc { blocks: vec![
+			Block::Table {
+				head:		None,
+				rows:		vec![Row(vec![Cell {
+					content:	vec![Inline::Link { to: fmt!("x"), content: vec![img.clone()] }],
+					header:		false,
+				}])],
+				cols:		Vec::new(),
+				caption:	Vec::new(),
+			},
+			Block::Para(vec![Inline::Text(fmt!("words")), img]),
+		] };
+		let out = map_inlines(&doc, |i| match i {
+			Inline::Image { alt, .. } => vec![Inline::Image {
+				src:	fmt!("/media/0.jpg"),
+				alt,
+				attrs:	Attrs::default(),
+			}],
+			other => vec![other],
+		});
+		let html = html::render(&out);
+		assert_eq!(html.matches("src=\"/media/0.jpg\"").count(), 2, "{}", html);
+		assert!(!html.contains("width"), "{}", html);
+		assert!(html.contains("href=\"x\"") && html.contains("words"), "{}", html);
 		Ok(())
 	}
 }
