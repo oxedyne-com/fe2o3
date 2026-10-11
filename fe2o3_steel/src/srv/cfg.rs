@@ -2708,6 +2708,12 @@ pub struct ServerConfig {
     pub log_files_max:                  u16,
     #[optional]
     pub log_max_age_days:               u16,
+    // The log file is synced to disk every `log_flush_ms` (zero means 1000), and at once after
+    // an error line, an archive and shutdown. `log_durable` syncs after every line instead.
+    #[optional]
+    pub log_flush_ms:                   u32,
+    #[optional]
+    pub log_durable:                    bool,
     pub server_address:                 String,         // typically "0.0.0.0"
     pub server_port_tcp:                u16,            // the primary HTTPS port
     // Optional plaintext HTTP listener port. When non-zero, Steel binds this port too and
@@ -2996,6 +3002,8 @@ impl Default for ServerConfig {
             log_file_max_bytes:             0,      // 1 MiB
             log_files_max:                  0,      // every archive kept
             log_max_age_days:               0,      // archives of any age kept
+            log_flush_ms:                   0,      // 1 s
+            log_durable:                    false,
             server_address:                 fmt!("0.0.0.0"),
             server_port_tcp:                8443,
             server_port_tcp_plaintext:      0,      // disabled by default
@@ -3059,6 +3067,12 @@ impl ServerConfig {
             d => Some(std::time::Duration::from_secs(d as u64 * 86_400)),
         };
         (max, keep, age)
+    }
+
+    /// The log file's sync interval and whether every line is synced, the zero interval read
+    /// as the default (see `log_flush_ms`).
+    pub fn log_flush(&self) -> (std::time::Duration, bool) {
+        (std::time::Duration::from_millis(self.log_flush_ms as u64), self.log_durable)
     }
 
     /// Validate the whole server configuration: each vhost's webroot, static

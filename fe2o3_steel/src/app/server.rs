@@ -208,13 +208,14 @@ impl AppShellContext {
         log_cfg.console = Some(logger_console_thread.chan.clone());
         (log_cfg.level, _) = res!(self.app_cfg.server_log_level());
         let (log_max, log_keep, log_age) = server_cfg.log_rotation();
+        let (log_flush, log_durable) = server_cfg.log_flush();
         log_cfg.file = Some(FileConfig::new(
             PathBuf::from(&root_path).join("www").join("logs"),
             self.app_cfg.app_name.clone(),
             "log".to_string(),
             0,
             Some(log_max), // Activate multiple log file archiving using this max size.
-        ).with_retention(log_keep, log_age));
+        ).with_retention(log_keep, log_age).with_flush(log_flush, log_durable));
         debug!("log_cfg = {:?}", log_cfg);
         log_set_config!(log_cfg);
         println!("Server now logging at {:?}", log_get_file_path!());
