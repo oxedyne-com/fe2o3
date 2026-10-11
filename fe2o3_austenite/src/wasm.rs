@@ -13,6 +13,15 @@
 //! UTF-16 code units. A project carrying `strict: true` turns a result that was not set as written into
 //! such a failure, so a partial PDF never reads as success.
 //!
+//! **The font pack.** The browser build (`--no-default-features --features wasm`) embeds no fonts. The host
+//! supplies the font pack, the twelve files of the crate's `fonts/` directory (`fonts::Embedded::BOOK`, each
+//! named by `Embedded::file`), in the project's `fonts` as `[[name, bytes], ...]`, as it supplies any font. A
+//! compile that reaches a pack family it was not given fails with a `missing_font` error and `needs` naming
+//! `font:Libertinus Serif`, `font:New Computer Modern Math` or `font:DejaVu Sans Mono`. The first such
+//! failure may name one family only, since an equation that cannot be set ends the compile before the text
+//! asks, so a host answers any `font:` need by supplying the whole pack. A native build embeds the pack
+//! (feature `embed-fonts`, on by default) and never asks.
+//!
 //! **Holding only the pages on screen.** `compileProjectDelta` keeps the laid-out pages of the compile it
 //! answered (their frames, not their SVG), and `renderPage` draws any one of them on request, byte for byte
 //! as the delta would have sent it. A consumer therefore holds the SVG of only the pages it shows: it sends

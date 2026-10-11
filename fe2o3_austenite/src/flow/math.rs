@@ -121,7 +121,9 @@ fn efield(elem: &Content, styles: &StyleChain, name: &str) -> Outcome<Option<Val
 fn prepare(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome<(StyleChain, Arc<MathFont>)> {
 	let st = styles.clone();
 	let book = res!(engine.fonts.book());
-	let found = resolve_font(&book, &res!(props::families(&st)), res!(props::fallback(&st)), res!(props::face_variant(&st)));
+	let families = res!(props::families(&st));
+	crate::flow::text::ask_for_face(engine, &book, families.iter().map(|f| f.as_str()));
+	let found = resolve_font(&book, &families, res!(props::fallback(&st)), res!(props::face_variant(&st)));
 	// No family of the list in the book, and no fallback to turn to, fails the equation.
 	let font = match found {
 		Ok(f)	=> f,

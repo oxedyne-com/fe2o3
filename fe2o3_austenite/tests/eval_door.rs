@@ -1602,3 +1602,44 @@ fn measure_the_kept_frames_of_a_300_page_book() -> Outcome<()> {
 	}
 	Ok(())
 }
+
+#[cfg(not(feature = "embed-fonts"))]
+#[test]
+fn a_build_without_fonts_asks_for_the_pack_families_and_compiles_once_they_are_supplied() -> Outcome<()> {
+	use oxedyne_fe2o3_austenite::fonts::Embedded;
+	// The host supplies the pack: the crate's own files, which are the faces a default build embeds.
+	let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+	let mut pack: Vec<(String, Vec<u8>)> = Vec::new();
+	for e in Embedded::BOOK {
+		pack.push((e.file().to_string(), res!(std::fs::read(dir.join(e.file())))));
+	}
+	for (src, want) in [
+		("Hello, world.\n",	"font:Libertinus Serif"),
+		("$x + 1$\n",			"font:New Computer Modern Math"),
+	] {
+		let mut inst = Instance::new();
+		let mut p = project(&[("/main.typ", src)]);
+		let f = match inst.compile_svg(&p) {
+			Ok(_)	=> return Err(err!("A build with no fonts compiled {:?} with none supplied.", src; Test)),
+			Err(f)	=> f,
+		};
+		assert_eq!(f.head.kind, DiagnosticKind::MissingFont, "{}", f.head);
+		assert_eq!(f.needs, vec![want.to_string()], "{:?} asks for its family", src);
+		p.fonts = pack.clone();
+		let made = match inst.compile_svg(&p) {
+			Ok(m)	=> m,
+			Err(f)	=> return Err(err!("{:?} with the pack supplied failed: {}", src, f.head; Test)),
+		};
+		assert!(made.needs.is_empty(), "{:?}", made.needs);
+		assert_eq!(made.product.len(), 1, "{:?} is set on one page", src);
+	}
+	let mut inst = Instance::new();
+	let mut p = project(&[("/main.typ", "Hello, world.\n")]);
+	p.fonts = pack;
+	let made = match inst.compile_svg(&p) {
+		Ok(m)	=> m,
+		Err(f)	=> return Err(err!("The text with the pack supplied first failed: {}", f.head; Test)),
+	};
+	assert!(text_layer(&made.product[0]).contains("Hello"), "the page is set in the supplied face");
+	Ok(())
+}
