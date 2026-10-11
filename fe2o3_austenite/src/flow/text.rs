@@ -1138,6 +1138,29 @@ pub fn shape_run(book: &FontBook, base: usize, text: &str, props: &Arc<TextProps
 	})
 }
 
+/// Asks the host for the font-pack family a list reaches before any family the book holds -- the face the
+/// text would have been set in -- as an error naming `font:<family>` in `needs`, once a compile. A build
+/// with the embedded faces holds every pack family, so this is silent there; a family outside the pack is
+/// left to Typst's `unknown font family` warning and the fallback.
+pub fn ask_for_face<'f, I: IntoIterator<Item = &'f str>>(engine: &mut Engine, book: &FontBook, families: I) {
+	for fam in families {
+		if book.has_family(&fam.to_lowercase()) {
+			return;
+		}
+		if let Some(need) = crate::fonts::need(fam) {
+			if !engine.diags.iter().any(|d| d.need.as_deref() == Some(need.as_str())) {
+				let family = need.trim_start_matches("font:").to_string();
+				let d = crate::diag::Diagnostic::error(crate::diag::DiagnosticKind::MissingFont,
+					crate::syntax::Span::detached(), fmt!("the font family {} is not loaded", family))
+					.with_hint("this build embeds no fonts, so the host supplies the family from the font pack")
+					.needing(need);
+				engine.diags.push(d);
+			}
+			return;
+		}
+	}
+}
+
 /// The first family from `from` with a face for the variant that is not yet exhausted, then Typst's
 /// fallback search; the face, its coverage and the index of the family after it.
 fn font_and_covers(ctx: &mut Ctx, text: &str, from: usize)
@@ -1714,6 +1737,7 @@ fn decorate(
 pub fn shape(engine: &mut Engine, text: &str, styles: &StyleChain) -> Outcome<ShapedText> {
 	let book = res!(engine.fonts.book());
 	let props = Arc::new(res!(props(styles)));
+	ask_for_face(engine, &book, props.families.iter().map(|f| f.name.as_str()));
 	let run = res!(shape_run(&book, 0, text, &props, props.rtl));
 	let size = props.size;
 	let mut fonts: Vec<Arc<oxedyne_fe2o3_font::font::Font>> = Vec::new();

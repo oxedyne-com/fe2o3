@@ -323,6 +323,13 @@ impl Instance {
 			};
 			return Err(Failure { head, rest, pages: None, skipped: report.skipped.clone(), needs });
 		}
+		// A pack family the host has not yet supplied (a build without the embedded faces) refuses the compile
+		// as a missing package does: pages set without their face would only mislead, and `needs` names it.
+		if let Some(i) = done.engine.diags.iter().position(|d| d.is_error() && d.need.is_some()) {
+			let mut rest = report.diagnostics.clone();
+			let head = rest.remove(i);
+			return Err(Failure { head, rest, pages: None, skipped: report.skipped.clone(), needs });
+		}
 		if p.strict {
 			if let Some(head) = report.strict_failure(&main) {
 				return Err(Failure::refused(head, &report, needs));

@@ -70,7 +70,9 @@ use std::sync::{
 // Mathematical Italic block, the upright operators and the large symbols, and an OpenType MATH table of
 // layout constants and grown-delimiter variants, which this module reads for its shifts, gaps and variants
 // (see the header). Until 2026-09-23 this was Latin Modern Math; some tuning notes below still name it.
-const MATH_FONT: &[u8] = crate::fonts::MATH;
+fn math_bytes() -> Outcome<&'static [u8]> {
+	crate::fonts::Embedded::Math.bytes()
+}
 
 /// The parsed maths font, built once and shared. Parsing the face is the costly part, so it is cached
 /// behind a [`OnceLock`]; a lost race merely parses twice and keeps the first.
@@ -79,7 +81,7 @@ fn math_font() -> Outcome<Arc<Font>> {
 	if let Some(f) = MATH.get() {
 		return Ok(f.clone());
 	}
-	let f = Arc::new(res!(Font::new(MATH_FONT.to_vec())));
+	let f = Arc::new(res!(Font::new(res!(math_bytes()).to_vec())));
 	let _ = MATH.set(f.clone());
 	Ok(f)
 }
@@ -92,7 +94,7 @@ fn math_table() -> Outcome<Option<Arc<MathTable>>> {
 	if let Some(t) = TABLE.get() {
 		return Ok(t.clone());
 	}
-	let parsed = res!(MathTable::parse(MATH_FONT)).map(Arc::new);
+	let parsed = res!(MathTable::parse(res!(math_bytes()))).map(Arc::new);
 	let _ = TABLE.set(parsed.clone());
 	Ok(parsed)
 }

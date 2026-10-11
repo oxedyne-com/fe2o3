@@ -145,7 +145,11 @@ impl FontLibrary {
 	/// mislead.
 	fn scan(dir: &Path) -> Self {
 		let mut faces: Vec<Declared> = Vec::new();
-		for bytes in EMBEDDED {
+		for face in Embedded::LIBRARY {
+			let bytes = match face.bytes() {
+				Ok(b)	=> b,
+				Err(_)	=> break,	// a build without the embedded faces
+			};
 			if let Ok(info) = FaceInfo::read(bytes) {
 				faces.push(Declared { info, bytes: Arc::new(bytes.to_vec()) });
 			}
@@ -220,6 +224,9 @@ pub fn same_family(a: &str, b: &str) -> bool {
 /// The families the crate embeds, which a document may name without supplying a file: the Libertinus
 /// reading set and the maths face. Normalised to the spelling Typst lists them under.
 pub fn embedded_families() -> Vec<String> {
+	if !EMBEDS {
+		return Vec::new();
+	}
 	vec![
 		"Libertinus Serif".to_string(),
 		"Libertinus Mono".to_string(),
@@ -441,7 +448,8 @@ fn missing_family(name: &str, site: &str, dir: &Path, lib: &FontLibrary) -> Erro
 /// still reaches ink (Typst's font fall-back). The mono role keeps Libertinus Mono, since Typst sets `raw`
 /// in its own face whatever the body family.
 fn reading_set(families: &[Option<Family>]) -> Outcome<FontSet> {
-	let chain = |bold: bool, italic: bool, embedded: &[u8]| -> Outcome<Font> {
+	let chain = |bold: bool, italic: bool, embedded: Embedded| -> Outcome<Font> {
+		let embedded = res!(embedded.bytes());
 		let mut faces: Vec<Face> = Vec::with_capacity(families.len() + 1);
 		let mut has_embedded = false;
 		for fam in families {
@@ -461,11 +469,11 @@ fn reading_set(families: &[Option<Family>]) -> Outcome<FontSet> {
 		Font::chain(faces)
 	};
 	Ok(FontSet::new(
-		res!(chain(false, false, SERIF)),
-		res!(chain(true, false, BOLD)),
-		res!(chain(false, true, ITALIC)),
-		res!(chain(true, true, BOLD_ITALIC)),
-		res!(Font::new(MONO.to_vec())),
+		res!(chain(false, false, Embedded::Serif)),
+		res!(chain(true, false, Embedded::Bold)),
+		res!(chain(false, true, Embedded::Italic)),
+		res!(chain(true, true, Embedded::BoldItalic)),
+		res!(Font::new(res!(Embedded::Mono.bytes()).to_vec())),
 	))
 }
 
@@ -486,40 +494,122 @@ fn load_variant(dir: &Path, name: &str, suffix: &str, slot: &mut Option<Variant>
 }
 
 // The embedded faces are Typst 0.15.1's own files (`typst-assets`), byte for byte, so a document that
-// names no font is shaped from the same glyph tables the oracle shapes from.
-const SERIF:			&[u8] = include_bytes!("../fonts/LibertinusSerif-Regular.otf");
-const BOLD:				&[u8] = include_bytes!("../fonts/LibertinusSerif-Bold.otf");
-const ITALIC:			&[u8] = include_bytes!("../fonts/LibertinusSerif-Italic.otf");
-const BOLD_ITALIC:		&[u8] = include_bytes!("../fonts/LibertinusSerif-BoldItalic.otf");
-const SEMIBOLD:			&[u8] = include_bytes!("../fonts/LibertinusSerif-Semibold.otf");
-const SEMIBOLD_ITALIC:	&[u8] = include_bytes!("../fonts/LibertinusSerif-SemiboldItalic.otf");
-const DEJAVU_MONO:		&[u8] = include_bytes!("../fonts/DejaVuSansMono.ttf");
-const DEJAVU_MONO_B:	&[u8] = include_bytes!("../fonts/DejaVuSansMono-Bold.ttf");
-const DEJAVU_MONO_O:	&[u8] = include_bytes!("../fonts/DejaVuSansMono-Oblique.ttf");
-const DEJAVU_MONO_BO:	&[u8] = include_bytes!("../fonts/DejaVuSansMono-BoldOblique.ttf");
-// The curated reader's mono role; the evaluator sets `raw` in DejaVu Sans Mono, as Typst does.
-const MONO:				&[u8] = include_bytes!("../fonts/LibertinusMono-Regular.otf");
+// names no font is shaped from the same glyph tables the oracle shapes from. They are compiled in only
+// with feature `embed-fonts` (on by default); the browser build leaves them out and takes them from the
+// host as the font pack, each family asked for in `needs` as `font:<family>` (see [`need`]).
+//
+// The maths face is New Computer Modern Math Book, the face Typst sets an equation in by default (its
+// weight is 450, which `exceptions` records), so an equation sets in the face the oracle sets it in and the
+// PDF names the same font. Its OpenType MATH table drives the maths layout (see `crate::math`). The Bold
+// face is the one Typst resolves a bold family request to; maths layout sets in the Book face alone.
 
-// The maths face: New Computer Modern Math Book, the face Typst sets an equation in by default (its weight is
-// 450, which `exceptions` records), so an equation sets in the face the oracle sets it in and the PDF names
-// the same font. Its OpenType MATH table drives the maths layout (see `crate::math`). The Bold face is the one
-// Typst resolves a bold family request to; maths layout sets in the Book face alone.
-pub(crate) const MATH:	&[u8] = include_bytes!("../fonts/NewCMMath-Book.otf");
-const MATH_BOLD:		&[u8] = include_bytes!("../fonts/NewCMMath-Bold.otf");
+pub const EMBEDS: bool = cfg!(feature = "embed-fonts");	// does this build carry the embedded faces?
 
-// Every embedded face, for the family library a document's `font:` is matched against.
-const EMBEDDED: [&[u8]; 6] = [SERIF, BOLD, ITALIC, BOLD_ITALIC, MONO, MATH];
+/// A face Typst embeds. Every use of an embedded face's bytes goes through [`Embedded::bytes`], the one
+/// place the build's `embed-fonts` feature is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Embedded {
+	Serif,
+	Bold,
+	Italic,
+	BoldItalic,
+	Semibold,
+	SemiboldItalic,
+	Mono,			// the curated reader's mono role; the evaluator sets `raw` in DejaVu Sans Mono, as Typst does
+	Math,
+	MathBold,
+	DejaVuMono,
+	DejaVuMonoBold,
+	DejaVuMonoOblique,
+	DejaVuMonoBoldOblique,
+}
+
+impl Embedded {
+	// The evaluator's book, which is the font pack a browser host serves.
+	pub const BOOK: [Embedded; 12] = [
+		Self::Serif, Self::Bold, Self::Italic, Self::BoldItalic, Self::Semibold, Self::SemiboldItalic,
+		Self::Math, Self::MathBold,
+		Self::DejaVuMono, Self::DejaVuMonoBold, Self::DejaVuMonoOblique, Self::DejaVuMonoBoldOblique,
+	];
+
+	// The family library a document's `font:` is matched against in the curated reader.
+	const LIBRARY: [Embedded; 6] = [Self::Serif, Self::Bold, Self::Italic, Self::BoldItalic, Self::Mono, Self::Math];
+
+	/// The family the face declares, as Typst lists it.
+	pub fn family(self) -> &'static str {
+		match self {
+			Self::Serif | Self::Bold | Self::Italic | Self::BoldItalic
+				| Self::Semibold | Self::SemiboldItalic					=> "Libertinus Serif",
+			Self::Mono													=> "Libertinus Mono",
+			Self::Math | Self::MathBold									=> "New Computer Modern Math",
+			Self::DejaVuMono | Self::DejaVuMonoBold
+				| Self::DejaVuMonoOblique | Self::DejaVuMonoBoldOblique	=> "DejaVu Sans Mono",
+		}
+	}
+
+	/// The file the face is, in the crate's `fonts/` directory and in the font pack.
+	pub fn file(self) -> &'static str {
+		match self {
+			Self::Serif					=> "LibertinusSerif-Regular.otf",
+			Self::Bold					=> "LibertinusSerif-Bold.otf",
+			Self::Italic				=> "LibertinusSerif-Italic.otf",
+			Self::BoldItalic			=> "LibertinusSerif-BoldItalic.otf",
+			Self::Semibold				=> "LibertinusSerif-Semibold.otf",
+			Self::SemiboldItalic		=> "LibertinusSerif-SemiboldItalic.otf",
+			Self::Mono					=> "LibertinusMono-Regular.otf",
+			Self::Math					=> "NewCMMath-Book.otf",
+			Self::MathBold				=> "NewCMMath-Bold.otf",
+			Self::DejaVuMono			=> "DejaVuSansMono.ttf",
+			Self::DejaVuMonoBold		=> "DejaVuSansMono-Bold.ttf",
+			Self::DejaVuMonoOblique		=> "DejaVuSansMono-Oblique.ttf",
+			Self::DejaVuMonoBoldOblique	=> "DejaVuSansMono-BoldOblique.ttf",
+		}
+	}
+
+	#[cfg(feature = "embed-fonts")]
+	pub fn bytes(self) -> Outcome<&'static [u8]> {
+		Ok(match self {
+			Self::Serif					=> include_bytes!("../fonts/LibertinusSerif-Regular.otf"),
+			Self::Bold					=> include_bytes!("../fonts/LibertinusSerif-Bold.otf"),
+			Self::Italic				=> include_bytes!("../fonts/LibertinusSerif-Italic.otf"),
+			Self::BoldItalic			=> include_bytes!("../fonts/LibertinusSerif-BoldItalic.otf"),
+			Self::Semibold				=> include_bytes!("../fonts/LibertinusSerif-Semibold.otf"),
+			Self::SemiboldItalic		=> include_bytes!("../fonts/LibertinusSerif-SemiboldItalic.otf"),
+			Self::Mono					=> include_bytes!("../fonts/LibertinusMono-Regular.otf"),
+			Self::Math					=> include_bytes!("../fonts/NewCMMath-Book.otf"),
+			Self::MathBold				=> include_bytes!("../fonts/NewCMMath-Bold.otf"),
+			Self::DejaVuMono			=> include_bytes!("../fonts/DejaVuSansMono.ttf"),
+			Self::DejaVuMonoBold		=> include_bytes!("../fonts/DejaVuSansMono-Bold.ttf"),
+			Self::DejaVuMonoOblique		=> include_bytes!("../fonts/DejaVuSansMono-Oblique.ttf"),
+			Self::DejaVuMonoBoldOblique	=> include_bytes!("../fonts/DejaVuSansMono-BoldOblique.ttf"),
+		})
+	}
+
+	#[cfg(not(feature = "embed-fonts"))]
+	pub fn bytes(self) -> Outcome<&'static [u8]> {
+		Err(err!("This build embeds no fonts (feature embed-fonts is off), so the {} face {} must be \
+			supplied by the host.", self.family(), self.file(); Missing, Configuration))
+	}
+}
+
+/// The `needs` entry for a family of the font pack that a compile reached and the book lacks, as
+/// `font:<family>`; none for any other family, which no host is expected to hold.
+pub fn need(key: &str) -> Option<String> {
+	Embedded::BOOK.iter()
+		.find(|e| same_family(e.family(), key))
+		.map(|e| fmt!("font:{}", e.family()))
+}
 
 /// The Libertinus Serif reading set: one face per role. Libertinus covers the Latin, punctuation and
 /// figures a set document needs, so each role is a single face; a symbol a document reaches for that the
 /// family lacks would fall to the not-defined glyph, which the demos do not hit.
 pub fn libertinus() -> Outcome<FontSet> {
 	Ok(FontSet::new(
-		res!(Font::new(SERIF.to_vec())),
-		res!(Font::new(BOLD.to_vec())),
-		res!(Font::new(ITALIC.to_vec())),
-		res!(Font::new(BOLD_ITALIC.to_vec())),
-		res!(Font::new(MONO.to_vec())),
+		res!(Font::new(res!(Embedded::Serif.bytes()).to_vec())),
+		res!(Font::new(res!(Embedded::Bold.bytes()).to_vec())),
+		res!(Font::new(res!(Embedded::Italic.bytes()).to_vec())),
+		res!(Font::new(res!(Embedded::BoldItalic.bytes()).to_vec())),
+		res!(Font::new(res!(Embedded::Mono.bytes()).to_vec())),
 	))
 }
 
@@ -874,12 +964,11 @@ impl FontBook {
 	/// Math in Book and Bold, and DejaVu Sans Mono in four.
 	pub fn embedded() -> Outcome<Self> {
 		let mut book = Self::default();
-		for bytes in [
-			SERIF, BOLD, ITALIC, BOLD_ITALIC, SEMIBOLD, SEMIBOLD_ITALIC,
-			MATH, MATH_BOLD,
-			DEJAVU_MONO, DEJAVU_MONO_B, DEJAVU_MONO_O, DEJAVU_MONO_BO,
-		] {
-			res!(book.add(bytes.to_vec()));
+		if !EMBEDS {
+			return Ok(book);
+		}
+		for face in Embedded::BOOK {
+			res!(book.add(res!(face.bytes()).to_vec()));
 		}
 		Ok(book)
 	}

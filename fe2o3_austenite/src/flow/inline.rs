@@ -711,6 +711,7 @@ pub fn prepare(
 		match seg {
 			Segment::Text(_, styles) => {
 				let props = res!(cache.get(&styles));
+				crate::flow::text::ask_for_face(engine, &book, props.families.iter().map(|f| f.name.as_str()));
 				res!(shape_range(&mut items, &book, &text, &levels, cursor, end, &props));
 			}
 			Segment::Item(item) => items.push(((cursor, end), item)),
