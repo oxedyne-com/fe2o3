@@ -2,6 +2,8 @@
 //! start, can be reproduced on a machine that has none of them.  Each is off until a test sets it,
 //! and each is process-wide, so a test that sets one runs in a test binary of its own.
 
+use crate::file::core::FileType;
+
 use oxedyne_fe2o3_jdat::Dat;
 
 use std::{
@@ -68,6 +70,10 @@ static FAULT_RECORDS:    AtomicU64  = AtomicU64::new(0);      // fault record wr
 static REPLAY_SYNC_FAILS: AtomicBool = AtomicBool::new(false); // the flush before replay fails
 static REPLAY_FLUSH_WAY: AtomicU64 = AtomicU64::new(0);      // 0 as the kernel allows, 1 syncfs, 2 per file
 static REPLAY_FLUSHES:   AtomicU64  = AtomicU64::new(0);      // syncfs or file syncs made before replay
+static DATA_TEAR_AT:     AtomicU64  = AtomicU64::new(u64::MAX); // the next data append fails after this many bytes
+static INDEX_TEAR_AT:    AtomicU64  = AtomicU64::new(u64::MAX); // the next index append fails after this many bytes
+static WRITES_TORN:      AtomicU64  = AtomicU64::new(0);      // appends failed by the two above
+static CUT_BACK_FAILS:   AtomicBool = AtomicBool::new(false); // a torn append cannot be cut back off
 static DURABILITY_MS:    AtomicU64  = AtomicU64::new(0);      // a store's durability timeout, when set
 static KERNEL_RELEASE:   Mutex<Option<String>> = Mutex::new(None); // in place of the running kernel's
 static HALT:             Mutex<Option<(Halt, std::path::PathBuf)>> = Mutex::new(None); // where to wait for a kill
@@ -416,6 +422,45 @@ pub fn set_head_insert_failure(on: bool) {
 
 pub(crate) fn head_insert_fails() -> bool {
     HEAD_INSERT_FAILS.load(Ordering::Relaxed)
+}
+
+/// Makes the writer's next append to a live file of type `typ` fail once `after` of its bytes are
+/// in the file, as a disk that fills or errors part-way through a write would.  It fires once;
+/// `None` disarms it.
+pub fn set_write_tear(typ: FileType, after: Option<u64>) {
+    let at = after.unwrap_or(u64::MAX);
+    match typ {
+        FileType::Data  => DATA_TEAR_AT.store(at, Ordering::SeqCst),
+        FileType::Index => INDEX_TEAR_AT.store(at, Ordering::SeqCst),
+    }
+}
+
+/// How many appends `set_write_tear` has failed so far.
+pub fn writes_torn() -> u64 {
+    WRITES_TORN.load(Ordering::SeqCst)
+}
+
+/// How many bytes the append now starting may write before it fails, if it is to fail.
+pub(crate) fn write_tears(typ: &FileType) -> Option<u64> {
+    let at = match typ {
+        FileType::Data  => DATA_TEAR_AT.swap(u64::MAX, Ordering::SeqCst),
+        FileType::Index => INDEX_TEAR_AT.swap(u64::MAX, Ordering::SeqCst),
+    };
+    if at == u64::MAX {
+        return None;
+    }
+    WRITES_TORN.fetch_add(1, Ordering::SeqCst);
+    Some(at)
+}
+
+/// Makes cutting a torn append back off its live file fail, as a disk that refuses the truncate
+/// as well would.
+pub fn set_cut_back_failure(on: bool) {
+    CUT_BACK_FAILS.store(on, Ordering::SeqCst);
+}
+
+pub(crate) fn cut_back_fails() -> bool {
+    CUT_BACK_FAILS.load(Ordering::SeqCst)
 }
 
 /// Makes every writer fail to hand a store's head to its syncer once the record is in the files,

@@ -34,11 +34,7 @@ use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
     fs::File,
-    io::{
-        Seek,
-        SeekFrom,
-        Write,
-    },
+    io::Write,
     sync::Arc,
 };
 
@@ -349,10 +345,16 @@ impl<
                 self.ozid(), fault.when, fault.error;
                 Write, Fatal));
         }
+        // A failed append is cut back off, so the next record starts where this one began.  The
+        // sizes are those of the pair the append went to, after any rollover, since a failure
+        // leaves them unchanged.
         let start = match self.write_to_file(FileType::Data, vec![&kbyts[..], &vstored[..]]) {
             Ok(start) => start,
             Err(e) => {
-                self.release_set(&role);
+                let upto = (self.lpair.dat.size, self.lpair.ind.size);
+                if self.cut_back(upto).is_ok() {
+                    self.release_set(&role);
+                }
                 return Err(e);
             },
         };
@@ -368,7 +370,15 @@ impl<
         let istored = &sfloc.buf;
 
         // Append key and location to the current index file.
-        res!(self.write_to_file(FileType::Index, vec![&kbyts[..], &istored[..]]));
+        // A failed index append withdraws the whole record, its data too, so a write reported
+        // failed does not come back when a later open rebuilds the index from the data.
+        if let Err(e) = self.write_to_file(FileType::Index, vec![&kbyts[..], &istored[..]]) {
+            let upto = (start, self.lpair.ind.size);
+            if self.cut_back(upto).is_ok() {
+                self.release_set(&role);
+            }
+            return Err(e);
+        }
         let ends = (self.lpair().dat.size, self.lpair().ind.size);
 
         // [11] The record is in the live pair, so say so before anything waits on the disk.  The
@@ -631,16 +641,8 @@ impl<
     /// Writes the given byte vector to the current `LivePair` for this zone, either to the data or
     /// index file.  This method starts a new `LivePair` data file when writing the given value
     /// would cause the current file to exceed the data file size limit.  The data to be written is
-    /// not modified in any way.
-    ///
-    /// # Arguments
-    /// * `typ` - `FileType::Data` or `FileType::Index`.
-    /// * `v` - bytes to write to the `LivePair`.
-    ///
-    /// # Errors
-    /// * The data length cannot exceed the maximum data file size.
-    /// * The process did not write all the data to file.
-    /// * The partially written data space could not be recovered.
+    /// not modified in any way.  An append that fails part-way leaves the writer's size of the
+    /// file where it was, so that `cut_back` can remove what got through.
     ///
     /// Returns the starting position in the file for the data sequence.
     fn write_to_file(
@@ -674,126 +676,127 @@ impl<
             start = start2;
         }
 
-        // [10] Write the data to the live file.
-        match typ {
-            FileType::Data => {
-                let mut bytes_written = 0;
-                for vi in v {
-                    // [10.1] Value bytes written here.  TODO concat and write once?
-                    match self.lpair_mut().dat.file.as_mut() {
-                        Some(file) => {
-                            match file.write(vi) {
-                                Err(e) => {
-                                    error!(sync_log::stream(), err!(e,
-                                        "{}: while writing to file, rewinding.", self.ozid();
-                                        IO, File, Write));
-                                    break;
-                                },
-                                Ok(n) => bytes_written += n,
-                            }
-                        },
-                        None => return Err(err!(
-                            "{}: The data file should not be None.", self.ozid();
-                            Unreachable)),
-                    }
-                }
-                if bytes_written < vlen {
-                    // [10.2] We have a problem, try and rewind the data file pointer.
-                    let msg = format!(
-                        "{}: Only {} of {} bytes was written to data file {:?}, but \
-                        the process has been aborted with no adverse effect on the \
-                        integrity of the database{}",
-                        self.ozid(), bytes_written, vlen, self.lpair().dat.path,
-                        if new_file { " (although a new file was started)" }
-                            else { "." },
-                    );
-                    // [10.3] Rewind the data file pointer.
-                    let len = self.lpair().dat.size - 1; 
-                    match self.lpair_mut().dat.file.as_mut() {
-                        Some(file) => res!(Self::rewind_file_pos(
-                            file,
-                            len,
-                            bytes_written,
-                            format!("{} An attempt to recover file space also failed, \
-                                again with no impact on database integrity", msg,
-                        ))),
-                        None => return Err(err!(
-                            "{}: The data file should not be None.", self.ozid();
-                            Unreachable, Bug)),
-                    }
-
-                    return Err(err!(
-                        "{} The {} bytes of file space were fully recovered.",
-                        msg, bytes_written;
-                        IO, File, Write));
-                } else {
-                    // [10.2] Good write, refresh the cached data file length.
-                    self.lpair_mut().dat.size = res!(self.lpair().dat.get_file_len());
+        // [10] Append to the live file.  A failure leaves the size where it was, for the caller
+        //      to cut the append back off.
+        let before = match typ {
+            FileType::Data  => self.lpair.dat.size,
+            FileType::Index => self.lpair.ind.size,
+        };
+        let appended = {
+            let lf = match typ {
+                FileType::Data  => &mut self.lpair.dat,
+                FileType::Index => &mut self.lpair.ind,
+            };
+            match lf.file.as_mut() {
+                Some(file)  => Some(Self::append(file, &v, &typ)),
+                None        => None,
+            }
+        };
+        let (written, failed) = match appended {
+            Some(a) => a,
+            None    => return Err(err!(
+                "{}: The {:?} file of live pair {} is not open.", self.ozid(), typ, self.lpair.fnum;
+                Unreachable, Bug)),
+        };
+        match failed {
+            None => {
+                match typ {
+                    FileType::Data  => self.lpair.dat.size = res!(self.lpair.dat.get_file_len()),
+                    // The index end feeds the durable mark: left stale, a fault cut the live
+                    // index back to where it began.
+                    FileType::Index => self.lpair.ind.size += written as u64,
                 }
                 Ok(start)
             },
-            FileType::Index => {
-                let mut bytes_written = 0;
-                for vi in v {
-                    // [10.4] Index bytes written here.
-                    match self.lpair_mut().ind.file.as_mut() {
-                        Some(file) => match file.write(vi) {
-                            Err(e) => {
-                                error!(sync_log::stream(), err!(e, 
-                                    "{}: while writing to file, rewinding.", self.ozid();
-                                    IO, File, Write));
-                                break;
-                            },
-                            Ok(n) => bytes_written += n,
-                        },
-                        None => return Err(err!(
-                            "{}: The index file should not be None.", self.ozid();
-                            Unreachable, Bug)),
-                    }
-                }
-                if bytes_written < vlen {
-                    return Err(err!(
-                        "{}: Only {} of {} bytes was written to index file {:?}, but \
-                        the process has been aborted with no adverse effect on the \
-                        integrity of the database{} The corruption will be detected on \
-                        next start up, triggering a more laborious scan of the associated \
-                        data file and a re-write of the index file.",
-                        self.ozid(), bytes_written, vlen, self.lpair().dat.path,
-                        if new_file { " (although a new file was started)" }
-                            else { "." };
-                        IO, File, Write));
-                    // Retain the corrupted index data, it will be detected and dealt
-                    // with on re-start.
-                }
-                // The index end feeds the durable mark: left stale, a fault cut the live index
-                // back to where it began.
-                self.lpair_mut().ind.size += bytes_written as u64;
-                Ok(start)
-            },
+            Some(e) => Err(err!(e,
+                "{}: Appending {} bytes to {:?} file of live pair {} at offset {} failed after                 {} bytes{}.", self.ozid(), vlen, typ, self.lpair.fnum, before,
+                written, if new_file { ", in a file just started" } else { "" };
+                IO, File, Write)),
         }
     }
 
-    fn rewind_file_pos(
-        file:           &mut File,
-        orig_pos:       u64,
-        bytes_written:  usize,
-        msg:            String,
-    )
-        -> Outcome<()>
-    {
-        match file.seek(SeekFrom::Start(orig_pos)) {
-            Err(e) => Err(err!(e, "{}.", msg; IO, File, Seek)),
-            Ok(actual_pos) => {
-                if actual_pos != orig_pos {
-                    Err(err!(
-                        "{}, the file cursor only rewound {} of the required {} bytes.",
-                        msg, actual_pos-orig_pos, bytes_written;
-                        IO, File, Seek))
-                } else {
-                    Ok(())
-                }
-            },
+    /// Cuts a failed append back off the live pair, to the last good lengths `upto`, and takes
+    /// the writer's sizes from the files.  They are opened for appending, so a seek back would
+    /// leave the torn bytes in place with the next record after them and its location wrong (QA
+    /// F4).  A cut that fails stops the store through its fault, whose record has the next open
+    /// cut the pair back to `upto`.
+    fn cut_back(&mut self, upto: (u64, u64)) -> Outcome<()> {
+        let e = match self.try_cut_back(upto) {
+            Ok(())  => return Ok(()),
+            Err(e)  => e,
+        };
+        let e = err!(e,
+            "{}: A failed append could not be cut back off live pair {}, so the store has \
+            stopped writing.  Restart the store; the open cuts the pair back to {} data and {} \
+            index bytes.", self.ozid(), self.lpair.fnum, upto.0, upto.1;
+            IO, File, Write, Fatal);
+        let cut = Cut {
+            zone:       self.wind().z(),
+            fnum:       self.lpair.fnum,
+            data:       self.lpair.dat.path.clone(),
+            data_upto:  upto.0,
+            index:      self.lpair.ind.path.clone(),
+            index_upto: upto.1,
+        };
+        error!(sync_log::stream(), e.clone());
+        let root = self.api().db_root().to_path_buf();
+        self.api().chans().fault().raise(&root, vec![cut], &e);
+        Err(e)
+    }
+
+    fn try_cut_back(&mut self, upto: (u64, u64)) -> Outcome<()> {
+        if hooks::cut_back_fails() {
+            return Err(err!(
+                "Live pair {} could not be cut back to ({}, {}) (test::hooks).",
+                self.lpair.fnum, upto.0, upto.1;
+                IO, File, Write));
         }
+        for (lf, to) in [(&mut self.lpair.dat, upto.0), (&mut self.lpair.ind, upto.1)] {
+            let file = match &lf.file {
+                Some(file)  => file,
+                None        => continue, // nothing was opened, so nothing was appended
+            };
+            let len = res!(lf.get_file_len());
+            if len > to {
+                if let Err(e) = file.set_len(to) {
+                    return Err(err!(e,
+                        "Cannot cut the failed append off {:?} from {} back to {}.",
+                        lf.path, len, to;
+                        IO, File, Write));
+                }
+            }
+            lf.size = res!(lf.get_file_len());
+            if lf.size != to {
+                return Err(err!(
+                    "After cutting a failed append off {:?}, it holds {} bytes, not the last good \
+                    length {}.", lf.path, lf.size, to;
+                    IO, File, Write, Mismatch));
+            }
+        }
+        Ok(())
+    }
+
+    // Appends the slices in order, returning the bytes that reached the file and the error that
+    // stopped it short, if one did.
+    fn append(file: &mut File, v: &[&[u8]], typ: &FileType) -> (usize, Option<std::io::Error>) {
+        let mut left = match hooks::write_tears(typ) {
+            Some(n) => n as usize,
+            None    => usize::MAX,
+        };
+        let mut done = 0;
+        for vi in v {
+            let n = vi.len().min(left);
+            if let Err(e) = file.write_all(&vi[..n]) {
+                return (done, Some(e));
+            }
+            done += n;
+            if n < vi.len() {
+                return (done, Some(std::io::Error::other(
+                    "The append was torn part-way (test::hooks).")));
+            }
+            left -= n;
+        }
+        (done, None)
     }
 }
 
