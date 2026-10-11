@@ -15,8 +15,8 @@ as total minus embedded fonts.  `--limit-mb` is the proposed pass line (owner de
 first binary's raw size must not exceed it, and the exit status says whether it did.
 
 A release build strips the `name` section, so attribution needs a measurement build that keeps
-it, for instance `wasm-pack build --profiling --target web --features wasm` or a raw
-`cargo build --release --target wasm32-unknown-unknown --features wasm`.  Without names the
+it, for instance `wasm-pack build --profiling --target web --no-default-features --features wasm` or a raw
+`cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm`.  Without names the
 attribution table is omitted and the report says so.
 
 Standard library only: no dependency is installed for this.  Brotli is reported when the

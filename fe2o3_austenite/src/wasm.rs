@@ -47,6 +47,11 @@
 //! one `[w, h]` a page in the same order and in the units of the page's SVG `viewBox` (whole points), window
 //! or none, so a page not yet fetched is laid out at its true size from the first frame. The kept pages are replaced by the
 //! next successful delta and by nothing else, so a failed compile leaves the last good pages drawable.
+//!
+//! **Plugins.** To run WebAssembly plugins, give the recipe above `--features wasm,plugin`. `plugin` is a
+//! default feature for the native build, so only `--no-default-features` keeps it out. Measured on 2026-10-12
+//! (`wasm-pack` release profile, gzip -9, no fonts), the module is 7.53 MB raw and 3.25 MB gzipped without it and 9.07 MB and 3.69 MB with it. A package
+//! that carries a plugin's `.wasm` needs that file supplied with the package's others, as bytes.
 
 use crate::caches::Counters;
 use crate::compile::{

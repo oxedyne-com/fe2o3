@@ -158,7 +158,7 @@ baseline.
 ## Wasm legs are best-effort
 
 The wasm legs run the tree's own build when `--aust-vendor DIR` (or `AUST_VENDOR`) names a
-`wasm-pack build fe2o3_austenite --release --target web --features wasm` output, and otherwise
+`wasm-pack build fe2o3_austenite --release --target web --no-default-features --features wasm` output, and otherwise
 Daimond's vendored copies, which are whatever was last shipped. They run only when the copies
 are present:
 `~/usr/code/web/apps/oxedyne/daimond/www/vendor/austenite/` and `.../vendor/typst/`.
