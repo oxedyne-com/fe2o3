@@ -137,7 +137,7 @@ fn describe(r: &Outcome<Option<(Dat, Meta<{ UID_LEN }, Uid>)>>) -> String {
         Ok(Some((Dat::BU64(b), _))) if !b.is_empty()
             && b.iter().enumerate().all(|(j, x)| *x == b[0] ^ (j as u8)) => fmt!("{}/{}", b.len(), b[0]),
         Ok(Some((d, _))) => fmt!("TORN:{:?}", d).chars().take(100).collect(),
-        Err(e) => fmt!("ERR:{}", fmt!("{}", e).chars().take(200).collect::<String>()),
+        Err(e) => fmt!("ERR:{}", fmt!("{}", e).chars().take(800).collect::<String>()),
     }
 }
 

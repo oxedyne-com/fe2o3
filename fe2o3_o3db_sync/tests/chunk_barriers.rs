@@ -2,9 +2,10 @@
 //! never answered before a barrier covers them, and the store asks each writer it used for one
 //! behind them, so a chunk must not trip the timed or every-N barrier as well: that barrier would
 //! cover only the chunks taken so far, and the rest would wait on a second one, in series (M1).
-//! Barriers are counted with `hooks::barriers_by_writer`, not timed.  The chunk phase is read at
-//! the head hold, once every chunk is answered and before the head is sent.  The hooks are
-//! process-wide, so the tests run one at a time.
+//! Nor does one put spread its chunks over every writer of a zone (M3).  Barriers are counted
+//! with `hooks::barriers_by_writer`, not timed.  The chunk phase is read at the head hold, once
+//! every chunk is answered and before the head is sent.  The hooks are process-wide, so the
+//! tests run one at a time.
 
 mod gc_pair;
 
@@ -160,6 +161,11 @@ fn run_layouts(p: Policy, settle: Duration, tag: &str) -> Outcome<Vec<String>> {
             if worst > 1 {
                 bad.push(fmt!("{:?} {}x{} {} bytes: a writer made {} barriers in the chunk phase {:?}",
                     p, z, w, len, worst, phase));
+            }
+            // M3: one writer per zone per put.
+            if phase.len() > z as usize {
+                bad.push(fmt!("{:?} {}x{} {} bytes: {} writers barriered for {} zones {:?}",
+                    p, z, w, len, phase.len(), z, phase));
             }
         }
         println!("BARRIERS {:?} {}x{}: {}", p, z, w, counts.join(" "));

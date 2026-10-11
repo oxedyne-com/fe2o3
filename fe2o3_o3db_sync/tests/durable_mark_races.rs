@@ -170,7 +170,7 @@ fn read_after_cut(db: &TestDb, root: &Path, c: &OzoneConfig, to: &str, keys: &[D
 #[test]
 fn a_chunk_answer_waits_for_its_barrier() -> Outcome<()> {
     let _g = lock();
-    for p in [Policy::Interval(3_600_000), Policy::Never, Policy::EveryN(100_000)] {
+    for p in [Policy::Interval(3_600_000), Policy::Interval(200), Policy::Never, Policy::EveryN(100_000)] {
         for (z, w) in [(1u16, 1u16), (2, 2)] {
             let label = fmt!("{:?} {}x{}", p, z, w);
             let c = res!(cfg(p, z, w));

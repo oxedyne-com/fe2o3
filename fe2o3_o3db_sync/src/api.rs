@@ -8,6 +8,7 @@ use crate::{
             OzoneBotId,
         },
         index::{
+            BotPoolInd,
             WorkerInd,
             ZoneInd,
         },
@@ -822,8 +823,11 @@ impl<
         }
     }
 
-    /// This is the write dispatch method, where `WriterBots` are chosen randomly.  Callers must
-    /// ensure the value is wrapped in a `Dat::BU64`.  Returns the writer each message went to.
+    /// This is the write dispatch method.  One `WriterBot` is drawn at random for each zone the
+    /// messages go to, and every message for that zone goes to it, so that a store's chunks are
+    /// covered by one barrier per zone rather than one per writer they happen to land on; the
+    /// load still spreads across calls.  Callers must ensure the value is wrapped in a
+    /// `Dat::BU64`.  Returns the writer each message went to.
     ///
     /// # Local errors
     /// * The write request message cannot be sent via a `WriterBot` channel.
@@ -834,9 +838,18 @@ impl<
         -> Outcome<Vec<WorkerInd>>
     {
         let mut took = Vec::with_capacity(msgs.len());
+        let mut drawn: Vec<(ZoneInd, BotPoolInd)> = Vec::new(); // this call's writer per zone
         for (msg, zind) in msgs {
             let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, &zind));
-            let (bot, bpind) = wbots.choose_bot(&ChooseBot::Randomly);
+            let bpind = match drawn.iter().find(|(z, _)| *z == zind) {
+                Some((_, b)) => *b,
+                None => {
+                    let (_, b) = wbots.choose_bot(&ChooseBot::Randomly);
+                    drawn.push((zind, b));
+                    b
+                },
+            };
+            let bot = res!(wbots.get_bot(*bpind));
             let wind = WorkerInd::new(zind, bpind);
             match bot.send(msg) {
                 Err(e) => return Err(err!(e,
