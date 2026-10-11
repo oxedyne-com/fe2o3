@@ -58,6 +58,7 @@ pub use self::write::{
 	escape_attr,
 	escape_text,
 	render,
+	render_inlines,
 	render_with,
 };
 

@@ -62,6 +62,17 @@ pub fn render_with(doc: &Doc, opts: &Opts) -> String {
 	out
 }
 
+/// Renders a run of inlines to HTML, with no block around it.
+///
+/// For a caller whose page sets a line of prose inside an element of its own -- a lede in a classed
+/// `p`, a subtitle, a table cell of page furniture -- where [`render`] would wrap it in a `p` the
+/// caller must not have.
+pub fn render_inlines(content: &[Inline], opts: &Opts) -> String {
+	let mut out = String::new();
+	inlines(&mut out, content, opts);
+	out
+}
+
 /// Writes an opening tag.
 ///
 /// Tags are pushed rather than formatted because this crate's own [`fmt`](crate::fmt) module shadows
@@ -713,6 +724,19 @@ mod tests {
 	}
 
 	/// Emphasis and strong emphasis are distinct, and nest.
+	#[test]
+	fn test_inlines_render_without_a_block_21() {
+		let line = vec![
+			Inline::Text("A ".to_string()),
+			Inline::Emph { strong: false, content: text("named") },
+			Inline::Text(" <line>".to_string()),
+		];
+		assert_eq!(render_inlines(&line, &Opts::default()), "A <em>named</em> &lt;line&gt;");
+		let rel = Opts { link_rel: Some("nofollow".to_string()) };
+		let link = vec![Inline::Link { to: "/a".to_string(), content: text("a") }];
+		assert_eq!(render_inlines(&link, &rel), "<a href=\"/a\" rel=\"nofollow\">a</a>");
+	}
+
 	#[test]
 	fn test_emphasis_nests_10() -> Outcome<()> {
 		let doc = Doc {
