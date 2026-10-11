@@ -199,9 +199,9 @@ pub(crate) fn page_id(page: &Page) -> u64 {
 fn page_key(page: &Page, body: &[Placed]) -> Fingerprint {
 	let mut h = Fingerprinter::new();
 	h.write(b"page");
-	let size = page.geom.media_box();
-	h.write_usize(size.x.as_usize());
-	h.write_usize(size.y.as_usize());
+	let (w, ht) = page_size(page);
+	h.write_usize(w);
+	h.write_usize(ht);
 	for p in body {
 		h.write_i32(p.x.raw());
 		h.write_i32(p.y.raw());
@@ -259,8 +259,14 @@ fn hash_graphic(g: &Graphic, h: &mut Fingerprinter) {
 }
 
 fn assemble(page: &Page, defs: &GlyphDefs, ink: &str, tspans: &str) -> String {
+	let (w, h) = page_size(page);
+	assemble_sized(w, h, defs, ink, tspans)
+}
+
+/// The page's width and height as its SVG writes them, in the `viewBox` and `width`/`height`: whole points.
+pub fn page_size(page: &Page) -> (usize, usize) {
 	let size = page.geom.media_box();
-	assemble_sized(size.x.as_usize(), size.y.as_usize(), defs, ink, tspans)
+	(size.x.as_usize(), size.y.as_usize())
 }
 
 /// Wraps the glyph outlines, the visible ink and the selectable tspans of a page `w` by `h` points in the

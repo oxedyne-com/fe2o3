@@ -7,11 +7,14 @@
 //! identity so the consumer caches the rest:
 //!
 //! ```text
-//! { version, order: [id, ...], changed: [{ id, svg }, ...], reset }
+//! { version, order: [id, ...], sizes: [[w, h], ...], changed: [{ id, svg }, ...], reset }
 //! ```
 //!
 //! * `order` is the full per-compile sequence of page ids. The consumer renders in this order, keeping a
 //!   cache keyed by id and dropping any id absent from `order`.
+//! * `sizes` holds each page's width and height in `order`'s order, in the units of its SVG `viewBox`
+//!   (whole points), whether or not the page's SVG is sent, so a page not yet drawn is laid out at its true
+//!   size from the first frame.
 //! * `changed` carries the SVG of only those pages whose id is new this compile (not in the consumer's
 //!   prior set), so a page the consumer already holds is never resent.
 //! * `version` is a monotonic counter, stepped each compile, for the consumer to order deltas by.
@@ -67,6 +70,7 @@ use std::collections::HashSet;
 pub struct PageDelta {
 	pub version:	u32,
 	pub order:		Vec<u64>,			// every page's content id, in reading order
+	pub sizes:		Vec<(usize, usize)>,	// each page's viewBox width and height, in `order`'s order
 	pub changed:	Vec<(u64, String)>,	// (id, svg) for each id new this compile, rendered once
 	pub reset:		bool,				// true when the prior set was empty, so `changed` carries all of `order`
 	pub rendered:	u32,				// the SVG documents this compile drew, which is `changed.len()`
@@ -75,7 +79,7 @@ pub struct PageDelta {
 impl PageDelta {
 	/// The whole delta from its head and the changed pages a [`Changed`] collected.
 	pub fn of(head: Head, changed: Vec<(u64, String)>) -> Self {
-		Self { version: head.version, order: head.order, changed, reset: head.reset, rendered: head.rendered }
+		Self { version: head.version, order: head.order, sizes: head.sizes, changed, reset: head.reset, rendered: head.rendered }
 	}
 }
 
@@ -84,6 +88,7 @@ impl PageDelta {
 pub struct Head {
 	pub version:	u32,
 	pub order:		Vec<u64>,
+	pub sizes:		Vec<(usize, usize)>,
 	pub reset:		bool,
 	pub rendered:	u32,
 }
@@ -181,8 +186,9 @@ impl Builder {
 			self.rendered += 1;
 			res!(out.take(*id, drawn));
 		}
+		let sizes = self.pages.iter().map(svg::page_size).collect();
 		let kept = Kept { version: self.version, order: self.order.clone(), pages: std::mem::take(&mut self.pages) };
-		Ok((Head { version: self.version, order: self.order, reset: self.reset, rendered: self.rendered }, kept))
+		Ok((Head { version: self.version, order: self.order, sizes, reset: self.reset, rendered: self.rendered }, kept))
 	}
 }
 

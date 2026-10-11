@@ -18,7 +18,9 @@
 //! as the delta would have sent it. A consumer therefore holds the SVG of only the pages it shows: it sends
 //! `known` as the ids it still holds and `want: [from, to]` as the span of `order` it shows, and the delta
 //! sends the SVG of the changed pages inside that span alone, with the whole `order` as ever. A page that
-//! scrolls into view and is not held is fetched with `renderPage(id)`. The kept pages are replaced by the
+//! scrolls into view and is not held is fetched with `renderPage(id)`. Beside `order` the delta sends `sizes`,
+//! one `[w, h]` a page in the same order and in the units of the page's SVG `viewBox` (whole points), window
+//! or none, so a page not yet fetched is laid out at its true size from the first frame. The kept pages are replaced by the
 //! next successful delta and by nothing else, so a failed compile leaves the last good pages drawable.
 
 use crate::caches::Counters;
@@ -95,8 +97,8 @@ impl DaimondTypst {
 	}
 
 	/// The live-view path Daimond consumes: compiles a project to a changed-only page delta, returning
-	/// `{ version, order: string[], changed: [{ id, svg }], reset, pages, diagnostics, skipped, needs }`
-	/// on success or `{ error, diagnostics, skipped, needs }` otherwise, `strict` as for
+	/// `{ version, order: string[], sizes: [w, h][], changed: [{ id, svg }], reset, pages, diagnostics,
+	/// skipped, needs }` on success or `{ error, diagnostics, skipped, needs }` otherwise, `strict` as for
 	/// [`Self::compile_project`]. The project carries `known: string[]`, the ids the consumer still holds
 	/// in its own SVG cache; only the pages whose id is not among them carry their SVG in `changed`. A
 	/// consumer that has cleared its cache sends `known: []` and gets a full resend (`reset: true`). The
@@ -582,7 +584,8 @@ impl Changed for JsChanged {
 	}
 }
 
-/// `{ version, order: string[], changed: [{ id, svg }], reset, pages, diagnostics, skipped, needs, counters }`.
+/// `{ version, order: string[], sizes: [w, h][], changed: [{ id, svg }], reset, pages, diagnostics, skipped,
+/// needs, counters }`.
 /// Ids (page content hashes) are decimal strings, since a JavaScript number holds only 53 bits exactly and
 /// would silently corrupt a 64-bit hash; the consumer treats them as opaque keys.
 fn ok_delta(made: &Made<(Head, JsChanged)>) -> JsValue {
@@ -594,6 +597,14 @@ fn ok_delta(made: &Made<(Head, JsChanged)>) -> JsValue {
 		order.push(&JsValue::from_str(&fmt!("{}", id)));
 	}
 	set(&obj, "order", &order);
+	let sizes = js_sys::Array::new();
+	for (w, h) in &head.sizes {
+		let pair = js_sys::Array::new();
+		pair.push(&JsValue::from_f64(*w as f64));
+		pair.push(&JsValue::from_f64(*h as f64));
+		sizes.push(&pair);
+	}
+	set(&obj, "sizes", &sizes);
 	set(&obj, "changed", &changed.arr);
 	set(&obj, "reset", &JsValue::from_bool(head.reset));
 	set_report(&obj, &made.report, &made.needs);

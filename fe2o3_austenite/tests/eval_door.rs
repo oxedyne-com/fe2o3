@@ -1495,6 +1495,45 @@ fn a_window_limits_what_the_delta_sends_and_a_page_outside_it_is_drawn_on_reques
 	Ok(())
 }
 
+/// The `viewBox` width and height a page's SVG declares.
+fn view_box(svg: &str) -> Outcome<(usize, usize)> {
+	let rest = res!(svg.split("viewBox=\"0 0 ").nth(1).ok_or_else(|| err!("The SVG has no viewBox."; Test)));
+	let mut nums = rest.split(|c: char| c == ' ' || c == '"');
+	let w = res!(res!(nums.next().ok_or_else(|| err!("The viewBox has no width."; Test))).parse::<usize>());
+	let h = res!(res!(nums.next().ok_or_else(|| err!("The viewBox has no height."; Test))).parse::<usize>());
+	Ok((w, h))
+}
+
+#[test]
+fn the_delta_sends_every_pages_size_as_its_svg_declares_it_window_or_none() -> Outcome<()> {
+	let src = "#set page(width: 220pt, height: 100pt, margin: 12pt)\nFirst.\n\
+		#set page(width: 300.6pt, height: 150pt)\nSecond.\n\
+		#set page(width: 120pt, height: 400pt)\nThird.\n\
+		#set page(paper: \"a5\")\nFourth.\n";
+	let mut inst = Instance::new();
+	let mut p = strict(&[("/main.typ", src)]);
+	let d = res!(delta_made(&mut inst, &p)).product;
+	assert_eq!(d.order.len(), 4, "four pages");
+	assert_eq!(d.sizes.len(), d.order.len(), "one size a page in order");
+	assert_eq!(d.changed.len(), 4, "no window sends every page");
+	for (id, svg) in &d.changed {
+		let i = res!(d.order.iter().position(|o| o == id).ok_or_else(|| err!("Page {} is not in order.", id; Test)));
+		assert_eq!(d.sizes[i], res!(view_box(svg)), "page {}'s size is its viewBox", i);
+	}
+	assert!(d.sizes[0] != d.sizes[1] && d.sizes[1] != d.sizes[2], "the pages differ in size: {:?}", d.sizes);
+	// A window sends one page's SVG and still every page's size.
+	p.known = Vec::new();
+	p.want = Some(Window { from: 1, to: 2 });
+	let w = res!(delta_made(&mut inst, &p)).product;
+	assert_eq!(w.changed.len(), 1);
+	assert_eq!(w.sizes, d.sizes, "the sizes are every page's, the window or not");
+	for i in 0..w.order.len() {
+		let (_, _, svg) = res!(page_svg(&inst, PageAt::Index(i)));
+		assert_eq!(w.sizes[i], res!(view_box(&svg)), "page {} drawn on request has the size the delta sent", i);
+	}
+	Ok(())
+}
+
 #[test]
 fn a_failed_compile_leaves_the_last_deltas_pages_drawable() -> Outcome<()> {
 	let mut inst = Instance::new();
