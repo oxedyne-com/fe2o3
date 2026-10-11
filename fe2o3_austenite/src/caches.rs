@@ -13,6 +13,11 @@
 //! here, stepped by [`Caches::begin`], swept by [`Caches::end`] and emptied by [`Caches::clear`].
 
 use crate::eval::eval::library;
+#[cfg(feature = "plugin")]
+use crate::eval::plugin::{
+	Plugin,
+	PluginFunc,
+};
 use crate::eval::value::Value;
 use crate::flow::par::ParMemo;
 use crate::fonts::ShapeStats;
@@ -20,9 +25,15 @@ use crate::fonts::ShapeStats;
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
+#[cfg(feature = "plugin")]
+use oxedyne_fe2o3_data::gen_map::GenMap;
+
+#[cfg(feature = "plugin")]
+use std::sync::Arc;
 
 pub const PAR_BUDGET:	usize = 16 << 20;	// bytes of laid paragraphs a session keeps by default
 pub const SHAPE_BUDGET:	usize = 32 << 20;	// bytes of shaped runs a session keeps by default
+pub const PLUGIN_BUDGET:	usize = 64 << 20;	// bytes of loaded plugins and their results a session keeps
 
 // The largest whole number JavaScript holds exactly.
 const JS_WHOLE: f64 = 9_007_199_254_740_991.0;
@@ -91,6 +102,8 @@ pub struct Counters {
 	pub relaid:			u64,	// pages laid again
 	pub par_hits:		u64,
 	pub par_misses:		u64,
+	pub plugin_hits:	u64,	// loads, transitions and calls answered from the memo
+	pub plugin_misses:	u64,	// and those run
 	pub shapes:			ShapeStats,
 }
 
@@ -148,6 +161,8 @@ pub struct Caches {
 	pub budgets:	Budgets,
 	pub counters:	Counters,			// this compile's
 	pub pars:		ParMemo,			// the paragraphs broken into lines
+	#[cfg(feature = "plugin")]
+	pub plugins:	PluginMemo,			// plugins loaded and transitioned, and their calls' results
 	config:			Option<Fingerprint>,	// what the entries were made under, none before the first compile
 	resets:			u64,				// how many times a changed configuration emptied them
 }
@@ -172,17 +187,23 @@ impl Caches {
 		self.config		= Some(config);
 		self.counters	= Counters::default();
 		self.pars.begin(self.budgets.pars);
+		#[cfg(feature = "plugin")]
+		self.plugins.begin();
 		moved
 	}
 
 	/// Closes the compile: each cache drops what neither this compile nor the one before touched.
 	pub fn end(&mut self) {
 		self.pars.sweep();
+		#[cfg(feature = "plugin")]
+		self.plugins.sweep();
 	}
 
 	/// Empties every cache. A panic, which leaves entries of unknown worth, drops the whole session instead.
 	pub fn clear(&mut self) {
 		self.pars.clear();
+		#[cfg(feature = "plugin")]
+		self.plugins.clear();
 	}
 
 	/// The configuration the entries were made under.
@@ -190,4 +211,113 @@ impl Caches {
 
 	/// How many times a changed configuration has emptied the caches.
 	pub fn resets(&self) -> u64 { self.resets }
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ PLUGINS                                                                    │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Plugins memoised as Typst memoises them: a load by the module's bytes, and a call or a transition by the
+/// function's fingerprint, which names the module, the transitions its plugin came through (FIX-9) and the
+/// function, together with the bytes of every argument. A plugin is deterministic, so a hit is the answer
+/// the call would give. Failures are not kept; they run again, under the same limits.
+#[cfg(feature = "plugin")]
+#[derive(Debug)]
+pub struct PluginMemo {
+	loads:	GenMap<Fingerprint, Arc<Plugin>>,
+	steps:	GenMap<Fingerprint, Arc<Plugin>>,	// transitions
+	calls:	GenMap<Fingerprint, Arc<Vec<u8>>>,
+}
+
+#[cfg(feature = "plugin")]
+impl Default for PluginMemo {
+	fn default() -> Self {
+		Self {
+			loads:	GenMap::new(PLUGIN_BUDGET),
+			steps:	GenMap::new(PLUGIN_BUDGET),
+			calls:	GenMap::new(PLUGIN_BUDGET),
+		}
+	}
+}
+
+#[cfg(feature = "plugin")]
+impl PluginMemo {
+	fn begin(&mut self) {
+		self.loads.begin();
+		self.steps.begin();
+		self.calls.begin();
+	}
+
+	fn sweep(&mut self) {
+		self.loads.sweep();
+		self.steps.sweep();
+		self.calls.sweep();
+	}
+
+	fn clear(&mut self) {
+		self.loads.clear();
+		self.steps.clear();
+		self.calls.clear();
+	}
+
+	/// The entries held: loads, transitions and calls.
+	pub fn len(&self) -> (usize, usize, usize) { (self.loads.len(), self.steps.len(), self.calls.len()) }
+}
+
+// A call or transition: the function, then each argument's length and bytes.
+#[cfg(feature = "plugin")]
+fn plugin_key(tag: u8, f: &PluginFunc, args: &[Arc<Vec<u8>>]) -> Fingerprint {
+	let mut h = Fingerprinter::new();
+	h.write_u8(tag);
+	h.write_fingerprint(f.fingerprint());
+	h.write_usize(args.len());
+	for a in args {
+		h.write_usize(a.len());
+		h.write_fingerprint(Fingerprint::of(a));
+	}
+	h.finish()
+}
+
+#[cfg(feature = "plugin")]
+impl Caches {
+	/// `plugin(source)`, memoised on the module's bytes.
+	pub fn plugin_load(&mut self, bytes: &[u8]) -> Outcome<Arc<Plugin>> {
+		let key = Fingerprint::of(bytes);
+		if let Some(p) = self.plugins.loads.get(&key) {
+			self.counters.plugin_hits += 1;
+			return Ok(p.clone());
+		}
+		self.counters.plugin_misses += 1;
+		let p = Arc::new(res!(Plugin::load(bytes)));
+		let size = p.size();
+		self.plugins.loads.insert(key, p.clone(), size);
+		Ok(p)
+	}
+
+	/// `plugin.transition(f, ..args)`, memoised on the function and the arguments' bytes.
+	pub fn plugin_transition(&mut self, f: &PluginFunc, args: Vec<Arc<Vec<u8>>>) -> Outcome<Arc<Plugin>> {
+		let key = plugin_key(b't', f, &args);
+		if let Some(p) = self.plugins.steps.get(&key) {
+			self.counters.plugin_hits += 1;
+			return Ok(p.clone());
+		}
+		self.counters.plugin_misses += 1;
+		let p = Arc::new(res!(f.transition(args)));
+		let size = p.size();
+		self.plugins.steps.insert(key, p.clone(), size);
+		Ok(p)
+	}
+
+	/// `f(..args)` for a plugin function, memoised on the function and the arguments' bytes.
+	pub fn plugin_call(&mut self, f: &PluginFunc, args: Vec<Arc<Vec<u8>>>) -> Outcome<Arc<Vec<u8>>> {
+		let key = plugin_key(b'c', f, &args);
+		if let Some(out) = self.plugins.calls.get(&key) {
+			self.counters.plugin_hits += 1;
+			return Ok(out.clone());
+		}
+		self.counters.plugin_misses += 1;
+		let out = Arc::new(res!(f.call(args)));
+		self.plugins.calls.insert(key, out.clone(), out.len() + std::mem::size_of::<Vec<u8>>());
+		Ok(out)
+	}
 }

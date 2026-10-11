@@ -57,6 +57,7 @@ pub struct Plugin {
 
 struct Base {
 	id:			Fingerprint,			// of the module's bytes
+	size:		usize,					// and their length
 	module:		wasmi::Module,
 	linker:		wasmi::Linker<CallData>,
 }
@@ -144,9 +145,8 @@ impl PluginFunc {
 	}
 
 	/// `plugin.transition(f, ..args)`: a new plugin whose instances start from the memory this call leaves.
-	pub fn transition(&self, args: Vec<Arc<Vec<u8>>>) -> Outcome<Module> {
-		let p = res!(self.plugin.transition(&self.name, args));
-		Ok(Plugin::into_module(Arc::new(p)))
+	pub fn transition(&self, args: Vec<Arc<Vec<u8>>>) -> Outcome<Plugin> {
+		self.plugin.transition(&self.name, args)
 	}
 }
 
@@ -184,7 +184,7 @@ impl Plugin {
 		if let Err(e) = linker.func_wrap(ENV, WRITE_ARGS, write_args) {
 			return Err(err!("cannot link {}: {}", WRITE_ARGS, e; Init));
 		}
-		let base = Arc::new(Base { id: Fingerprint::of(bytes), module, linker });
+		let base = Arc::new(Base { id: Fingerprint::of(bytes), size: bytes.len(), module, linker });
 		let first = res!(Instance::new(&base, None));
 		Ok(Self {
 			base,
@@ -192,6 +192,16 @@ impl Plugin {
 			snapshot:	None,
 			print:		Fingerprint::from_u128(0),
 		})
+	}
+
+	/// The bytes a memo holding this plugin should count: the module, the snapshot it starts from, and the
+	/// memory of the instances pooled now.
+	pub fn size(&self) -> usize {
+		let held = match self.pool.lock() {
+			Ok(pool)	=> pool.iter().map(|i| i.memory().map(|m| m.data(&i.store).len()).unwrap_or(0)).sum(),
+			Err(_)		=> 0,
+		};
+		self.base.size + self.snapshot.as_ref().map_or(0, |s| s.data.len()) + held
 	}
 
 	/// The module `plugin()` returns: every exported function, by name.
