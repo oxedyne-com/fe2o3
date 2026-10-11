@@ -15,6 +15,7 @@ pub mod https;
 pub mod id;
 pub mod loopback;
 pub mod mail;
+pub mod member;
 pub mod publish;
 pub mod server;
 //pub mod smtps;
