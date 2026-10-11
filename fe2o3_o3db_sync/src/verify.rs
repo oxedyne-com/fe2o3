@@ -39,7 +39,7 @@ pub struct ReadFailure {
 pub struct VerifyReport {
     pub keys:       usize,  // live keys the scan emitted
     pub present:    usize,  // read back whole
-    pub absent:     usize,  // newest record a deletion
+    pub absent:     usize,  // deleted after the scan listed it
     pub chunked:    usize,  // stored under a bunch key, read back or not
     pub failures:   Vec<ReadFailure>,
 }

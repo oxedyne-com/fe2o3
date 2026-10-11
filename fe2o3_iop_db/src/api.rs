@@ -243,6 +243,7 @@ pub trait Database<
     )
         -> Outcome<bool>;
 
+    /// Lists the keys with a live value; deleted keys are left out.
     fn scan(
         &self,
         opts:   &ScanOpts,

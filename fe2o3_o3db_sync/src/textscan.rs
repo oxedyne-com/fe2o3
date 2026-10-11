@@ -80,8 +80,8 @@ fn gather<'a>(d: &'a Dat, out: &mut Vec<&'a str>) {
 /// Reads every live key of an Ozone store and decodes the JDAT text its values hold.
 ///
 /// The store must be a COPY, opened with garbage collection off and used by nobody else; this
-/// function issues no write. A key whose newest record is a deletion reads as absent and is
-/// passed over.
+/// function issues no write. The scan leaves deleted keys out, and one deleted after it reads
+/// as absent and is passed over.
 ///
 /// # Arguments
 /// * `scan_wait` - how long each zone's scan may take; a large store needs a generous wait.

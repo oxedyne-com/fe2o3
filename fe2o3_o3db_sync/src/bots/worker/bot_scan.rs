@@ -1,5 +1,6 @@
 use crate::{
     prelude::*,
+    base::id,
     bots::{
         base::bot_deps::*,
         worker::worker_deps::*,
@@ -32,9 +33,18 @@ use std::{
     collections::{
         BTreeMap,
         HashMap,
+        btree_map::Entry,
     },
-    fs,
-    io::BufReader,
+    fs::{
+        self,
+        File,
+    },
+    io::{
+        BufReader,
+        Read,
+        Seek,
+        SeekFrom,
+    },
     sync::Arc,
     thread,
     time::Duration,
@@ -43,6 +53,11 @@ use std::{
 const SCAN_COVERAGE_ATTEMPTS: usize = 3;
 
 const SCAN_COVERAGE_SETTLE: Duration = Duration::from_millis(20);
+
+type Live<const UIDL: usize, UID> = HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>, FileLocation)>;
+
+// The data files of one pass, each opened before its index file is walked.
+type DataFiles = BTreeMap<FileNum, File>;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ZoneFilePresence {
@@ -205,19 +220,27 @@ impl<
         // whichever happened to be walked last: a chunk-data record later superseded by a
         // Complete tombstone must classify as the tombstone, or the inverse scan would emit a
         // chunk key a delete has already begun reclaiming.
-        let mut live: HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>, FileLocation)>
-            = HashMap::new();
+        let mut live: Live<UIDL, UID> = HashMap::new();
         let mut short: Vec<Shortfall> = Vec::new();
+        let mut stale: Option<Error<ErrTag>> = None;
 
         // A pass that comes up short is repeated from scratch rather
         // than patched, because the deduplication depends on files
         // being visited in ascending order: re-walking one file after
         // the others would let an older record overwrite a newer one.
+        // So is a pass whose tombstone check met a record other than
+        // the one its index named, a collection having replaced the
+        // file between the two opens.
         for attempt in 0..SCAN_COVERAGE_ATTEMPTS {
             live.clear();
-            short = res!(self.scan_pass(&mut live));
+            stale = None;
+            let mut files = DataFiles::new();
+            short = res!(self.scan_pass(&mut live, &mut files));
             if short.is_empty() {
-                break;
+                match self.drop_deleted(&mut live, &mut files) {
+                    Ok(())  => break,
+                    Err(e)  => stale = Some(e),
+                }
             }
             if attempt + 1 < SCAN_COVERAGE_ATTEMPTS {
                 thread::sleep(SCAN_COVERAGE_SETTLE);
@@ -241,6 +264,15 @@ impl<
                 the next start.",
                 self.ozid(), short.len(), detail;
                 Data, Mismatch, Missing));
+        }
+        if let Some(e) = stale {
+            return Err(err!(e,
+                "{}: Scan of this zone could not tell its deleted keys from its \
+                live ones in {} passes, each meeting a record other than the one \
+                its index named, so nothing is reported rather than a list that \
+                would name a deleted key.",
+                self.ozid(), SCAN_COVERAGE_ATTEMPTS;
+                Data, Mismatch));
         }
 
         let mut out: Vec<(Dat, Dat, Meta<UIDL, UID>)> =
@@ -275,13 +307,24 @@ impl<
 
     fn scan_pass(
         &mut self,
-        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>, FileLocation)>,
+        live:   &mut Live<UIDL, UID>,
+        dfiles: &mut DataFiles,
     )
         -> Outcome<Vec<Shortfall>>
     {
         let files = res!(self.list_zone_files());
         let mut short = Vec::new();
         for (fnum, present) in files {
+            // Opened before its index, so that the offsets the index gives are into this
+            // generation of the data file unless a whole collection, data rename then index
+            // rename, falls between the two opens; `drop_deleted` catches that one.
+            if present.dat {
+                if let Ok((_, f)) = self.zdir().open_ozone_file(
+                    fnum, &FileType::Data, &FileAccess::Reading)
+                {
+                    dfiles.insert(fnum, f);
+                }
+            }
             let before = self.data_file_len(fnum);
             // Every index file present is walked, including one whose data
             // file has gone: a collection that deletes a wholly superseded
@@ -305,6 +348,70 @@ impl<
             }
         }
         Ok(short)
+    }
+
+    /// Removes from `live` every key whose newest record is a tombstone.  The index gives the
+    /// length of a record's value but not the value, and a tombstone, written unencrypted by
+    /// every delete, always has one length, so only a Complete record of that length is read.
+    fn drop_deleted(
+        &self,
+        live:   &mut Live<UIDL, UID>,
+        dfiles: &mut DataFiles,
+    )
+        -> Outcome<()>
+    {
+        let tomb = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
+        let tomb_len = res!(tomb.as_bytes()).len();
+        let csummer = self.api().schemes().checksummer().clone();
+        let csum_len = res!(csummer.len());
+        let mut gone: Vec<Vec<u8>> = Vec::new();
+        for (kbyts, (_, meta, cind, floc)) in live.iter() {
+            // A bunch key or chunk record is never a tombstone.
+            if cind.is_some() || floc.vlen != try_into!(u64, tomb_len + csum_len) {
+                continue;
+            }
+            let rec = res!(self.read_record(dfiles, floc));
+            let klen = try_into!(usize, floc.klen);
+            if !res!(StoredKey::<UIDL, UID>::holds(&rec[..klen], kbyts, meta, csum_len)) {
+                return Err(err!(
+                    "{}: The record at {} in data file {} is not the one its index named, \
+                    stamped {:?}.", self.ozid(), floc.start, floc.fnum, meta.time;
+                    Data, Mismatch));
+            }
+            res!(csummer.clone().verify(&rec[klen..]));
+            let (val, _) = res!(Dat::from_bytes(&rec[klen..rec.len() - csum_len]));
+            if let Dat::Usr(kind, _) = &val {
+                if *kind == id::usr_kind_id_deleted() {
+                    gone.push(kbyts.clone());
+                }
+            }
+        }
+        for k in gone {
+            live.remove(&k);
+        }
+        Ok(())
+    }
+
+    fn read_record(
+        &self,
+        dfiles: &mut DataFiles,
+        floc:   &FileLocation,
+    )
+        -> Outcome<Vec<u8>>
+    {
+        let file = match dfiles.entry(floc.fnum) {
+            Entry::Occupied(o)  => o.into_mut(),
+            Entry::Vacant(v)    => {
+                let (_, f) = res!(self.zdir().open_ozone_file(
+                    floc.fnum, &FileType::Data, &FileAccess::Reading));
+                v.insert(f)
+            },
+        };
+        let kv = floc.keyval();
+        res!(file.seek(SeekFrom::Start(kv.start)));
+        let mut buf = vec![0u8; try_into!(usize, kv.len)];
+        res!(file.read_exact(&mut buf));
+        Ok(buf)
     }
 
     fn data_file_len(&self, fnum: FileNum) -> Option<u64> {
@@ -343,7 +450,7 @@ impl<
     fn scan_walk_ind_file(
         &mut self,
         fnum: FileNum,
-        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>, FileLocation)>,
+        live: &mut Live<UIDL, UID>,
     )
         -> Outcome<u64>
     {

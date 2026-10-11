@@ -200,12 +200,8 @@ impl<
 		let entries = res!(self.db.api().scan(&opts, None));
 		let mut out = Vec::with_capacity(entries.len());
 		for (k, _v, _meta) in &entries {
-			let id = res!(Self::parse_key(k));
-			// Skip a key whose value is a tombstone: scan enumerates the key
-			// space, and a deleted chunk lingers until compaction.
-			if res!(self.read(&id)).is_some() {
-				out.push(id);
-			}
+			// The scan leaves deleted keys out.
+			out.push(res!(Self::parse_key(k)));
 		}
 		Ok(out)
 	}

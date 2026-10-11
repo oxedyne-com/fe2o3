@@ -110,7 +110,8 @@ fn verify_finds_a_torn_value_and_writes_nothing() -> Outcome<()> {
     let after = res!(snapshot(&root));
     msg!("clean store: {}", rep.summary(80));
     assert!(rep.clean(), "a clean store reported failures: {:?}", rep.failures);
-    assert_eq!((rep.keys, rep.present, rep.absent, rep.chunked), (9, 8, 1, 3));
+    // The deleted key is not listed by the scan, so it is neither counted nor read.
+    assert_eq!((rep.keys, rep.present, rep.absent, rep.chunked), (8, 8, 0, 3));
     assert_eq!(before.keys().collect::<Vec<_>>(), after.keys().collect::<Vec<_>>(),
         "the check added or removed a file");
     for (path, bytes) in &before {
@@ -142,6 +143,6 @@ fn verify_finds_a_torn_value_and_writes_nothing() -> Outcome<()> {
     assert_eq!(rep.failures.len(), 1, "expected one failure: {:?}", rep.failures);
     assert_eq!(rep.failures[0].key, torn);
     assert!(rep.failures[0].chunked);
-    assert_eq!((rep.keys, rep.present, rep.chunked), (9, 7, 3));
+    assert_eq!((rep.keys, rep.present, rep.chunked), (8, 7, 3));
     Ok(())
 }

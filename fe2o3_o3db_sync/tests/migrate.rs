@@ -15,8 +15,8 @@
 //!   them. This is the data-loss case, tested explicitly.
 //! - **Several keyspaces, several keys each, all carried.** The per-prefix
 //!   report accounts for every keyspace.
-//! - **Tombstones are dropped.** A deleted key is emitted by a scan but reads as
-//!   absent; the target simply lacks it, and reads it as absent too.
+//! - **Tombstones are dropped.** A deleted key is left out of the source scan,
+//!   so it is never read or copied; the target lacks it and reads it as absent.
 //! - **The source is not mutated in any data or index file by a read-only,
 //!   gc-off open.** The one file a plain open rewrites is `config.jdat`; every
 //!   `.dat`/`.ind` file is byte-identical after the migration. This is the
@@ -246,8 +246,8 @@ fn scenario_orphan_shrink_and_untouched() -> Outcome<()> {
             res!(store_wait(db.api(), chunk_key.clone(), payload(&fmt!("v{:02}", round), sz), user));
         }
 
-        // (d) A key that is written then deleted -> a live tombstone that a scan
-        //     emits but get() reads as absent. The migration must drop it.
+        // (d) A key that is written then deleted -> a tombstone that the scan
+        //     leaves out and get() reads as absent. The migration must drop it.
         res!(store_wait(db.api(), dat!("acct:deleteme"), payload("gone", 40), user));
         res!(delete_wait(db.api(), dat!("acct:deleteme"), user));
 
@@ -337,9 +337,11 @@ fn scenario_orphan_shrink_and_untouched() -> Outcome<()> {
             "Expected to copy {} present keys, copied {}.", expect_copied, report.copied;
             Test, Data, Mismatch));
     }
-    if report.tombstones < 1 {
+    // The scan leaves the deleted key out, so no listed key reads absent.
+    if report.tombstones != 0 {
         return Err(err!(
-            "Expected at least one tombstone (the deleted key) to be dropped, saw {}.",
+            "Expected the source scan to leave the deleted key out, but {} listed \
+            key(s) read absent.",
             report.tombstones;
             Test, Data, Mismatch));
     }

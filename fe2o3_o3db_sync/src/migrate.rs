@@ -70,7 +70,7 @@ use std::{
 pub struct MigrationReport {
     pub scanned:        usize,                  // keys the source scan emitted
     pub copied:         usize,                  // keys with a value present, copied to the target
-    pub tombstones:     usize,                  // scanned keys whose value was absent (deleted)
+    pub tombstones:     usize,                  // scanned keys read absent (deleted after the scan)
     pub verified:       usize,                  // copied keys whose target bytes matched the source
     pub per_prefix:     BTreeMap<String, usize>,// copied keys grouped by key prefix (before first ':')
     pub source_bytes:   u64,
@@ -153,8 +153,9 @@ pub fn migrate_live_set<
     let mut tombstones  = 0usize;
     let mut per_prefix: BTreeMap<String, usize> = BTreeMap::new();
 
-    // 2. Copy each present value into the target.  A key whose value is absent
-    //    is a live tombstone: it is dropped, not copied.
+    // 2. Copy each present value into the target.  The scan leaves deleted keys
+    //    out, so a key whose value is absent was deleted after the scan: it is
+    //    dropped, not copied.
     for (kdat, _empty, _meta) in &entries {
         match res!(source.get_wait(kdat, schms2)) {
             None => {

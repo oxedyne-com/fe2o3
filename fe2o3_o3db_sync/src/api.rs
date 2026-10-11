@@ -1508,6 +1508,8 @@ impl<
         }
     }
 
+    /// Lists the keys with a live value; deleted keys are left out.  Values are not returned.
+    ///
     /// Walks every index file in every zone, so the cost is the size of the store rather than
     /// the size of the result.  The deadline is the ordinary user request one, which is what
     /// keeps "nothing on a request path may scan" enforceable rather than advisory: a walk big
