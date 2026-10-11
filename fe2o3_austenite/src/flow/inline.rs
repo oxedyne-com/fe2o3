@@ -72,8 +72,6 @@ use oxedyne_fe2o3_text::unicode::bidi;
 use oxedyne_fe2o3_text::unicode::lookup::Partitioned;
 use oxedyne_fe2o3_text::unicode::prop::Script;
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 const SPACING_REPLACE:	&str = " ";
@@ -272,7 +270,6 @@ pub struct Prep {
 	pub items:		Vec<((usize, usize), Item)>,
 	pub indices:	Vec<usize>,							// the item holding each byte
 	pub book:		Arc<FontBook>,
-	cache:			RefCell<HashMap<(usize, usize, usize), ShapedRun>>,
 }
 
 impl Prep {
@@ -298,15 +295,6 @@ impl Prep {
 		out
 	}
 
-	/// Item `i`'s text re-shaped over `start..end`, remembered for the attempts that ask again.
-	fn reshape(&self, i: usize, run: &ShapedRun, start: usize, end: usize) -> Outcome<ShapedRun> {
-		if let Some(r) = self.cache.borrow().get(&(i, start, end)) {
-			return Ok(r.clone());
-		}
-		let r = res!(run.reshape(&self.book, start, end));
-		self.cache.borrow_mut().insert((i, start, end), r.clone());
-		Ok(r)
-	}
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -750,7 +738,6 @@ pub fn prepare(
 		items,
 		indices,
 		book,
-		cache:		RefCell::new(HashMap::new()),
 	})
 }
 
@@ -959,10 +946,26 @@ impl Line {
 	fn trailing_text_mut(&mut self) -> Option<&mut ShapedRun> {
 		self.items.iter_mut().rev().find(|(_, i)| !i.is_tag()).and_then(|(_, i)| i.text_mut())
 	}
+
+	pub fn tail(&self) -> Tail {
+		let style = match self.dash {
+			Some(Dash::Hard)	=> self.trailing_text().map(ShapedRun::empty),
+			_					=> None,
+		};
+		Tail { dash: self.dash, style }
+	}
 }
 
-/// The line spanning `start..end`, ending at `bp`, after line `pred`.
-pub fn line(p: &Prep, start: usize, end: usize, bp: Breakpoint, pred: Option<&Line>) -> Outcome<Line> {
+/// What the next line needs of a line: its dash, and for a hard hyphen the style of the text it ends,
+/// to repeat the hyphen in. A breaker keeps one per candidate instead of the whole line.
+#[derive(Clone, Debug, Default)]
+pub struct Tail {
+	pub dash:	Option<Dash>,
+	pub style:	Option<ShapedRun>,	// glyphless, carrying only the properties and direction
+}
+
+/// The line spanning `start..end`, ending at `bp`, after the line whose tail is `pred`.
+pub fn line(p: &Prep, start: usize, end: usize, bp: Breakpoint, pred: Option<&Tail>) -> Outcome<Line> {
 	let full = match p.text.get(start..end) {
 		Some(t)	=> t,
 		None	=> return Err(err!("A line {}..{} is off a character boundary.", start, end; Bug)),
@@ -975,7 +978,7 @@ pub fn line(p: &Prep, start: usize, end: usize, bp: Breakpoint, pred: Option<&Li
 	// A hard hyphen repeated at the next line's start, where the language wants it.
 	if let Some(pred) = pred {
 		if pred.dash == Some(Dash::Hard) {
-			if let Some(base) = pred.trailing_text() {
+			if let Some(base) = &pred.style {
 				if should_repeat_hyphen(&base.props.lang, full) {
 					if let Some(h) = base.hyphen(&p.book, trim.shaping, false) {
 						l.items.push((START_HYPHEN, Item::Text(h)));
@@ -1091,7 +1094,10 @@ fn collect_range(
 			*fallback = Some((idx, Item::Text(shaped.empty())));
 			continue;
 		}
-		let mut run = if split { res!(p.reshape(i, shaped, a, b)) } else { shaped.clone() };
+		// Nothing is kept per attempt: the breaker tries several lines for every breakpoint, and a store
+		// of each one's glyphs grew with the paragraph (2.6 GB in the browser for 20,000 words in one).
+		// The font book's bounded shape cache answers a repeat.
+		let mut run = if split { res!(shaped.reshape(&p.book, a, b)) } else { shaped.clone() };
 		if trim.layout < end {
 			let lim = trim.layout;
 			run.trim(|g| g.range.0 >= lim);
