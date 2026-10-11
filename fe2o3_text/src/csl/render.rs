@@ -89,6 +89,92 @@ pub enum Ibid { #[default] No, Ibid, WithLocator }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sorting { Variable, Macro }
 
+/// What a cite's disambiguation has reached: hayagriva's `DisambiguateState`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Disamb { #[default] None, Names(NameDisamb), Choose, YearSuffix(u8) }
+
+impl Disamb {
+
+	pub fn may_names(&self) -> bool {
+		matches!(self, Self::None | Self::Names(_))
+	}
+
+	pub fn may_choose(&self) -> bool {
+		matches!(self, Self::None | Self::Names(_))
+	}
+
+	pub fn may_year_suffix(&self) -> bool {
+		matches!(self, Self::None | Self::Names(_) | Self::Choose)
+	}
+
+	/// The further of two states: names, then choose, then a year-suffix.
+	pub fn max(self, other: Self) -> Self {
+		match (self, other) {
+			(Self::None, o)				=> o,
+			(s, Self::None)				=> s,
+			(Self::Names(a), Self::Names(b))	=> Self::Names(a.max(b)),
+			(Self::Names(_), o)			=> o,
+			(s, Self::Names(_))			=> s,
+			(Self::Choose, o)			=> o,
+			(s, Self::Choose)			=> s,
+			(Self::YearSuffix(a), Self::YearSuffix(b))	=> Self::YearSuffix(a.max(b)),
+		}
+	}
+}
+
+/// hayagriva's `NameDisambiguationProperties`: for each variable of a `names` element, each
+/// person's form, `None` while et al. cuts it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameDisamb {
+	forms:		Vec<Vec<Option<NForm>>>,
+	default:	NForm,
+	vars:		Vec<String>,
+}
+
+impl NameDisamb {
+
+	/// Shows the first `num` names of the first variable that has as many.
+	pub fn add_name(&mut self, num: usize) -> bool {
+		let def = self.default;
+		match self.forms.iter_mut().find(|l| l.len() >= num) {
+			Some(l) => {
+				for n in l.iter_mut().take(num) {
+					if n.is_none() {
+						*n = Some(def);
+					}
+				}
+				true
+			}
+			None => false,
+		}
+	}
+
+	/// The more disambiguated: more names shown, then the larger forms.
+	pub fn max(self, other: Self) -> Self {
+		let shown = |x: &Self| x.forms.iter().flatten().filter(|f| f.is_some()).count();
+		let ord = shown(&self).cmp(&shown(&other))
+			.then_with(|| self.forms.iter().flatten().cmp(other.forms.iter().flatten()));
+		match ord {
+			std::cmp::Ordering::Greater	=> self,
+			_				=> other,
+		}
+	}
+
+	/// The `idx`th name's form across the variables, or the default form when it is cut or
+	/// absent.
+	pub fn form_mut(&mut self, idx: usize) -> &mut NForm {
+		match self.forms.iter_mut().flat_map(|l| l.iter_mut()).nth(idx) {
+			Some(Some(f))	=> f,
+			_		=> &mut self.default,
+		}
+	}
+}
+
+/// hayagriva's special forms: render one variable only, the first date alone (a collapsed
+/// year), the year-suffix alone, or everything but the author.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Special { VarOnly(String), OnlyFirstDate, OnlyYearSuffix, SuppressAuthor }
+
 /// What the citation, rather than the entry, supplies: its number, label and locator, and the
 /// position tests' answers.
 #[derive(Clone, Debug, Default)]
@@ -97,7 +183,7 @@ pub struct Cite {
 	pub label:		Option<String>,
 	pub locator:		Option<(String, NumVal)>,	// kind (`page`, `custom`) and value
 	pub first_note:		Option<usize>,			// first-reference-note-number
-	pub disambiguate:	bool,
+	pub disamb:		Disamb,
 	pub first:		bool,
 	pub ibid:		Ibid,
 	pub near_note:		bool,
@@ -152,6 +238,8 @@ struct Writer {
 	suppressing:	bool,
 	suppressed:	Vec<String>,
 	checked_disamb:	bool,
+	first_name:	Option<NameDisamb>,	// the first `names` element's forms
+	dates_seen:	bool,	// the first date has rendered
 	fmts:		Vec<Formatting>,
 	cases:		Vec<Option<TextCase>>,
 	delims:		Vec<Option<String>>,
@@ -381,9 +469,9 @@ fn part_form(p: &DatePart) -> DatePartForm {
 }
 
 // Names
-/// hayagriva's `DisambiguatedNameForm`, before B3's disambiguation widens it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NForm { Count, ShortInit, ShortFull, LongInit, LongFull }
+/// hayagriva's `DisambiguatedNameForm`, ordered as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NForm { Count, ShortInit, ShortFull, LongInit, LongFull }
 
 /// citationberg's `NameOptions`: a `name`'s options over those it inherits, with CSL's defaults.
 #[derive(Clone, Debug)]
@@ -499,6 +587,20 @@ impl<'a> NamesView<'a> {
 			..self
 		}
 	}
+}
+
+/// A year-suffix as letters: a to z, then aa.
+fn letters(n: u8) -> String {
+	let mut out = Vec::new();
+	let mut c = n as u32;
+	loop {
+		out.insert(0, (b'a' + (c % 26) as u8) as char);
+		if c < 26 {
+			break;
+		}
+		c = (c - 26) / 26;
+	}
+	out.into_iter().collect()
 }
 
 fn roman(n: i32) -> Option<String> {
@@ -659,6 +761,7 @@ pub struct Ctx<'a, I: Item> {
 	bib:	bool,
 	sorting:	Option<Sorting>,
 	sort_names:	NameOpts,	// a macro sort key's names-min, -use-first and -use-last
+	special:	Option<Special>,
 	w:	Writer,
 }
 
@@ -704,6 +807,7 @@ pub fn bibliography_entry<'a, I: Item>(
 pub struct CiteOut {
 	pub nodes:		Vec<Node>,
 	pub checked_disamb:	bool,	// a `choose` asked `disambiguate`
+	pub first_name:		Option<NameDisamb>,
 }
 
 pub fn citation_entry<'a, I: Item>(
@@ -712,10 +816,11 @@ pub fn citation_entry<'a, I: Item>(
 	item:	&'a I,
 	cite:	&'a Cite,
 	lang:	Option<&'a str>,
+	special:	Option<Special>,
 )
 	-> CiteOut
 {
-	let mut ctx = Ctx::new(style, chain, item, cite, lang, false);
+	let mut ctx = Ctx::new(style, chain, item, cite, lang, false).special(special);
 	let layout = &style.citation.layout;
 	let fi = ctx.w.push_format(&layout.look.fmt);
 	let di = ctx.w.push_delim(layout.delimiter.clone());
@@ -723,7 +828,8 @@ pub fn citation_entry<'a, I: Item>(
 	ctx.w.pop_delim(di);
 	ctx.w.pop_format(fi);
 	let checked_disamb = ctx.checked_disambiguate();
-	CiteOut { nodes: ctx.flush(), checked_disamb }
+	let first_name = ctx.w.first_name.take();
+	CiteOut { nodes: ctx.flush(), checked_disamb, first_name }
 }
 
 impl<'a, I: Item> Ctx<'a, I> {
@@ -738,13 +844,19 @@ impl<'a, I: Item> Ctx<'a, I> {
 	)
 		-> Self
 	{
-		Self { style, chain, item, cite, lang, bib, sorting: None, sort_names: NameOpts::default(), w: Writer::default() }
+		Self { style, chain, item, cite, lang, bib, sorting: None, sort_names: NameOpts::default(), special: None, w: Writer::default() }
 	}
 
 	/// This context renders a sort key.
 	pub fn sorting(mut self, s: Sorting, names: NameOpts) -> Self {
 		self.sorting = Some(s);
 		self.sort_names = names;
+		self
+	}
+
+	/// The special form to render in, or none.
+	pub fn special(mut self, s: Option<Special>) -> Self {
+		self.special = s;
 		self
 	}
 
@@ -968,6 +1080,10 @@ impl<'a, I: Item> Ctx<'a, I> {
 		}
 		match var {
 			"citation-label"	=> self.cite.label.as_deref().map(Chunked::normal),
+			"year-suffix"		=> match self.cite.disamb {
+				Disamb::YearSuffix(n)	=> Some(Chunked::normal(&letters(n))),
+				_			=> None,
+			},
 			_			=> self.item.text(var, form),
 		}
 	}
@@ -1050,6 +1166,20 @@ impl<'a, I: Item> Ctx<'a, I> {
 	}
 
 	fn target(&mut self, t: &'a Text) -> Option<Target<'a>> {
+		// A special form passes macros and only its own variables.
+		if let (Some(sp), TextSrc::Var { name, .. }) = (&self.special, &t.src) {
+			let pass = match sp {
+				Special::VarOnly(v)					=> v == name,
+				Special::OnlyFirstDate | Special::OnlyYearSuffix	=> name == "year-suffix" || name == "locator",
+				Special::SuppressAuthor					=> true,
+			};
+			if !pass {
+				return None;
+			}
+		}
+		if let (Some(Special::VarOnly(_) | Special::OnlyFirstDate | Special::OnlyYearSuffix), TextSrc::Term { .. } | TextSrc::Value(_)) = (&self.special, &t.src) {
+			return None;
+		}
 		match &t.src {
 			TextSrc::Var { name, form } => match var_kind(name) {
 				VarKind::Standard	=> self.resolve_std(name, *form).map(|v| Target::Std(name, v)),
@@ -1077,7 +1207,12 @@ impl<'a, I: Item> Ctx<'a, I> {
 			_			=> None,
 		};
 		let affix_is_url = url.map_or(false, |p| t.look.prefix.as_deref() == Some(p));
-		let a = if affix_is_url { None } else { Some(self.w.apply_prefix(t.look.prefix.as_deref())) };
+		// A macro used out of its context, under VarOnly, prints no affixes.
+		let out_of_context = matches!(self.special, Some(Special::VarOnly(_))) && matches!(t.src, TextSrc::Macro(_));
+		let a = match affix_is_url || out_of_context {
+			true	=> None,
+			false	=> Some(self.w.apply_prefix(t.look.prefix.as_deref())),
+		};
 		if t.look.quotes {
 			self.push_quotes();
 		}
@@ -1211,6 +1346,9 @@ impl<'a, I: Item> Ctx<'a, I> {
 
 	/// `number`. The gender for ordinals is that of the variable's own long term.
 	fn render_number(&mut self, n: &'a Number) {
+		if !self.number_passes(&n.var) {
+			return;
+		}
 		let value = self.resolve_num_or_page(&n.var);
 		let depth = self.w.push_elem(&n.look.fmt);
 		let a = self.w.apply_prefix(n.look.prefix.as_deref());
@@ -1230,7 +1368,31 @@ impl<'a, I: Item> Ctx<'a, I> {
 		self.w.commit_elem(depth, n.look.display, Some(meta));
 	}
 
+	/// Does a special form let a number or label of this variable through? hayagriva's
+	/// `Number::will_render`: only the locator, under a date form, and nothing under VarOnly.
+	fn number_passes(&self, var: &str) -> bool {
+		match &self.special {
+			None | Some(Special::SuppressAuthor)				=> true,
+			Some(Special::OnlyFirstDate | Special::OnlyYearSuffix)	=> var == "locator",
+			Some(Special::VarOnly(_))					=> false,
+		}
+	}
+
+	/// hayagriva's answer under a special form: a number other than the locator claims to print
+	/// and queries nothing, so its group still renders.
+	fn special_info(&self, var: &str) -> Option<(bool, Usage)> {
+		match &self.special {
+			Some(Special::VarOnly(v)) if v != var				=> Some((false, Usage::default())),
+			Some(Special::VarOnly(_) | Special::OnlyFirstDate | Special::OnlyYearSuffix)
+				if var != "locator"					=> Some((true, Usage::default())),
+			_								=> None,
+		}
+	}
+
 	fn number_info(&mut self, n: &'a Number) -> (bool, Usage) {
+		if let Some(r) = self.special_info(&n.var) {
+			return r;
+		}
 		let found = self.unsuppressed(|c| c.resolve_num_or_page(&n.var).is_some());
 		(found, Usage { vars: true, non_empty: found, ..Usage::default() })
 	}
@@ -1289,6 +1451,9 @@ impl<'a, I: Item> Ctx<'a, I> {
 	/// A label of a `custom` locator never prints. Unlike most queries this one runs with
 	/// suppression as it stands (hayagriva).
 	fn label_info(&mut self, l: &'a Label) -> (bool, Usage) {
+		if let Some(r) = self.special_info(&l.var) {
+			return r;
+		}
 		if l.var == "locator" && self.cite.locator.as_ref().map_or(false, |(k, _)| k == "custom") {
 			return (false, Usage::default());
 		}
@@ -1328,6 +1493,10 @@ impl<'a, I: Item> Ctx<'a, I> {
 
 	fn render_names_view(&mut self, v: NamesView<'a>) {
 		let people = self.people(v);
+		let empty = people.iter().all(|(p, _)| p.is_empty());
+		if !self.names_pass(v.vars, v.substitute, empty) {
+			return;
+		}
 		if people.iter().any(|(p, _)| !p.is_empty()) {
 			self.render_name_list(v, &people);
 			return;
@@ -1388,10 +1557,19 @@ impl<'a, I: Item> Ctx<'a, I> {
 			self.w.commit_elem(depth, v.look.display, Some(meta_people(people)));
 			return;
 		}
-		for (i, (persons, var)) in people.iter().filter(|(p, _)| !p.is_empty()).enumerate() {
-			let forms: Vec<Option<NForm>> = (0..persons.len())
-				.map(|j| if o.is_suppressed(j, persons.len(), subsequent) { None } else { Some(form) })
-				.collect();
+		// A disambiguated cite brings its own forms, when they are for these variables.
+		let props = match &self.cite.disamb {
+			Disamb::Names(p) if p.vars.iter().map(String::as_str).eq(people.iter().map(|(_, v)| *v)) => p.clone(),
+			_ => NameDisamb {
+				forms:		people.iter().map(|(p, _)| (0..p.len())
+					.map(|j| if o.is_suppressed(j, p.len(), subsequent) { None } else { Some(form) })
+					.collect()).collect(),
+				default:	form,
+				vars:		v.vars.to_vec(),
+			},
+		};
+		let listed = people.iter().zip(props.forms.iter()).filter(|((p, _), _)| !p.is_empty());
+		for (i, ((persons, var), forms)) in listed.enumerate() {
 			let plural = persons.len() != 1;
 			if i > 0 {
 				let d = v.delimiter.or(names_delim).unwrap_or("");
@@ -1404,7 +1582,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 				self.render_label_with_var(l, t);
 			}
 			let fi = self.w.push_format(&name.look.fmt);
-			self.add_names(v, persons, name, &o, &forms, var);
+			self.add_names(v, persons, name, &o, forms, var);
 			self.w.pop_format(fi);
 			if let (Some(l), false, None) = (v.label, v.label_first, self.sorting) {
 				let t = self.term(var, l.form, plural).unwrap_or("");
@@ -1413,6 +1591,9 @@ impl<'a, I: Item> Ctx<'a, I> {
 		}
 		self.apply_suffix(v.look.suffix.as_deref(), a);
 		self.w.commit_elem(depth, v.look.display, Some(meta_people(people)));
+		if self.w.first_name.is_none() {
+			self.w.first_name = Some(props);
+		}
 	}
 
 	/// A label inside `names`, its term chosen by the caller.
@@ -1657,10 +1838,33 @@ impl<'a, I: Item> Ctx<'a, I> {
 		self.w.commit_elem(loc, None, Some(Meta::Name(var.to_string(), idx)));
 	}
 
+	/// hayagriva's `renders_given_special_form`: VarOnly passes a `names` holding its variable,
+	/// directly or through the substitute of an empty one; SuppressAuthor stops one that would
+	/// render the author; the date forms stop every `names`.
+	fn names_pass(&mut self, vars: &'a [String], sub: Option<&'a [Elem]>, empty: bool) -> bool {
+		match self.special.clone() {
+			Some(Special::VarOnly(var)) => {
+				let has = vars.iter().any(|v| *v == var);
+				let in_sub = empty && sub.map_or(false, |s| s.iter().any(|c| match c {
+					Elem::Names(n)	=> n.vars.iter().any(|v| *v == var),
+					_		=> false,
+				}));
+				has || in_sub
+			}
+			Some(Special::OnlyFirstDate | Special::OnlyYearSuffix) => false,
+			Some(Special::SuppressAuthor) => !self.names_will_render(vars, sub, "author"),
+			None => true,
+		}
+	}
+
 	fn names_info(&mut self, n: &'a Names) -> (bool, Usage) {
 		let s = self.w.suppressing;
 		self.w.suppressing = false;
 		let counts: Vec<usize> = n.vars.iter().map(|v| self.resolve_names(v).len()).collect();
+		if !self.names_pass(&n.vars, n.substitute.as_deref(), counts.iter().all(|&c| c == 0)) {
+			self.w.suppressing = s;
+			return (false, Usage::default());
+		}
 		let mut empty = counts.iter().all(|&c| c == 0);
 		let mut sub = (false, Usage::default());
 		if let Some(elems) = &n.substitute {
@@ -1692,7 +1896,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 	/// locale's parts and delimiter, each part overridden by the style's part of the same name,
 	/// and the cs:date's own delimiter is ignored, as CSL 1.0.2 says.
 	fn render_date(&mut self, d: &'a Date) {
-		if d.var.is_empty() {
+		if d.var.is_empty() || !self.date_passes(&d.var) {
 			return;
 		}
 		let date = match self.resolve_date(&d.var) {
@@ -1735,6 +1939,8 @@ impl<'a, I: Item> Ctx<'a, I> {
 			},
 			None => None,
 		};
+		let first = !self.w.dates_seen;
+		self.w.dates_seen = true;
 		let fmt = match base {
 			Some(b)	=> fmt_over(&d.look.fmt, &b.look.fmt),
 			None	=> d.look.fmt,
@@ -1764,7 +1970,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 				Some(_)	=> d.parts.iter().find(|p| p.name == part.name),
 				None	=> None,
 			};
-			self.render_date_part(part, &date, over);
+			self.render_date_part(part, &date, over, first);
 			last_empty = cursor == self.w.len();
 		}
 		self.w.pop_case(cidx);
@@ -1775,7 +1981,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 	/// One date part. A style part overriding a localised one replaces its form whole (an unset
 	/// form being the default), lays its formatting over it and wins on case; the affixes and
 	/// strip-periods stay the locale's.
-	fn render_date_part(&mut self, part: &DatePart, date: &DateVal, over: Option<&DatePart>) {
+	fn render_date_part(&mut self, part: &DatePart, date: &DateVal, over: Option<&DatePart>, first: bool) {
 		let val = match part.name {
 			DatePartName::Day	=> date.day.map(i32::from),
 			DatePartName::Month	=> date.month.or(date.season).map(i32::from),
@@ -1791,12 +1997,18 @@ impl<'a, I: Item> Ctx<'a, I> {
 			None	=> part.look.fmt,
 		};
 		let fi = self.w.push_format(&fmt);
-		let a = self.w.apply_prefix(part.look.prefix.as_deref());
+		// The year-suffix form writes only the suffix, without the part's affixes.
+		let only_suffix = self.special == Some(Special::OnlyYearSuffix);
+		let a = match only_suffix {
+			true	=> None,
+			false	=> Some(self.w.apply_prefix(part.look.prefix.as_deref())),
+		};
 		if part.name == DatePartName::Month {
 			self.w.strip_periods = part.look.strip_periods;
 		}
 		let cidx = self.push_case(over.and_then(|o| o.look.text_case).or(part.look.text_case));
 		match (part.name, form) {
+			_ if only_suffix => {}
 			(DatePartName::Month, _) if date.month.is_none() => {
 				// A season. hayagriva returns early when the locale lacks the term, leaving its
 				// stacks pushed; here the part is closed as usual.
@@ -1836,10 +2048,75 @@ impl<'a, I: Item> Ctx<'a, I> {
 			}
 			_ => self.push_str(&val.to_string()),
 		}
-		self.apply_suffix(part.look.suffix.as_deref(), a);
+		if part.name == DatePartName::Year && first && self.year_suffix_implicit() {
+			if let Some(c) = self.resolve_std("year-suffix", VarForm::Long) {
+				self.push_chunked(&c);
+			}
+		}
+		if let Some(a) = a {
+			self.apply_suffix(part.look.suffix.as_deref(), a);
+		}
 		self.w.strip_periods = false;
 		self.w.pop_case(cidx);
 		self.w.pop_format(fi);
+	}
+
+	/// hayagriva's `Date::will_render` for its own variable: VarOnly passes only that date, and
+	/// the date forms only the first date.
+	fn date_passes(&self, var: &str) -> bool {
+		match &self.special {
+			Some(Special::VarOnly(v))					=> v == var,
+			Some(Special::OnlyFirstDate | Special::OnlyYearSuffix)	=> !self.w.dates_seen,
+			_								=> true,
+		}
+	}
+
+	/// Is the year-suffix written after the first date's year, because neither layout writes it?
+	fn year_suffix_implicit(&mut self) -> bool {
+		let style: &'a Style = self.style;
+		if self.will_render_all(&style.citation.layout.elems, "year-suffix") {
+			return false;
+		}
+		!style.bibliography.as_ref().map_or(false, |b| self.will_render_all(&b.layout.elems, "year-suffix"))
+	}
+
+	fn will_render_all(&mut self, elems: &'a [Elem], var: &str) -> bool {
+		elems.iter().any(|e| self.will_render(e, var))
+	}
+
+	/// Would the element render the variable? hayagriva's `will_render`: a text resolves its
+	/// target, a group any child, a choose its chosen branch, a label never.
+	pub fn will_render(&mut self, e: &'a Elem, var: &str) -> bool {
+		match e {
+			Elem::Text(t) => match self.target(t) {
+				Some(Target::Std(v, _) | Target::Num(v, _))	=> v == var,
+				Some(Target::Page(_))				=> var == "page",
+				Some(Target::Macro(m))				=> self.will_render_all(m, var),
+				_						=> false,
+			},
+			Elem::Number(n)	=> self.number_passes(&n.var) && n.var == var,
+			Elem::Label(_)	=> false,
+			Elem::Names(n)	=> self.names_will_render(&n.vars, n.substitute.as_deref(), var),
+			Elem::Date(d)	=> match &self.special {
+				Some(Special::OnlyFirstDate | Special::OnlyYearSuffix)	=> !self.w.dates_seen,
+				_							=> self.date_passes(&d.var) && d.var == var,
+			},
+			Elem::Group(g)	=> self.will_render_all(&g.elems, var),
+			Elem::Choose(c)	=> match self.choose_branch(c) {
+				Some(b)	=> self.will_render_all(b, var),
+				None	=> false,
+			},
+		}
+	}
+
+	fn names_will_render(&mut self, vars: &'a [String], sub: Option<&'a [Elem]>, var: &str) -> bool {
+		if vars.iter().any(|v| v == var) {
+			return true;
+		}
+		match sub {
+			Some(s) if vars.iter().all(|v| self.item.names(v).is_empty()) => self.will_render_all(s, var),
+			_ => false,
+		}
 	}
 
 	/// The date is queried after suppression is restored, so it is recorded (hayagriva).
@@ -1967,7 +2244,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 		match t {
 			Test::Disambiguate(d) => {
 				self.w.checked_disamb = true;
-				*d == self.cite.disambiguate
+				*d == (self.cite.disamb == Disamb::Choose)
 			}
 			Test::IsNumeric(v) => match var_kind(v) {
 				VarKind::Standard	=> self.resolve_std(v, VarForm::Long).map_or(false, |c| Numeric::parse(&c.to_string()).is_some()),

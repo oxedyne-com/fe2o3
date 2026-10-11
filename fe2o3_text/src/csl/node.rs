@@ -154,6 +154,15 @@ pub fn remove_any_meta(nodes: &mut Vec<Node>) -> Option<Node> {
 	None
 }
 
+/// The first element, depth first, that `f` accepts: hayagriva's `find_elem_by`.
+pub fn find_elem<'a>(nodes: &'a [Node], f: &impl Fn(&Elem) -> bool) -> Option<&'a Elem> {
+	nodes.iter().find_map(|n| match n {
+		Node::Elem(e) if f(e)	=> Some(e),
+		Node::Elem(e)		=> find_elem(&e.children, f),
+		_			=> None,
+	})
+}
+
 /// Merges neighbouring text of one formatting and inlines elements that carry neither display nor
 /// meta.
 pub fn simplify(nodes: Vec<Node>) -> Vec<Node> {
@@ -171,6 +180,31 @@ pub fn simplify(nodes: Vec<Node>) -> Vec<Node> {
 		}
 	}
 	acc
+}
+
+/// The text with each run's formatting, as hayagriva's terminal writer sets it out: the key on
+/// which disambiguation finds two cites that read the same.
+pub fn styled(nodes: &[Node]) -> String {
+	fn walk(nodes: &[Node], s: &mut String) {
+		for n in nodes {
+			match n {
+				Node::Text(t, f) | Node::Link { text: t, fmt: f, .. } => {
+					let _ = write!(s, "{:?}{}\u{1b}", f, t);
+				}
+				Node::Math(m)	=> { let _ = write!(s, "${}$", m); }
+				Node::Cite { .. }	=> {}
+				Node::Elem(e) => {
+					let block = e.display == Some(Display::Block);
+					if block { s.push('\n'); }
+					walk(&e.children, s);
+					if block { s.push('\n'); }
+				}
+			}
+		}
+	}
+	let mut s = String::new();
+	walk(nodes, &mut s);
+	s
 }
 
 /// The text without formatting. A block element sits on lines of its own, as hayagriva's plain

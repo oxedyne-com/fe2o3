@@ -81,6 +81,7 @@ mod typst {
 			Display,
 			FontStyle,
 			FontWeight,
+			VAlign,
 			VarForm,
 		},
 	};
@@ -269,6 +270,7 @@ mod typst {
 		let mut s = s;
 		if f.style != FontStyle::Normal { s = format!("<em>{}</em>", s); }
 		if f.weight == FontWeight::Bold { s = format!("<strong>{}</strong>", s); }
+		if f.valign == VAlign::Sup { s = format!("<sup>{}</sup>", s); }
 		s
 	}
 
@@ -384,7 +386,8 @@ mod typst {
 			}
 		}
 		out.push_str(rest);
-		out
+		// A superscript delimiter carries the role too.
+		out.replace("<sup role=\"doc-biblioref\">", "<sup>")
 	}
 
 	/// Each citation of `cites.typ` against Typst's `cites-<style>.html`: the indices that match.
@@ -428,6 +431,70 @@ mod typst {
 		let cites = cites_typ(&items);
 		let ok = res!(check_cites("apa", items, cites, "cites-apa.html"));
 		assert_eq!(ok, (0..8).collect::<Vec<_>>());
+		Ok(())
+	}
+
+	/// `group.bib`: one author's three works, two in one year; a second Smith; two Browns et al.
+	fn group_fixtures() -> Vec<Fx> {
+		let art = |key, title, author: Vec<Person>, year| Fx {
+			key, ty: "article-journal", title: Chunked::normal(title),
+			container: Some("Journal of Pairs"), author, issued: Some(DateVal::year(year)),
+			..Fx::default()
+		};
+		let book = |key, title, author: Vec<Person>, year| Fx {
+			key, ty: "book", title: Chunked::normal(title), publisher: Some("Acme Press"),
+			author, issued: Some(DateVal::year(year)),
+			..Fx::default()
+		};
+		vec![
+			art("d1", "First Paper", vec![p("Smith", "John")], 2020),
+			art("d2", "Second Paper", vec![p("Smith", "John")], 2020),
+			book("d3", "Earlier Book", vec![p("Smith", "John")], 2018),
+			art("d4", "Another Smith", vec![p("Smith", "Mary")], 2019),
+			art("d5", "Three Colours", vec![p("Brown", "Alice"), p("Green", "Bob"), p("White", "Carl")], 2021),
+			art("d6", "Three More Colours", vec![p("Brown", "Alice"), p("Black", "Dan"), p("Blue", "Eve")], 2021),
+			book("d7", "A Later Book", vec![p("Smith", "Mary")], 2018),
+		]
+	}
+
+	/// The citations of `group.typ`.
+	fn group_cites(items: &[Fx]) -> Vec<Citation> {
+		let at = |k: &str| items.iter().position(|f| f.key == k).unwrap_or(usize::MAX);
+		let c = |keys: &[&str]| Citation {
+			refs: keys.iter().map(|k| CiteRef { entry: at(k), ..CiteRef::default() }).collect(),
+			note: None,
+		};
+		vec![
+			c(&["d1", "d2", "d3"]),
+			c(&["d1", "d4", "d3", "d2"]),
+			c(&["d4"]),
+			c(&["d5"]),
+			c(&["d6"]),
+			c(&["d5", "d6", "d1"]),
+			c(&["d3", "d1", "d2", "d5", "d6"]),
+			c(&["d7"]),
+			c(&["d3", "d7"]),
+		]
+	}
+
+	fn check_group(style: &str) -> Outcome<Vec<usize>> {
+		let items = group_fixtures();
+		let cites = group_cites(&items);
+		check_cites(style, items, cites, &format!("group-{}.html", style))
+	}
+
+	/// Citation-number collapsing: `1–3`, and the after-collapse delimiter.
+	#[test]
+	fn test_ama_collapse_as_typst() -> Outcome<()> {
+		assert_eq!(res!(check_group("american-medical-association")), (0..9).collect::<Vec<_>>());
+		Ok(())
+	}
+
+	/// Grouping by author with year collapsing (apa), and year-suffix collapsing (ams).
+	#[test]
+	fn test_group_collapse_as_typst() -> Outcome<()> {
+		assert_eq!(res!(check_group("apa")), (0..9).collect::<Vec<_>>());
+		assert_eq!(res!(check_group("american-meteorological-society")), (0..9).collect::<Vec<_>>());
 		Ok(())
 	}
 

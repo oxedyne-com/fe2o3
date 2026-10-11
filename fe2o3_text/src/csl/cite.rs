@@ -30,11 +30,18 @@ use crate::csl::{
 		self,
 		Cite,
 		Ctx,
+		Disamb,
 		Ibid,
+		NForm,
+		NameDisamb,
 		Sorting,
+		Special,
 	},
+	person::Person,
 	style::{
+		Collapse,
 		Demote,
+		GivenRule,
 		NameOpts,
 		Sort,
 		SortKey,
@@ -79,7 +86,10 @@ struct Pending {
 	hidden:		bool,
 	cite:		Cite,
 	checked_disamb:	bool,
+	first_name:	Option<NameDisamb>,		// the first `names` element's forms, as first rendered
 	delim:		Option<String>,			// the delimiter before it, when grouping sets one
+	group:		Option<usize>,			// its cite group, numbered from 1
+	special:	Option<Special>,		// what collapsing leaves of it
 	nodes:		Vec<Node>,
 }
 
@@ -159,15 +169,64 @@ impl CiteState {
 					hidden:		r.hidden,
 					cite,
 					checked_disamb:	false,
+					first_name:	None,
 					delim:		None,
+					group:		None,
+					special:	None,
 					nodes:		Vec::new(),
 				};
-				let out = render::citation_entry(style, chain, &items[e], &p.cite, lang);
+				let out = render::citation_entry(style, chain, &items[e], &p.cite, lang, None);
 				p.checked_disamb = out.checked_disamb;
+				p.first_name = out.first_name;
 				p.nodes = out.nodes;
 				ps.push(p);
 			}
 			res.push((c.note, ps));
+		}
+
+		// 2. Up to three rounds of disambiguation. Each set of cites that read alike tries names,
+		// then `choose`, then a year-suffix, and each entry takes the furthest state its cites
+		// reached.
+		for _ in 0..3 {
+			let sets = ambiguous(&res);
+			if sets.is_empty() {
+				break;
+			}
+			let mut marks: Vec<Option<Disamb>> = vec![None; items.len()];
+			for set in &sets {
+				let mut found = disamb_names(style, &res, set);
+				if found.is_empty() && marks.iter().all(Option::is_none) {
+					found = disamb_choose(&res, set);
+				}
+				if found.is_empty() && marks.iter().all(Option::is_none) {
+					found = disamb_year_suffix(style, items, &res, set);
+				}
+				for (e, d) in found {
+					marks[e] = Some(match marks[e].take() {
+						Some(m)	=> m.max(d),
+						None	=> d,
+					});
+				}
+			}
+			if marks.iter().all(Option::is_none) {
+				break;
+			}
+			for p in res.iter_mut().flat_map(|(_, ps)| ps.iter_mut()) {
+				if let Some(d) = &marks[p.entry] {
+					p.cite.disamb = d.clone();
+					p.nodes = render::citation_entry(style, chain, &items[p.entry], &p.cite, lang, None).nodes;
+				}
+			}
+		}
+
+		// 3. Cites with equal names gather behind the first of them.
+		let layout = &style.citation.layout;
+		let group_delim = style.citation.cite_group_delimiter.clone()
+			.or_else(|| layout.delimiter.clone().filter(|_| style.citation.collapse.is_some()));
+		if let Some(delim) = group_delim {
+			for (_, ps) in res.iter_mut() {
+				group(ps, &delim);
+			}
 		}
 
 		// 4. Final positions on the final order, and the locators.
@@ -201,13 +260,16 @@ impl CiteState {
 			}
 		}
 
-		// 5-6. The final render of each cite, then the citation's affixes and delimiters.
-		let layout = &style.citation.layout;
+		// 5-6. Collapsing, the final render of each cite, then the citation's affixes and
+		// delimiters.
 		let fmt = Formatting::default().apply(&layout.look.fmt);
 		let mut out = Vec::with_capacity(res.len());
 		for (_, ps) in res.iter_mut() {
+			if ps.iter().all(|p| p.form == CiteForm::Normal) {
+				collapse(style, ps);
+			}
 			for p in ps.iter_mut() {
-				p.nodes = render::citation_entry(style, chain, &items[p.entry], &p.cite, lang).nodes;
+				p.nodes = render::citation_entry(style, chain, &items[p.entry], &p.cite, lang, p.special.clone()).nodes;
 			}
 			if ps.iter().all(|p| p.hidden) {
 				out.push(Vec::new());
@@ -256,6 +318,316 @@ impl CiteState {
 	/// hidden.
 	pub fn citation(&self, i: usize) -> &[Node] {
 		self.cites.get(i).map_or(&[], |c| c.as_slice())
+	}
+}
+
+// Disambiguation
+
+type Set = Vec<(usize, usize)>;	// cites by citation and place in it
+type Res = [(Option<usize>, Vec<Pending>)];
+
+/// The sets of cites, still open to a year-suffix, that render alike though their entries differ.
+fn ambiguous(res: &Res) -> Vec<Set> {
+	let mut keys: Vec<(String, Option<usize>, (usize, usize))> = Vec::new();	// key, its set, first cite
+	let mut sets: Vec<Set> = Vec::new();
+	for (i, (_, ps)) in res.iter().enumerate() {
+		for (j, p) in ps.iter().enumerate() {
+			if !p.cite.disamb.may_year_suffix() {
+				continue;
+			}
+			let key = node::styled(&p.nodes);
+			match keys.iter_mut().find(|(k, _, _)| *k == key) {
+				Some((_, Some(set), _))	=> sets[*set].push((i, j)),
+				Some((_, set, first))	=> {
+					*set = Some(sets.len());
+					sets.push(vec![*first, (i, j)]);
+				}
+				None => keys.push((key, None, (i, j))),
+			}
+		}
+	}
+	sets.into_iter().filter(|set| {
+		let first = set.first().map(|&(i, j)| res[i].1[j].entry);
+		set.iter().any(|&(i, j)| Some(res[i].1[j].entry) != first)
+	}).collect()
+}
+
+/// Every person a cite's `names` elements hold, written or not.
+fn names_of(nodes: &[Node], out: &mut Vec<Person>) {
+	for n in nodes {
+		if let Node::Elem(e) = n {
+			if let Some(Meta::Names(ns)) = &e.meta {
+				out.extend(ns.iter().flat_map(|(ps, _)| ps.iter()).cloned());
+			}
+			names_of(&e.children, out);
+		}
+	}
+}
+
+/// One cite of an ambiguous set, with its people.
+struct DisambData<'r> {
+	at:	(usize, usize),
+	names:	Vec<Person>,
+	p:	&'r Pending,
+}
+
+/// Do the first `n` names, as the given-name rule compares them, tell `x` from the rest?
+fn is_disambiguated(n: usize, xs: &[DisambData], x: &DisambData, rule: Option<GivenRule>) -> bool {
+	let init = |p: &Person| {
+		let mut g = String::new();
+		let _ = p.initials(&mut g, None, false);
+		Person { given: Some(g), ..p.clone() }
+	};
+	let bare = |p: &Person| Person { given: None, ..p.clone() };
+	let parts = |d: &DisambData| -> Vec<Person> {
+		d.names.iter().take(n).enumerate().map(|(i, p)| match rule {
+			Some(GivenRule::AllNames | GivenRule::ByCite)	=> p.clone(),
+			Some(GivenRule::AllNamesWithInitials)		=> init(p),
+			Some(GivenRule::PrimaryName) if i == 0		=> p.clone(),
+			Some(GivenRule::PrimaryNameWithInitials) if i == 0	=> init(p),
+			Some(GivenRule::PrimaryName | GivenRule::PrimaryNameWithInitials) | None => bare(p),
+		}).collect()
+	};
+	let mine = parts(x);
+	xs.iter().all(|y| y.at == x.at || parts(y) != mine)
+}
+
+/// hayagriva's `disamb_cite_add_given_name`: a namesake with other initials needs the initial, one
+/// with the same initials the full given name.
+fn add_given(x: &Person, xs: &[&Person], form: &mut NForm) -> bool {
+	if *form == NForm::Count || *form == NForm::LongFull {
+		return false;
+	}
+	let mut changed = false;
+	for p in xs {
+		if x == *p || x.family != p.family {
+			continue;
+		}
+		let (mut xi, mut pi) = (String::new(), String::new());
+		let _ = x.initials(&mut xi, None, false);
+		let _ = p.initials(&mut pi, None, false);
+		if xi == pi {
+			*form = NForm::LongFull;
+			return true;
+		}
+		if *form != NForm::LongInit {
+			*form = NForm::LongInit;
+			changed = true;
+		}
+	}
+	changed
+}
+
+/// hayagriva's `disambiguate_names`: show more names, one more each pass, and under the by-cite
+/// rule widen the forms of namesakes, until each cite stands apart.
+fn disamb_names(style: &Style, res: &Res, set: &Set) -> Vec<(usize, Disamb)> {
+	let group: Vec<DisambData> = set.iter().map(|&(i, j)| {
+		let mut names = Vec::new();
+		names_of(&res[i].1[j].nodes, &mut names);
+		DisambData { at: (i, j), names, p: &res[i].1[j] }
+	}).collect();
+	let max = match style.citation.add_names {
+		true	=> group.iter().map(|d| d.names.len()).max().unwrap_or(0),
+		false	=> 1,
+	};
+	let rule = match style.citation.add_givenname {
+		true	=> Some(style.citation.givenname_rule),
+		false	=> None,
+	};
+	let mut changed: Vec<((usize, usize), NameDisamb)> = Vec::new();
+	let slot = |changed: &Vec<((usize, usize), NameDisamb)>, d: &DisambData| -> Option<NameDisamb> {
+		match changed.iter().find(|(at, _)| *at == d.at) {
+			Some((_, n))	=> Some(n.clone()),
+			None		=> match &d.p.cite.disamb {
+				Disamb::Names(n)	=> Some(n.clone()),
+				_			=> d.p.first_name.clone(),
+			},
+		}
+	};
+	let put = |changed: &mut Vec<((usize, usize), NameDisamb)>, at: (usize, usize), n: NameDisamb| {
+		match changed.iter_mut().find(|(a, _)| *a == at) {
+			Some((_, old))	=> *old = n,
+			None		=> changed.push((at, n)),
+		}
+	};
+	let mut done: Vec<(usize, usize)> = Vec::new();
+	for i in 1..=max {
+		let before = done.len();
+		if before == group.len() {
+			break;
+		}
+		for d in &group {
+			if done.contains(&d.at) || !d.p.cite.disamb.may_names() || !is_disambiguated(i, &group, d, rule) {
+				continue;
+			}
+			done.push(d.at);
+			if rule != Some(GivenRule::ByCite) {
+				continue;
+			}
+			if let (Some(mut props), Some(x)) = (slot(&changed, d), d.names.get(i - 1)) {
+				let others: Vec<&Person> = group.iter()
+					.filter(|o| o.at != d.at)
+					.flat_map(|o| o.names.iter())
+					.collect();
+				if add_given(x, &others, props.form_mut(i - 1)) {
+					put(&mut changed, d.at, props);
+				}
+			}
+		}
+		if done.len() > before {
+			for d in &group {
+				if let Some(mut s) = slot(&changed, d) {
+					s.add_name(i);
+					put(&mut changed, d.at, s);
+				}
+			}
+		}
+	}
+	changed.into_iter().map(|((i, j), n)| (res[i].1[j].entry, Disamb::Names(n))).collect()
+}
+
+/// hayagriva's `disambiguate_with_choose`: every cite that asked `disambiguate`, but the first,
+/// takes the `choose` branch.
+fn disamb_choose(res: &Res, set: &Set) -> Vec<(usize, Disamb)> {
+	let ps: Vec<&Pending> = set.iter().map(|&(i, j)| &res[i].1[j]).collect();
+	if !ps.iter().any(|p| p.checked_disamb && p.cite.disamb.may_choose()) {
+		return Vec::new();
+	}
+	ps.iter().filter(|p| p.checked_disamb).skip(1).map(|p| (p.entry, Disamb::Choose)).collect()
+}
+
+/// hayagriva's `disambiguate_year_suffix`: when some cite writes a date and the style allows it,
+/// each entry of the set takes a suffix in the order it first appears.
+fn disamb_year_suffix<I: Item>(style: &Style, items: &[I], res: &Res, set: &Set) -> Vec<(usize, Disamb)> {
+	const DATES: [&str; 6] = ["issued", "accessed", "available-date", "event-date", "submitted", "original-date"];
+	let dated = res.iter().flat_map(|(_, ps)| ps.iter()).any(|p| {
+		let has = DATES.iter().any(|v| items[p.entry].date(v).is_some());
+		node::find_elem(&p.nodes, &|e| e.meta == Some(Meta::Date) || (has && e.meta == Some(Meta::CitationLabel))).is_some()
+	});
+	let open = |&(i, j): &(usize, usize)| res[i].1[j].cite.disamb.may_year_suffix();
+	if !dated || !style.citation.add_year_suffix || !set.iter().any(open) {
+		return Vec::new();
+	}
+	let mut entries: Vec<usize> = Vec::new();
+	for at in set.iter().filter(|at| open(at)) {
+		let e = res[at.0].1[at.1].entry;
+		if !entries.contains(&e) {
+			entries.push(e);
+		}
+	}
+	entries.into_iter().enumerate().map(|(i, e)| (e, Disamb::YearSuffix(i as u8))).collect()
+}
+
+// Grouping and collapsing
+
+/// hayagriva's grouping: each cite whose first `names` element equals an earlier one's moves up
+/// behind the last of them and takes `delim` before it, which the one it follows gives up. As in
+/// hayagriva, the group number recorded is the count of groups so far, and the indices kept for
+/// earlier groups are not shifted by a later move.
+fn group(ps: &mut [Pending], delim: &str) {
+	let mut map: Vec<(node::Elem, usize)> = Vec::new();	// a names element, the last index with it
+	let mut count = 0;
+	for i in 0..ps.len() {
+		let names = match node::find_elem(&ps[i].nodes, &|e| matches!(e.meta, Some(Meta::Names(_)))) {
+			Some(e)	=> e.clone(),
+			None	=> continue,
+		};
+		let mut prev = None;
+		let target = match map.iter_mut().find(|(n, _)| *n == names) {
+			Some((_, last)) => {
+				prev = Some(*last);
+				*last += 1;
+				*last
+			}
+			None => {
+				count += 1;
+				map.push((names, i));
+				i
+			}
+		};
+		let mut pos = i;
+		while target < pos {
+			ps.swap(pos, pos - 1);
+			pos -= 1;
+		}
+		ps[target].delim = Some(delim.to_string());
+		ps[target].group = Some(count);
+		if let Some(p) = prev {
+			ps[p].delim = None;
+		}
+	}
+}
+
+/// hayagriva's `collapse_items`: runs of three or more consecutive citation numbers become a
+/// range, and a group's later cites keep only their year, or only their year-suffix.
+fn collapse(style: &Style, ps: &mut [Pending]) {
+	let c = &style.citation;
+	let after = c.after_collapse_delimiter.clone().or_else(|| c.layout.delimiter.clone());
+	let group_delim = c.cite_group_delimiter.clone();
+	let suffix_delim = c.year_suffix_delimiter.clone().or_else(|| group_delim.clone());
+	match c.collapse {
+		Some(Collapse::CitationNumber) => {
+			let mut range: Option<(usize, usize)> = None;	// its first and last index
+			let mut just = false;				// the last range collapsed
+			let end_range = |ps: &mut [Pending], range: &mut Option<(usize, usize)>, just: &mut bool| {
+				let use_after = *just;
+				*just = false;
+				if let Some((start, end)) = *range {
+					if use_after {
+						ps[start].delim = after.clone();
+					}
+					if start + 1 < end {
+						ps[end].delim = Some("–".to_string());
+						for p in &mut ps[start + 1..end] {
+							p.hidden = true;
+						}
+						*just = true;
+					}
+				}
+				*range = None;
+			};
+			for i in 0..ps.len() {
+				let numbered = node::find_elem(&ps[i].nodes, &|e| e.meta == Some(Meta::CitationNumber)).is_some();
+				if ps[i].hidden || !numbered {
+					end_range(ps, &mut range, &mut just);
+					continue;
+				}
+				let n = ps[i].cite.number;
+				match range {
+					Some((start, end)) if end + 1 == i && ps[end].cite.number.map(|m| m + 1) == n => {
+						range = Some((start, i));
+					}
+					_ => {
+						end_range(ps, &mut range, &mut just);
+						range = Some((i, i));
+					}
+				}
+			}
+			end_range(ps, &mut range, &mut just);
+		}
+		Some(kind @ (Collapse::Year | Collapse::YearSuffix | Collapse::YearSuffixRanged)) => {
+			let mut cur: Option<(usize, usize)> = None;	// where the group began, and its number
+			for i in 0..ps.len() {
+				match cur {
+					Some((_, g)) if Some(g) == ps[i].group => {
+						let suffixed = matches!(ps[i].cite.disamb, render::Disamb::YearSuffix(s) if s > 0);
+						if kind == Collapse::YearSuffix && suffixed {
+							ps[i].delim = suffix_delim.clone();
+							ps[i].special = Some(Special::OnlyYearSuffix);
+							continue;
+						}
+						ps[i].delim = group_delim.clone();
+						ps[i].special = Some(Special::OnlyFirstDate);
+					}
+					Some((start, _)) if start + 1 < i => {
+						ps[i].delim = after.clone();
+						cur = ps[i].group.map(|g| (i, g));
+					}
+					_ => cur = ps[i].group.map(|g| (i, g)),
+				}
+			}
+		}
+		None => {}
 	}
 }
 
