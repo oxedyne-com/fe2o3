@@ -137,10 +137,19 @@ fn one(out: &mut String, block: &Block) {
 			}
 		}
 		Block::Rule				=> out.push_str("---\n"),
-		Block::Table { head, rows, cols }	=> table(out, head, rows, cols),
+		Block::Table { head, rows, cols, caption } => {
+			table(out, head, rows, cols);
+			// Markdown has no caption, so it stands as the paragraph after the table.
+			if !caption.is_empty() {
+				out.push('\n');
+				one(out, &Block::Para(caption.clone()));
+			}
+		}
 		// A division names a region and Markdown has no syntax for one. Its content stands where it
 		// stood, which is what the HTML writer does with an attribute-less division too.
 		Block::Div { content, .. }		=> blocks(out, content),
+		// Nor has it a figure or a definition list. See `Block::as_plain`.
+		Block::Figure { .. } | Block::Terms { .. } => blocks(out, &block.as_plain()),
 	}
 }
 
@@ -182,7 +191,7 @@ fn row(out: &mut String, r: &Row, n: usize) {
 		// A cell is never the start of a line, whatever it looks like: `3.40` in a cell opens no
 		// ordered list, and escaping it there would put a backslash in front of every price in the
 		// document.
-		inlines(&mut cell, &r.0.get(i).unwrap_or(&empty).0, false);
+		inlines(&mut cell, &r.0.get(i).unwrap_or(&empty).content, false);
 		// A pipe inside a cell would end it.
 		out.push_str(&cell.replace('|', "\\|"));
 		out.push(' ');
@@ -245,8 +254,9 @@ fn inlines(out: &mut String, content: &[Inline], start: bool) {
 				out.push_str(&fence);
 				start = false;
 			}
-			// A span names a region and Markdown has no syntax for one.
-			Inline::Span { content, .. }		=> {
+			// A span names a region and Markdown has no syntax for one. Nor has it a superscript or
+			// a subscript, so their words stand in the line.
+			Inline::Span { content, .. } | Inline::Sup(content) | Inline::Sub(content) => {
 				inlines(out, content, start);
 				start = false;
 			}

@@ -35,6 +35,7 @@ use crate::doc::{
 	Doc,
 	Inline,
 	Row,
+	Term,
 };
 
 
@@ -148,18 +149,55 @@ fn block(out: &mut String, item: &Block, opts: &Opts) {
 			blocks_with(out, inner, opts);
 			out.push_str("</blockquote>");
 		}
-		Block::Table { head, rows, cols } => {
+		Block::Table { head, rows, cols, caption } => {
 			out.push_str("<table>\n");
+			if !caption.is_empty() {
+				open(out, "caption");
+				inlines(out, caption, opts);
+				close(out, "caption");
+				out.push('\n');
+			}
 			if let Some(head) = head {
 				out.push_str("<thead>\n");
-				row(out, head, cols, "th", opts);
+				row(out, head, cols, true, opts);
 				out.push_str("</thead>\n");
 			}
 			out.push_str("<tbody>\n");
 			for r in rows {
-				row(out, r, cols, "td", opts);
+				row(out, r, cols, false, opts);
 			}
 			out.push_str("</tbody>\n</table>");
+		}
+		Block::Figure { attrs, content, caption } => {
+			out.push_str("<figure");
+			write_attrs(out, attrs);
+			out.push_str(">\n");
+			// An image is what most figures hold, and it stands in the figure bare, as an exporter
+			// writes it, rather than in a paragraph the reader made of it. Anything else is the
+			// blocks it is.
+			match content.as_slice() {
+				[Block::Para(content)] if content.iter().all(is_pictorial) => {
+					inlines(out, content, opts);
+					out.push('\n');
+				}
+				_ => blocks_with(out, content, opts),
+			}
+			if !caption.is_empty() {
+				open(out, "figcaption");
+				inlines(out, caption, opts);
+				close(out, "figcaption");
+				out.push('\n');
+			}
+			out.push_str("</figure>");
+		}
+		Block::Terms { attrs, items } => {
+			out.push_str("<dl");
+			write_attrs(out, attrs);
+			out.push_str(">\n");
+			for item in items {
+				term(out, item, opts);
+			}
+			out.push_str("</dl>");
 		}
 		Block::Rule => out.push_str("<hr>"),
 		Block::Div { attrs, content } => {
@@ -195,6 +233,9 @@ fn write_attrs(out: &mut String, attrs: &Attrs) {
 		out.push('"');
 	}
 	for (k, v) in &attrs.pairs {
+		if !is_safe_key(k) {
+			continue;
+		}
 		out.push(' ');
 		escape_attr(out, k);
 		out.push_str("=\"");
@@ -203,12 +244,68 @@ fn write_attrs(out: &mut String, attrs: &Attrs) {
 	}
 }
 
-/// Renders one row of a table, its cells tagged `th` or `td` and aligned by column.
-fn row(out: &mut String, r: &Row, cols: &[Align], tag: &str, opts: &Opts) {
+/// Does an inline belong to a picture: an image, or the space between two?
+fn is_pictorial(item: &Inline) -> bool {
+	match item {
+		Inline::Image { .. }	=> true,
+		Inline::Text(t)		=> t.trim().is_empty(),
+		_			=> false,
+	}
+}
+
+/// Renders one term of a definition list and its definitions.
+///
+/// Each group is wrapped in the `div` HTML allows there, so that a stylesheet can lay a term and its
+/// definition out as one. A definition that is a single paragraph is written bare, on the rule a list
+/// item follows.
+fn term(out: &mut String, item: &Term, opts: &Opts) {
+	out.push_str("<div><dt>");
+	inlines(out, &item.term, opts);
+	out.push_str("</dt>");
+	for def in &item.defs {
+		out.push_str("<dd>");
+		match def.as_slice() {
+			[Block::Para(content)]	=> inlines(out, content, opts),
+			_			=> {
+				out.push('\n');
+				blocks_with(out, def, opts);
+			}
+		}
+		out.push_str("</dd>");
+	}
+	out.push_str("</div>\n");
+}
+
+/// May a pair with this key be written as an attribute?
+///
+/// Refused whatever a policy said, since no policy should be able to say yes: a key that is not
+/// `[a-z][a-z0-9-]*`; one beginning `on`, which is an event handler and so a script; and `style`,
+/// which can dress the page as anything. `id` and `class` are written from their own fields, so a
+/// pair naming either would write the attribute twice, and is refused too.
+fn is_safe_key(k: &str) -> bool {
+	let mut chars = k.chars();
+	let first_ok = matches!(chars.next(), Some('a'..='z'));
+	first_ok
+		&& chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+		&& !k.starts_with("on")
+		&& !matches!(k, "style" | "id" | "class")
+}
+
+/// Renders one row of a table, its cells aligned by column.
+///
+/// A header row's cells are `th scope="col"`; in a body row a header cell is `th scope="row"`, and
+/// every other cell a `td`.
+fn row(out: &mut String, r: &Row, cols: &[Align], head: bool, opts: &Opts) {
 	out.push_str("<tr>");
 	for (i, cell) in r.0.iter().enumerate() {
+		let (tag, scope) = match (head, cell.header) {
+			(true, _)	=> ("th", " scope=\"col\""),
+			(false, true)	=> ("th", " scope=\"row\""),
+			(false, false)	=> ("td", ""),
+		};
 		out.push('<');
 		out.push_str(tag);
+		out.push_str(scope);
 		// A row may run wider than the columns the table declared; a cell past the end is aligned by
 		// nothing, which is the same as a column that named no alignment.
 		align(out, cols.get(i).copied().unwrap_or_default());
@@ -244,7 +341,7 @@ fn align(out: &mut String, a: Align) {
 
 /// Renders a cell's inline content.
 fn cells(out: &mut String, cell: &Cell, opts: &Opts) {
-	inlines(out, &cell.0, opts);
+	inlines(out, &cell.content, opts);
 }
 
 /// Renders a run of inlines.
@@ -297,6 +394,16 @@ fn inline(out: &mut String, item: &Inline, opts: &Opts) {
 		// Only ever a hard break, so it is honoured unconditionally and no whitespace rule is needed
 		// here. A wrap in the author's editor never reaches the tree as one of these.
 		Inline::Break => out.push_str("<br>"),
+		Inline::Sup(content) => {
+			open(out, "sup");
+			inlines(out, content, opts);
+			close(out, "sup");
+		}
+		Inline::Sub(content) => {
+			open(out, "sub");
+			inlines(out, content, opts);
+			close(out, "sub");
+		}
 	}
 }
 
@@ -480,14 +587,15 @@ mod tests {
 	fn test_a_table_aligns_by_logical_side_02() -> Outcome<()> {
 		let doc = Doc {
 			blocks: vec![Block::Table {
-				head:	Some(Row(vec![Cell(text("Name")), Cell(text("Age"))])),
-				rows:	vec![Row(vec![Cell(text("Alice")), Cell(text("30"))])],
+				head:	Some(Row(vec![Cell::new(text("Name")), Cell::new(text("Age"))])),
+				rows:	vec![Row(vec![Cell::new(text("Alice")), Cell::new(text("30"))])],
 				cols:	vec![Align::Start, Align::End],
+				caption: Vec::new(),
 			}],
 		};
 		let out = render(&doc);
-		assert!(out.contains("<th style=\"text-align: start\">Name</th>"), "got: {}", out);
-		assert!(out.contains("<th style=\"text-align: end\">Age</th>"), "got: {}", out);
+		assert!(out.contains("<th scope=\"col\" style=\"text-align: start\">Name</th>"), "got: {}", out);
+		assert!(out.contains("<th scope=\"col\" style=\"text-align: end\">Age</th>"), "got: {}", out);
 		assert!(out.contains("<td style=\"text-align: start\">Alice</td>"), "got: {}", out);
 		// Never left or right: the tree does not know which side the text begins on.
 		assert!(!out.contains("left"), "got: {}", out);
@@ -501,8 +609,9 @@ mod tests {
 		let doc = Doc {
 			blocks: vec![Block::Table {
 				head:	None,
-				rows:	vec![Row(vec![Cell(text("a")), Cell(text("b"))])],
+				rows:	vec![Row(vec![Cell::new(text("a")), Cell::new(text("b"))])],
 				cols:	vec![Align::None],
+				caption: Vec::new(),
 			}],
 		};
 		let out = render(&doc);

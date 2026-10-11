@@ -168,7 +168,14 @@ fn blocks(out: &mut Out, run: &[Block], left: &mut Left) -> Outcome<()> {
 				out.open("text:p", &[("text:style-name", "Horizontal_20_Line")]);
 				res!(out.close("text:p"));
 			}
-			Block::Table { head, rows, cols }	=> res!(table(out, head, rows, cols, left)),
+			Block::Table { head, rows, cols, caption } => {
+				res!(table(out, head, rows, cols, left));
+				// Its caption is the paragraph after it, which is where a reader looks for one.
+				if !caption.is_empty() {
+					res!(blocks(out, &[Block::Para(caption.clone())], left));
+				}
+			}
+			Block::Figure { .. } | Block::Terms { .. } => res!(blocks(out, &block.as_plain(), left)),
 			Block::Div { content, .. }		=> res!(blocks(out, content, left)),
 		}
 	}
@@ -243,7 +250,7 @@ fn row_of(out: &mut Out, r: &Row, n: usize, left: &mut Left) -> Outcome<()> {
 	for i in 0..n {
 		out.open("table:table-cell", &[("office:value-type", "string")]);
 		out.open("text:p", &[]);
-		res!(inlines(out, &r.0.get(i).unwrap_or(&empty).0, left));
+		res!(inlines(out, &r.0.get(i).unwrap_or(&empty).content, left));
 		res!(out.close("text:p"));
 		res!(out.close("table:table-cell"));
 	}
@@ -282,7 +289,7 @@ fn inlines(out: &mut Out, content: &[Inline], left: &mut Left) -> Outcome<()> {
 				res!(text_run(out, alt));
 				res!(out.close("text:span"));
 			}
-			Inline::Span { content, .. }		=> res!(inlines(out, content, left)),
+			Inline::Span { content, .. } | Inline::Sup(content) | Inline::Sub(content)		=> res!(inlines(out, content, left)),
 			Inline::Break				=> out.empty("text:line-break", &[]),
 		}
 	}
@@ -580,7 +587,7 @@ fn read_table(xml: &Xml, at: &Elem, images: &mut usize, st: &Styles) -> Option<B
 		return None;
 	}
 	let n = head.iter().chain(rows.iter()).map(|r| r.0.len()).max().unwrap_or(0);
-	Some(Block::Table { head, rows, cols: vec![Align::None; n] })
+	Some(Block::Table { head, rows, cols: vec![Align::None; n], caption: Vec::new() })
 }
 
 fn read_row(xml: &Xml, tr: &Elem, images: &mut usize, st: &Styles) -> Row {
@@ -601,7 +608,7 @@ fn read_row(xml: &Xml, tr: &Elem, images: &mut usize, st: &Styles) -> Row {
 					.unwrap_or(1)
 					.min(1024);
 				for _ in 0..n {
-					cells.push(Cell(content.clone()));
+					cells.push(Cell::new(content.clone()));
 				}
 			}
 			"table:covered-table-cell"	=> cells.push(Cell::default()),

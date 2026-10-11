@@ -242,8 +242,14 @@ fn block(b: &Block) -> Option<Dat> {
 		// The column alignments go with the grid. An alignment is a column's, there are no columns
 		// left to carry one, and §4.4's `align` style belongs to a whole node rather than to a slice
 		// down the middle of several: a row is not a column, so there is nowhere true to put it.
-		Block::Table { head, rows, .. } => {
-			let mut kids = Vec::with_capacity(rows.len() + 1);
+		//
+		// A caption is the box's first paragraph, ahead of the rows, as it stood ahead of them.
+		Block::Table { head, rows, caption, .. } => {
+			let mut kids = Vec::with_capacity(rows.len() + 2);
+			let cap = inlines(caption);
+			if !cap.is_empty() {
+				kids.push(node(NodeKind::Para, Vec::new(), cap));
+			}
 			if let Some(head) = head {
 				if let Some(para) = table_row(head) {
 					kids.push(para);
@@ -276,6 +282,16 @@ fn block(b: &Block) -> Option<Dat> {
 			}
 			Some(node(NodeKind::Boxx, Vec::new(), kids))
 		},
+		// A figure and a definition list degrade, until v0 has kinds for them, to a box of the
+		// blocks `Block::as_plain` gives: every word stays, the caption a paragraph after the
+		// content, each term a strong paragraph before its definitions.
+		Block::Figure { .. } | Block::Terms { .. } => {
+			let kids = self::blocks(&b.as_plain());
+			if kids.is_empty() {
+				return None;
+			}
+			Some(node(NodeKind::Boxx, Vec::new(), kids))
+		},
 	}
 }
 
@@ -294,7 +310,7 @@ fn table_row(row: &Row) -> Option<Dat> {
 		if n > 0 {
 			push_text(&mut out, CELL_SEP);
 		}
-		out.extend(inlines(&cell.0));
+		out.extend(inlines(&cell.content));
 	}
 	Some(node(NodeKind::Para, Vec::new(), out))
 }
@@ -345,6 +361,8 @@ fn inlines(content: &[Inline]) -> Vec<Dat> {
 			// every word and every emphasis inside it, in order, exactly as a code span keeps its
 			// characters.
 			Inline::Span { content, .. } => out.extend(inlines(content)),
+			// A superscript and a subscript degrade alike, until v0 has a kind for either.
+			Inline::Sup(content) | Inline::Sub(content) => out.extend(inlines(content)),
 		}
 	}
 	out
@@ -529,7 +547,7 @@ mod tests {
 
 	/// A cell of one run of literal text.
 	fn c(s: &str) -> Cell {
-		Cell(vec![t(s)])
+		Cell::new(vec![t(s)])
 	}
 
 	#[test]
@@ -905,6 +923,7 @@ mod tests {
 				head:	Some(Row(vec![c("Name"), c("Age")])),
 				rows:	vec![Row(vec![c("Alice"), c("30")])],
 				cols:	vec![Align::Start, Align::None],
+				caption:	Vec::new(),
 			},
 			Block::Quote(vec![
 				p("Quoted."),
@@ -953,6 +972,44 @@ mod tests {
 		Ok(())
 	}
 
+	/// Until the import is made lossless, a figure, a definition list, a table's caption and a
+	/// superscript all degrade, and keep every word in reading order while doing so.
+	#[test]
+	fn test_the_page_constructs_degrade_keeping_their_words_26a() -> Outcome<()> {
+		let tree = res!(imported(vec![
+			Block::Figure {
+				attrs:		Default::default(),
+				content:	vec![p("Content.")],
+				caption:	vec![t("Caption.")],
+			},
+			Block::Terms {
+				attrs:	Default::default(),
+				items:	vec![oxedyne_fe2o3_text::doc::Term {
+					term:	vec![t("Term")],
+					defs:	vec![vec![Block::Para(vec![t("m"), Inline::Sup(vec![t("2")])])]],
+				}],
+			},
+			Block::Table {
+				head:		None,
+				rows:		vec![Row(vec![c("a"), c("b")])],
+				cols:		Vec::new(),
+				caption:	vec![t("Cap")],
+			},
+		]));
+		let fig = res!(kid(&tree, 0));
+		assert_eq!(res!(kind_of(&fig)), NodeKind::Boxx);
+		assert_eq!(&res!(said(&res!(kid(&fig, 0)))), "Content.");
+		assert_eq!(&res!(said(&res!(kid(&fig, 1)))), "Caption.");
+		let terms = res!(kid(&tree, 1));
+		assert_eq!(&res!(said(&res!(kid(&terms, 0)))), "Term");
+		assert_eq!(&res!(said(&res!(kid(&terms, 1)))), "m2");
+		let table = res!(kid(&tree, 2));
+		assert_eq!(&res!(said(&res!(kid(&table, 0)))), "Cap");
+		assert_eq!(&res!(said(&res!(kid(&table, 1)))), "a | b");
+		res!(crate::canon::check(&tree));
+		Ok(())
+	}
+
 	#[test]
 	fn test_a_table_degrades_to_a_box_of_rows_26() -> Outcome<()> {
 		// v0 has no kind for a grid and the vocabulary is frozen, so the grid goes and every word
@@ -966,6 +1023,7 @@ mod tests {
 					Row(vec![c("Bob"), c("25")]),
 				],
 				cols:	vec![Align::Start, Align::End],
+				caption:	Vec::new(),
 			},
 		]));
 		let boxx = res!(kid(&tree, 0));
@@ -989,13 +1047,14 @@ mod tests {
 			Block::Table {
 				head:	None,
 				rows:	vec![Row(vec![
-					Cell(vec![Inline::Emph { strong: true, content: vec![t("loud")] }]),
-					Cell(vec![Inline::Link {
+					Cell::new(vec![Inline::Emph { strong: true, content: vec![t("loud")] }]),
+					Cell::new(vec![Inline::Link {
 						to:		"news.cricket".to_string(),
 						content:	vec![t("a link")],
 					}]),
 				])],
 				cols:	vec![Align::None, Align::None],
+				caption:	Vec::new(),
 			},
 		]));
 		let boxx = res!(kid(&tree, 0));
@@ -1017,9 +1076,10 @@ mod tests {
 		// renders as nothing at all: the same rule an empty paragraph is held to.
 		let tree = res!(imported(vec![
 			Block::Table {
-				head:	Some(Row(vec![Cell(Vec::new()), Cell(Vec::new())])),
-				rows:	vec![Row(vec![c("   "), Cell(Vec::new())])],
+				head:	Some(Row(vec![Cell::default(), Cell::default()])),
+				rows:	vec![Row(vec![c("   "), Cell::default()])],
 				cols:	vec![Align::None, Align::None],
+				caption:	Vec::new(),
 			},
 			p("After."),
 		]));

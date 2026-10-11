@@ -320,7 +320,7 @@ fn runs(out: &mut Out, content: &[Inline], fmt: Fmt, left: &mut Left) -> Outcome
 				left.images.push(src.clone());
 				res!(run(out, alt, Fmt { italic: true, ..fmt }));
 			}
-			Inline::Span { content, .. }		=> res!(runs(out, content, fmt, left)),
+			Inline::Span { content, .. } | Inline::Sup(content) | Inline::Sub(content)		=> res!(runs(out, content, fmt, left)),
 			// A slide has no soft break worth keeping: the shape wraps.
 			Inline::Break				=> res!(run(out, " ", fmt)),
 		}

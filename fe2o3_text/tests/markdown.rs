@@ -81,10 +81,11 @@ pub fn test_markdown(filter: &'static str) -> Outcome<()> {
 				Block::Table {
 					head:	None,
 					rows:	vec![oxedyne_fe2o3_text::doc::Row(vec![
-						oxedyne_fe2o3_text::doc::Cell(vec![Inline::Text("3.40".to_string())]),
-						oxedyne_fe2o3_text::doc::Cell(vec![Inline::Text("a | b".to_string())]),
+						oxedyne_fe2o3_text::doc::Cell::new(vec![Inline::Text("3.40".to_string())]),
+						oxedyne_fe2o3_text::doc::Cell::new(vec![Inline::Text("a | b".to_string())]),
 					])],
 					cols:	vec![],
+					caption: vec![],
 				},
 			],
 		};

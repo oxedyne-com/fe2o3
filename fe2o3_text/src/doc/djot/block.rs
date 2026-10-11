@@ -581,20 +581,20 @@ fn table(lines: &[&str], cols: Vec<Align>, refs: &HashMap<String, String>)
 		rows.push(res!(row(lines[i], cols.len(), refs)));
 		i += 1;
 	}
-	Ok((Block::Table { head: Some(head), rows, cols }, i))
+	Ok((Block::Table { head: Some(head), rows, cols, caption: Vec::new() }, i))
 }
 
 /// Reads one row of a table, held to the width the header set.
 fn row(line: &str, n: usize, refs: &HashMap<String, String>) -> Outcome<Row> {
 	let mut cells = Vec::with_capacity(n);
 	for text in cells_of(line).iter().take(n) {
-		cells.push(Cell(res!(inline::parse(text, refs))));
+		cells.push(Cell::new(res!(inline::parse(text, refs))));
 	}
 	// A row of fewer cells than the header named columns is short of the grid rather than wrong, and
 	// a row of more has said something the header made no column for, and what it has no column for is
 	// dropped.
 	while cells.len() < n {
-		cells.push(Cell(Vec::new()));
+		cells.push(Cell::default());
 	}
 	Ok(Row(cells))
 }

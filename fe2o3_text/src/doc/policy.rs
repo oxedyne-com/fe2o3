@@ -39,11 +39,13 @@
 //! built to overflow a stack is refused rather than walked.
 
 use crate::doc::{
+	Attrs,
 	Block,
 	Cell,
 	Doc,
 	Inline,
 	Row,
+	Term,
 };
 
 
@@ -53,6 +55,24 @@ use crate::doc::{
 /// is one too -- a `data:text/html` destination is a document of the sender's choosing served from
 /// the site's own origin.
 pub const SAFE_SCHEMES: &[&str] = &["http", "https", "mailto"];
+
+/// Which names of a kind a policy lets through: any, or only those listed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AllowList {
+	Any,
+	Only(Vec<String>),
+}
+
+impl AllowList {
+
+	/// Does the list let this name through?
+	pub fn permits(&self, name: &str) -> bool {
+		match self {
+			Self::Any		=> true,
+			Self::Only(names)	=> names.iter().any(|n| n == name),
+		}
+	}
+}
 
 /// What a document from an untrusted author may contain.
 ///
@@ -74,9 +94,14 @@ pub struct Policy {
 	pub heading_floor:	Option<u8>,
 	/// Whether tables survive.
 	pub allow_tables:	bool,
-	/// Whether a division or span keeps the attributes that name it. Off by default: an id or a class
-	/// a stranger chose lands in the site's own document.
-	pub allow_attrs:	bool,
+	/// The classes a division, span, figure or definition list may keep. None by default: a class a
+	/// stranger chose borrows the site's styling.
+	pub classes:		AllowList,
+	/// Whether an id survives. Off by default: a stranger's id can collide with the page's own.
+	pub ids:		bool,
+	/// The key-value pairs that survive, by key. None by default. Whatever this says, the HTML
+	/// writer refuses a key that could carry script or style; see `html::write`.
+	pub pairs:		AllowList,
 	/// How deep the tree may nest before the walk stops and drops what is below.
 	pub max_depth:		usize,
 }
@@ -91,7 +116,9 @@ impl Default for Policy {
 			allow_images:	false,
 			heading_floor:	Some(3),
 			allow_tables:	true,
-			allow_attrs:	false,
+			classes:	AllowList::Only(Vec::new()),
+			ids:		false,
+			pairs:		AllowList::Only(Vec::new()),
 			max_depth:	16,
 		}
 	}
@@ -110,7 +137,9 @@ impl Policy {
 			allow_images:	true,
 			heading_floor:	None,
 			allow_tables:	true,
-			allow_attrs:	true,
+			classes:	AllowList::Any,
+			ids:		true,
+			pairs:		AllowList::Any,
 			max_depth:	usize::MAX,
 		}
 	}
@@ -233,10 +262,23 @@ where
 				items:		items.iter().map(|it| retarget_blocks(it, map)).collect(),
 			},
 			Block::Quote(inner)		=> Block::Quote(retarget_blocks(inner, map)),
-			Block::Table { head, rows, cols } => Block::Table {
-				head:	head.as_ref().map(|h| retarget_row(h, map)),
-				rows:	rows.iter().map(|r| retarget_row(r, map)).collect(),
-				cols:	cols.clone(),
+			Block::Table { head, rows, cols, caption } => Block::Table {
+				head:		head.as_ref().map(|h| retarget_row(h, map)),
+				rows:		rows.iter().map(|r| retarget_row(r, map)).collect(),
+				cols:		cols.clone(),
+				caption:	retarget_inlines(caption, map),
+			},
+			Block::Figure { attrs, content, caption } => Block::Figure {
+				attrs:		attrs.clone(),
+				content:	retarget_blocks(content, map),
+				caption:	retarget_inlines(caption, map),
+			},
+			Block::Terms { attrs, items } => Block::Terms {
+				attrs:	attrs.clone(),
+				items:	items.iter().map(|t| Term {
+					term:	retarget_inlines(&t.term, map),
+					defs:	t.defs.iter().map(|d| retarget_blocks(d, map)).collect(),
+				}).collect(),
 			},
 			Block::Div { attrs, content } => Block::Div {
 				attrs:		attrs.clone(),
@@ -254,7 +296,7 @@ fn retarget_row<F>(r: &Row, map: &F) -> Row
 where
 	F: Fn(&str) -> Option<String>,
 {
-	Row(r.0.iter().map(|c| Cell(retarget_inlines(&c.0, map))).collect())
+	Row(r.0.iter().map(|c| Cell { content: retarget_inlines(&c.content, map), header: c.header }).collect())
 }
 
 /// The inlines, their destinations rewritten.
@@ -287,6 +329,8 @@ where
 				attrs:		attrs.clone(),
 				content:	retarget_inlines(content, map),
 			}),
+			Inline::Sup(content)	=> out.push(Inline::Sup(retarget_inlines(content, map))),
+			Inline::Sub(content)	=> out.push(Inline::Sub(retarget_inlines(content, map))),
 			Inline::Text(_) | Inline::Code(_) | Inline::Break	=> out.push(item.clone()),
 		}
 	}
@@ -333,7 +377,7 @@ fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
 			// the language name reaches a class attribute -- which is why it is passed through the
 			// same attribute rule as everything else.
 			Block::Code { lang, text } => out.push(Block::Code {
-				lang:	if policy.allow_attrs { lang.clone() } else { lang.as_ref()
+				lang:	if policy.classes == AllowList::Any { lang.clone() } else { lang.as_ref()
 						.filter(|l| l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 						.cloned() },
 				text:	text.clone(),
@@ -344,10 +388,14 @@ fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
 					out.push(Block::Quote(kept));
 				}
 			}
-			Block::Table { head, rows, cols } => {
+			Block::Table { head, rows, cols, caption } => {
 				if !policy.allow_tables {
-					// A table that is not permitted still said something; its cells become
-					// paragraphs rather than vanishing.
+					// A table that is not permitted still said something; its caption and cells
+					// become paragraphs rather than vanishing.
+					let caption = inlines(caption, policy, depth);
+					if !caption.is_empty() {
+						out.push(Block::Para(caption));
+					}
 					if let Some(h) = head {
 						out.extend(row_as_paras(h, policy, depth));
 					}
@@ -357,10 +405,34 @@ fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
 					continue;
 				}
 				out.push(Block::Table {
-					head:	head.as_ref().map(|h| row(h, policy, depth)),
-					rows:	rows.iter().map(|r| row(r, policy, depth)).collect(),
-					cols:	cols.clone(),
+					head:		head.as_ref().map(|h| row(h, policy, depth)),
+					rows:		rows.iter().map(|r| row(r, policy, depth)).collect(),
+					cols:		cols.clone(),
+					caption:	inlines(caption, policy, depth),
 				});
+			}
+			Block::Figure { attrs, content, caption } => {
+				let content = blocks(content, policy, depth + 1);
+				let caption = inlines(caption, policy, depth + 1);
+				if content.is_empty() && caption.is_empty() {
+					continue;
+				}
+				out.push(Block::Figure { attrs: kept(attrs, policy), content, caption });
+			}
+			Block::Terms { attrs, items } => {
+				let items: Vec<Term> = items.iter()
+					.map(|t| Term {
+						term:	inlines(&t.term, policy, depth + 1),
+						defs:	t.defs.iter()
+							.map(|d| blocks(d, policy, depth + 1))
+							.filter(|d| !d.is_empty())
+							.collect(),
+					})
+					.filter(|t| !t.term.is_empty() || !t.defs.is_empty())
+					.collect();
+				if !items.is_empty() {
+					out.push(Block::Terms { attrs: kept(attrs, policy), items });
+				}
 			}
 			Block::Rule => out.push(Block::Rule),
 			Block::Div { attrs, content } => {
@@ -368,12 +440,13 @@ fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
 				if kept.is_empty() {
 					continue;
 				}
-				if policy.allow_attrs {
-					out.push(Block::Div { attrs: attrs.clone(), content: kept });
-				} else {
+				let attrs = self::kept(attrs, policy);
+				if attrs.is_empty() {
 					// The division's content is kept and its naming is not: the words were the
 					// author's to write and the site's markup was not theirs to join.
 					out.extend(kept);
+				} else {
+					out.push(Block::Div { attrs, content: kept });
 				}
 			}
 		}
@@ -381,15 +454,31 @@ fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
 	out
 }
 
+/// The attributes an element keeps under the policy: the permitted classes and pairs, and the id
+/// where ids are permitted.
+///
+/// The element itself is the author's to write, so a figure or a definition list stays whatever
+/// goes; a division or a span left naming nothing is unwrapped by its caller.
+fn kept(attrs: &Attrs, policy: &Policy) -> Attrs {
+	Attrs {
+		id:		match policy.ids {
+			true	=> attrs.id.clone(),
+			false	=> None,
+		},
+		classes:	attrs.classes.iter().filter(|c| policy.classes.permits(c)).cloned().collect(),
+		pairs:		attrs.pairs.iter().filter(|(k, _)| policy.pairs.permits(k)).cloned().collect(),
+	}
+}
+
 /// A row, its cells brought within the policy.
 fn row(r: &Row, policy: &Policy, depth: usize) -> Row {
-	Row(r.0.iter().map(|c| Cell(inlines(&c.0, policy, depth))).collect())
+	Row(r.0.iter().map(|c| Cell { content: inlines(&c.content, policy, depth), header: c.header }).collect())
 }
 
 /// A row's cells as paragraphs, for a table a policy will not keep.
 fn row_as_paras(r: &Row, policy: &Policy, depth: usize) -> Vec<Block> {
 	r.0.iter()
-		.map(|c| Block::Para(inlines(&c.0, policy, depth)))
+		.map(|c| Block::Para(inlines(&c.content, policy, depth)))
 		.filter(|b| match b { Block::Para(c) => !c.is_empty(), _ => true })
 		.collect()
 }
@@ -405,6 +494,8 @@ fn inlines(items: &[Inline], policy: &Policy, depth: usize) -> Vec<Inline> {
 			Inline::Text(t)	=> out.push(Inline::Text(t.clone())),
 			Inline::Code(c)	=> out.push(Inline::Code(c.clone())),
 			Inline::Break	=> out.push(Inline::Break),
+			Inline::Sup(content)	=> out.push(Inline::Sup(inlines(content, policy, depth + 1))),
+			Inline::Sub(content)	=> out.push(Inline::Sub(inlines(content, policy, depth + 1))),
 			Inline::Emph { strong, content } => out.push(Inline::Emph {
 				strong:		*strong,
 				content:	inlines(content, policy, depth + 1),
@@ -429,10 +520,11 @@ fn inlines(items: &[Inline], policy: &Policy, depth: usize) -> Vec<Inline> {
 			}
 			Inline::Span { attrs, content } => {
 				let kept = inlines(content, policy, depth + 1);
-				if policy.allow_attrs {
-					out.push(Inline::Span { attrs: attrs.clone(), content: kept });
-				} else {
+				let attrs = self::kept(attrs, policy);
+				if attrs.is_empty() {
 					out.extend(kept);
+				} else {
+					out.push(Inline::Span { attrs, content: kept });
 				}
 			}
 		}
