@@ -8,12 +8,15 @@
 
 use crate::{
     prelude::*,
+    comm::channels::Cut,
     file::zdir::{
         sync_dir,
         write_whole,
     },
     test::hooks,
 };
+
+use oxedyne_fe2o3_core::file::ExclusiveLock;
 
 use std::{
     path::{
@@ -34,20 +37,25 @@ impl Refusal {
         root.join(constant::REFUSAL_FILENAME)
     }
 
-    /// Leaves the marker, naming `why`, durably: through a synced temporary file, renamed, and the
-    /// root synced.
-    pub fn write(root: &Path, why: &str) -> Outcome<PathBuf> {
+    /// Leaves the marker, naming `why` and every file in doubt in `cuts`, durably: through a
+    /// synced temporary file, renamed, and the root synced.  The cut lines are the fault
+    /// record's, so the marker alone can stand in for a record that was lost or never written.
+    pub fn write(root: &Path, why: &str, cuts: &[Cut]) -> Outcome<PathBuf> {
         if hooks::fault_record_fails() {
             return Err(err!("The refusal marker could not be written (test::hooks)."; IO, Write));
         }
         let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let text = fmt!("when {}\nwhy {}\n", secs, why.replace('\n', " "));
+        let mut text = fmt!("when {}\nwhy {}\n", secs, why.replace('\n', " "));
+        for c in cuts {
+            text.push_str(&c.line());
+            text.push('\n');
+        }
         write_whole(root, constant::REFUSAL_FILENAME, &text, None)
     }
 
     /// Leaves the marker for the open refused by `e`, and returns `e` saying whether it was left.
     pub(crate) fn refuse(root: &Path, e: Error<ErrTag>) -> Error<ErrTag> {
-        match Self::write(root, &fmt!("{}", e)) {
+        match Self::write(root, &e.plain(), &[]) {
             Ok(path) => err!(e,
                 "The refusal is kept in {:?}, so every later open of the store is refused too, \
                 since the kernel will not report the error again.  Once the files in doubt are \
@@ -86,10 +94,32 @@ impl Refusal {
 
     /// The operator's verb: removes the marker, durably, so the store opens again.  Calling it
     /// says that the files in doubt were checked, or that the store was restored; nothing here
-    /// checks either.  A fault record left beside the marker still cuts its files at the next
-    /// open.  Returns whether there was a marker.
+    /// checks either.  The marker's cuts are first folded into the fault record, durably, so the
+    /// next open still cuts every file in doubt even when the record had been lost (QA r2 F2).
+    /// It takes the store's lock, and refuses while another open holds the store, whose files
+    /// may still change.  Returns whether there was a marker.
     pub fn clear(root: &Path) -> Outcome<bool> {
         let path = Self::path(root);
+        if !path.exists() {
+            return Ok(false);
+        }
+        let lock_path = root.join(constant::STORE_LOCK_FILENAME);
+        let _lock = match res!(ExclusiveLock::try_acquire(&lock_path)) {
+            Some(l) => l,
+            None => return Err(err!(
+                "The refusal of the Ozone store at {:?} is not cleared: the store is held by \
+                another open, in another process or this one ({:?} is locked), whose files may \
+                still change.  Stop the one holding it, then clear.", root, lock_path;
+                Init, Lock, Conflict)),
+        };
+        let marker = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(err!(e,
+                "Cannot read the refusal marker {:?} to fold its cuts into the fault record.", path;
+                IO, File, Read)),
+        };
+        let folded = res!(Self::fold(root, &marker));
         match std::fs::remove_file(&path) {
             Ok(()) => (),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -100,7 +130,57 @@ impl Refusal {
         res!(sync_dir(root));
         warn!(sync_log::stream(),
             "The refusal of the store at {:?} was cleared: the operator holds that the files in \
-            doubt were checked, or that the store was restored.", root);
+            doubt were checked, or that the store was restored.  The next open cuts these files \
+            in doubt (zone, file number, data and index marks): {:?}", root, folded);
         Ok(true)
+    }
+
+    // Copies the cut lines of the marker text `marker` that the fault record lacks into the
+    // record, written whole, and returns every cut line the record now holds.
+    fn fold(root: &Path, marker: &str) -> Outcome<Vec<String>> {
+        let cuts: Vec<&str> = marker.lines().filter(|l| l.starts_with("cut ")).collect();
+        let rpath = root.join(constant::FAULT_FILENAME);
+        let mut text = match std::fs::read_to_string(&rpath) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if cuts.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // The record was lost, or never written: the marker's own lines head it.
+                let mut head = String::new();
+                for l in marker.lines() {
+                    if let Some(w) = l.strip_prefix("when ") {
+                        head.push_str(&fmt!("when {}\n", w));
+                    } else if let Some(w) = l.strip_prefix("why ") {
+                        head.push_str(&fmt!("error {}\n", w));
+                    }
+                }
+                head
+            },
+            Err(e) => return Err(err!(e,
+                "Cannot read the fault record {:?} to fold the refusal marker's cuts into it, so \
+                the marker is kept.", rpath;
+                IO, File, Read)),
+        };
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        let mut added = false;
+        for l in &cuts {
+            if !text.lines().any(|r| r == *l) {
+                text.push_str(l);
+                text.push('\n');
+                added = true;
+            }
+        }
+        if added {
+            if let Err(e) = write_whole(root, constant::FAULT_FILENAME, &text, None) {
+                return Err(err!(e,
+                    "Cannot fold the refusal marker's cuts into the fault record {:?}, so the \
+                    marker is kept.", rpath;
+                    IO, File, Write));
+            }
+        }
+        Ok(text.lines().filter(|l| l.starts_with("cut ")).map(String::from).collect())
     }
 }

@@ -315,3 +315,50 @@ fn a_loaded_open_of_9600_files() -> Outcome<()> {
     let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
+
+/// M11: the open really calls `syncfs`, once per filesystem.  `hooks::replay_flushes` counts the
+/// flush before it is made, so only the kernel can tell whether it was: this test runs itself
+/// again under `strace -f -e trace=syncfs` and counts the calls the child's open makes.  It
+/// passes with a note when strace is absent.  Runner:
+/// `cargo test -p oxedyne_fe2o3_o3db_sync --test open_flush -- --ignored --nocapture
+/// an_open_calls_syncfs_once_per_filesystem`.
+#[test]
+#[ignore]
+fn an_open_calls_syncfs_once_per_filesystem() -> Outcome<()> {
+    const CHILD: &str = "OPEN_FLUSH_STRACE_ROOT";
+    const NAME: &str = "an_open_calls_syncfs_once_per_filesystem";
+    let _g = lock();
+    if let Ok(root) = std::env::var(CHILD) {
+        // The child: one open and close of the store its parent wrote, flushed by syncfs.
+        hooks::set_replay_flush(ReplayFlush::Syncfs);
+        let db = res!(open(Path::new(&root)));
+        res!(db.close());
+        return Ok(());
+    }
+    if !cfg!(target_os = "linux") {
+        return Ok(());
+    }
+    let have = std::process::Command::new("strace").arg("-V").output();
+    if !matches!(have, Ok(ref o) if o.status.success()) {
+        println!("{}: strace is not installed, so the kernel's count is not checked.", NAME);
+        return Ok(());
+    }
+    let root = res!(written("./test_db_open_flush_strace"));
+    let trace = root.with_extension("strace");
+    let exe = res!(std::env::current_exe());
+    let out = res!(std::process::Command::new("strace")
+        .args(["-f", "-qq", "-e", "trace=syncfs", "-o"])
+        .arg(&trace)
+        .arg(&exe)
+        .args(["--ignored", "--exact", NAME, "--test-threads=1"])
+        .env(CHILD, &root)
+        .output());
+    let text = fs::read_to_string(&trace).unwrap_or_default();
+    let _ = fs::remove_file(&trace);
+    let _ = fs::remove_dir_all(&root);
+    assert!(out.status.success(), "the traced open failed: {}",
+        String::from_utf8_lossy(&out.stdout));
+    let calls = text.lines().filter(|l| l.contains("syncfs(")).count();
+    assert_eq!(calls, 1, "two zones on one filesystem made {} syncfs calls:\n{}", calls, text);
+    Ok(())
+}

@@ -63,6 +63,8 @@ static HEADS_HELD:       AtomicU64  = AtomicU64::new(0);      // stores that hav
 static SWEEP_HOLD:       AtomicBool = AtomicBool::new(false); // a sweep waits between its two scans
 static SWEEPS_HELD:      AtomicU64  = AtomicU64::new(0);      // sweeps that have reached the hold above
 static FAULT_RECORD_FAILS: AtomicBool = AtomicBool::new(false); // the fault record cannot be written
+static FAULT_RECORD_AT:  AtomicU64  = AtomicU64::new(0);      // the nth fault record write fails, 0 none
+static FAULT_RECORDS:    AtomicU64  = AtomicU64::new(0);      // fault record writes since the above was set
 static REPLAY_SYNC_FAILS: AtomicBool = AtomicBool::new(false); // the flush before replay fails
 static REPLAY_FLUSH_WAY: AtomicU64 = AtomicU64::new(0);      // 0 as the kernel allows, 1 syncfs, 2 per file
 static REPLAY_FLUSHES:   AtomicU64  = AtomicU64::new(0);      // syncfs or file syncs made before replay
@@ -235,6 +237,20 @@ pub fn set_fault_record_fails(on: bool) {
 
 pub(crate) fn fault_record_fails() -> bool {
     FAULT_RECORD_FAILS.load(Ordering::SeqCst)
+}
+
+/// Makes only the `n`th write of a fault record from now fail, counting from one, and every other
+/// write, the refusal marker's among them, succeed.  Zero turns it off.
+pub fn set_fault_record_fails_at(n: u64) {
+    FAULT_RECORDS.store(0, Ordering::SeqCst);
+    FAULT_RECORD_AT.store(n, Ordering::SeqCst);
+}
+
+// Counts a write of the fault record, and says whether it is the one set to fail.
+pub(crate) fn fault_record_write_fails() -> bool {
+    let at = FAULT_RECORD_AT.load(Ordering::SeqCst);
+    let n = FAULT_RECORDS.fetch_add(1, Ordering::SeqCst) + 1;
+    at != 0 && n == at
 }
 
 /// Makes the flush an open gives the store's files before replaying them fail, whichever way it

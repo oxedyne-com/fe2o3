@@ -352,7 +352,14 @@ impl<
 
         // A refused open, or a run stopped by a failed sync, leaves the store refused until an
         // operator clears it: the kernel will not report the error to this open again.
-        res!(Refusal::check(&self.db_root));
+        // The refused start lets go of the lock, so the operator can clear the refusal while
+        // this process lives on.
+        if let Err(e) = Refusal::check(&self.db_root) {
+            let mut closing = lock_mutex!(self.closing,
+                "Releasing the store's lock after an open refused by its marker.");
+            closing.lock = None;
+            return Err(e);
+        }
 
         // Write config to a file now that we have a directory structure.
         res!(self.cfg().write_config_file(self.db_root()));

@@ -194,6 +194,20 @@ fn kill_at(halt: Halt) -> Outcome<()> {
         let il = fs::metadata(zdir.join(ZoneDir::relative_file_path(&FileType::Index, f))).map(|m| m.len()).unwrap_or(0);
         assert!(dl <= d && il <= i, "{}: file {} is ({}, {}), past its mark ({}, {})", label, f, dl, il, d, i);
     }
+    // QA r2b: the store keeps working after the cut, and a second reopen agrees with the first.
+    let db = res!(open());
+    res!(db.insert(dat!("kill9 after"), val(77), Uid::default(), None));
+    res!(db.close());
+    let db = res!(open());
+    for i in 0..NKEPT {
+        let got = res!(db.get(&kept(i), None)).map(|(v, _)| v);
+        assert_eq!(got, Some(val(i as u8 + 1)), "{}: confirmed key {} lost at the second reopen", label, i);
+    }
+    let last2 = res!(db.get(&dat!("kill9 last"), None)).map(|(v, _)| v);
+    assert_eq!(last2, last, "{}: the last key changed between reopens", label);
+    let after = res!(db.get(&dat!("kill9 after"), None)).map(|(v, _)| v);
+    assert_eq!(after, Some(val(77)), "{}: the write after the cut was lost", label);
+    res!(db.close());
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_file(&flag);
     let _ = fs::remove_file(&log);
