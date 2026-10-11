@@ -55,7 +55,6 @@ pub fn library() -> Scope {
 	text::define(&mut s);
 	layout::define(&mut s);
 	grid::define(&mut s);
-	visual::define(&mut s);
 	model::define(&mut s);
 	math::define(&mut s);
 	intro::define(&mut s);

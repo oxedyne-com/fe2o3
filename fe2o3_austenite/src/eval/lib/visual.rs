@@ -20,12 +20,7 @@ use crate::eval::content::{
 	FieldType,
 	Fold,
 };
-use crate::eval::func::{
-	Func,
-	NativeFunc,
-};
 use crate::eval::lib::foundations::keyword;
-use crate::eval::scope::Scope;
 use crate::eval::styles::{
 	Property,
 	Style,
@@ -255,25 +250,11 @@ pub fn fid(kind: ElemKind, name: &str) -> Outcome<FieldId> {
 
 // Library
 
-pub fn define(scope: &mut Scope) {
-	scope.define("stroke", Value::Func(Func::Native(NativeFunc::Visual(VisualFn::Stroke))));
-	scope.define("tiling", Value::Func(Func::Native(NativeFunc::Visual(VisualFn::Tiling))));
-}
-
 /// A native function reached through an element function, as `polygon.regular` is.
 pub fn scoped(kind: ElemKind, name: &str) -> Option<VisualFn> {
 	match (kind, name) {
 		(ElemKind::Polygon, "regular")	=> Some(VisualFn::PolygonRegular),
 		_								=> None,
-	}
-}
-
-/// The constructor a type value calls to, for `stroke(..)` and `tiling(..)` reached through the type.
-pub fn constructor(ty: Type) -> Option<VisualFn> {
-	match ty {
-		Type::Stroke	=> Some(VisualFn::Stroke),
-		Type::Tiling	=> Some(VisualFn::Tiling),
-		_				=> None,
 	}
 }
 

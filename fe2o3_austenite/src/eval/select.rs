@@ -10,13 +10,9 @@ use crate::eval::content::{
 	ElemKind,
 	FieldId,
 };
-use crate::eval::func::{
-	Func,
-	NativeFunc,
-};
+use crate::eval::func::Func;
 use crate::eval::locate::Location;
 use crate::eval::ops;
-use crate::eval::scope::Scope;
 use crate::eval::styles::StyleChain;
 use crate::eval::value::{
 	Label,
@@ -178,11 +174,6 @@ native_fns! {
 		After		=> "after",
 		Where		=> "where",
 	}
-}
-
-/// Defines the global `selector` function. The standard library's root scope calls it.
-pub fn define(scope: &mut Scope) {
-	scope.define("selector", Value::Func(Func::Native(NativeFunc::Style(StyleFn::Selector))));
 }
 
 /// The selector methods; `where` is the element function's.
