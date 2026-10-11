@@ -59,22 +59,19 @@ mod typst {
 	use oxedyne_fe2o3_core::prelude::*;
 	use oxedyne_fe2o3_text::csl::{
 		archive,
+		Citation,
+		CiteRef,
+		CiteState,
 		item::{
 			ChunkKind,
 			Chunked,
 			DateVal,
 			Item,
 		},
-		node::{
-			Meta,
-			Node,
-		},
+		node::Node,
 		page::PageVal,
 		person::Person,
-		render::{
-			self,
-			Cite,
-		},
+		render_bibliography,
 		style::{
 			Display,
 			FontStyle,
@@ -289,21 +286,18 @@ mod typst {
 		}
 	}
 
-	/// The entry as Typst writes it. second-field-align (B3) is applied here as Typst shows it:
-	/// the first field becomes the prefix column and the rest follows after one space.
-	fn entry_html(mut nodes: Vec<Node>, align: bool) -> String {
+	/// The entry as Typst writes it: second-field-align's first field as the prefix column, and
+	/// the rest after one space.
+	fn entry_html(prefix: Option<Node>, body: Vec<Node>) -> String {
 		let mut out = String::new();
-		if align && matches!(nodes.first(), Some(Node::Elem(e)) if e.meta == Some(Meta::CitationNumber)) {
-			let first = nodes.remove(0);
+		if let Some(p) = prefix {
 			let mut inner = String::new();
-			html(&[first], &mut inner);
+			html(&[p], &mut inner);
 			out.push_str(&format!("<span class=\"prefix\">{}</span> ", inner));
-			let mut rest = String::new();
-			html(&nodes, &mut rest);
-			out.push_str(rest.trim_start());
-		} else {
-			html(&nodes, &mut out);
 		}
+		let mut rest = String::new();
+		html(&body, &mut rest);
+		out.push_str(rest.trim_start());
 		out.trim().to_string()
 	}
 
@@ -317,27 +311,32 @@ mod typst {
 		}).collect())
 	}
 
+	/// The whole bibliography, as Typst's `full: true` cites every entry: the count of entries
+	/// that match Typst's in the same place.
 	fn check(style_name: &str) -> Outcome<usize> {
 		let style = res!(res!(archive::by_name(style_name).ok_or_else(|| err!("No style {}.", style_name; Missing))).style());
 		let files = res!(archive::locales_for(&style, Some("en")));
 		let chain = files.chain(&style, Some("en"));
-		let align = style.bibliography.as_ref().map_or(false, |b| b.second_field_align.is_some());
 		let want = res!(expected(style_name));
+		let items = fixtures();
+		let cites: Vec<Citation> = (0..items.len()).map(|i| Citation {
+			refs: vec![CiteRef { entry: i, hidden: true, ..CiteRef::default() }],
+			note: None,
+		}).collect();
+		let state = CiteState::new(&style, &chain, Some("en"), &items, &cites);
+		let bib = render_bibliography(&style, &chain, Some("en"), &items, &state);
 		let mut matched = 0;
 		let mut report = String::new();
-		for (i, fx) in fixtures().iter().enumerate() {
-			let cite = Cite { number: Some(i + 1), first: true, ..Cite::default() };
-			let nodes = res!(render::bibliography_entry(&style, &chain, fx, &cite, Some("en"))
-				.ok_or_else(|| err!("{} has no bibliography.", style_name; Missing)));
-			let got = entry_html(nodes, align);
-			if want.contains(&got) {
+		for (i, (prefix, body)) in bib.into_iter().enumerate() {
+			let got = entry_html(prefix, body);
+			if want.get(i) == Some(&got) {
 				matched += 1;
 			} else {
-				report.push_str(&format!("\n{} {}: got  {}\n", style_name, fx.key, got));
+				report.push_str(&format!("\n{} #{} {}: got  {}\n     want {}\n", style_name, i, items[state.order()[i]].key, got, want.get(i).map_or("", |w| w.as_str())));
 			}
 		}
 		if !report.is_empty() {
-			println!("{}\nwant:\n{}", report, want.join("\n"));
+			println!("{}", report);
 		}
 		Ok(matched)
 	}

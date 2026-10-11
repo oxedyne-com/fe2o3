@@ -209,6 +209,7 @@ pub struct EtAl {
 pub struct Names {
 	pub vars:		Vec<String>,
 	pub delimiter:		Option<String>,
+	pub opts:		NameOpts,	// inheritable name options set on `names` itself
 	pub name:		Option<Name>,
 	pub et_al:		Option<EtAl>,
 	pub label:		Option<Label>,
@@ -844,6 +845,7 @@ impl<'a> Rd<'a> {
 		let mut out = Names {
 			vars:		res!(self.req(e, "variable")).split_whitespace().map(str::to_string).collect(),
 			delimiter:	e.attr("delimiter").map(str::to_string),
+			opts:		res!(self.name_opts(e)),
 			name:		None,
 			et_al:		None,
 			label:		None,

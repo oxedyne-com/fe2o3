@@ -5,6 +5,7 @@
 //! from the CSL specification this follows hayagriva. Each departure is noted where it is made.
 pub mod archive;
 pub mod case;
+pub mod cite;
 mod case_words;
 pub mod item;
 pub mod locale;
@@ -18,5 +19,13 @@ pub use locale::{
 	Chain,
 	Locale,
 	Locales,
+};
+pub use cite::{
+	render_bibliography,
+	BibEntry,
+	CiteForm,
+	CiteRef,
+	CiteState,
+	Citation,
 };
 pub use style::Style;

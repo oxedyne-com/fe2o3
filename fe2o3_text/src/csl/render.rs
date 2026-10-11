@@ -84,6 +84,11 @@ use std::fmt::Write;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Ibid { #[default] No, Ibid, WithLocator }
 
+/// Rendering a sort key: by a variable, or through a macro. Names reverse, institutional names
+/// lose a leading article, and dates and numbers render as sortable values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sorting { Variable, Macro }
+
 /// What the citation, rather than the entry, supplies: its number, label and locator, and the
 /// position tests' answers.
 #[derive(Clone, Debug, Default)]
@@ -453,6 +458,7 @@ impl NOpts {
 struct NamesView<'a> {
 	vars:		&'a [String],
 	delimiter:	Option<&'a str>,
+	opts:		&'a NameOpts,
 	name:		Option<&'a Name>,
 	et_al:		Option<&'a EtAl>,
 	label:		Option<&'a Label>,
@@ -467,6 +473,7 @@ impl<'a> NamesView<'a> {
 		Self {
 			vars:		&n.vars,
 			delimiter:	n.delimiter.as_deref(),
+			opts:		&n.opts,
 			name:		n.name.as_ref(),
 			et_al:		n.et_al.as_ref(),
 			label:		n.label.as_ref(),
@@ -644,6 +651,8 @@ pub struct Ctx<'a, I: Item> {
 	cite:	&'a Cite,
 	lang:	Option<&'a str>,	// the locale the document asked for, if any
 	bib:	bool,
+	sorting:	Option<Sorting>,
+	sort_names:	NameOpts,	// a macro sort key's names-min, -use-first and -use-last
 	w:	Writer,
 }
 
@@ -695,7 +704,20 @@ impl<'a, I: Item> Ctx<'a, I> {
 	)
 		-> Self
 	{
-		Self { style, chain, item, cite, lang, bib, w: Writer::default() }
+		Self { style, chain, item, cite, lang, bib, sorting: None, sort_names: NameOpts::default(), w: Writer::default() }
+	}
+
+	/// This context renders a sort key.
+	pub fn sorting(mut self, s: Sorting, names: NameOpts) -> Self {
+		self.sorting = Some(s);
+		self.sort_names = names;
+		self
+	}
+
+	pub fn render_all(&mut self, elems: &'a [Elem]) {
+		for e in elems {
+			self.render(e);
+		}
 	}
 
 	pub fn flush(self) -> Vec<Node> {
@@ -1298,6 +1320,10 @@ impl<'a, I: Item> Ctx<'a, I> {
 	/// the delimiter between variables likewise.
 	fn inherited_names(&self) -> (NameOpts, Option<&'a str>) {
 		let style: &'a Style = self.style;
+		// hayagriva's macro sort context stacks the key's options on the style's alone.
+		if self.sorting == Some(Sorting::Macro) {
+			return (self.sort_names.over(&style.names), style.names_delimiter.as_deref());
+		}
 		let (o, d) = match (self.bib, style.bibliography.as_ref()) {
 			(true, Some(b))	=> (&b.names, b.names_delimiter.as_deref()),
 			_		=> (&style.citation.names, style.citation.names_delimiter.as_deref()),
@@ -1313,7 +1339,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 		let (base, names_delim) = self.inherited_names();
 		let plain = Name::default();
 		let name = v.name.unwrap_or(&plain);
-		let o = NOpts::new(name.opts.over(&base));
+		let o = NOpts::new(name.opts.over(&v.opts.over(&base)));
 		let form = o.form();
 		// hayagriva asks the cite whether it is the entry's first; a bibliography inherits the
 		// first citation's answer.
@@ -1339,14 +1365,14 @@ impl<'a, I: Item> Ctx<'a, I> {
 					self.push_str(d);
 				}
 			}
-			if let (Some(l), true) = (v.label, v.label_first) {
+			if let (Some(l), true, None) = (v.label, v.label_first, self.sorting) {
 				let t = self.term(var, l.form, plural).unwrap_or("");
 				self.render_label_with_var(l, t);
 			}
 			let fi = self.w.push_format(&name.look.fmt);
 			self.add_names(v, persons, name, &o, &forms, var);
 			self.w.pop_format(fi);
-			if let (Some(l), false) = (v.label, v.label_first) {
+			if let (Some(l), false, None) = (v.label, v.label_first, self.sorting) {
 				let t = self.term(var, l.form, plural).unwrap_or("");
 				self.render_label_with_var(l, t);
 			}
@@ -1395,8 +1421,11 @@ impl<'a, I: Item> Ctx<'a, I> {
 			true	=> forms.last().copied().flatten(),
 			false	=> None,
 		};
-		// Sort-only demotion is B3's: without sorting it keeps the particle.
-		let demote = self.style.demote_particle == Demote::DisplayAndSort;
+		let demote = match self.style.demote_particle {
+			Demote::DisplayAndSort	=> true,
+			Demote::SortOnly	=> self.sorting.is_some(),
+			Demote::Never		=> false,
+		};
 		let mut last_inverted = false;
 		for (i, (p, f)) in persons.iter().take(take).zip(forms).enumerate() {
 			let f = match f {
@@ -1443,7 +1472,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 				let reverse = o.sort_order == Some(SortOrder::All);
 				self.write_name(p, f, reverse, demote, name, o, var, persons.len() - 1);
 			}
-		} else if has_et_al {
+		} else if has_et_al && self.sorting.is_none() {
 			let (tname, fmt) = match v.et_al {
 				Some(e)	=> (e.term.as_str(), e.look.fmt),
 				None	=> ("et-al", Fmt::default()),
@@ -1521,7 +1550,11 @@ impl<'a, I: Item> Ctx<'a, I> {
 		let fam = name.parts.iter().find(|x| x.part == PartName::Family);
 		let loc = self.w.push_elem(&Fmt::default());
 		let long = matches!(form, NForm::LongInit | NForm::LongFull);
-		if p.is_institutional() || !long {
+		if p.is_institutional() && self.sorting.is_some() {
+			let s = self.open_part(fam, true);
+			self.push_str(p.family_without_article());
+			self.close_part(s);
+		} else if p.is_institutional() || !long {
 			let s = self.open_part(fam, true);
 			self.push_str(&p.family);
 			self.close_part(s);
@@ -1538,7 +1571,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 				self.close_part(s);
 				self.part_suffix(giv);
 			}
-		} else if reverse {
+		} else if reverse || self.sorting.is_some() {
 			let s = self.open_part(fam, true);
 			self.push_str(if demote { p.family_without_particle() } else { p.family.as_str() });
 			self.close_part(s);
@@ -1632,6 +1665,34 @@ impl<'a, I: Item> Ctx<'a, I> {
 			Some(x)	=> x,
 			None	=> return,
 		};
+		if let Some(sorting) = self.sorting {
+			// citeproc's trick, as hayagriva has it: BC years as N(i32::MAX + y), AD as Py.
+			let has = |n: DatePartName| d.parts.iter().any(|p| p.name == n);
+			let (y, m, dd) = match (d.form, sorting) {
+				(Some(_), _) => match d.parts_sel {
+					Some(DateParts::Year)		=> (true, false, false),
+					Some(DateParts::YearMonth)	=> (true, true, false),
+					_				=> (true, true, true),
+				},
+				(None, Sorting::Variable)	=> (true, true, true),
+				(None, Sorting::Macro)		=> (has(DatePartName::Year), has(DatePartName::Month), has(DatePartName::Day)),
+			};
+			let mut k = String::new();
+			if y {
+				let _ = match date.year < 0 {
+					true	=> write!(k, "N{:09}", i32::MAX + date.year),
+					false	=> write!(k, "P{:09}", date.year),
+				};
+			}
+			if m {
+				let _ = write!(k, "{:02}", date.month.unwrap_or(0));
+			}
+			if dd {
+				let _ = write!(k, "{:02}", date.day.unwrap_or(0));
+			}
+			self.push_str(&k);
+			return;
+		}
 		let base: Option<&'a Date> = match d.form {
 			// A locale without the form prints nothing.
 			Some(f) => match self.chain.date(f) {

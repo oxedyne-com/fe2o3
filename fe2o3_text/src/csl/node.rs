@@ -137,6 +137,22 @@ pub fn last_text(nodes: &[Node]) -> Option<&str> {
 	}
 }
 
+/// Takes out the first element, depth first, that carries a meta: second-field-align's first
+/// field, as hayagriva's `remove_any_meta` finds it.
+pub fn remove_any_meta(nodes: &mut Vec<Node>) -> Option<Node> {
+	for i in 0..nodes.len() {
+		if let Node::Elem(e) = &mut nodes[i] {
+			if e.meta.is_some() {
+				return Some(nodes.remove(i));
+			}
+			if let Some(n) = remove_any_meta(&mut e.children) {
+				return Some(n);
+			}
+		}
+	}
+	None
+}
+
 /// Merges neighbouring text of one formatting and inlines elements that carry neither display nor
 /// meta.
 pub fn simplify(nodes: Vec<Node>) -> Vec<Node> {

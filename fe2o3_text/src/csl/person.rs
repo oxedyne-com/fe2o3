@@ -190,4 +190,36 @@ impl Person {
 		}
 		Ok(())
 	}
+
+	/// The particles before the family name: the dropping one, then the non-dropping one.
+	pub fn particles(&self) -> Option<String> {
+		match (&self.particle, self.particle_in_family()) {
+			(Some(d), Some(n))	=> Some(format!("{} {}", d, n)),
+			(Some(d), None)		=> Some(d.clone()),
+			(None, Some(n))		=> Some(n.to_string()),
+			(None, None)		=> None,
+		}
+	}
+
+	/// hayagriva's `csl_cmp` in the long form: CJK names last, then the family name (without its
+	/// particle when demoting), the particle, the given name and the suffix, each lower-cased.
+	pub fn sort_cmp(&self, other: &Self, demote: bool) -> std::cmp::Ordering {
+		let low = |s: &Option<String>| s.as_ref().map(|x| x.to_lowercase());
+		let (ca, cb) = (self.is_cjk(), other.is_cjk());
+		if ca != cb {
+			return ca.cmp(&cb);
+		}
+		let fam = self.family.to_lowercase().cmp(&other.family.to_lowercase());
+		if ca {
+			return fam.then_with(|| low(&self.given).cmp(&low(&other.given)));
+		}
+		let ord = match demote {
+			true => self.family_without_particle().to_lowercase()
+				.cmp(&other.family_without_particle().to_lowercase())
+				.then_with(|| low(&self.particles()).cmp(&low(&other.particles()))),
+			false => fam.then_with(|| low(&self.particle).cmp(&low(&other.particle))),
+		};
+		ord.then_with(|| low(&self.given).cmp(&low(&other.given)))
+			.then_with(|| low(&self.suffix).cmp(&low(&other.suffix)))
+	}
 }
