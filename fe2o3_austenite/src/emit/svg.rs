@@ -39,6 +39,7 @@ use oxedyne_fe2o3_graphics::{
 	svg::{
 		presentation,
 		write_path_data,
+		write_path_data_into,
 	},
 	transform::Transform,
 };
@@ -48,13 +49,15 @@ use oxedyne_fe2o3_text::base64;
 use oxedyne_fe2o3_text::xml::write::escape as xml_escape;
 
 use std::collections::BTreeMap;
+use std::fmt::Write;
 
 /// The glyph outlines a page draws, each once, keyed by [`glyph_id`]. A placed glyph is a `<use>` of its
 /// entry; [`assemble`] writes the entries as the page's `<defs>`, in id order, so two renders of the same
 /// content write the same bytes however the page was split for the emit memo.
 #[derive(Clone, Debug, Default)]
 pub struct GlyphDefs {
-	defs: BTreeMap<String, String>,	// id -> outline flipped to y down, as path data
+	defs:		BTreeMap<u64, String>,	// id's hash -> outline flipped to y down, as path data
+	scratch:	String,					// the outline being placed, font frame, for its id
 }
 
 impl GlyphDefs {
@@ -65,13 +68,18 @@ impl GlyphDefs {
 	/// Writes a `<use>` of `outline` -- font frame, y up, already at its point size -- with its origin at
 	/// the page point (`x`, `y`), defining the outline first if this page has not yet drawn it.
 	pub fn place(&mut self, out: &mut String, outline: &Path, x: f32, y: f32, colour: Rgba) -> Outcome<()> {
-		let id = glyph_id(&write_path_data(outline));
-		if !self.defs.contains_key(&id) {
+		// The outline is written into a buffer kept for the purpose, so placing a glyph allocates nothing
+		// once the page has drawn it. The map keys on the id's hash, which orders the defs as the id would.
+		self.scratch.clear();
+		write_path_data_into(&mut self.scratch, outline);
+		let key = glyph_key(&self.scratch);
+		if !self.defs.contains_key(&key) {
 			let flipped = res!(outline.transform(&Transform::scale(1.0, -1.0)));
-			self.defs.insert(id.clone(), write_path_data(&flipped));
+			self.defs.insert(key, write_path_data(&flipped));
 		}
-		out.push_str(&fmt!("  <use href=\"#{}\" x=\"{}\" y=\"{}\" {}/>\n",
-			id, x, y, presentation(Some(colour), None)));
+		let _ = write!(out, "  <use href=\"#ag{:016x}\" x=\"{}\" y=\"{}\" ", key, x, y);
+		out.push_str(&presentation(Some(colour), None));
+		out.push_str("/>\n");
 		Ok(())
 	}
 
@@ -79,7 +87,7 @@ impl GlyphDefs {
 	pub fn merge(&mut self, other: &GlyphDefs) {
 		for (id, d) in &other.defs {
 			if !self.defs.contains_key(id) {
-				self.defs.insert(id.clone(), d.clone());
+				self.defs.insert(*id, d.clone());
 			}
 		}
 	}
@@ -98,7 +106,9 @@ impl GlyphDefs {
 		}
 		out.push_str("<defs>\n");
 		for (id, d) in &self.defs {
-			out.push_str(&fmt!("  <path id=\"{}\" d=\"{}\"/>\n", id, d));
+			let _ = write!(out, "  <path id=\"ag{:016x}\" d=\"", id);
+			out.push_str(d);
+			out.push_str("\"/>\n");
 		}
 		out.push_str("</defs>\n");
 	}
@@ -108,10 +118,15 @@ impl GlyphDefs {
 /// sixteen hex digits. Equal outlines share an id on every page and in every font, and a different outline
 /// would need a 64-bit collision to borrow one.
 pub fn glyph_id(font_d: &str) -> String {
+	fmt!("ag{:016x}", glyph_key(font_d))
+}
+
+/// The hash a [`glyph_id`] writes in hex.
+fn glyph_key(font_d: &str) -> u64 {
 	let mut h = Fingerprinter::new();
 	h.write(b"glyph");
 	h.write_str(font_d);
-	fmt!("ag{:016x}", h.finish().fold())
+	h.finish().fold()
 }
 
 /// Renders one page as a self-contained SVG document. This is the whole-frame path, unchanged in its
@@ -410,14 +425,20 @@ fn draw_graphic(
 		match op {
 			DrawOp::Fill { path, colour } => {
 				let p = res!(path.transform(&t));
-				out.push_str(&fmt!(
-					"  <path d=\"{}\" {}/>\n", write_path_data(&p), presentation(Some(colour.to_rgba()), None)));
+				out.push_str("  <path d=\"");
+				write_path_data_into(out, &p);
+				out.push_str("\" ");
+				out.push_str(&presentation(Some(colour.to_rgba()), None));
+				out.push_str("/>\n");
 			},
 			DrawOp::Stroke { path, colour, width } => {
 				let pen	= res!(Stroke::new(*width));
 				let p	= res!(path.transform(&t));
-				out.push_str(&fmt!(
-					"  <path d=\"{}\" {}/>\n", write_path_data(&p), presentation(None, Some((colour.to_rgba(), &pen)))));
+				out.push_str("  <path d=\"");
+				write_path_data_into(out, &p);
+				out.push_str("\" ");
+				out.push_str(&presentation(None, Some((colour.to_rgba(), &pen))));
+				out.push_str("/>\n");
 			},
 			DrawOp::Image { image, x, y, w, h } => {
 				// The raster is re-encoded to PNG and embedded as a base64 data URI in an `<image>`. Its
