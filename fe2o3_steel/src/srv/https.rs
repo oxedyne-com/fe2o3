@@ -847,7 +847,12 @@ impl<
                             // Inject HSTS header if configured, so browsers
                             // remember to use HTTPS for subsequent visits.
                             // Never over plain HTTP, where the header means nothing.
-                            if !plain && self.cfg.hsts_max_age_secs > 0 {
+                            // Like the baseline below, it fills only an empty field: a
+                            // handler that sets its own policy is not given a second one.
+                            if !plain
+                                && self.cfg.hsts_max_age_secs > 0
+                                && msg.header.fields.get_all(&HeaderName::StrictTransportSecurity).is_none()
+                            {
                                 msg.header.fields.insert(
                                     HeaderName::StrictTransportSecurity,
                                     HeaderFieldValue::Generic(fmt!(

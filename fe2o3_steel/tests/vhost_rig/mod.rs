@@ -163,6 +163,7 @@ pub struct Site {
     pub webhook_routes:     Vec<WebhookRoute>,
     pub admin_dashboard:    bool,
     pub response_headers:   Vec<(String, String)>,
+    pub handlers:           ApiHandlerRegistry,     // in-process handlers its `api_routes` name
 }
 
 impl Site {
@@ -174,6 +175,7 @@ impl Site {
             webhook_routes:     Vec::new(),
             admin_dashboard:    true,
             response_headers:   Vec::new(),
+            handlers:           ApiHandlerRegistry::new(),
         }
     }
 }
@@ -259,7 +261,7 @@ impl Rig {
                 site.api_routes.clone(),
                 site.webhook_routes.clone(),
                 Arc::new(WebhookRegistry::new()),
-                Arc::new(ApiHandlerRegistry::new()),
+                Arc::new(site.handlers),
                 None,
                 Some(admin.clone()),
                 None,

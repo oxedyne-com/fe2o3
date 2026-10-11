@@ -4,6 +4,9 @@
 //! gets the baseline. The key is read from config with its names lower-cased, and a name that is
 //! not a token, a value with a line break, or a field that frames the message is refused.
 //!
+//! The server's HSTS, like the baseline, fills only an empty field: a handler that sends its own
+//! `Strict-Transport-Security` is not given a second one beside it.
+//!
 //! `ServerConfig::binds_loopback_only` says whether every listener a config opens is loopback.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
@@ -20,10 +23,33 @@ use vhost_rig::{
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
-use oxedyne_fe2o3_steel::srv::cfg::{
-    ServerConfig,
-    VhostConfig,
+use oxedyne_fe2o3_net::http::{
+    fields::{
+        HeaderFieldValue,
+        HeaderFields,
+        HeaderName,
+    },
+    header::HttpMethod,
+    loc::HttpLocator,
+    msg::HttpMessage,
+    status::HttpStatus,
 };
+use oxedyne_fe2o3_steel::srv::{
+    api::ApiHandler,
+    cfg::{
+        ApiRoute,
+        ServerConfig,
+        VhostConfig,
+    },
+};
+
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+};
+
+use tokio_rustls::rustls::ClientConfig;
 
 const SET:  &str = "private.test";
 const BARE: &str = "plain.test";
@@ -65,6 +91,68 @@ fn every_response_carries_the_vhost_headers_once() -> Outcome<()> {
         assert_eq!(r.field("referrer-policy").as_deref(), Some("strict-origin-when-cross-origin"),
             "{:?}", r);
         assert_eq!(r.field("x-robots-tag"), None, "{:?}", r);
+        Ok(())
+    })
+}
+
+const OWN_HSTS: &str = "max-age=60";
+
+/// Answers with a policy of its own.
+struct OwnHsts;
+
+impl ApiHandler for OwnHsts {
+    fn handle<'a>(
+        &'a self,
+        _route:         &'a ApiRoute,
+        _method:        HttpMethod,
+        _loc:           &'a HttpLocator,
+        _body:          &'a [u8],
+        _req_headers:   &'a HeaderFields,
+        _tls_client:    &'a Option<Arc<ClientConfig>>,
+        _id:            &'a str,
+    ) -> Pin<Box<dyn Future<Output = Outcome<HttpMessage>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut msg = HttpMessage::respond_with_text(HttpStatus::OK, "own");
+            msg.header.fields.insert(
+                HeaderName::StrictTransportSecurity,
+                HeaderFieldValue::Generic(OWN_HSTS.to_string()),
+                None,
+            );
+            Ok(msg)
+        })
+    }
+}
+
+#[test]
+fn a_handlers_own_hsts_is_not_doubled() -> Outcome<()> {
+    let web = res!(Scratch::new("resp_hsts"));
+    res!(web.put("index.html", "<p>home</p>"));
+    let mut site = Site::new(SET, &web.0);
+    site.api_routes = vec![ApiRoute {
+        path:           fmt!("/api/own"),
+        upstream_host:  None,
+        upstream_port:  None,
+        upstream_path:  None,
+        upstream_tls:   false,
+        headers:        Vec::new(),
+        handler:        Some(fmt!("own_hsts")),
+        config:         Vec::new(),
+    }];
+    site.handlers.register("own_hsts", OwnHsts);
+    let mut cfg = ServerConfig::default();
+    cfg.hsts_max_age_secs = 31_536_000;
+    let rig = res!(Rig::with_config(vec![site], cfg));
+    let runtime = res!(vhost_rig::runtime());
+    runtime.block_on(async {
+        let r = res!(rig.fetch(SET, "GET", "/api/own", &[], "").await);
+        assert_eq!(r.body, "own", "{:?}", r);
+        assert_eq!(count(&r, "strict-transport-security"), 1, "{:?}", r);
+        assert_eq!(r.field("strict-transport-security").as_deref(), Some(OWN_HSTS), "{:?}", r);
+        // A response that sets none is given the server's, once.
+        let r = res!(rig.fetch(SET, "GET", "/index.html", &[], "").await);
+        assert_eq!(count(&r, "strict-transport-security"), 1, "{:?}", r);
+        assert_eq!(r.field("strict-transport-security").as_deref(),
+            Some("max-age=31536000; includeSubDomains"), "{:?}", r);
         Ok(())
     })
 }
