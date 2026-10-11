@@ -309,6 +309,9 @@ impl IgnoreFile {
     /// read.
     pub fn parse(bytes: &[u8]) -> Self {
         let mut rules = Vec::new();
+        // A leading UTF-8 byte order mark is not part of the first rule: git skips it
+        // (`skip_utf8_bom`), and Windows editors write one.
+        let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
         for raw in bytes.split(|b| *b == b'\n') {
             let mut line = raw;
             if line.last() == Some(&b'\r') {

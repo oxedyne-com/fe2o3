@@ -135,6 +135,18 @@ pub fn test_glob(filter: &'static str) -> Outcome<()> {
         Ok(())
     }));
 
+    res!(test_it(filter, &["A leading UTF-8 byte order mark is skipped, as git skips it 000", "all", "glob", "ignore"], || {
+        let f = IgnoreFile::parse(b"\xef\xbb\xbfsecret.txt\n*.log\n");
+        assert!(f.ignores(b"secret.txt", false), "the first rule after a BOM still holds");
+        assert!(f.ignores(b"a.log", false));
+        let g = IgnoreFile::parse(b"\xef\xbb\xbf# a comment\nkept\n");
+        assert!(!g.ignores(b"# a comment", false), "a comment after a BOM is still a comment");
+        assert!(g.ignores(b"kept", false));
+        let h = IgnoreFile::parse(b"a\n\xef\xbb\xbfb\n");
+        assert!(!h.ignores(b"b", false), "only a mark at the very start is skipped");
+        Ok(())
+    }));
+
     res!(test_it(filter, &["Patterns and paths are bytes 000", "all", "glob", "ignore"], || {
         // A path that is not UTF-8 is matched byte for byte.
         let g = res!(glob("*.bin"));
