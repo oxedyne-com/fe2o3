@@ -43,8 +43,16 @@ use crate::{
 		KEY_FALLBACK,
 		KEY_STYLE,
 		KEY_STYLES,
+		ADDR_HASH,
+		COL_ALIGNMENTS,
+		KEY_COLS,
+		KEY_HEAD,
+		KEY_HEADER,
+		KEY_PAIRS,
+		KEY_SRC,
 	},
 	limit,
+	SCHEMA_DOC_1,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -162,6 +170,17 @@ pub fn validate(tree: &Dat, schema: &str) -> Outcome<Stats> {
 			Invalid, Input));
 		}
 
+		// A kind this reader knows and the declared schema does not carry is refused, never read
+		// under a fallback: a table in an `oxeweb/doc/0` tree is a known kind in the wrong
+		// vocabulary, which is the case §4.5's forward compatibility is not for.
+		if !schema.knows(kind) {
+			return Err(err!(
+				"Node {} is a {} (code {}), a page kind of '{}' that the declared schema '{}' \
+				does not carry; it admits {}.",
+				id, kind.label(), kind.code(), SCHEMA_DOC_1, schema.name(), schema.admits_label();
+			Invalid, Input, Mismatch));
+		}
+
 		// A child appears only where its parent admits it.
 		if let Some(pkind) = parent {
 			if !pkind.allows(&kind) {
@@ -198,6 +217,9 @@ pub fn validate(tree: &Dat, schema: &str) -> Outcome<Stats> {
 					if kind == NodeKind::Heading {
 						res!(check_heading_level(id, map));
 					}
+					if kind.is_page_kind() {
+						res!(check_page_fields(id, kind, map));
+					}
 					// The root doc's style table is validated once, and its names collected so
 					// that every later `style` reference can be resolved against them (§4.4). The
 					// schema goes with it: which properties a record may name is the schema's
@@ -228,11 +250,18 @@ pub fn validate(tree: &Dat, schema: &str) -> Outcome<Stats> {
 		};
 		// SPEC §4.2: a list is marked `item+` and carries at least one child. A doc and a section are
 		// `flow*` and may be empty, since a stub with only a title is a legitimate thing to publish.
-		if kind.requires_child() && kids.is_empty() {
+		// `oxeweb/doc/1` carries every list `fe2o3_text::doc` can hold, an empty one included, since
+		// a mapping that dropped it could not be undone.
+		let needs_kid = kind.requires_child()
+			&& !(schema == Schema::Doc1 && kind == NodeKind::List);
+		if needs_kid && kids.is_empty() {
 			return Err(err!(
 				"Node {} ({}) carries no children, but a {} must carry at least one.",
 				id, kind.label(), kind.label();
 			Invalid, Input, Missing));
+		}
+		if kind.is_page_kind() {
+			res!(check_parts(id, kind, kids));
 		}
 		for kid in kids.iter().rev() {
 			stack.push((kid, Some(kind), depth + 1, inert));
@@ -379,6 +408,8 @@ fn check_field(
 	}
 
 	let typed = match (f.typ, v) {
+		(FieldType::Strs,	Dat::List(list))	=>
+			!list.is_empty() && list.iter().all(|d| matches!(d, Dat::Str(_))),
 		(FieldType::Str,	Dat::Str(_))	=> true,
 		(FieldType::U8,	Dat::U8(_))	=> true,
 		(FieldType::I8,	Dat::I8(_))	=> true,
@@ -395,6 +426,123 @@ fn check_field(
 	}
 
 	Ok(())
+}
+
+/// Checks the fields of a page kind that carry more than a width: a value from a closed set, a pair
+/// list's evenness, a flag written only when it says yes, and an image's one source.
+///
+/// A flag that is false is the flag absent, so carrying `false` would give one tree two addresses.
+fn check_page_fields(
+	id:	usize,
+	kind:	NodeKind,
+	map:	&DaticleMap,
+)
+	-> Outcome<()>
+{
+	for key in [KEY_HEAD, KEY_HEADER] {
+		if let Some(Dat::Bool(false)) = map.get(&dat!(key)) {
+			return Err(err!(
+				"Node {} ({}): '{}' is false, which must be omitted rather than written, since \
+				the absent flag already says it.", id, kind.label(), key;
+			Invalid, Input));
+		}
+	}
+	if let Some(Dat::List(cols)) = map.get(&dat!(KEY_COLS)) {
+		for (i, c) in cols.iter().enumerate() {
+			let ok = match c {
+				Dat::Str(s) => COL_ALIGNMENTS.contains(&s.as_str()),
+				_ => false,
+			};
+			if !ok {
+				return Err(err!(
+					"Node {} ({}): column {} has the alignment {:?}, which is none of {:?}.",
+					id, kind.label(), i, c, COL_ALIGNMENTS;
+				Invalid, Input, Range));
+			}
+		}
+	}
+	if let Some(Dat::List(pairs)) = map.get(&dat!(KEY_PAIRS)) {
+		if pairs.len() % 2 != 0 {
+			return Err(err!(
+				"Node {} ({}): '{}' holds {} strings; it is keys and values in turn, so an even \
+				number.", id, kind.label(), KEY_PAIRS, pairs.len();
+			Invalid, Input));
+		}
+	}
+	if kind == NodeKind::Img {
+		let src = map.get(&dat!(KEY_SRC)).is_some();
+		let hash = map.get(&dat!(ADDR_HASH)).is_some();
+		if src == hash {
+			return Err(err!(
+				"Node {} (img) carries {} of '{}' and '{}'; an inline image is found by exactly \
+				one, its source string or its content hash.", id,
+				if src { "both" } else { "neither" }, KEY_SRC, ADDR_HASH;
+			Invalid, Input));
+		}
+	}
+	Ok(())
+}
+
+/// Checks where the parts of a page kind stand among its children: a table's caption first and its
+/// head row the first row, a figure's caption last, a term's label first, and none of them twice.
+///
+/// The parent's content class has already said which kinds may stand here at all; this says where.
+/// Each order is the one `fe2o3_text::doc` holds the parts in, so one page has one tree.
+fn check_parts(
+	id:	usize,
+	kind:	NodeKind,
+	kids:	&[Dat],
+)
+	-> Outcome<()>
+{
+	let code = |d: &Dat| match d {
+		Dat::Usr(uid, _) => uid.code(),
+		_ => 0,
+	};
+	let is = |d: &Dat, k: NodeKind| code(d) == k.code();
+	let misplaced = |what: &str, i: usize, rule: &str| err!(
+		"Node {} ({}): child {} is a {} out of place; {}.", id, kind.label(), i, what, rule;
+		Invalid, Input);
+	match kind {
+		NodeKind::Table => {
+			let first_row = if kids.first().map_or(false, |d| is(d, NodeKind::Caption)) { 1 } else { 0 };
+			for (i, kid) in kids.iter().enumerate() {
+				if is(kid, NodeKind::Caption) && i != 0 {
+					return Err(misplaced("caption", i, "a table's caption is its first child"));
+				}
+				if is(kid, NodeKind::Row) && i != first_row && head_row(kid) {
+					return Err(misplaced("head row", i, "a table's head row is its first row"));
+				}
+			}
+		},
+		NodeKind::Figure => {
+			for (i, kid) in kids.iter().enumerate() {
+				if is(kid, NodeKind::Caption) && i + 1 != kids.len() {
+					return Err(misplaced("caption", i, "a figure's caption is its last child"));
+				}
+			}
+		},
+		NodeKind::Term => {
+			for (i, kid) in kids.iter().enumerate() {
+				if is(kid, NodeKind::Label) && i != 0 {
+					return Err(misplaced("label", i, "a term's label is its first child"));
+				}
+			}
+		},
+		_ => (),
+	}
+	Ok(())
+}
+
+/// Does this row node say it is its table's head?
+fn head_row(row: &Dat) -> bool {
+	match row {
+		Dat::Usr(_, Some(payload)) => match payload.as_ref() {
+			Dat::Map(map) => matches!(map.get(&dat!(KEY_HEAD)), Some(Dat::Bool(true))),
+			_ => false,
+		},
+		_ => false,
+	}
 }
 
 /// Checks a heading's level, the one field with a range as well as a width: it runs from 1 to 6.
@@ -427,6 +575,7 @@ fn type_label(typ: FieldType) -> &'static str {
 		FieldType::Hash32	=> "b32",
 		FieldType::Address	=> "address",
 		FieldType::Nodes	=> "a non-empty list of nodes",
+		FieldType::Strs	=> "a non-empty list of str",
 	}
 }
 
@@ -437,6 +586,11 @@ fn content_label(content: Content) -> &'static str {
 		Content::Flow	=> "flow",
 		Content::Inline	=> "inline",
 		Content::Items	=> "item",
+		Content::Cells	=> "cell",
+		Content::TableParts	=> "caption and row",
+		Content::FigureParts	=> "flow and caption",
+		Content::Terms	=> "term",
+		Content::TermParts	=> "label and def",
 	}
 }
 
@@ -1032,11 +1186,11 @@ mod tests {
 
 	#[test]
 	fn test_wrong_schema_01() -> Outcome<()> {
-		let e = match validate(&every_kind(), "oxeweb/doc/1") {
+		let e = match validate(&every_kind(), "oxeweb/doc/9") {
 			Ok(_) => return Err(err!("A foreign schema was accepted."; Test)),
 			Err(e) => fmt!("{}", e),
 		};
-		assert!(e.contains("oxeweb/doc/1"), "Error must name the schema it got: {}", e);
+		assert!(e.contains("oxeweb/doc/9"), "Error must name the schema it got: {}", e);
 		Ok(())
 	}
 
@@ -1477,16 +1631,16 @@ mod tests {
 
 	#[test]
 	fn test_unknown_kind_with_fallback_accepted_28() -> Outcome<()> {
-		// A kind 20 the reader does not know, carrying a valid fallback and an uninterpreted field.
+		// A kind 40 the reader does not know, carrying a valid fallback and an uninterpreted field.
 		let alien = Dat::Usr(
-			UsrKindId::new(20, None, None),
+			UsrKindId::new(40, None, None),
 			Some(Box::new(mapdat!{
 				"fallback" => Dat::List(vec![
 					node(NodeKind::Para, mapdat!{
 						"children" => Dat::List(vec![text("A fallback paragraph")]),
 					}),
 				]),
-				"rows" => dat!("only a reader that knows kind 20 uses this"),
+				"rows" => dat!("only a reader that knows kind 40 uses this"),
 			})),
 		);
 		let stats = res!(validate(&doc(vec![alien]), SCHEMA_DOC));
@@ -1498,7 +1652,7 @@ mod tests {
 	#[test]
 	fn test_unknown_kind_without_fallback_rejected_29() -> Outcome<()> {
 		let alien = Dat::Usr(
-			UsrKindId::new(20, None, None),
+			UsrKindId::new(40, None, None),
 			Some(Box::new(mapdat!{ "rows" => dat!("no fallback here") })),
 		);
 		let e = match validate(&doc(vec![alien]), SCHEMA_DOC) {
@@ -1513,7 +1667,7 @@ mod tests {
 	#[test]
 	fn test_unknown_kind_empty_fallback_rejected_30() -> Outcome<()> {
 		let alien = Dat::Usr(
-			UsrKindId::new(20, None, None),
+			UsrKindId::new(40, None, None),
 			Some(Box::new(mapdat!{ "fallback" => Dat::List(Vec::new()) })),
 		);
 		let e = match validate(&doc(vec![alien]), SCHEMA_DOC) {

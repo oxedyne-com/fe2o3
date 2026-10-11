@@ -6,30 +6,28 @@
 //! is a tree like any other: it is validated, canonically encoded, hashed and signed by the same
 //! code that does it for a document written by hand, because by then it is the same document.
 //!
-//! # Where the two vocabularies do not meet
+//! # One block, one node
 //!
-//! The v0 vocabulary is closed, and Markdown says four things it has no room for. None of them is
-//! a reason to grow the vocabulary, and each is handled by saying less rather than by saying it
-//! wrongly:
-//!
-//! - A **thematic break** is dropped. v0 has no kind for one, and there is nothing it can degrade to
-//!   that means what it meant.
-//! - A **table** becomes a box of paragraphs, one to a row. v0 has no kind for a grid, and a box is
-//!   what says "these things are one thing", which is as much of a table as v0 says.
-//! - An **image** becomes its alt text. SBJ addresses an image by the content hash of the blob
-//!   (§4.2), and Markdown gives a path; nothing here can resolve one into the other, and an image
-//!   node with an invented hash would address a blob that does not exist.
-//! - An **inline code span** becomes its characters. SBJ's `code` is flow content and a paragraph
-//!   admits inline content only, so a code span cannot sit where Markdown puts it.
-//!
-//! Each of these loses something, and each loses it visibly: the words survive, and only the mark-up
-//! around them goes. A mapping that cannot be exact should be lossy in the direction of the prose.
+//! The tree is written under `oxeweb/doc/1` ([`SCHEMA_DOC_1`](crate::SCHEMA_DOC_1)), whose page kinds
+//! give every construct of [`doc`](oxedyne_fe2o3_text::doc) a node of its own: a table keeps its grid,
+//! a rule its place, a span its names, an inline image its source. Nothing is dropped or degraded, so
+//! [`export::to_doc`](crate::export::to_doc) gives back the tree this was handed: `to_doc(from_doc(d))
+//! == d` for every `d` whose strings already keep §3 rule 5 and whose headings run from 1 to 6. The
+//! two corrections made at the door are the only exceptions: a string is normalised to NFC with its
+//! stray control characters removed, and a heading level is clamped.
 
 use crate::{
 	kinds::{
 		NodeKind,
 		ADDR_NAME,
 		KEY_CHILDREN,
+		KEY_CLASSES,
+		KEY_COLS,
+		KEY_HEAD,
+		KEY_HEADER,
+		KEY_ID,
+		KEY_PAIRS,
+		KEY_SRC,
 		KEY_TO,
 	},
 	text::ukid,
@@ -41,9 +39,12 @@ use oxedyne_fe2o3_text::{
 		self,
 		html,
 		markdown,
+		Align,
+		Attrs,
 		Block,
 		Inline,
 		Row,
+		Term,
 	},
 	unicode::norm,
 };
@@ -56,13 +57,7 @@ pub const DEFAULT_LANG: &'static str = "en";
 /// The name a document is titled by when it has no title and the caller supplies no source name.
 pub const DEFAULT_STEM: &'static str = "document";
 
-/// What a degraded table's cells are divided by, once the grid that divided them is gone.
 ///
-/// A table's rows become paragraphs (see [`block`]), so a cell boundary either survives in the prose
-/// or does not survive at all. A pipe is what a reader of plain text reads a column boundary as, and
-/// it survives being laid out: a tab or a run of spaces is whitespace, and whatever renders the
-/// paragraph is free to collapse it, which would run two columns into one word.
-const CELL_SEP: &'static str = " | ";
 
 /// What the caller knows that the Markdown does not.
 ///
@@ -120,12 +115,11 @@ pub fn from_html(
 	Ok(from_doc(&doc, opts))
 }
 
-/// Maps a parsed Markdown document to a document tree.
+/// Maps a parsed document to an `oxeweb/doc/1` tree, one node to each block and inline.
 ///
-/// The mapping never fails. Markdown has no syntax errors, only text that means less than the author
-/// hoped, and the three things v0 has no room for are dropped or degraded rather than refused. What
-/// comes back is a tree the validator accepts, and whether it does is [`validate`](crate::validate)'s
-/// business rather than a promise made here.
+/// The mapping never fails and loses nothing: see the module's "One block, one node". What comes
+/// back is a tree the validator accepts under [`SCHEMA_DOC_1`](crate::SCHEMA_DOC_1), and whether it
+/// does is [`validate`](crate::validate)'s business rather than a promise made here.
 pub fn from_doc(
 	md:	&doc::Doc,
 	opts:	&Options,
@@ -174,150 +168,132 @@ fn title(
 // │ BLOCKS                                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Maps a run of blocks to the flow nodes they become, leaving out the ones that become nothing.
+/// Maps a run of blocks to the flow nodes they become, one to each.
 fn blocks(blocks: &[Block]) -> Vec<Dat> {
-	let mut out = Vec::with_capacity(blocks.len());
-	for b in blocks {
-		if let Some(node) = block(b) {
-			out.push(node);
-		}
-	}
-	out
+	blocks.iter().map(block).collect()
 }
 
-/// Maps one block, or `None` where the vocabulary has no room for it.
-fn block(b: &Block) -> Option<Dat> {
+/// Maps one block to its node. Every block has one, and nothing is dropped, so that
+/// [`export::to_doc`](crate::export::to_doc) can give back the block it came from.
+fn block(b: &Block) -> Dat {
 	match b {
-		Block::Heading { level, content } => Some(node(
+		Block::Heading { level, content } => node(
 			NodeKind::Heading,
 			vec![("level", Dat::U8(heading_level(*level)))],
 			inlines(content),
-		)),
-		Block::Para(content) => {
-			// Whitespace is not a paragraph. A blank one carries no words and renders as nothing, so
-			// carrying it would give one document two addresses for the same prose.
-			if doc::text_of(content).trim().is_empty() {
-				return None;
-			}
-			Some(node(NodeKind::Para, Vec::new(), inlines(content)))
-		},
-		Block::List { ordered, items } => {
-			let kids: Vec<Dat> = items.iter()
-				.map(|item| node(NodeKind::Item, Vec::new(), blocks(item)))
-				.collect();
-			// SPEC §4.2 marks a list `item+`, so a list of no items is refused by the validator. A
-			// list that lost every item is a list of nothing, which is what dropping it says.
-			if kids.is_empty() {
-				return None;
-			}
-			Some(node(NodeKind::List, vec![("ordered", Dat::Bool(*ordered))], kids))
-		},
+		),
+		Block::Para(content) => node(NodeKind::Para, Vec::new(), inlines(content)),
+		Block::List { ordered, items } => node(
+			NodeKind::List,
+			vec![("ordered", Dat::Bool(*ordered))],
+			items.iter().map(|item| node(NodeKind::Item, Vec::new(), blocks(item))).collect(),
+		),
 		Block::Code { lang, text } => {
 			let mut fields = Vec::with_capacity(2);
-			// The language is optional, and a fence that named none, or named nothing but
-			// whitespace, has none to declare.
 			if let Some(lang) = lang {
-				if !lang.trim().is_empty() {
-					fields.push(("lang", Dat::Str(clean(lang))));
-				}
+				fields.push(("lang", Dat::Str(clean(lang))));
 			}
 			fields.push(("text", Dat::Str(clean(text))));
-			Some(node(NodeKind::Code, fields, Vec::new()))
+			node(NodeKind::Code, fields, Vec::new())
 		},
-		// A quote carries no `cite`, because Markdown gives none. Attribution is a thing the author
+		// A quote carries no `cite`, because the prose gives none. Attribution is a thing the author
 		// writes inside the quotation, and inventing one from it would be a guess.
-		Block::Quote(quoted) => Some(node(NodeKind::Quote, Vec::new(), self::blocks(quoted))),
-		// A table degrades to a box of paragraphs, one to a row, each row's cells divided by
-		// CELL_SEP. v0 has no kind for a grid (§4.2) and the vocabulary is frozen, so no mapping
-		// keeps the grid; what any mapping can keep is every word, in the order it was written, and
-		// the rows it was written in. A box is flow content that holds flow content, so a run of
-		// paragraphs that belong together is the thing it is for: it says "these paragraphs are one
-		// thing", which is the most of a table v0 says.
-		//
-		// The header row is not marked out from the rest. It comes first, as it did, and that is all.
-		// Emphasising it would say the author wrote emphasis, and they wrote a header; the bold a
-		// browser puts on a header cell is a rendering convention and not something the prose said.
-		// This is the reason a quote invents no `cite`, applied a second time.
-		//
-		// The column alignments go with the grid. An alignment is a column's, there are no columns
-		// left to carry one, and §4.4's `align` style belongs to a whole node rather than to a slice
-		// down the middle of several: a row is not a column, so there is nowhere true to put it.
-		//
-		// A caption is the box's first paragraph, ahead of the rows, as it stood ahead of them.
-		Block::Table { head, rows, caption, .. } => {
+		Block::Quote(quoted) => node(NodeKind::Quote, Vec::new(), blocks(quoted)),
+		Block::Table { head, rows, cols, caption } => {
+			let mut fields = Vec::with_capacity(1);
+			if !cols.is_empty() {
+				fields.push((KEY_COLS, Dat::List(cols.iter().map(|a| dat!(col_align(*a))).collect())));
+			}
 			let mut kids = Vec::with_capacity(rows.len() + 2);
-			let cap = inlines(caption);
-			if !cap.is_empty() {
-				kids.push(node(NodeKind::Para, Vec::new(), cap));
+			if !caption.is_empty() {
+				kids.push(node(NodeKind::Caption, Vec::new(), inlines(caption)));
 			}
 			if let Some(head) = head {
-				if let Some(para) = table_row(head) {
-					kids.push(para);
-				}
+				kids.push(table_row(head, true));
 			}
 			for row in rows {
-				if let Some(para) = table_row(row) {
-					kids.push(para);
-				}
+				kids.push(table_row(row, false));
 			}
-			// A table that said nothing renders as nothing, as a blank paragraph does.
-			if kids.is_empty() {
-				return None;
-			}
-			Some(node(NodeKind::Boxx, Vec::new(), kids))
+			node(NodeKind::Table, fields, kids)
 		},
-		// A thematic break is dropped: v0 has no kind for one (§4.2), and the vocabulary is frozen. A
-		// rule is a division between passages and nothing else, so there is no node it degrades to
-		// that keeps what it meant -- an empty paragraph or a box would each say something the author
-		// did not.
-		Block::Rule => None,
-		// A division degrades to a box of its blocks. A box is flow content holding flow content, which
-		// is what a division is, and it says "these blocks are one thing" without keeping the id and
-		// classes v0 has no vocabulary for (§4.4 names styles locally, not by class). An empty division
-		// says nothing and is dropped, as a blank paragraph is.
-		Block::Div { content, .. } => {
-			let kids = self::blocks(content);
-			if kids.is_empty() {
-				return None;
+		Block::Rule => node(NodeKind::Rule, Vec::new(), Vec::new()),
+		Block::Div { attrs, content } => node(NodeKind::Div, attr_fields(attrs), blocks(content)),
+		Block::Figure { attrs, content, caption } => {
+			let mut kids = blocks(content);
+			if !caption.is_empty() {
+				kids.push(node(NodeKind::Caption, Vec::new(), inlines(caption)));
 			}
-			Some(node(NodeKind::Boxx, Vec::new(), kids))
+			node(NodeKind::Figure, attr_fields(attrs), kids)
 		},
-		// A figure and a definition list degrade, until v0 has kinds for them, to a box of the
-		// blocks `Block::as_plain` gives: every word stays, the caption a paragraph after the
-		// content, each term a strong paragraph before its definitions.
-		Block::Figure { .. } | Block::Terms { .. } => {
-			let kids = self::blocks(&b.as_plain());
-			if kids.is_empty() {
-				return None;
-			}
-			Some(node(NodeKind::Boxx, Vec::new(), kids))
-		},
+		Block::Terms { attrs, items } => node(
+			NodeKind::Terms,
+			attr_fields(attrs),
+			items.iter().map(term).collect(),
+		),
 	}
 }
 
-/// One row of a table, as the paragraph it degrades to, or `None` where the row says nothing.
-///
-/// A cell holds inline content and a paragraph admits inline content, so a cell's inlines are carried
-/// across whole: the emphasis, the links and the words are all the row's, and only the cell walls go.
-fn table_row(row: &Row) -> Option<Dat> {
-	// A row of empty cells carries no words, and a paragraph of nothing but separators would say
-	// something the author did not. It is dropped, as a blank paragraph is.
-	if row.0.iter().all(|cell| cell.text_of().trim().is_empty()) {
-		return None;
+/// One row of a table, its head row marked as one.
+fn table_row(
+	row:	&Row,
+	head:	bool,
+)
+	-> Dat
+{
+	let fields = if head { vec![(KEY_HEAD, Dat::Bool(true))] } else { Vec::new() };
+	let cells = row.0.iter().map(|cell| {
+		let fields = if cell.header { vec![(KEY_HEADER, Dat::Bool(true))] } else { Vec::new() };
+		node(NodeKind::Cell, fields, inlines(&cell.content))
+	}).collect();
+	node(NodeKind::Row, fields, cells)
+}
+
+/// One entry of a definition list: its label where the term has words, then each definition.
+fn term(t: &Term) -> Dat {
+	let mut kids = Vec::with_capacity(t.defs.len() + 1);
+	if !t.term.is_empty() {
+		kids.push(node(NodeKind::Label, Vec::new(), inlines(&t.term)));
 	}
-	let mut out = Vec::new();
-	for (n, cell) in row.0.iter().enumerate() {
-		if n > 0 {
-			push_text(&mut out, CELL_SEP);
+	for def in &t.defs {
+		kids.push(node(NodeKind::Def, Vec::new(), blocks(def)));
+	}
+	node(NodeKind::Term, Vec::new(), kids)
+}
+
+/// The wire name of a column alignment, one of [`COL_ALIGNMENTS`](crate::kinds::COL_ALIGNMENTS).
+pub fn col_align(a: Align) -> &'static str {
+	match a {
+		Align::None	=> "none",
+		Align::Start	=> "start",
+		Align::Centre	=> "center",
+		Align::End	=> "end",
+	}
+}
+
+/// The attribute fields of a figure, a definition list, a division or a span, each left out when it
+/// names nothing.
+fn attr_fields(attrs: &Attrs) -> Vec<(&'static str, Dat)> {
+	let mut fields = Vec::with_capacity(3);
+	if !attrs.classes.is_empty() {
+		fields.push((KEY_CLASSES, Dat::List(attrs.classes.iter().map(|c| Dat::Str(clean(c))).collect())));
+	}
+	if let Some(id) = &attrs.id {
+		fields.push((KEY_ID, Dat::Str(clean(id))));
+	}
+	if !attrs.pairs.is_empty() {
+		let mut flat = Vec::with_capacity(attrs.pairs.len() * 2);
+		for (k, v) in &attrs.pairs {
+			flat.push(Dat::Str(clean(k)));
+			flat.push(Dat::Str(clean(v)));
 		}
-		out.extend(inlines(&cell.content));
+		fields.push((KEY_PAIRS, Dat::List(flat)));
 	}
-	Some(node(NodeKind::Para, Vec::new(), out))
+	fields
 }
 
 /// A heading's level, held to the 1 to 6 the schema admits.
 ///
-/// Markdown has no other level, so this only ever matters for a tree built by hand. A level outside
+/// No reader has any other level, so this only ever matters for a tree built by hand. A level outside
 /// the range is clamped rather than refused, since an import that dies on a heading has told an
 /// author nothing they can act on.
 fn heading_level(n: u8) -> u8 {
@@ -328,54 +304,38 @@ fn heading_level(n: u8) -> u8 {
 // │ INLINES                                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Maps a run of inlines to the inline nodes they become.
+/// Maps a run of inlines to the inline nodes they become, one to each.
 fn inlines(content: &[Inline]) -> Vec<Dat> {
-	let mut out = Vec::with_capacity(content.len());
-	for item in content {
-		match item {
-			Inline::Text(s) => push_text(&mut out, s),
-			Inline::Emph { strong, content } => out.push(node(
-				NodeKind::Emph,
-				vec![("strong", Dat::Bool(*strong))],
-				inlines(content),
-			)),
-			Inline::Link { to, content } => out.push(node(
-				NodeKind::Link,
-				vec![(KEY_TO, address(to))],
-				inlines(content),
-			)),
-			// An image degrades to its alt text. An `image` node addresses its blob by content hash
-			// (§4.2) and Markdown gives a path, so nothing here can build one: resolving a path to a
-			// blob, hashing it and publishing it is the business of whatever puts blobs on the
-			// oxeweb, and a hash invented to fill the field would address nothing.
-			Inline::Image { alt, .. } => push_text(&mut out, alt),
-			// A code span degrades to its characters. SBJ's `code` is flow content and a paragraph
-			// admits inline content only, so a code node cannot sit where Markdown puts this. The
-			// characters are what the span says; the monospace is how it looked.
-			Inline::Code(s) => push_text(&mut out, s),
-			// A hard break is a newline in a text run. §3 rule 5 permits one in a string, which is
-			// what the `every_kind` fixture carries.
-			Inline::Break => out.push(text("\n".to_string())),
-			// A span degrades to its content, flattened into the line. v0 has no generic inline grouping
-			// kind (§4.2), and the id and classes it carries have no vocabulary here, so what it keeps is
-			// every word and every emphasis inside it, in order, exactly as a code span keeps its
-			// characters.
-			Inline::Span { content, .. } => out.extend(inlines(content)),
-			// A superscript and a subscript degrade alike, until v0 has a kind for either.
-			Inline::Sup(content) | Inline::Sub(content) => out.extend(inlines(content)),
-		}
-	}
-	out
+	content.iter().map(inline).collect()
 }
 
-/// Pushes a text run, unless it would say nothing.
-fn push_text(
-	out:	&mut Vec<Dat>,
-	s:	&str,
-) {
-	let s = clean(s);
-	if !s.is_empty() {
-		out.push(text(s));
+/// Maps one inline to its node.
+fn inline(item: &Inline) -> Dat {
+	match item {
+		Inline::Text(s) => text(clean(s)),
+		Inline::Emph { strong, content } => node(
+			NodeKind::Emph,
+			vec![("strong", Dat::Bool(*strong))],
+			inlines(content),
+		),
+		Inline::Link { to, content } => node(
+			NodeKind::Link,
+			vec![(KEY_TO, address(to))],
+			inlines(content),
+		),
+		// An inline image keeps the source it was written with. SBJ's block `image` addresses a blob
+		// by content hash (§4.2), which a path is not; whatever publishes the blob rewrites `src` to
+		// `hash` then, and until it does the source is what the prose said.
+		Inline::Image { src, alt } => node(
+			NodeKind::Img,
+			vec![("alt", Dat::Str(clean(alt))), (KEY_SRC, Dat::Str(clean(src)))],
+			Vec::new(),
+		),
+		Inline::Code(s) => node(NodeKind::Tt, vec![("text", Dat::Str(clean(s)))], Vec::new()),
+		Inline::Span { attrs, content } => node(NodeKind::Span, attr_fields(attrs), inlines(content)),
+		Inline::Break => node(NodeKind::Break, Vec::new(), Vec::new()),
+		Inline::Sup(content) => node(NodeKind::Sup, Vec::new(), inlines(content)),
+		Inline::Sub(content) => node(NodeKind::Sub, Vec::new(), inlines(content)),
 	}
 }
 
@@ -400,7 +360,7 @@ fn address(to: &str) -> Dat {
 /// encoding of a node with no children and that is the one without the key.
 fn node(
 	kind:	NodeKind,
-	fields:	Vec<(&str, Dat)>,
+	fields:	Vec<(&'static str, Dat)>,
 	kids:	Vec<Dat>,
 )
 	-> Dat
@@ -441,12 +401,10 @@ mod tests {
 		kinds::children_of,
 		validate,
 		SCHEMA_DOC,
+		SCHEMA_DOC_1,
 	};
 
-	use oxedyne_fe2o3_text::doc::{
-		Align,
-		Cell,
-	};
+	use oxedyne_fe2o3_text::doc::Cell;
 
 	/// Builds a document of the given blocks, and holds it to the validator.
 	///
@@ -455,7 +413,7 @@ mod tests {
 	fn imported(blocks: Vec<Block>) -> Outcome<Dat> {
 		let md = doc::Doc { blocks };
 		let tree = from_doc(&md, &Options::default());
-		res!(validate::validate(&tree, SCHEMA_DOC));
+		res!(validate::validate(&tree, SCHEMA_DOC_1));
 		Ok(tree)
 	}
 
@@ -595,11 +553,12 @@ mod tests {
 	}
 
 	#[test]
-	fn test_an_empty_paragraph_is_skipped_04() -> Outcome<()> {
-		// A paragraph of nothing but whitespace renders as nothing, so it is nothing.
+	fn test_an_empty_paragraph_is_kept_04() -> Outcome<()> {
+		// Nothing is dropped, or the export could not give back what the import was handed.
 		let tree = res!(imported(vec![p("   \t "), p("Real prose."), Block::Para(Vec::new())]));
-		assert_eq!(res!(kids(&tree)).len(), 1);
-		assert_eq!(res!(text_of(&res!(kid(&res!(kid(&tree, 0)), 0)))), "Real prose.");
+		assert_eq!(res!(kids(&tree)).len(), 3);
+		assert_eq!(res!(text_of(&res!(kid(&res!(kid(&tree, 1)), 0)))), "Real prose.");
+		assert_eq!(res!(kids(&res!(kid(&tree, 2)))).len(), 0);
 		Ok(())
 	}
 
@@ -625,15 +584,15 @@ mod tests {
 	}
 
 	#[test]
-	fn test_a_list_of_no_items_is_dropped_06() -> Outcome<()> {
-		// SPEC §4.2 marks a list `item+`, so an empty one would be refused by the validator, which is
-		// what running this through it proves.
+	fn test_a_list_of_no_items_is_kept_under_doc_1_06() -> Outcome<()> {
+		// `oxeweb/doc/1` carries an empty list; `oxeweb/doc/0` still marks a list `item+`.
 		let tree = res!(imported(vec![
 			Block::List { ordered: false, items: Vec::new() },
 			p("After."),
 		]));
-		assert_eq!(res!(kids(&tree)).len(), 1);
-		assert_eq!(res!(kind_of(&res!(kid(&tree, 0)))), NodeKind::Para);
+		assert_eq!(res!(kids(&tree)).len(), 2);
+		assert_eq!(res!(kind_of(&res!(kid(&tree, 0)))), NodeKind::List);
+		assert!(validate::validate(&tree, SCHEMA_DOC).is_err(), "doc/0 admitted an empty list.");
 		Ok(())
 	}
 
@@ -684,12 +643,14 @@ mod tests {
 			Block::Code { lang: Some("  ".to_string()), text: "plain".to_string() },
 		]));
 		// The field is optional (§4.2), and the canonical encoding of an absent optional is its
-		// absence, so a fence that named no language carries no key.
-		for n in 0..2 {
-			let code = res!(kid(&tree, n));
-			assert!(field(&code, "lang").is_err(), "A code block invented a language.");
-			assert_eq!(res!(field(&code, "text")), dat!("plain"));
-		}
+		// absence, so a fence that named no language carries no key. A blank name is still a name,
+		// and the lossless import keeps it as written.
+		let code = res!(kid(&tree, 0));
+		assert!(field(&code, "lang").is_err(), "A code block invented a language.");
+		assert_eq!(res!(field(&code, "text")), dat!("plain"));
+		let code = res!(kid(&tree, 1));
+		assert_eq!(res!(field(&code, "lang")), dat!("  "));
+		assert_eq!(res!(field(&code, "text")), dat!("plain"));
 		Ok(())
 	}
 
@@ -742,20 +703,15 @@ mod tests {
 	}
 
 	#[test]
-	fn test_a_rule_is_dropped_13() -> Outcome<()> {
-		// v0 has no thematic break, and the vocabulary is frozen, so the rule goes and the prose stays.
+	fn test_a_rule_is_a_rule_13() -> Outcome<()> {
 		let tree = res!(imported(vec![p("Before."), Block::Rule, p("After.")]));
-		let kids = res!(kids(&tree));
-		assert_eq!(kids.len(), 2, "A rule left something behind: {:?}", kids);
-		assert_eq!(res!(text_of(&res!(kid(&kids[0], 0)))), "Before.");
-		assert_eq!(res!(text_of(&res!(kid(&kids[1], 0)))), "After.");
+		assert_eq!(res!(kids(&tree)).len(), 3);
+		assert_eq!(res!(kind_of(&res!(kid(&tree, 1)))), NodeKind::Rule);
 		Ok(())
 	}
 
 	#[test]
-	fn test_an_image_degrades_to_its_alt_text_14() -> Outcome<()> {
-		// An `image` node addresses a blob by content hash, and Markdown gives a path, so the words
-		// survive and the picture does not.
+	fn test_an_image_keeps_its_source_and_alt_text_14() -> Outcome<()> {
 		let tree = res!(imported(vec![
 			Block::Para(vec![
 				t("Look: "),
@@ -765,48 +721,45 @@ mod tests {
 				},
 			]),
 		]));
-		let para = res!(kid(&tree, 0));
-		let alt = res!(kid(&para, 1));
-		assert_eq!(res!(kind_of(&alt)), NodeKind::Text);
-		assert_eq!(res!(text_of(&alt)), "A diagram of a tree");
+		let img = res!(kid(&res!(kid(&tree, 0)), 1));
+		assert_eq!(res!(kind_of(&img)), NodeKind::Img);
+		assert_eq!(res!(field(&img, KEY_SRC)), dat!("tree.png"));
+		assert_eq!(res!(field(&img, "alt")), dat!("A diagram of a tree"));
+		assert!(field(&img, "hash").is_err(), "An unresolved image carried a hash.");
 		Ok(())
 	}
 
 	#[test]
-	fn test_an_image_with_no_alt_text_says_nothing_15() -> Outcome<()> {
+	fn test_an_image_with_no_alt_text_is_still_an_image_15() -> Outcome<()> {
 		let tree = res!(imported(vec![
 			Block::Para(vec![
 				t("Words."),
 				Inline::Image { src: "tree.png".to_string(), alt: String::new() },
 			]),
 		]));
-		assert_eq!(res!(kids(&res!(kid(&tree, 0)))).len(), 1);
+		let img = res!(kid(&res!(kid(&tree, 0)), 1));
+		assert_eq!(res!(field(&img, "alt")), dat!(""));
 		Ok(())
 	}
 
 	#[test]
-	fn test_an_inline_code_span_degrades_to_text_16() -> Outcome<()> {
-		// SBJ's `code` is flow content and a para admits inline content only, so a code node cannot
-		// sit here at all. That the tree validates is the whole point of the degrading.
+	fn test_an_inline_code_span_is_a_tt_16() -> Outcome<()> {
 		let tree = res!(imported(vec![
 			Block::Para(vec![t("Run "), Inline::Code("cargo test".to_string()), t(" first.")]),
 		]));
-		let para = res!(kid(&tree, 0));
-		let span = res!(kid(&para, 1));
-		assert_eq!(res!(kind_of(&span)), NodeKind::Text);
-		assert_eq!(res!(text_of(&span)), "cargo test");
+		let span = res!(kid(&res!(kid(&tree, 0)), 1));
+		assert_eq!(res!(kind_of(&span)), NodeKind::Tt);
+		assert_eq!(res!(field(&span, "text")), dat!("cargo test"));
 		Ok(())
 	}
 
 	#[test]
-	fn test_a_hard_break_is_a_newline_17() -> Outcome<()> {
+	fn test_a_hard_break_is_a_break_17() -> Outcome<()> {
 		let tree = res!(imported(vec![
 			Block::Para(vec![t("One line"), Inline::Break, t("and the next")]),
 		]));
-		let para = res!(kid(&tree, 0));
-		let brk = res!(kid(&para, 1));
-		assert_eq!(res!(kind_of(&brk)), NodeKind::Text);
-		assert_eq!(res!(text_of(&brk)), "\n");
+		let brk = res!(kid(&res!(kid(&tree, 0)), 1));
+		assert_eq!(res!(kind_of(&brk)), NodeKind::Break);
 		Ok(())
 	}
 
@@ -820,7 +773,7 @@ mod tests {
 			..Options::default()
 		};
 		let tree = from_doc(&md, &opts);
-		res!(validate::validate(&tree, SCHEMA_DOC));
+		res!(validate::validate(&tree, SCHEMA_DOC_1));
 		assert_eq!(res!(field(&tree, "title")), dat!("The caller's title"));
 		Ok(())
 	}
@@ -842,7 +795,7 @@ mod tests {
 			],
 		};
 		let tree = from_doc(&md, &Options::default());
-		res!(validate::validate(&tree, SCHEMA_DOC));
+		res!(validate::validate(&tree, SCHEMA_DOC_1));
 		// The first level 1 heading, flattened: emphasis inside a title keeps its words.
 		assert_eq!(res!(field(&tree, "title")), dat!("A loud title"));
 		Ok(())
@@ -858,7 +811,7 @@ mod tests {
 			..Options::default()
 		};
 		let tree = from_doc(&md, &opts);
-		res!(validate::validate(&tree, SCHEMA_DOC));
+		res!(validate::validate(&tree, SCHEMA_DOC_1));
 		assert_eq!(res!(field(&tree, "title")), dat!("the_file_name"));
 		Ok(())
 	}
@@ -871,7 +824,7 @@ mod tests {
 			..Options::default()
 		};
 		let tree = from_doc(&md, &opts);
-		res!(validate::validate(&tree, SCHEMA_DOC));
+		res!(validate::validate(&tree, SCHEMA_DOC_1));
 		assert_eq!(res!(field(&tree, "lang")), dat!("fr"));
 		Ok(())
 	}
@@ -938,7 +891,7 @@ mod tests {
 			},
 			Block::Code { lang: Some("rust".to_string()), text: "fn main() {}".to_string() },
 		]));
-		let stats = res!(validate::validate(&tree, SCHEMA_DOC));
+		let stats = res!(validate::validate(&tree, SCHEMA_DOC_1));
 		assert!(stats.nodes > 15, "The document lost most of itself: {:?}", stats);
 		res!(crate::canon::check(&tree));
 		Ok(())
@@ -966,55 +919,47 @@ mod tests {
 			Block::Quote(vec![p("A quoted line.")]),
 			Block::Code { lang: Some("rust".to_string()), text: "fn main() {}".to_string() },
 		]));
-		let buf = res!(crate::doc::write(&tree, SCHEMA_DOC, &signer, 0));
+		let buf = res!(crate::doc::write(&tree, SCHEMA_DOC_1, &signer, 0));
 		let read = res!(crate::doc::read(&buf));
 		assert_eq!(read.tree(), &tree, "An imported document did not survive its own signing path.");
 		Ok(())
 	}
 
-	/// Until the import is made lossless, a figure, a definition list, a table's caption and a
-	/// superscript all degrade, and keep every word in reading order while doing so.
 	#[test]
-	fn test_the_page_constructs_degrade_keeping_their_words_26a() -> Outcome<()> {
+	fn test_the_page_constructs_keep_their_parts_in_order_26a() -> Outcome<()> {
 		let tree = res!(imported(vec![
 			Block::Figure {
-				attrs:		Default::default(),
+				attrs:		Attrs { id: Some("f1".to_string()), ..Default::default() },
 				content:	vec![p("Content.")],
 				caption:	vec![t("Caption.")],
 			},
 			Block::Terms {
-				attrs:	Default::default(),
-				items:	vec![oxedyne_fe2o3_text::doc::Term {
+				attrs:	Attrs { classes: vec!["gloss".to_string()], ..Default::default() },
+				items:	vec![Term {
 					term:	vec![t("Term")],
 					defs:	vec![vec![Block::Para(vec![t("m"), Inline::Sup(vec![t("2")])])]],
 				}],
 			},
-			Block::Table {
-				head:		None,
-				rows:		vec![Row(vec![c("a"), c("b")])],
-				cols:		Vec::new(),
-				caption:	vec![t("Cap")],
-			},
 		]));
 		let fig = res!(kid(&tree, 0));
-		assert_eq!(res!(kind_of(&fig)), NodeKind::Boxx);
-		assert_eq!(&res!(said(&res!(kid(&fig, 0)))), "Content.");
-		assert_eq!(&res!(said(&res!(kid(&fig, 1)))), "Caption.");
+		assert_eq!(res!(kind_of(&fig)), NodeKind::Figure);
+		assert_eq!(res!(field(&fig, KEY_ID)), dat!("f1"));
+		assert_eq!(res!(kind_of(&res!(kid(&fig, 0)))), NodeKind::Para);
+		assert_eq!(res!(kind_of(&res!(kid(&fig, 1)))), NodeKind::Caption);
 		let terms = res!(kid(&tree, 1));
-		assert_eq!(&res!(said(&res!(kid(&terms, 0)))), "Term");
-		assert_eq!(&res!(said(&res!(kid(&terms, 1)))), "m2");
-		let table = res!(kid(&tree, 2));
-		assert_eq!(&res!(said(&res!(kid(&table, 0)))), "Cap");
-		assert_eq!(&res!(said(&res!(kid(&table, 1)))), "a | b");
+		assert_eq!(res!(field(&terms, KEY_CLASSES)), Dat::List(vec![dat!("gloss")]));
+		let term = res!(kid(&terms, 0));
+		assert_eq!(res!(kind_of(&res!(kid(&term, 0)))), NodeKind::Label);
+		let def = res!(kid(&term, 1));
+		assert_eq!(res!(kind_of(&def)), NodeKind::Def);
+		let sup = res!(kid(&res!(kid(&def, 0)), 1));
+		assert_eq!(res!(kind_of(&sup)), NodeKind::Sup);
 		res!(crate::canon::check(&tree));
 		Ok(())
 	}
 
 	#[test]
-	fn test_a_table_degrades_to_a_box_of_rows_26() -> Outcome<()> {
-		// v0 has no kind for a grid and the vocabulary is frozen, so the grid goes and every word
-		// stays. That the box validates is the whole of the claim: a box is flow content that holds
-		// flow content, so a paragraph to a row is a thing a document may say.
+	fn test_a_table_keeps_its_grid_26() -> Outcome<()> {
 		let tree = res!(imported(vec![
 			Block::Table {
 				head:	Some(Row(vec![c("Name"), c("Age")])),
@@ -1023,69 +968,56 @@ mod tests {
 					Row(vec![c("Bob"), c("25")]),
 				],
 				cols:	vec![Align::Start, Align::End],
-				caption:	Vec::new(),
+				caption:	vec![t("People")],
 			},
 		]));
-		let boxx = res!(kid(&tree, 0));
-		assert_eq!(res!(kind_of(&boxx)), NodeKind::Boxx);
-		// A paragraph to a row, the header's among them, and nothing lost but the walls between the
-		// cells.
-		assert_eq!(res!(kids(&boxx)).len(), 3);
-		for (n, expected) in ["Name | Age", "Alice | 30", "Bob | 25"].iter().enumerate() {
-			let para = res!(kid(&boxx, n));
-			assert_eq!(res!(kind_of(&para)), NodeKind::Para);
-			assert_eq!(&res!(said(&para)), expected);
-		}
+		let table = res!(kid(&tree, 0));
+		assert_eq!(res!(kind_of(&table)), NodeKind::Table);
+		assert_eq!(res!(field(&table, KEY_COLS)), Dat::List(vec![dat!("start"), dat!("end")]));
+		assert_eq!(res!(kids(&table)).len(), 4);
+		assert_eq!(res!(kind_of(&res!(kid(&table, 0)))), NodeKind::Caption);
+		let head = res!(kid(&table, 1));
+		assert_eq!(res!(field(&head, KEY_HEAD)), Dat::Bool(true));
+		assert!(field(&res!(kid(&table, 2)), KEY_HEAD).is_err(), "A body row carried 'head'.");
+		let cell = res!(kid(&res!(kid(&table, 3)), 1));
+		assert_eq!(res!(kind_of(&cell)), NodeKind::Cell);
+		assert_eq!(&res!(said(&cell)), "25");
 		res!(crate::canon::check(&tree));
 		Ok(())
 	}
 
 	#[test]
-	fn test_a_table_needs_no_header_and_keeps_its_markup_27() -> Outcome<()> {
-		// A cell's inlines are a paragraph's inlines, so what a cell holds sits where it sat.
+	fn test_a_header_cell_in_a_body_row_is_marked_27() -> Outcome<()> {
 		let tree = res!(imported(vec![
 			Block::Table {
 				head:	None,
 				rows:	vec![Row(vec![
-					Cell::new(vec![Inline::Emph { strong: true, content: vec![t("loud")] }]),
-					Cell::new(vec![Inline::Link {
-						to:		"news.cricket".to_string(),
-						content:	vec![t("a link")],
-					}]),
+					Cell { content: vec![t("Alice")], header: true },
+					Cell::new(vec![Inline::Emph { strong: true, content: vec![t("30")] }]),
 				])],
-				cols:	vec![Align::None, Align::None],
+				cols:	Vec::new(),
 				caption:	Vec::new(),
 			},
 		]));
-		let boxx = res!(kid(&tree, 0));
-		assert_eq!(res!(kind_of(&boxx)), NodeKind::Boxx);
-		// A table with no header row is a table of its body, and the box holds the one row it has.
-		assert_eq!(res!(kids(&boxx)).len(), 1);
-		let para = res!(kid(&boxx, 0));
-		assert_eq!(res!(kind_of(&para)), NodeKind::Para);
-		assert_eq!(res!(kind_of(&res!(kid(&para, 0)))), NodeKind::Emph);
-		assert_eq!(res!(text_of(&res!(kid(&para, 1)))), CELL_SEP);
-		assert_eq!(res!(kind_of(&res!(kid(&para, 2)))), NodeKind::Link);
-		assert_eq!(res!(said(&para)), "loud | a link");
+		let table = res!(kid(&tree, 0));
+		assert!(field(&table, KEY_COLS).is_err(), "No columns were written as an empty list.");
+		let row = res!(kid(&table, 0));
+		assert_eq!(res!(field(&res!(kid(&row, 0)), KEY_HEADER)), Dat::Bool(true));
+		assert!(field(&res!(kid(&row, 1)), KEY_HEADER).is_err(), "A plain cell said 'header'.");
 		Ok(())
 	}
 
 	#[test]
-	fn test_a_table_that_says_nothing_is_dropped_28() -> Outcome<()> {
-		// A row of empty cells is a blank paragraph by another name, and a box of no paragraphs
-		// renders as nothing at all: the same rule an empty paragraph is held to.
-		let tree = res!(imported(vec![
-			Block::Table {
-				head:	Some(Row(vec![Cell::default(), Cell::default()])),
-				rows:	vec![Row(vec![c("   "), Cell::default()])],
-				cols:	vec![Align::None, Align::None],
-				caption:	Vec::new(),
-			},
-			p("After."),
-		]));
-		let kids = res!(kids(&tree));
-		assert_eq!(kids.len(), 1, "An empty table left something behind: {:?}", kids);
-		assert_eq!(res!(kind_of(&kids[0])), NodeKind::Para);
+	fn test_a_page_kind_is_refused_under_doc_0_28() -> Outcome<()> {
+		// A table is a kind this reader knows, so under `oxeweb/doc/0` it is refused by name and
+		// never read through a fallback.
+		let tree = res!(imported(vec![Block::Rule]));
+		let e = match validate::validate(&tree, SCHEMA_DOC) {
+			Ok(_) => return Err(err!("doc/0 admitted a rule."; Test, Unexpected)),
+			Err(e) => fmt!("{}", e),
+		};
+		assert!(e.contains("rule") && e.contains(SCHEMA_DOC), "Unhelpful refusal: {}", e);
 		Ok(())
 	}
+
 }

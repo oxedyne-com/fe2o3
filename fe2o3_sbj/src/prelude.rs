@@ -19,5 +19,6 @@ pub use crate::{
 	SCHEMA_APP,
 	SCHEMA_CHROME,
 	SCHEMA_DOC,
+	SCHEMA_DOC_1,
 	VERSION_MAJOR,
 };

@@ -320,6 +320,24 @@ mod tests {
 		Ok(())
 	}
 
+	/// The key file is readable by its owner alone, whatever the umask, and a file already there at a
+	/// wider mode is replaced at 0600 rather than written into (review S13).
+	#[cfg(unix)]
+	#[test]
+	fn test_the_key_file_is_written_0600_02() -> Outcome<()> {
+		use std::os::unix::fs::PermissionsExt;
+		let dir = std::env::temp_dir().join(fmt!("sbj_key_mode_{}", std::process::id()));
+		let path = dir.join("key.jdat");
+		res!(fs::create_dir_all(&dir));
+		res!(fs::write(&path, b"old"));
+		res!(fs::set_permissions(&path, fs::Permissions::from_mode(0o644)));
+		res!(save(&res!(KeyPair::generate()), &path));
+		let mode = res!(fs::metadata(&path)).permissions().mode() & 0o777;
+		res!(fs::remove_dir_all(&dir));
+		assert_eq!(mode, 0o600, "The key file was left at {:o}.", mode);
+		Ok(())
+	}
+
 	/// A key file that names a scheme this version does not sign with is refused, naming it.
 	#[test]
 	fn test_a_foreign_scheme_is_refused_01() -> Outcome<()> {
