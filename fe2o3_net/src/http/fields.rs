@@ -262,6 +262,19 @@ pub enum HeaderName {
     NonStandard(String),
 }
 
+impl HeaderName {
+    /// Does this field carry a credential, whose value must never reach a log?
+    pub fn is_credential(&self) -> bool {
+        matches!(self,
+            Self::Authorization
+            | Self::ProxyAuthorization
+            | Self::Cookie
+            | Self::Cookie2
+            | Self::SetCookie
+            | Self::SetCookie2)
+    }
+}
+
 impl fmt::Display for HeaderName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

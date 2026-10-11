@@ -69,6 +69,48 @@ const FLAG_UV: u8 = 0x04;   // user verified
 const AUTH_DATA_MIN_LEN: usize = 37;
 
 
+/// The fixed head of authenticator data, which `credentials.create()` returns as well as
+/// `credentials.get()`: an enrolment reads it from `getAuthenticatorData()` to check the
+/// rpIdHash and the UP and UV flags before it stores a key. Only the head is read; the attested
+/// credential data and extensions after it, which are CBOR, are not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthDataHead {
+    pub rp_id_hash:     [u8; 32],
+    pub user_present:   bool,   // UP
+    pub user_verified:  bool,   // UV
+    pub counter:        u32,    // signCount, big-endian on the wire
+}
+
+impl AuthDataHead {
+    pub fn read(authenticator_data: &[u8]) -> Outcome<Self> {
+        if authenticator_data.len() < AUTH_DATA_MIN_LEN {
+            return Err(err!(
+                "WebAuthn authenticatorData is {} bytes, need at least {}.",
+                authenticator_data.len(), AUTH_DATA_MIN_LEN;
+                Invalid, Input, Size));
+        }
+        let mut rp_id_hash = [0u8; 32];
+        rp_id_hash.copy_from_slice(&authenticator_data[0..32]);
+        let flags = authenticator_data[32];
+        Ok(Self {
+            rp_id_hash,
+            user_present:   flags & FLAG_UP != 0,
+            user_verified:  flags & FLAG_UV != 0,
+            counter:        u32::from_be_bytes([
+                authenticator_data[33],
+                authenticator_data[34],
+                authenticator_data[35],
+                authenticator_data[36],
+            ]),
+        })
+    }
+
+    /// Was this authenticator data made for `rp_id`?
+    pub fn rp_id_matches(&self, rp_id: &str) -> bool {
+        self.rp_id_hash == sha256(rp_id.as_bytes())
+    }
+}
+
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut ctx = Context::new(&SHA256);
     ctx.update(data);
@@ -147,37 +189,25 @@ pub fn verify_assertion(
     }
 
     // authenticatorData: rpIdHash, flags and the signature counter.
-    if authenticator_data.len() < AUTH_DATA_MIN_LEN {
-        return Err(err!(
-            "WebAuthn authenticatorData is {} bytes, need at least {}.",
-            authenticator_data.len(), AUTH_DATA_MIN_LEN;
-            Invalid, Input, Size));
-    }
-    if authenticator_data[0..32] != sha256(rp_id.as_bytes()) {
+    let head = res!(AuthDataHead::read(authenticator_data));
+    if !head.rp_id_matches(rp_id) {
         return Err(err!(
             "WebAuthn rpIdHash does not match SHA-256({:?}).", rp_id;
             Invalid, Input, Mismatch, Security));
     }
-    let flags = authenticator_data[32];
-    let user_present  = flags & FLAG_UP != 0;
-    let user_verified = flags & FLAG_UV != 0;
-    if !user_present {
+    if !head.user_present {
         return Err(err!(
             "WebAuthn assertion has the user-present (UP) flag clear.";
             Invalid, Input, Security));
     }
-    if !user_verified {
+    if !head.user_verified {
         return Err(err!(
             "WebAuthn assertion has the user-verified (UV) flag clear; \
             userVerification:'required' was expected.";
             Invalid, Input, Security));
     }
-    let counter = u32::from_be_bytes([
-        authenticator_data[33],
-        authenticator_data[34],
-        authenticator_data[35],
-        authenticator_data[36],
-    ]);
+    let (counter, user_present, user_verified) =
+        (head.counter, head.user_present, head.user_verified);
 
     // The signature is over authenticatorData || SHA-256(clientDataJSON).
     let mut signed = Vec::with_capacity(authenticator_data.len() + 32);
@@ -606,5 +636,28 @@ mod tests {
         assert!(msg(&p384).contains("a P-384 key"), "{}", msg(&p384));
 
         assert!(msg(&[]).contains("no key this recognises"), "{}", msg(&[]));
+    }
+
+    /// The head of enrolment-style authenticator data -- head, then attested credential data --
+    /// reads as the verifier reads it, and a short buffer is refused naming its length.
+    #[test]
+    fn test_auth_data_head_00() -> Outcome<()> {
+        let mut ad = make_auth_data(RP_ID, FLAG_UP | FLAG_UV | 0x40, 0x0102_0304);
+        ad.extend_from_slice(&[0xa5; 80]);
+        let head = res!(AuthDataHead::read(&ad));
+        assert!(head.rp_id_matches(RP_ID));
+        assert!(!head.rp_id_matches("evil.example.com"));
+        assert!(head.user_present);
+        assert!(head.user_verified);
+        assert_eq!(head.counter, 0x0102_0304);
+
+        let head = res!(AuthDataHead::read(&make_auth_data(RP_ID, FLAG_UP, 0)));
+        assert!(head.user_present && !head.user_verified);
+
+        match AuthDataHead::read(&ad[..36]) {
+            Ok(_)   => return Err(err!("A 36-byte head was accepted."; Test)),
+            Err(e)  => assert!(fmt!("{}", e).contains("36 bytes"), "{}", e),
+        }
+        Ok(())
     }
 }
