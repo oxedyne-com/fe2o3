@@ -119,9 +119,10 @@ fn a_compile_that_fails_prints_the_report_before_the_error() {
 }
 
 #[test]
-fn the_flag_without_eval_is_refused() {
-	let r = run("no_eval", "Hello.\n", &["--diag-summary"]);
-	assert!(!r.ok, "the flag alone is refused");
+fn the_flag_on_the_curated_reader_is_refused() {
+	let r = run("no_eval", "Hello.\n", &["--engine", "curated", "--diag-summary"]);
+	assert!(!r.ok, "the flag on the curated reader is refused");
+	assert!(r.stderr.contains("--diag-summary is not read on the curated reader path"), "{}", r.stderr);
 	assert!(r.lines.is_empty(), "no report is printed:\n{}", r.stderr);
 }
 

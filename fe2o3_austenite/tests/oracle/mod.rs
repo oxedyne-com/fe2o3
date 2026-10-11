@@ -498,7 +498,10 @@ fn run_austenite(root: &CorpusRoot, work_dir: &Path) -> Outcome<AusOutput> {
 	let ledger_json_path	= work_dir.join(fmt!("{}-ledger-{}-{}.json", root.name, slot, pid));
 	let bin				= env!("CARGO_BIN_EXE_austenite");
 
+	// The curated reader, by name: since FIRE-2 a plain `austenite` compiles through the evaluator, which
+	// keeps no curated ledger and writes no Pearl document.
 	let output = match Command::new(bin)
+		.arg("--engine").arg("curated")
 		.arg("--ledger-out").arg(&ledger_json_path)
 		.arg("--pearl")
 		.arg(root.path)

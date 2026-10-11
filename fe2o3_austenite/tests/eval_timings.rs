@@ -215,15 +215,16 @@ fn a_record_with_a_phase_never_recorded_is_refused() {
 }
 
 #[test]
-fn timings_needs_the_evaluator_and_a_file() {
+fn timings_is_refused_on_the_curated_reader_and_needs_a_file() {
 	let dir = case_dir("flags");
 	let main = dir.join("main.typ");
 	std::fs::write(&main, "Text.\n").expect("the case's source");
 	let m = main.to_str().expect("a path");
 	let rec = dir.join("t.json");
-	let out = austenite(&["--timings", rec.to_str().expect("a path"), m]);
-	assert!(!out.status.success(), "--timings without --eval is refused");
-	assert!(String::from_utf8_lossy(&out.stderr).contains("--timings needs --eval"), "{}", String::from_utf8_lossy(&out.stderr));
+	let out = austenite(&["--engine", "curated", "--timings", rec.to_str().expect("a path"), m]);
+	assert!(!out.status.success(), "--timings on the curated reader is refused");
+	let err = String::from_utf8_lossy(&out.stderr);
+	assert!(err.contains("--timings is not read on the curated reader path"), "{}", err);
 	let out = austenite(&["--eval", m, "--timings"]);
 	assert!(!out.status.success(), "--timings with no file is refused");
 	assert!(String::from_utf8_lossy(&out.stderr).contains("--timings needs a file"), "{}", String::from_utf8_lossy(&out.stderr));

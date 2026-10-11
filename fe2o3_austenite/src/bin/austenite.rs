@@ -1,20 +1,16 @@
 //! `austenite` -- compile a Typst document to a set of pages.
 //!
-//! Reads a Typst root, follows its `#include` chain through the [`book`](oxedyne_fe2o3_austenite::book)
-//! assembler (or, for a lone file, straight through the [`lang`](oxedyne_fe2o3_austenite::lang) reader),
-//! authors the block stream through the block layer, runs the two-pass driver to a fixed point, decorates
-//! each page with a running head and a folio, and writes every page as SVG alongside the resolved ledger
-//! and a single PDF of the whole run.
+//! Since FIRE-2 (2026-10-11, D-20261011-24) every `.typ` source compiles through the evaluator, as
+//! `austenite watch` and `austenite build` do: plain `austenite SOURCE.typ [OUTPUT_DIR]` (default output
+//! `austenite-out`) writes `OUTPUT_DIR/document.pdf`, and `--explain` prints each site the evaluator did not
+//! set as written, with its line and column. `--eval` is still accepted and changes nothing.
 //!
-//! A construct the reader cannot yet set -- a `#show` rule, a `#columns` wrapper, an unknown `#func` --
-//! is passed over rather than failing the compile, and the lone-file path reports the tally on one terse
-//! line so a dropped construct is visible.
-//!
-//! Usage: `austenite <SOURCE.typ> [OUTPUT_DIR]` (default output `austenite-out`), or
-//! `austenite --watch <SOURCE.typ> [OUTPUT_DIR]` to recompile on every change to the root, its includes,
-//! its `config.typ`, or its assets. `austenite watch` and `austenite build` compile through the evaluator
-//! under the settings of an `austenite.jdat`; `austenite --eval --watch` is an alias of `watch` with no
-//! settings file.
+//! A book opts back to the frozen curated reader with one line in its `austenite.jdat`, `"engine": "curated"`,
+//! or a run does with `--engine curated`. That path follows the `#include` chain through the
+//! [`book`](oxedyne_fe2o3_austenite::book) assembler (or a lone file through the
+//! [`lang`](oxedyne_fe2o3_austenite::lang) reader) and writes every page as SVG beside the ledger and the PDF;
+//! only it takes `--pearl` and `--ledger-out`. A flag the chosen engine would not read is refused by name.
+//! `--watch` recompiles on every change under either engine.
 
 use oxedyne_fe2o3_austenite::{
 	compile,
@@ -26,6 +22,7 @@ use oxedyne_fe2o3_austenite::{
 	ledger::Ledger,
 	lang,
 	memo::Memo,
+	settings,
 	page::{
 		Frame,
 		Page,
@@ -639,20 +636,90 @@ fn command_build(args: &[String]) -> Outcome<()> {
 	Ok(())
 }
 
+// Which engine compiles a plain `austenite SOURCE.typ`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Engine {
+	Evaluator,	// the default since FIRE-2 (2026-10-11), the engine `watch` and `build` use
+	Curated,	// the frozen book reader, kept reachable for a book that opts back
+}
+
+impl Engine {
+	fn path(&self) -> &'static str {
+		match self {
+			Self::Evaluator	=> "the evaluator path",
+			Self::Curated	=> "the curated reader path",
+		}
+	}
+
+	fn parse(word: &str) -> Outcome<Self> {
+		match word {
+			"evaluator"	=> Ok(Self::Evaluator),
+			"curated"	=> Ok(Self::Curated),
+			other		=> Err(err!("--engine takes evaluator or curated, not '{}'.", other; Input, Invalid)),
+		}
+	}
+}
+
+// A flag the chosen engine would not read, refused by name rather than ignored. `chosen` says what chose
+// the engine, so the way back is in the message.
+fn refuse(flag: &str, engine: Engine, chosen: &str, why: &str) -> Error<ErrTag> {
+	err!("{} is not read on {} ({}): {}.", flag, engine.path(), chosen, why; Input, Invalid)
+}
+
+/// The report `--explain` prints on the evaluator path: every site the evaluator recorded as not set as
+/// written, one per line as `file:line:col: <severity>: <kind>: <message>`, the source line beneath it, a
+/// `^` under the column, and the hint where there is one. A site with no position (line `0`) is printed
+/// without the caret, and a file that can no longer be read gives the head line alone.
+fn explain_sites(sites: &[oxedyne_fe2o3_austenite::compile::Diagnostic]) -> String {
+	let mut cache: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+	let mut out = String::new();
+	for d in sites {
+		let head = fmt!("{}: {}: {}", d.severity.as_str(), d.kind.as_str(), d.message);
+		if d.line == 0 {
+			out.push_str(&fmt!("{}: {}\n", d.file, head));
+		} else {
+			out.push_str(&fmt!("{}:{}:{}: {}\n", d.file, d.line, d.col, head));
+			let text = cache.entry(d.file.clone())
+				.or_insert_with(|| std::fs::read_to_string(&d.file).ok());
+			if let Some(line) = text.as_ref().and_then(|t| t.lines().nth(d.line - 1)) {
+				out.push_str(line);
+				out.push('\n');
+				for _ in 1..d.col { out.push(' '); }
+				out.push_str("^\n");
+			}
+		}
+		if let Some(h) = &d.hint {
+			out.push_str(&fmt!("  hint: {}\n", h));
+		}
+	}
+	out
+}
+
+const USAGE: &str = "Usage: austenite watch|build ... or austenite [--watch] [--explain] [--engine evaluator|curated] \
+	[--strict] [--diag-summary] [--timings FILE.json [--timings-fine]] [--root DIR] [--font-path DIR]... <SOURCE.typ> [OUTPUT_DIR]. \
+	A .typ source compiles through the evaluator; --eval is accepted and changes nothing. A book whose austenite.jdat \
+	holds \"engine\": \"curated\" (or a run given --engine curated) compiles through the frozen curated reader instead, \
+	which alone takes --pearl and --ledger-out PATH and none of --strict, --diag-summary, --timings, --root or --font-path. \
+	A flag the chosen engine would not read is refused by name.";
+
 fn main() -> Outcome<()> {
 	let argv: Vec<String> = std::env::args().skip(1).collect();
 	match argv.first().map(|a| a.as_str()) {
 		Some("watch")	=> return command_watch(&argv[1..]),
 		Some("build")	=> return command_build(&argv[1..]),
+		Some("--help") | Some("-h")	=> {
+			println!("{}", USAGE);
+			return Ok(());
+		},
 		_				=> (),
 	}
-	// Flags may precede or follow the paths; `--watch` (`-w`), `--pearl`, `--ledger-out <path>`, `--explain`,
-	// and the evaluator's `--eval`, `--strict`, `--root <dir>` and `--font-path <dir>` are recognised,
-	// everything else is a positional argument in order: the source root, then the optional output directory.
+	// Flags may precede or follow the paths; everything else is a positional argument in order: the source
+	// root, then the optional output directory.
 	let mut watching	= false;
 	let mut pearl		= false;
 	let mut explain		= false;
 	let mut eval		= false;
+	let mut engine_arg:	Option<Engine>	= None;
 	let mut strict		= false;
 	let mut diag_summary	= false;
 	let mut timings:	Option<String>	= None;
@@ -668,6 +735,10 @@ fn main() -> Outcome<()> {
 			"--pearl"			=> pearl = true,
 			"--explain"			=> explain = true,
 			"--eval"			=> eval = true,
+			"--engine"			=> engine_arg = Some(match args.next() {
+				Some(w)	=> res!(Engine::parse(&w)),
+				None	=> return Err(err!("--engine needs evaluator or curated."; Input, Invalid, Missing)),
+			}),
 			"--strict"			=> strict = true,
 			"--diag-summary"	=> diag_summary = true,
 			"--timings-fine"	=> fine = true,
@@ -695,32 +766,86 @@ fn main() -> Outcome<()> {
 	}
 	let source = match pos.first() {
 		Some(s)	=> s.clone(),
-		None	=> return Err(err!(
-			"Usage: austenite watch|build ... or austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--diag-summary] [--timings FILE.json [--timings-fine]] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
-			Input, Invalid, Missing)),
+		None	=> return Err(err!("{}", USAGE; Input, Invalid, Missing)),
 	};
 	let out_dir = match pos.get(1) {
 		Some(s)	=> s.clone(),
 		None	=> "austenite-out".to_string(),
 	};
 
-	if diag_summary && !eval {
-		return Err(err!("--diag-summary needs --eval."; Input, Invalid));
+	// The engine: `--engine`, else `--eval` (the evaluator, as it always meant), else the book's own
+	// `austenite.jdat` when it opts back to the curated reader, else the evaluator.
+	let (engine, chosen) = match (engine_arg, eval) {
+		(Some(Engine::Curated), true)	=> return Err(err!(
+			"--eval and --engine curated ask for two engines; give one."; Input, Invalid)),
+		(Some(e), _)					=> (e, "chosen by --engine".to_string()),
+		(None, true)					=> (Engine::Evaluator, "chosen by --eval".to_string()),
+		(None, false)					=> match res!(settings::curated_by(std::path::Path::new(&source))) {
+			Some(file)	=> (Engine::Curated, fmt!("chosen by \"engine\": \"curated\" in {}", file.display())),
+			None		=> (Engine::Evaluator, "the default for a .typ source".to_string()),
+		},
+	};
+
+	if explain && watching {
+		return Err(refuse("--explain", engine, &chosen,
+			"it reports one compile, and --watch prints a status line per rebuild instead; drop one of the two"));
 	}
-	if timings.is_some() && !eval {
-		return Err(err!("--timings needs --eval."; Input, Invalid));
+	match engine {
+		Engine::Evaluator	=> {
+			let back = "it belongs to the curated reader; drop it, or add --engine curated";
+			if pearl {
+				return Err(refuse("--pearl", engine, &chosen, back));
+			}
+			if ledger_out.is_some() {
+				return Err(refuse("--ledger-out", engine, &chosen, back));
+			}
+		},
+		Engine::Curated		=> {
+			let back = "it belongs to the evaluator; drop it, or compile with --engine evaluator";
+			for (given, flag) in [
+				(strict,				"--strict"),
+				(diag_summary,			"--diag-summary"),
+				(timings.is_some(),		"--timings"),
+				(fine,					"--timings-fine"),
+				(root.is_some(),		"--root"),
+				(!font_paths.is_empty(),	"--font-path"),
+			] {
+				if given {
+					return Err(refuse(flag, engine, &chosen, back));
+				}
+			}
+		},
 	}
-	if fine && timings.is_none() {
-		return Err(err!("--timings-fine needs --timings."; Input, Invalid));
-	}
-	if eval {
+
+	if engine == Engine::Evaluator {
+		if fine && timings.is_none() {
+			return Err(err!("--timings-fine needs --timings."; Input, Invalid));
+		}
+		// With no `--font-path`, the fonts a book keeps in `assets/fonts` beside the source or one level up,
+		// where the curated reader and `austenite build` look for them.
+		if font_paths.is_empty() {
+			let dir = PathBuf::from(&source);
+			let dir = match dir.parent() {
+				Some(p) if !p.as_os_str().is_empty()	=> p.to_path_buf(),
+				_										=> PathBuf::from("."),
+			};
+			for d in [dir.join("assets/fonts"), dir.join("../assets/fonts")] {
+				if d.is_dir() {
+					font_paths.push(d.display().to_string());
+				}
+			}
+		}
 		let job = EvalJob { source, out_dir, root, font_paths, strict, diag_summary, timings_out: timings, timings_fine: fine };
 		if watching {
 			return watch_eval(job);
 		}
 		let mut read = Vec::new();
 		let mut session = eval_session(&job);
-		let stats = res!(compile_eval(&job, &mut session, true, false, &mut read));
+		// Under `--explain` the detailed report stands in for the terse `skipped:` line.
+		let stats = res!(compile_eval(&job, &mut session, true, explain, &mut read));
+		if explain {
+			print!("{}", explain_sites(&stats.sites));
+		}
 		print_eval_done(&job, &stats);
 		return Ok(());
 	}
