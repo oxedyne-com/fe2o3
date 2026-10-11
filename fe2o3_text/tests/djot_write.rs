@@ -9,6 +9,7 @@ use oxedyne_fe2o3_text::doc::{
 	Doc,
 	Inline,
 	Row,
+	Term,
 	djot,
 };
 
@@ -145,10 +146,14 @@ fn edge(mut v: Vec<Inline>) -> Vec<Inline> {
 	out
 }
 
-fn cells(g: &mut Gen, n: usize, depth: usize) -> Row {
-	Row((0..n).map(|_| match g.chance(5) {
-		true	=> Cell::default(),
-		false	=> Cell::new(edge(inlines(g, depth, false))),
+/// A row of cells, each a header where `header` says, or now and then the other way.
+fn cells(g: &mut Gen, n: usize, depth: usize, header: bool) -> Row {
+	Row((0..n).map(|_| {
+		let content = match g.chance(5) {
+			true	=> Vec::new(),
+			false	=> edge(inlines(g, depth, false)),
+		};
+		Cell { content, header: header != g.chance(6) }
 	}).collect())
 }
 
@@ -157,7 +162,7 @@ fn blocks(g: &mut Gen, depth: usize) -> Vec<Block> {
 }
 
 fn block(g: &mut Gen, depth: usize) -> Block {
-	let k = if depth == 0 { g.below(4) } else { g.below(9) };
+	let k = if depth == 0 { g.below(4) } else { g.below(11) };
 	let d = depth.saturating_sub(1);
 	match k {
 		0	=> Block::Para(edge(inlines(g, depth.min(3), true))),
@@ -182,13 +187,38 @@ fn block(g: &mut Gen, depth: usize) -> Block {
 		6	=> {
 			let n = 1 + g.below(3);
 			let cols = (0..n).map(|_| [Align::None, Align::Start, Align::Centre, Align::End][g.below(4)]).collect();
+			let head = if g.chance(3) { None } else { Some(cells(g, n, d.min(2), true)) };
+			let mut rows: Vec<Row> = (0..g.below(4)).map(|_| cells(g, n, d.min(2), false)).collect();
+			// The page case: the first cell of every body row heads its row.
+			if g.chance(4) {
+				for r in rows.iter_mut() {
+					for (i, c) in r.0.iter_mut().enumerate() {
+						c.header = i == 0;
+					}
+				}
+			}
 			Block::Table {
-				head:		if g.chance(3) { None } else { Some(cells(g, n, d.min(2))) },
-				rows:		(0..g.below(4)).map(|_| cells(g, n, d.min(2))).collect(),
+				head,
+				rows,
 				cols,
 				caption:	if g.chance(2) { Vec::new() } else { edge(inlines(g, d.min(2), false)) },
 			}
 		}
+		9	=> Block::Figure {
+			attrs:		if g.chance(2) { Attrs::default() } else { attrs(g) },
+			content:	if g.chance(6) { Vec::new() } else { blocks(g, d) },
+			caption:	if g.chance(3) { Vec::new() } else { edge(inlines(g, d.min(2), true)) },
+		},
+		10	=> Block::Terms {
+			attrs:	if g.chance(2) { Attrs::default() } else { attrs(g) },
+			items:	(0..1 + g.below(3)).map(|_| Term {
+				term:	if g.chance(6) { Vec::new() } else { edge(inlines(g, d.min(2), true)) },
+				defs:	(0..g.below(3)).map(|_| match g.chance(5) {
+					true	=> Vec::new(),
+					false	=> blocks(g, d),
+				}).collect(),
+			}).collect(),
+		},
 		_	=> Block::Div {
 			attrs:		if g.chance(4) { Attrs::default() } else { attrs(g) },
 			content:	if g.chance(6) { Vec::new() } else { blocks(g, d) },
@@ -216,7 +246,8 @@ fn test_round_trip_over_generated_trees() -> Outcome<()> {
 		let doc = Doc { blocks: blocks(&mut g, 4) };
 		let dbg = fmt!("{:?}", doc);
 		for name in ["Heading", "Para", "List", "Code", "Quote", "Table", "Rule", "Div", "Text", "Emph",
-			"Link", "Image", "Span", "Break", "Sup", "Sub", "caption: [", "head: None", "Centre"]
+			"Link", "Image", "Span", "Break", "Sup", "Sub", "caption: [", "head: None", "Centre",
+			"Figure", "Terms", "defs: []", "term: []", "header: true", "header: false"]
 		{
 			if dbg.contains(name) {
 				seen.insert(name);
@@ -228,7 +259,7 @@ fn test_round_trip_over_generated_trees() -> Outcome<()> {
 			return Err(err!("Seed {}: {}", seed, e; Invalid, Output));
 		}
 	}
-	assert_eq!(seen.len(), 19, "variants seen: {:?}", seen);
+	assert_eq!(seen.len(), 25, "variants seen: {:?}", seen);
 	Ok(())
 }
 
@@ -250,6 +281,8 @@ fn shrink(bs: Vec<Block>) -> Vec<Block> {
 			Block::Div { content, .. }	=> vec![content.clone()],
 			Block::Quote(c)			=> vec![c.clone()],
 			Block::List { items, .. }	=> items.clone(),
+			Block::Figure { content, .. }	=> vec![content.clone()],
+			Block::Terms { items, .. }	=> items.iter().flat_map(|t| t.defs.clone()).collect(),
 			_				=> Vec::new(),
 		};
 		for k in kids {
@@ -309,5 +342,49 @@ fn test_reader_learns_sup_sub_and_captions() -> Outcome<()> {
 	// Forced emphasis around a space.
 	let d = res!(djot::parse("{_ spaced _}\n"));
 	assert_eq!(d.blocks, vec![Block::Para(vec![Inline::Emph { strong: false, content: vec![t(" spaced ")] }])]);
+	Ok(())
+}
+
+#[test]
+fn test_reader_learns_the_page_constructs() -> Outcome<()> {
+	// Two terms, the second with two definitions kept apart, and attrs above the list.
+	let d = res!(djot::parse("{.terms}\n: Bark\n\n  A tree's skin.\n\n  ::\n\n  A dog's call.\n\n: Jaw\n"));
+	assert_eq!(d.blocks, vec![Block::Terms {
+		attrs:	Attrs { id: None, classes: vec!["terms".into()], pairs: Vec::new() },
+		items:	vec![
+			Term { term: vec![t("Bark")], defs: vec![
+				vec![Block::Para(vec![t("A tree's skin.")])],
+				vec![Block::Para(vec![t("A dog's call.")])],
+			] },
+			Term { term: vec![t("Jaw")], defs: Vec::new() },
+		],
+	}]);
+	// A figure and its caption; a division classed `figure` stays a division.
+	let d = res!(djot::parse("::: figure {#f}\n![x](a.png)\n\n^ A caption.\n:::\n\n::: {.figure}\nP\n:::\n"));
+	assert_eq!(d.blocks[0], Block::Figure {
+		attrs:		Attrs { id: Some("f".into()), classes: Vec::new(), pairs: Vec::new() },
+		content:	vec![Block::Para(vec![Inline::Image { src: "a.png".into(), alt: "x".into(), attrs: Attrs::default() }])],
+		caption:	vec![t("A caption.")],
+	});
+	assert!(matches!(&d.blocks[1], Block::Div { .. }), "got {:?}", d.blocks[1]);
+	// Row headers in the short form and the long, and a heads value that fits nothing stays a pair.
+	let d = res!(djot::parse("{heads=\"rows\"}\n| --- | --- |\n| a | 1 |\n"));
+	match &d.blocks[0] {
+		Block::Table { rows, .. }	=> assert_eq!((rows[0].0[0].header, rows[0].0[1].header), (true, false)),
+		other				=> return Err(err!("Not a table: {:?}", other; Invalid, Output)),
+	}
+	let d = res!(djot::parse("{heads=\"01 10\"}\n| h | i |\n|---|---|\n| a | 1 |\n"));
+	match &d.blocks[0] {
+		Block::Table { head: Some(h), rows, .. } => {
+			assert_eq!((h.0[0].header, h.0[1].header), (false, true));
+			assert_eq!((rows[0].0[0].header, rows[0].0[1].header), (true, false));
+		}
+		other				=> return Err(err!("Not a headed table: {:?}", other; Invalid, Output)),
+	}
+	let d = res!(djot::parse("{heads=\"x\"}\n| a |\n|---|\n"));
+	assert!(matches!(&d.blocks[0], Block::Div { .. }), "got {:?}", d.blocks[0]);
+	// A line of prose that opens with a colon does not break a paragraph.
+	let d = res!(djot::parse("Note\n: not a term\n"));
+	assert_eq!(d.blocks, vec![Block::Para(vec![t("Note : not a term")])]);
 	Ok(())
 }

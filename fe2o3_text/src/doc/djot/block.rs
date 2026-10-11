@@ -15,7 +15,9 @@ use crate::doc::{
 	Attrs,
 	Block,
 	Cell,
+	Inline,
 	Row,
+	Term,
 	djot::inline,
 };
 
@@ -68,6 +70,7 @@ enum Start {
 		attrs:	Attrs,
 		/// Whether the fence opens a division rather than closing one.
 		open:	bool,
+		fig:	bool,	// `::: figure`, which opens a figure
 	},
 	/// A thematic break.
 	Rule,
@@ -75,7 +78,7 @@ enum Start {
 	Quote,
 	/// A standalone attributes line, which attaches to the block that follows it.
 	Attr(Attrs),
-	/// A list item marker.
+	/// A list item marker, `:` among them for a definition list.
 	Item {
 		/// Whether the marker is a number.
 		ord:	bool,
@@ -94,20 +97,29 @@ enum Start {
 	Text,
 }
 
+/// What ends a run of blocks short of the end of its lines.
+#[derive(Clone, Copy, PartialEq)]
+enum Until {
+	End,
+	Fence(usize),	// a bare fence of at least this many colons, closing a division
+	Figure(usize),	// likewise, a `^ ` line among the blocks being the figure's caption
+	Def,		// a `::` line, which begins a term's next definition
+}
+
 /// Reads a run of lines into the blocks they are, at the given nesting depth.
 fn blocks(lines: &[&str], depth: usize, refs: &HashMap<String, String>) -> Outcome<Vec<Block>> {
-	let (out, _) = res!(blocks_to(lines, depth, refs, None));
+	let (out, _, _) = res!(blocks_to(lines, depth, refs, Until::End));
 	Ok(out)
 }
 
-/// Reads lines into blocks up to the bare fence of at least `close` colons that ends the division
-/// they are in, and says how many lines that was, the fence not counted.
+/// Reads lines into blocks up to what `until` says ends them, and says how many lines that was, the
+/// ending line not counted, and what caption a figure's blocks gave.
 ///
-/// The fence is looked for here, among the blocks, rather than by a scan of the lines, because only
-/// the blocks know which lines are theirs: a fence inside a listing, or indented inside a list item,
-/// closes nothing out here.
-fn blocks_to(lines: &[&str], depth: usize, refs: &HashMap<String, String>, close: Option<usize>)
-	-> Outcome<(Vec<Block>, usize)>
+/// The ending line is looked for here, among the blocks, rather than by a scan of the lines, because
+/// only the blocks know which lines are theirs: a fence inside a listing, or indented inside a list
+/// item, closes nothing out here.
+fn blocks_to(lines: &[&str], depth: usize, refs: &HashMap<String, String>, until: Until)
+	-> Outcome<(Vec<Block>, usize, Vec<Inline>)>
 {
 	if depth > DEPTH_LIMIT {
 		return Err(err!(
@@ -117,11 +129,21 @@ fn blocks_to(lines: &[&str], depth: usize, refs: &HashMap<String, String>, close
 	}
 	let mut out = Vec::new();
 	let mut pending: Option<Attrs> = None;	// A standalone attributes line, awaiting its block.
+	let mut caption = Vec::new();
 	let mut i = 0;
 	while i < lines.len() {
 		// A reference definition was gathered in the first pass and is not itself a block.
 		if ref_def_of(lines[i]).is_some() {
 			i += 1;
+			continue;
+		}
+		if until == Until::Def && trim(lines[i]) == "::" {
+			return Ok((out, i, caption));
+		}
+		if let (Until::Figure(_), Some(first)) = (until, caption_of(lines[i])) {
+			let (c, n) = res!(caption_run(&lines[i..], first, refs));
+			caption = c;
+			i += n;
 			continue;
 		}
 		match classify(lines[i]) {
@@ -140,11 +162,11 @@ fn blocks_to(lines: &[&str], depth: usize, refs: &HashMap<String, String>, close
 				emit(&mut out, &mut pending, b);
 				i += n;
 			}
-			Start::Div { len, open: false, .. } if close.map_or(false, |c| len >= c) => {
-				return Ok((out, i));
+			Start::Div { len, open: false, .. } if closes(until, len) => {
+				return Ok((out, i, caption));
 			}
-			Start::Div { len, attrs, .. }	=> {
-				let (b, n) = res!(div(&lines[i..], depth, len, attrs, refs));
+			Start::Div { len, attrs, fig, .. } => {
+				let (b, n) = res!(div(&lines[i..], depth, len, attrs, fig, refs));
 				emit(&mut out, &mut pending, b);
 				i += n;
 			}
@@ -161,6 +183,11 @@ fn blocks_to(lines: &[&str], depth: usize, refs: &HashMap<String, String>, close
 				});
 				i += 1;
 			}
+			Start::Item { mark: b':', .. } => {
+				let (b, n) = res!(terms(&lines[i..], depth, refs));
+				emit(&mut out, &mut pending, b);
+				i += n;
+			}
 			Start::Item { .. }	=> {
 				let (b, n) = res!(list(&lines[i..], depth, refs));
 				emit(&mut out, &mut pending, b);
@@ -173,27 +200,88 @@ fn blocks_to(lines: &[&str], depth: usize, refs: &HashMap<String, String>, close
 			}
 		}
 	}
-	Ok((out, lines.len()))
+	Ok((out, lines.len(), caption))
 }
 
-/// Adds a block, wrapping it in a division where a standalone attributes line stood above it.
-///
-/// The attributes have nowhere else to go: this tree carries block attributes only on a division, so a
-/// `{.note}` above a paragraph makes a division of the paragraph. Above a division of its own, the
-/// attributes merge into it rather than wrap it in a second, so `{#a}` over `::: note` names the one
-/// box.
-fn emit(out: &mut Vec<Block>, pending: &mut Option<Attrs>, b: Block) {
-	match pending.take() {
-		None		=> out.push(b),
-		Some(attrs)	=> match b {
-			Block::Div { attrs: inner, content }	=> {
-				out.push(Block::Div { attrs: merge_attrs(attrs, inner), content });
-			}
-			other					=> {
-				out.push(Block::Div { attrs, content: vec![other] });
-			}
-		},
+/// Does a bare fence of `len` colons end the blocks being read?
+fn closes(until: Until, len: usize) -> bool {
+	match until {
+		Until::Fence(c) | Until::Figure(c)	=> len >= c,
+		Until::End | Until::Def			=> false,
 	}
+}
+
+/// Adds a block, giving it the attributes a standalone attributes line above it named.
+///
+/// A division, a figure and a definition list carry attributes of their own, and the line's merge
+/// into them, so `{#a}` over `::: note` names the one box. Above a table, a `heads` pair says which
+/// cells are headers and is taken by the table. Any other block has nowhere to keep attributes, so a
+/// `{.note}` above a paragraph makes a division of the paragraph.
+fn emit(out: &mut Vec<Block>, pending: &mut Option<Attrs>, b: Block) {
+	let attrs = match pending.take() {
+		None		=> return out.push(b),
+		Some(attrs)	=> attrs,
+	};
+	match b {
+		Block::Div { attrs: inner, content }		=> {
+			out.push(Block::Div { attrs: merge_attrs(attrs, inner), content });
+		}
+		Block::Figure { attrs: inner, content, caption } => {
+			out.push(Block::Figure { attrs: merge_attrs(attrs, inner), content, caption });
+		}
+		Block::Terms { attrs: inner, items }		=> {
+			out.push(Block::Terms { attrs: merge_attrs(attrs, inner), items });
+		}
+		Block::Table { head, mut rows, cols, caption }	=> {
+			let mut attrs = attrs;
+			let mut head = head;
+			let at = attrs.pairs.iter().position(|(k, _)| k == "heads");
+			if let Some(at) = at {
+				if heads_apply(&attrs.pairs[at].1, &mut head, &mut rows) {
+					attrs.pairs.remove(at);
+				}
+			}
+			let t = Block::Table { head, rows, cols, caption };
+			match at.is_some() && attrs.is_empty() {
+				true	=> out.push(t),
+				false	=> out.push(Block::Div { attrs, content: vec![t] }),
+			}
+		}
+		other						=> {
+			out.push(Block::Div { attrs, content: vec![other] });
+		}
+	}
+}
+
+/// Sets a table's header flags from a `heads` value, and says whether the value was one.
+///
+/// `rows` says the first cell of every body row heads its row. Otherwise the value is a word of `0`
+/// and `1` for each row, the header row first where there is one, a letter to each cell. A value that
+/// is neither, or that does not fit the table, changes nothing and stays the pair it was written as.
+fn heads_apply(v: &str, head: &mut Option<Row>, rows: &mut [Row]) -> bool {
+	if v == "rows" {
+		for r in rows.iter_mut() {
+			if let Some(c) = r.0.first_mut() {
+				c.header = true;
+			}
+		}
+		return !rows.is_empty();
+	}
+	let words: Vec<&str> = v.split(' ').collect();
+	let all: Vec<&Row> = head.iter().chain(rows.iter()).collect();
+	let fits = words.len() == all.len()
+		&& words.iter().zip(&all).all(|(w, r)| {
+			w.len() == r.0.len() && w.bytes().all(|b| b == b'0' || b == b'1')
+		});
+	if !fits || all.is_empty() {
+		return false;
+	}
+	for (w, r) in words.iter().zip(head.iter_mut().chain(rows.iter_mut())) {
+		for (b, c) in w.bytes().zip(r.0.iter_mut()) {
+			c.header = b == b'1';
+		}
+	}
+	true
 }
 
 /// Combines an outer set of attributes, written first, with an inner set the block carried of its own.
@@ -244,8 +332,11 @@ fn classify(line: &str) -> Start {
 		if n >= 3 {
 			let info = rest[n..].trim();
 			let open = !info.is_empty();
-			let attrs = div_attrs(info);
-			return Start::Div { len: n, attrs, open };
+			let (attrs, fig) = match figure_attrs(info) {
+				Some(a)	=> (a, true),
+				None	=> (div_attrs(info), false),
+			};
+			return Start::Div { len: n, attrs, open, fig };
 		}
 	}
 
@@ -300,6 +391,29 @@ fn div_attrs(info: &str) -> Attrs {
 	}
 }
 
+/// The attributes a figure's opening fence named, if the fence opens a figure: the bare word
+/// `figure`, and a brace group after it where the figure has attributes.
+///
+/// A division whose one class is `figure` is written `::: {.figure}`, so the bare word is free to
+/// mean the figure.
+fn figure_attrs(info: &str) -> Option<Attrs> {
+	let rest = match info.strip_prefix("figure") {
+		Some(r)	=> r,
+		None	=> return None,
+	};
+	if rest.is_empty() {
+		return Some(Attrs::default());
+	}
+	let rest = rest.trim_start();
+	if rest.len() == info.len() - "figure".len() || !rest.starts_with('{') {
+		return None;
+	}
+	match inline::attrs_of(rest) {
+		Some((a, used)) if used == rest.len()	=> Some(a),
+		_					=> None,
+	}
+}
+
 /// Recognises a list item marker, and what it says about the item it begins.
 fn item_start(line: &str, off: usize, ind: usize) -> Option<Start> {
 	let b = line.as_bytes();
@@ -309,7 +423,7 @@ fn item_start(line: &str, off: usize, ind: usize) -> Option<Start> {
 	let mut num = None;
 	let mark;
 	match b[p] {
-		b'-' | b'*' | b'+'	=> {
+		b'-' | b'*' | b'+' | b':'	=> {
 			mark = b[p];
 			p += 1;
 			c += 1;
@@ -489,6 +603,8 @@ fn interrupts(line: &str) -> bool {
 		| Start::Quote				=> true,
 		// A list ends a paragraph only where it plainly begins one, so that a year opening a
 		// sentence, or a full stop wrapping onto its own line, is prose and not a list.
+		// Nor does a definition list, so a line of prose that opens with a colon stays prose.
+		Start::Item { mark: b':', .. }		=> false,
 		Start::Item { ord, num, bare, .. }	=> !bare && (!ord || num == Some(1)),
 		Start::Text				=> false,
 	}
@@ -623,13 +739,13 @@ fn table(lines: &[&str], cols: Vec<Align>, headed: bool, refs: &HashMap<String, 
 	-> Outcome<(Block, usize)>
 {
 	let (head, mut i) = match headed {
-		true	=> (Some(res!(row(lines[0], cols.len(), refs))), 2),
+		true	=> (Some(res!(row(lines[0], cols.len(), true, refs))), 2),
 		false	=> (None, 1),
 	};
 	let mut rows = Vec::new();
 	// The table runs to the first line that begins a block of its own, a blank line among them.
 	while i < lines.len() && !interrupts(lines[i]) && caption_of(lines[i]).is_none() {
-		rows.push(res!(row(lines[i], cols.len(), refs)));
+		rows.push(res!(row(lines[i], cols.len(), false, refs)));
 		i += 1;
 	}
 	let mut j = i;
@@ -638,16 +754,25 @@ fn table(lines: &[&str], cols: Vec<Align>, headed: bool, refs: &HashMap<String, 
 	}
 	let mut caption = Vec::new();
 	if let Some(first) = lines.get(j).and_then(|l| caption_of(l)) {
-		let mut acc = vec![first.to_string()];
-		j += 1;
-		while j < lines.len() && !interrupts(lines[j]) && ref_def_of(lines[j]).is_none() {
-			acc.push(strip_leading(lines[j]).to_string());
-			j += 1;
-		}
-		caption = res!(inline::parse(acc.join("\n").trim(), refs));
-		i = j;
+		let (c, n) = res!(caption_run(&lines[j..], first, refs));
+		caption = c;
+		i = j + n;
 	}
 	Ok((Block::Table { head, rows, cols, caption }, i))
+}
+
+/// Reads a caption from its `^ ` line, `first` being that line's text, across the lines that carry
+/// it on as a paragraph's do, and says how many lines it took.
+fn caption_run(lines: &[&str], first: &str, refs: &HashMap<String, String>)
+	-> Outcome<(Vec<Inline>, usize)>
+{
+	let mut acc = vec![first.to_string()];
+	let mut j = 1;
+	while j < lines.len() && !interrupts(lines[j]) && ref_def_of(lines[j]).is_none() {
+		acc.push(strip_leading(lines[j]).to_string());
+		j += 1;
+	}
+	Ok((res!(inline::parse(acc.join("\n").trim(), refs)), j))
 }
 
 /// The text of a table caption line, `^ ` and all before it taken off, if the line is one.
@@ -659,17 +784,18 @@ fn caption_of(line: &str) -> Option<&str> {
 	}
 }
 
-/// Reads one row of a table, held to the width the header set.
-fn row(line: &str, n: usize, refs: &HashMap<String, String>) -> Outcome<Row> {
+/// Reads one row of a table, held to the width the header set, its cells headers where it is the
+/// header row.
+fn row(line: &str, n: usize, header: bool, refs: &HashMap<String, String>) -> Outcome<Row> {
 	let mut cells = Vec::with_capacity(n);
 	for text in cells_of(line).iter().take(n) {
-		cells.push(Cell::new(res!(inline::parse(text, refs))));
+		cells.push(Cell { content: res!(inline::parse(text, refs)), header });
 	}
 	// A row of fewer cells than the header named columns is short of the grid rather than wrong, and
 	// a row of more has said something the header made no column for, and what it has no column for is
 	// dropped.
 	while cells.len() < n {
-		cells.push(Cell::default());
+		cells.push(Cell { content: Vec::new(), header });
 	}
 	Ok(Row(cells))
 }
@@ -704,15 +830,26 @@ fn fence_closes(line: &str, ch: u8, len: usize) -> bool {
 /// The fences nest, so a division holds divisions: a bare fence of colons at least as long as the
 /// opening one closes the innermost division still open. A division nobody closed runs to the end, as
 /// an unclosed code fence does.
-fn div(lines: &[&str], depth: usize, len: usize, attrs: Attrs, refs: &HashMap<String, String>)
+///
+/// A `::: figure` fence opens a figure in the same way, and a `^ ` line among its blocks is its
+/// caption, which the writer puts last.
+fn div(lines: &[&str], depth: usize, len: usize, attrs: Attrs, fig: bool, refs: &HashMap<String, String>)
 	-> Outcome<(Block, usize)>
 {
-	let (content, n) = res!(blocks_to(&lines[1..], depth + 1, refs, Some(len)));
+	let until = match fig {
+		true	=> Until::Figure(len),
+		false	=> Until::Fence(len),
+	};
+	let (content, n, caption) = res!(blocks_to(&lines[1..], depth + 1, refs, until));
 	let consumed = match 1 + n < lines.len() {
 		true	=> n + 2,	// the closing fence is the division's too
 		false	=> lines.len(),
 	};
-	Ok((Block::Div { attrs, content }, consumed))
+	let b = match fig {
+		true	=> Block::Figure { attrs, content, caption },
+		false	=> Block::Div { attrs, content },
+	};
+	Ok((b, consumed))
 }
 
 /// Reads a block quotation and the blocks within it.
@@ -775,6 +912,47 @@ fn list(lines: &[&str], depth: usize, refs: &HashMap<String, String>) -> Outcome
 		i = j + n;
 	}
 	Ok((Block::List { ordered: ord, items }, i))
+}
+
+/// Reads a definition list: each `: ` item's term, then its definitions, indented beneath it.
+///
+/// The term is the item's first paragraph, to the first blank line. What follows is one definition,
+/// and a `::` line among the definition's blocks begins another, so a term may carry several. A `::`
+/// line before any blocks gives the first definition, empty, which is how a term with one empty
+/// definition differs from a term with none.
+fn terms(lines: &[&str], depth: usize, refs: &HashMap<String, String>) -> Outcome<(Block, usize)> {
+	let mut items = Vec::new();
+	let mut i = 0;
+	loop {
+		let mut j = i;
+		while j < lines.len() && is_blank(lines[j]) {
+			j += 1;
+		}
+		if j >= lines.len() {
+			break;
+		}
+		let (col, head) = match classify(lines[j]) {
+			Start::Item { mark: b':', col, head, .. }	=> (col, head),
+			_						=> break,
+		};
+		let (body, n) = item_body(&lines[j..], head, col);
+		let k = body.iter().position(|l| is_blank(l)).unwrap_or(body.len());
+		let term = res!(inline::parse(body[..k].join("\n").trim(), refs));
+		let rest: Vec<&str> = body[k..].iter().map(|s| s.as_str()).collect();
+		let mut defs = Vec::new();
+		let (first, mut at, _) = res!(blocks_to(&rest, depth + 1, refs, Until::Def));
+		if !first.is_empty() {
+			defs.push(first);
+		}
+		while at < rest.len() {
+			let (def, n, _) = res!(blocks_to(&rest[at + 1..], depth + 1, refs, Until::Def));
+			defs.push(def);
+			at += 1 + n;
+		}
+		items.push(Term { term, defs });
+		i = j + n;
+	}
+	Ok((Block::Terms { attrs: Attrs::default(), items }, i))
 }
 
 /// Reads one list item's lines, with the marker and the indentation that stands for it taken off.

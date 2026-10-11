@@ -34,7 +34,8 @@
 //!
 //! The subset read is what prose actually uses: headings, paragraphs, block quotations, fenced code,
 //! ordered and unordered lists (nested), thematic breaks, pipe tables (with or without a header, and
-//! with a `^ ` caption), divisions, standalone attributes lines, and the inline run of ordinary and
+//! with a `^ ` caption), divisions, figures (`::: figure`), definition lists (`: term`), standalone
+//! attributes lines, and the inline run of ordinary and
 //! strong emphasis, superscript and subscript (each with Djot's braced forms, `{_` and `_}`), verbatim
 //! spans, links (inline and by reference), images (with an attribute block), attributed spans and hard
 //! breaks.
@@ -43,16 +44,17 @@
 //!
 //! The following Djot constructs are not yet read, and their syntax survives as the literal text it is
 //! written in rather than being interpreted: footnotes, inline and display maths (`$` and `$$`),
-//! definition lists, inline symbols (`:name:`), smart punctuation, raw inline and raw blocks, comments
+//! inline symbols (`:name:`), smart punctuation, raw inline and raw blocks, comments
 //! (`{% %}`), line blocks, and task lists. A document that uses them is read without error; the marks
 //! simply stand as characters.
 //!
 //! # Writing
 //!
 //! [`render`] writes a tree back out, and `parse(&render(&d)) == d` for every tree `d` in the
-//! vocabulary below that a reader could have produced: text merged into one run between other inlines,
+//! vocabulary below that a reader could have produced: a list, table and definition list each holding
+//! something, every row of a table as wide as the widest, text merged into one run between other inlines,
 //! no line ending inside text or inline code, no two code spans side by side, no whitespace at either end of a paragraph, heading,
-//! cell or caption, no hard break at the end of a block, in a cell or in a caption, a code block's text
+//! cell, term or caption, no hard break at the end of a block, in a cell or in a table's caption, a code block's text
 //! empty or ending in a line ending and holding no line of whitespace alone, and attribute names and
 //! values Djot can spell (no space, `=`, `,`, brace or quote in a name; no quote, bracket, backtick or
 //! pipe in a value). Where the tree holds something with two Djot spellings, the one written is in
@@ -71,8 +73,18 @@
 //! | `Table { head: Some(..) }` | header row, delimiter row, body rows |
 //! | `Table { head: None }` | the delimiter row first, then the body rows |
 //! | `cols` | `---`, `:--` (start), `:-:` (centre), `--:` (end) |
-//! | `Table { caption }` | a blank line then `^ caption` |
+//! | `Table { caption }` | a blank line then `^ caption`; `^` alone for none, where a figure's caption follows |
+//! | `Cell { header }` | a header row's cells head and a body's do not; otherwise `{heads="…"}` on the line above |
+//! | `heads="rows"` | the first cell of every body row heads its row, and nothing else departs |
+//! | `heads="11 10"` | any other pattern: a word of `1` and `0` to each row, the header row first |
+//! | `Figure { attrs, content, caption }` | `::: figure`, then ` {attrs}` where there are any; the content; `^ caption` last |
+//! | a `Div` whose attrs are the one class `figure` | `::: {.figure}`, since the bare word `figure` opens a figure |
+//! | `Terms { attrs }` | `{attrs}` on the line above where there are any, or where a definition list stands just before |
+//! | `Term { term, defs }` | `: term`, then each definition indented two spaces after a blank line |
+//! | a `Term`'s second and later definitions | each after a `::` line, as is a first that is empty |
+//! | a `Term` with no term | `:` alone |
 //! | `Rule` | `***`, since `- ---` reads as a break and not an item holding one |
+//! | an attributes line above a figure or definition list | merged into its attrs, as above a division |
 //! | `Div { attrs }` | `::: class` where the attrs are one class alone, else `::: {#id .class k="v"}`; `::: {}` when empty |
 //! | nested `Div` | `:::` at every depth, each closing fence closing the innermost division open |
 //! | `Attrs` | `{#id .class k="v"}`, in that order, every value quoted |
@@ -85,7 +97,6 @@
 //! | `Code` | a backtick run one longer than any inside, padded with a space where the reader would trim one |
 //! | `Span { attrs, content }` | `[content]{attrs}`, `{}` included when the attrs are empty |
 //! | `Break` | a backslash at the end of the line |
-//! | `Figure`, `Terms`, a `Cell` with `header: true` | not yet: written as [`Block::as_plain`](crate::doc::Block::as_plain) gives, and the header flag dropped |
 //!
 //! # Usage
 //!

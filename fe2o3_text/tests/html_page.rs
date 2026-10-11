@@ -13,6 +13,7 @@ use oxedyne_fe2o3_text::doc::{
 	Doc,
 	Inline,
 	Term,
+	djot,
 };
 use oxedyne_fe2o3_text::doc::html::read;
 
@@ -110,11 +111,39 @@ fn expected(src: &str) -> String {
 		.replace("</i>", "</em>"))
 }
 
+// The fixtures, each the HTML of one construct as the pages write it.
+const FIGURE: &str = "<figure class=\"fig\">\n<img src=\"img/paw.jpg\" alt=\"Dog offering a paw\">\n\
+	<figcaption><span class=\"fig-caption\">Hachikō giving a paw.</span> \
+	<span class=\"credit\">Unknown author, public domain</span></figcaption>\n</figure>";
+const DL_WRAPPED: &str = "<dl class=\"terms\">\n<div><dt>Jaw joint</dt><dd>The dentary meets the squamosal.</dd></div>\n\
+	<div><dt>Middle ear</dt><dd>Three bones.</dd></div>\n</dl>";
+const DL_BARE: &str = "<dl class=\"terms\"><dt>Jaw joint</dt><dd>The dentary meets the squamosal.</dd>\
+	<dt>Middle ear</dt><dd>Three bones.</dd></dl>";
+const DL_TWO_DEFS: &str = "<dl><dt>Bark</dt><dd>A tree's skin.</dd><dd>A dog's call.</dd></dl>";
+const ROW_HEADS: &str = "<table>\n<caption>Facts</caption>\n<tbody>\n\
+	<tr><th scope=\"row\">Breed</th><td>Akita</td></tr>\n\
+	<tr><th scope=\"row\">Sex</th><td>Male</td></tr>\n</tbody>\n</table>";
+const NUM_ALL: &str = "<table><tbody><tr><td>a</td><td class=\"num\">1</td></tr>\
+	<tr><td>b</td><td class=\"num\">2</td></tr></tbody></table>";
+const NUM_SOME: &str = "<table><tbody><tr><td>a</td><td class=\"num\">1</td></tr>\
+	<tr><td>b</td><td>two</td></tr></tbody></table>";
+const SUP_SUB: &str = "<p>H<sub>2</sub>O and E = mc<sup>2</sup></p>";
+const NAMED: &str = "<div class=\"table-wrap\"><div><p>Inner.</p></div><p>After.</p></div>\
+	<p>A <span class=\"id\">1375772297</span> and <span>bare</span> span.</p>";
+const SPAN_ID: &str = "<p><span id=\"x\" lang=\"ja\">名</span></p>";
+const HOSTILE: &str = "<figure class=\"fig\"><img src=\"https://tracker.example/x.png\" alt=\"A picture\">\
+	<figcaption><a href=\"javascript:alert(1)\">Click</a></figcaption></figure>\
+	<dl class=\"terms\"><dt><a href=\"javascript:x\">Term</a></dt><dd>Def <sup>1</sup></dd></dl>\
+	<table><caption><a href=\"javascript:y\">Cap</a></caption><tr><th scope=\"row\">A</th><td>1</td></tr></table>";
+const COUNTED: &str = "<figure><img src=\"a.png\" alt=\"x\"><figcaption>Two words</figcaption></figure>\
+	<dl><dt>Term</dt><dd>One def.</dd></dl>\
+	<table><caption>A caption</caption><tr><td>cell</td></tr></table>";
+const HANDLER: &str = "<p><span class=\"hl\" onmouseover=\"alert(1)\" style=\"color:red\">x</span></p>";
+const CREDIT: &str = "<p><span id=\"a\" class=\"credit evil\" lang=\"ja\">x</span></p>";
+
 #[test]
 fn test_a_figure_holds_its_image_and_caption_00() -> Outcome<()> {
-	let src = "<figure class=\"fig\">\n<img src=\"img/paw.jpg\" alt=\"Dog offering a paw\">\n\
-		<figcaption><span class=\"fig-caption\">Hachikō giving a paw.</span> \
-		<span class=\"credit\">Unknown author, public domain</span></figcaption>\n</figure>";
+	let src = FIGURE;
 	let doc = res!(parse_kept(src));
 	assert_eq!(doc.blocks, vec![Block::Figure {
 		attrs:		class("fig"),
@@ -144,10 +173,8 @@ fn test_a_figure_holds_its_image_and_caption_00() -> Outcome<()> {
 
 #[test]
 fn test_a_definition_list_reads_wrapped_and_bare_groups_01() -> Outcome<()> {
-	let wrapped = "<dl class=\"terms\">\n<div><dt>Jaw joint</dt><dd>The dentary meets the squamosal.</dd></div>\n\
-		<div><dt>Middle ear</dt><dd>Three bones.</dd></div>\n</dl>";
-	let bare = "<dl class=\"terms\"><dt>Jaw joint</dt><dd>The dentary meets the squamosal.</dd>\
-		<dt>Middle ear</dt><dd>Three bones.</dd></dl>";
+	let wrapped = DL_WRAPPED;
+	let bare = DL_BARE;
 	let want = vec![Block::Terms {
 		attrs:	class("terms"),
 		items:	vec![
@@ -170,7 +197,7 @@ fn test_a_definition_list_reads_wrapped_and_bare_groups_01() -> Outcome<()> {
 
 #[test]
 fn test_a_term_may_carry_several_definitions_02() -> Outcome<()> {
-	let doc = res!(html::parse("<dl><dt>Bark</dt><dd>A tree's skin.</dd><dd>A dog's call.</dd></dl>"));
+	let doc = res!(html::parse(DL_TWO_DEFS));
 	match &doc.blocks[0] {
 		Block::Terms { items, .. }	=> {
 			assert_eq!(items.len(), 1);
@@ -185,9 +212,7 @@ fn test_a_term_may_carry_several_definitions_02() -> Outcome<()> {
 
 #[test]
 fn test_a_table_keeps_its_caption_and_row_headers_03() -> Outcome<()> {
-	let src = "<table>\n<caption>Facts</caption>\n<tbody>\n\
-		<tr><th scope=\"row\">Breed</th><td>Akita</td></tr>\n\
-		<tr><th scope=\"row\">Sex</th><td>Male</td></tr>\n</tbody>\n</table>";
+	let src = ROW_HEADS;
 	let doc = res!(html::parse(src));
 	match &doc.blocks[0] {
 		Block::Table { head, rows, caption, .. }	=> {
@@ -205,15 +230,13 @@ fn test_a_table_keeps_its_caption_and_row_headers_03() -> Outcome<()> {
 
 #[test]
 fn test_a_num_column_aligns_to_the_end_04() -> Outcome<()> {
-	let all = res!(html::parse("<table><tbody><tr><td>a</td><td class=\"num\">1</td></tr>\
-		<tr><td>b</td><td class=\"num\">2</td></tr></tbody></table>"));
+	let all = res!(html::parse(NUM_ALL));
 	match &all.blocks[0] {
 		Block::Table { cols, .. }	=> assert_eq!(cols, &vec![Align::None, Align::End]),
 		other				=> panic!("expected a table, got {:?}", other),
 	}
 	// A column only some of whose cells say `num` has no one alignment to give, and is given none.
-	let some = res!(html::parse("<table><tbody><tr><td>a</td><td class=\"num\">1</td></tr>\
-		<tr><td>b</td><td>two</td></tr></tbody></table>"));
+	let some = res!(html::parse(NUM_SOME));
 	match &some.blocks[0] {
 		Block::Table { cols, .. }	=> assert_eq!(cols, &vec![Align::None, Align::None]),
 		other				=> panic!("expected a table, got {:?}", other),
@@ -223,7 +246,7 @@ fn test_a_num_column_aligns_to_the_end_04() -> Outcome<()> {
 
 #[test]
 fn test_sup_and_sub_are_read_and_written_05() -> Outcome<()> {
-	let src = "<p>H<sub>2</sub>O and E = mc<sup>2</sup></p>";
+	let src = SUP_SUB;
 	let doc = res!(html::parse(src));
 	assert_eq!(doc.blocks, vec![Block::Para(vec![
 		t("H"),
@@ -237,8 +260,7 @@ fn test_sup_and_sub_are_read_and_written_05() -> Outcome<()> {
 
 #[test]
 fn test_keep_classed_keeps_only_named_spans_and_divs_06() -> Outcome<()> {
-	let src = "<div class=\"table-wrap\"><div><p>Inner.</p></div><p>After.</p></div>\
-		<p>A <span class=\"id\">1375772297</span> and <span>bare</span> span.</p>";
+	let src = NAMED;
 	// By default both are erased, as they always were.
 	let plain = res!(html::parse(src));
 	assert_eq!(plain.blocks, vec![
@@ -260,7 +282,7 @@ fn test_keep_classed_keeps_only_named_spans_and_divs_06() -> Outcome<()> {
 		]),
 	]);
 	// An id names an element as well as a class does, and other attributes travel as pairs.
-	let id = res!(parse_kept("<p><span id=\"x\" lang=\"ja\">名</span></p>"));
+	let id = res!(parse_kept(SPAN_ID));
 	assert_eq!(id.blocks, vec![Block::Para(vec![Inline::Span {
 		attrs:		Attrs {
 			id:		Some("x".to_string()),
@@ -274,10 +296,7 @@ fn test_keep_classed_keeps_only_named_spans_and_divs_06() -> Outcome<()> {
 
 #[test]
 fn test_the_policy_walks_every_new_node_07() -> Outcome<()> {
-	let src = "<figure class=\"fig\"><img src=\"https://tracker.example/x.png\" alt=\"A picture\">\
-		<figcaption><a href=\"javascript:alert(1)\">Click</a></figcaption></figure>\
-		<dl class=\"terms\"><dt><a href=\"javascript:x\">Term</a></dt><dd>Def <sup>1</sup></dd></dl>\
-		<table><caption><a href=\"javascript:y\">Cap</a></caption><tr><th scope=\"row\">A</th><td>1</td></tr></table>";
+	let src = HOSTILE;
 	let doc = policy::apply(&res!(parse_kept(src)), &policy::Policy::default());
 	let out = html::render(&doc);
 	assert!(!out.contains("javascript"), "a refused destination survived: {}", out);
@@ -294,9 +313,7 @@ fn test_the_policy_walks_every_new_node_07() -> Outcome<()> {
 
 #[test]
 fn test_the_new_nodes_are_counted_and_written_as_markdown_08() -> Outcome<()> {
-	let doc = res!(parse_kept("<figure><img src=\"a.png\" alt=\"x\"><figcaption>Two words</figcaption></figure>\
-		<dl><dt>Term</dt><dd>One def.</dd></dl>\
-		<table><caption>A caption</caption><tr><td>cell</td></tr></table>"));
+	let doc = res!(parse_kept(COUNTED));
 	// The alt text, the caption, the term and definition, the table's caption and cell.
 	assert_eq!(doc.word_count(), 1 + 2 + 1 + 2 + 2 + 1);
 	let md = markdown::write::render(&doc);
@@ -416,7 +433,7 @@ fn test_the_writer_refuses_script_and_style_keys_10() -> Outcome<()> {
 	let ok = html::render(&span("data-k"));
 	assert!(ok.contains("data-k=\"alert(1)\""), "a plain key was refused: {}", ok);
 	// Read from HTML, the handler never reaches the page either.
-	let read = res!(parse_kept("<p><span class=\"hl\" onmouseover=\"alert(1)\" style=\"color:red\">x</span></p>"));
+	let read = res!(parse_kept(HANDLER));
 	let out = html::render(&read);
 	assert!(!out.contains("alert") && !out.contains("color"), "got: {}", out);
 	Ok(())
@@ -424,7 +441,7 @@ fn test_the_writer_refuses_script_and_style_keys_10() -> Outcome<()> {
 
 #[test]
 fn test_the_policy_allows_attributes_by_kind_11() -> Outcome<()> {
-	let doc = res!(parse_kept("<p><span id=\"a\" class=\"credit evil\" lang=\"ja\">x</span></p>"));
+	let doc = res!(parse_kept(CREDIT));
 	let mut p = policy::Policy::default();
 	p.classes = policy::AllowList::Only(vec!["credit".to_string()]);
 	let out = html::render(&policy::apply(&doc, &p));
@@ -437,4 +454,96 @@ fn test_the_policy_allows_attributes_by_kind_11() -> Outcome<()> {
 	let out = html::render(&policy::apply(&doc, &policy::Policy::default()));
 	assert!(out.contains("<p>x</p>"), "got: {}", out);
 	Ok(())
+}
+
+/// Every fixture above, read keeping its names, written as Djot and read back: the tree an editor
+/// opens must be the tree that was stored.
+#[test]
+fn test_the_corpus_round_trips_through_djot_12() -> Outcome<()> {
+	let corpus = [
+		FIGURE, DL_WRAPPED, DL_BARE, DL_TWO_DEFS, ROW_HEADS, NUM_ALL, NUM_SOME, SUP_SUB, NAMED,
+		SPAN_ID, HOSTILE, COUNTED, HANDLER, CREDIT, ARTICLE,
+	];
+	for (n, src) in corpus.iter().enumerate() {
+		res!(via_djot(&res!(parse_kept(src)), &fmt!("fixture {}", n)));
+	}
+	// The row headers are written in their short form.
+	let text = djot::render(&res!(parse_kept(ROW_HEADS)));
+	assert!(text.starts_with("{heads=\"rows\"}\n"), "got:\n{}", text);
+	Ok(())
+}
+
+/// The bodies of the Zoapedia pages, read where the application keeps them, through the same path.
+/// Ignored by default, since the pages live outside this repository.
+#[test]
+#[ignore]
+fn test_the_zoapedia_page_bodies_round_trip_through_djot_13() -> Outcome<()> {
+	let home = res!(std::env::var("HOME"));
+	let dir = std::path::Path::new(&home).join("usr/code/web/apps/zoapedia/tools/pages");
+	let mut n = 0;
+	for entry in res!(std::fs::read_dir(&dir)) {
+		let path = res!(entry).path();
+		if path.extension().map_or(true, |e| e != "json") {
+			continue;
+		}
+		let json = res!(std::fs::read_to_string(&path));
+		let body = res!(json_field(&json, "body"));
+		let doc = res!(parse_kept(&body));
+		res!(via_djot(&doc, &fmt!("{}", path.display())));
+		n += 1;
+	}
+	assert_eq!(n, 25, "expected the 25 pages in {}", dir.display());
+	Ok(())
+}
+
+fn via_djot(doc: &Doc, name: &str) -> Outcome<()> {
+	let text = djot::render(doc);
+	let back = res!(djot::parse(&text));
+	if back != *doc {
+		let at = doc.blocks.iter().zip(&back.blocks).position(|(a, b)| a != b).unwrap_or(0);
+		return Err(err!("{}: the Djot round trip changed the tree at block {}.\n--- djot ---\n{}\n\
+			--- want ---\n{:?}\n--- got ---\n{:?}",
+			name, at, text, doc.blocks.get(at), back.blocks.get(at); Invalid, Output));
+	}
+	Ok(())
+}
+
+/// The string value of a top-level field of a JSON object, its escapes decoded: enough of JSON to
+/// read a page file, and no more.
+fn json_field(json: &str, key: &str) -> Outcome<String> {
+	let bad = || err!("No string field {:?} could be read.", key; Invalid, Input);
+	let at = res!(json.find(&fmt!("\"{}\"", key)).ok_or_else(bad));
+	let rest = json[at + key.len() + 2..].trim_start();
+	let rest = res!(rest.strip_prefix(':').ok_or_else(bad)).trim_start();
+	let mut chars = res!(rest.strip_prefix('"').ok_or_else(bad)).chars();
+	let mut out = String::new();
+	let mut high: Option<u32> = None;	// a high surrogate awaiting its pair
+	while let Some(c) = chars.next() {
+		match c {
+			'"'	=> return Ok(out),
+			'\\'	=> match res!(chars.next().ok_or_else(bad)) {
+				'n'	=> out.push('\n'),
+				't'	=> out.push('\t'),
+				'r'	=> out.push('\r'),
+				'b'	=> out.push('\u{8}'),
+				'f'	=> out.push('\u{c}'),
+				'u'	=> {
+					let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+					let v = res!(u32::from_str_radix(&hex, 16));
+					let code = match (high.take(), v) {
+						(None, 0xD800..=0xDBFF)		=> {
+							high = Some(v);
+							continue;
+						}
+						(Some(h), 0xDC00..=0xDFFF)	=> 0x10000 + ((h - 0xD800) << 10) + (v - 0xDC00),
+						(_, v)				=> v,
+					};
+					out.push(res!(char::from_u32(code).ok_or_else(bad)));
+				}
+				other	=> out.push(other),
+			},
+			c	=> out.push(c),
+		}
+	}
+	Err(bad())
 }

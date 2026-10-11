@@ -27,6 +27,7 @@ use crate::doc::{
 	Doc,
 	Inline,
 	Row,
+	Term,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -58,7 +59,10 @@ fn blocks(out: &mut String, bs: &[Block]) {
 			(Some((o, a)), Block::List { ordered, .. }) if o == *ordered	=> !a,
 			_								=> false,
 		};
-		one(out, b, alt);
+		// Two definition lists side by side would read as one, so the second is given its
+		// attributes line, empty or not.
+		let after_terms = i > 0 && matches!(bs[i - 1], Block::Terms { .. });
+		one(out, b, alt, after_terms);
 		prev = match b {
 			Block::List { ordered, .. }	=> Some((*ordered, alt)),
 			_				=> None,
@@ -67,7 +71,7 @@ fn blocks(out: &mut String, bs: &[Block]) {
 }
 
 /// Writes one block, a list in its alternative marker where `alt` says so.
-fn one(out: &mut String, block: &Block, alt: bool) {
+fn one(out: &mut String, block: &Block, alt: bool, after_terms: bool) {
 	match block {
 		Block::Heading { level, content }	=> {
 			for _ in 0..(*level).clamp(1, 6) {
@@ -169,7 +173,10 @@ fn one(out: &mut String, block: &Block, alt: bool) {
 			let fence = ":::";
 			out.push_str(fence);
 			out.push(' ');
-			match a.id.is_none() && a.pairs.is_empty() && a.classes.len() == 1 && bare(&a.classes[0]) {
+			// A division classed `figure` alone takes the brace group, the bare word being a figure's.
+			match a.id.is_none() && a.pairs.is_empty() && a.classes.len() == 1 && bare(&a.classes[0])
+				&& a.classes[0] != "figure"
+			{
 				true	=> out.push_str(&a.classes[0]),
 				false	=> attrs(out, a),
 			}
@@ -178,9 +185,98 @@ fn one(out: &mut String, block: &Block, alt: bool) {
 			out.push_str(fence);
 			out.push('\n');
 		}
-		// The page constructs are written in F2b; until then they degrade as `Block::as_plain` says.
-		Block::Figure { .. } | Block::Terms { .. } => blocks(out, &block.as_plain()),
+		Block::Figure { attrs: a, content, caption } => {
+			out.push_str("::: figure");
+			if !a.is_empty() {
+				out.push(' ');
+				attrs(out, a);
+			}
+			out.push('\n');
+			blocks(out, content);
+			if !caption.is_empty() {
+				// A table last in the figure would take the figure's caption for its own, so one
+				// with none is given its empty caption first.
+				if let Some(Block::Table { caption: c, .. }) = content.last() {
+					if c.is_empty() {
+						out.push_str("\n^\n");
+					}
+				}
+				if !content.is_empty() {
+					out.push('\n');
+				}
+				out.push_str("^ ");
+				inlines(out, caption, false, 0, false);
+				out.push('\n');
+			}
+			out.push_str(":::\n");
+		}
+		Block::Terms { attrs: a, items }	=> {
+			if !a.is_empty() || after_terms {
+				attrs(out, a);
+				out.push('\n');
+			}
+			for (n, t) in items.iter().enumerate() {
+				if n > 0 {
+					out.push('\n');
+				}
+				term(out, t);
+			}
+		}
 	}
+}
+
+/// Writes one item of a definition list: `: ` and the term, then each definition indented beneath
+/// it, a `::` line before every one but a first that holds something.
+fn term(out: &mut String, t: &Term) {
+	let mut body = String::new();
+	inlines(&mut body, &t.term, true, 0, false);
+	body.push('\n');
+	for (k, d) in t.defs.iter().enumerate() {
+		body.push('\n');
+		if k > 0 || d.is_empty() {
+			body.push_str("::\n");
+			if !d.is_empty() {
+				body.push('\n');
+			}
+		}
+		blocks(&mut body, d);
+	}
+	for (k, line) in body.lines().enumerate() {
+		match (k, line.is_empty()) {
+			(0, true)	=> out.push(':'),
+			(0, false)	=> {
+				out.push_str(": ");
+				out.push_str(line);
+			}
+			(_, true)	=> {}
+			(_, false)	=> {
+				out.push_str("  ");
+				out.push_str(line);
+			}
+		}
+		out.push('\n');
+	}
+}
+
+/// The `heads` value a table needs, if its header flags are not the ones a reader gives by default:
+/// every cell of the header row a header, and no cell of the body.
+fn heads(head: &Option<Row>, rows: &[Row], n: usize) -> Option<String> {
+	let flag = |r: &Row, i: usize, dflt: bool| r.0.get(i).map_or(dflt, |c| c.header);
+	let head_all = head.as_ref().map_or(true, |h| (0..n).all(|i| flag(h, i, true)));
+	if head_all && rows.iter().all(|r| (0..n).all(|i| !flag(r, i, false))) {
+		return None;
+	}
+	if head_all && !rows.is_empty() && rows.iter().all(|r| (0..n).all(|i| flag(r, i, false) == (i == 0))) {
+		return Some("rows".to_string());
+	}
+	let mut words = Vec::new();
+	if let Some(h) = head {
+		words.push((0..n).map(|i| if flag(h, i, true) { '1' } else { '0' }).collect::<String>());
+	}
+	for r in rows {
+		words.push((0..n).map(|i| if flag(r, i, false) { '1' } else { '0' }).collect::<String>());
+	}
+	Some(words.join(" "))
 }
 
 /// Does the class name stand alone after a division's colons, as `::: note` does?
@@ -229,6 +325,11 @@ fn table(out: &mut String, head: &Option<Row>, rows: &[Row], cols: &[Align]) {
 	let n = head.iter().chain(rows).map(|r| r.0.len()).max().unwrap_or(0).max(cols.len());
 	if n == 0 {
 		return;
+	}
+	if let Some(v) = heads(head, rows, n) {
+		out.push_str("{heads=\"");
+		out.push_str(&v);
+		out.push_str("\"}\n");
 	}
 	if let Some(h) = head {
 		row(out, h, n);
