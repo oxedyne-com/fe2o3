@@ -32,6 +32,8 @@ pub mod access;
 pub mod base2x;
 pub mod base64;
 pub mod core;
+#[cfg(feature = "csl")]
+pub mod csl;
 pub mod glob;
 pub mod highlight;
 pub mod html;
