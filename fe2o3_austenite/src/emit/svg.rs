@@ -6,6 +6,13 @@
 //! stroke. This module writes only the element tree around them -- the `<svg>`, `<rect>` and
 //! `<path>` -- which `fe2o3_graphics::svg` deliberately leaves to the caller, because the document
 //! shape above a `<path>` is the caller's format, not that crate's.
+//!
+//! Glyph reuse (SZ1, 12 Oct 2026): each distinct glyph outline is written once per page, as a `<path id>`
+//! in the page's `<defs>`, and every occurrence is a `<use>` of it. A text page fell from 3.27 MB, every
+//! outline written in full at every occurrence, to a fraction of that. The id is a hash of the outline's
+//! own path data, so one id always names one shape: Daimond inlines several page SVGs into one DOM, where
+//! a repeated id must still resolve to the same outline whichever page's copy the browser finds. The scope
+//! is the page, not the document, because Daimond's delta caches and drops pages independently.
 
 use crate::font::ShapedText;
 use crate::ir::{
@@ -40,14 +47,82 @@ use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 use oxedyne_fe2o3_text::base64;
 use oxedyne_fe2o3_text::xml::write::escape as xml_escape;
 
+use std::collections::BTreeMap;
+
+/// The glyph outlines a page draws, each once, keyed by [`glyph_id`]. A placed glyph is a `<use>` of its
+/// entry; [`assemble`] writes the entries as the page's `<defs>`, in id order, so two renders of the same
+/// content write the same bytes however the page was split for the emit memo.
+#[derive(Clone, Debug, Default)]
+pub struct GlyphDefs {
+	defs: BTreeMap<String, String>,	// id -> outline flipped to y down, as path data
+}
+
+impl GlyphDefs {
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Writes a `<use>` of `outline` -- font frame, y up, already at its point size -- with its origin at
+	/// the page point (`x`, `y`), defining the outline first if this page has not yet drawn it.
+	pub fn place(&mut self, out: &mut String, outline: &Path, x: f32, y: f32, colour: Rgba) -> Outcome<()> {
+		let id = glyph_id(&write_path_data(outline));
+		if !self.defs.contains_key(&id) {
+			let flipped = res!(outline.transform(&Transform::scale(1.0, -1.0)));
+			self.defs.insert(id.clone(), write_path_data(&flipped));
+		}
+		out.push_str(&fmt!("  <use href=\"#{}\" x=\"{}\" y=\"{}\" {}/>\n",
+			id, x, y, presentation(Some(colour), None)));
+		Ok(())
+	}
+
+	/// Takes in another slice's outlines, as the furniture's join the cached body's.
+	pub fn merge(&mut self, other: &GlyphDefs) {
+		for (id, d) in &other.defs {
+			if !self.defs.contains_key(id) {
+				self.defs.insert(id.clone(), d.clone());
+			}
+		}
+	}
+
+	pub fn len(&self) -> usize {
+		self.defs.len()
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.defs.is_empty()
+	}
+
+	fn write(&self, out: &mut String) {
+		if self.defs.is_empty() {
+			return;
+		}
+		out.push_str("<defs>\n");
+		for (id, d) in &self.defs {
+			out.push_str(&fmt!("  <path id=\"{}\" d=\"{}\"/>\n", id, d));
+		}
+		out.push_str("</defs>\n");
+	}
+}
+
+/// The page-local id of a glyph outline, from the outline's own path data (font frame, y up): `ag` and
+/// sixteen hex digits. Equal outlines share an id on every page and in every font, and a different outline
+/// would need a 64-bit collision to borrow one.
+pub fn glyph_id(font_d: &str) -> String {
+	let mut h = Fingerprinter::new();
+	h.write(b"glyph");
+	h.write_str(font_d);
+	fmt!("ag{:016x}", h.finish().fold())
+}
+
 /// Renders one page as a self-contained SVG document. This is the whole-frame path, unchanged in its
 /// bytes: it renders every placed item -- body and furniture alike -- as one slice.
 pub fn render_page(page: &Page) -> Outcome<String> {
 	let mut ink		= String::new();
 	let mut tspans	= String::new();
 	let mut seen	= false;
-	res!(render_slice(&page.frame.placed, &mut ink, &mut tspans, &mut seen));
-	Ok(assemble(page, &ink, &tspans))
+	let mut defs	= GlyphDefs::new();
+	res!(render_slice(&page.frame.placed, &mut ink, &mut tspans, &mut seen, &mut defs));
+	Ok(assemble(page, &defs, &ink, &tspans))
 }
 
 /// Renders one page through the emit memo. The body frame (`placed[..body_len]`) is content-hashed;
@@ -62,27 +137,30 @@ pub fn render_page_memo(page: &Page, memo: &mut Memo) -> Outcome<String> {
 	let furn	= &page.frame.placed[split..];
 
 	let key = page_key(page, body);
-	let (body_ink, body_tspans, seen_after) = match memo.page_lookup(key) {
-		Some(e)	=> (e.body_ink, e.body_tspans, e.seen_text),
+	let (body_ink, body_tspans, seen_after, body_defs) = match memo.page_lookup(key) {
+		Some(e)	=> (e.body_ink, e.body_tspans, e.seen_text, e.body_defs),
 		None	=> {
 			let mut ink		= String::new();
 			let mut tspans	= String::new();
 			let mut seen	= false;
-			res!(render_slice(body, &mut ink, &mut tspans, &mut seen));
-			memo.page_store(key, ink.clone(), tspans.clone(), seen);
-			(ink, tspans, seen)
+			let mut defs	= GlyphDefs::new();
+			res!(render_slice(body, &mut ink, &mut tspans, &mut seen, &mut defs));
+			memo.page_store(key, ink.clone(), tspans.clone(), seen, defs.clone());
+			(ink, tspans, seen, defs)
 		},
 	};
 
-	// The furniture, drawn fresh, its selectable tspans continuing the body's interword spacing.
+	// The furniture, drawn fresh, its selectable tspans continuing the body's interword spacing and its
+	// outlines joining the body's, so a glyph both use is defined once.
 	let mut furn_ink	= String::new();
 	let mut furn_tspans	= String::new();
 	let mut seen		= seen_after;
-	res!(render_slice(furn, &mut furn_ink, &mut furn_tspans, &mut seen));
+	let mut defs		= body_defs;
+	res!(render_slice(furn, &mut furn_ink, &mut furn_tspans, &mut seen, &mut defs));
 
 	let ink		= fmt!("{}{}", body_ink, furn_ink);
 	let tspans	= fmt!("{}{}", body_tspans, furn_tspans);
-	Ok(assemble(page, &ink, &tspans))
+	Ok(assemble(page, &defs, &ink, &tspans))
 }
 
 /// The stable identity of a whole page for the changed-only delta ([`crate::delta`]): the content hash of
@@ -163,15 +241,18 @@ fn hash_graphic(g: &Graphic, h: &mut Fingerprinter) {
 	}
 }
 
-/// Wraps the visible ink and the selectable tspans of a page in the SVG document shell -- the `<svg>`
-/// viewport, the white backing rectangle, the `.tsel` style, and the one page-wide `<text>` layer -- so
-/// every render path, memo or not, produces the same bytes for the same content.
-fn assemble(page: &Page, ink: &str, tspans: &str) -> String {
-	let size	= page.geom.media_box();
-	let w		= size.x.as_usize();
-	let h		= size.y.as_usize();
-	// Sized once, so a page of a few megabytes is not grown by doubling and left holding the slack.
-	let mut out = String::with_capacity(ink.len() + tspans.len() + 512);
+fn assemble(page: &Page, defs: &GlyphDefs, ink: &str, tspans: &str) -> String {
+	let size = page.geom.media_box();
+	assemble_sized(size.x.as_usize(), size.y.as_usize(), defs, ink, tspans)
+}
+
+/// Wraps the glyph outlines, the visible ink and the selectable tspans of a page `w` by `h` points in the
+/// SVG document shell -- the `<svg>` viewport, the white backing rectangle, the `.tsel` style, the
+/// `<defs>`, and the one page-wide `<text>` layer -- so every render path, memo, Pearl or neither, writes
+/// the same bytes for the same content.
+pub(crate) fn assemble_sized(w: usize, h: usize, defs: &GlyphDefs, ink: &str, tspans: &str) -> String {
+	// Sized once, so a large page is not grown by doubling and left holding the slack.
+	let mut out = String::with_capacity(ink.len() + tspans.len() + 64 * defs.len() + 512);
 	out.push_str(&fmt!(
 		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
 		w, h, w, h));
@@ -181,6 +262,7 @@ fn assemble(page: &Page, ink: &str, tspans: &str) -> String {
 	// so it draws nothing over the glyph outlines below, and pointer-events left at the SVG default
 	// (not `none`) so a mouse drag still hits real text nodes rather than only outline paths.
 	out.push_str("<style>.tsel { fill: transparent; }</style>\n");
+	defs.write(&mut out);
 	out.push_str(ink);
 	if !tspans.is_empty() {
 		out.push_str(&fmt!("  <text class=\"tsel\">{}</text>\n", tspans));
@@ -207,6 +289,7 @@ fn render_slice(
 	ink:		&mut String,
 	tspans:		&mut String,
 	seen_text:	&mut bool,
+	defs:		&mut GlyphDefs,
 )
 	-> Outcome<()>
 {
@@ -218,7 +301,7 @@ fn render_slice(
 	for p in placed {
 		// Real text is drawn glyph by glyph as filled outlines; a rule or a reservation as one rectangle.
 		if let PlacedKind::Text(shaped) = &p.kind {
-			res!(draw_text(ink, p.x, p.y, p.dims.height, shaped));
+			res!(draw_text(ink, defs, p.x, p.y, p.dims.height, shaped));
 			continue;
 		}
 		// A group opens an SVG group under its matrix and clip; its end closes it.
@@ -353,12 +436,13 @@ fn draw_graphic(
 	Ok(())
 }
 
-/// Draws a placed run as filled glyph outlines. `height` is the line's own HBox height -- the face
+/// Draws a placed run as glyph outlines, each a `<use>` of its entry in `defs`. `height` is the line's own HBox height -- the face
 /// ascent for an ordinary line, or the cap height for a first line raised under the block-edge model
 /// (see `linebreak::set_lines`), whose glyphs then carry a compensating negative shift -- so
 /// `by + height` is the baseline either way. `bx`/`by` are the box's top-left.
 fn draw_text(
 	out:	&mut String,
+	defs:	&mut GlyphDefs,
 	bx:		Sp,
 	by:		Sp,
 	height:	Sp,
@@ -374,14 +458,10 @@ fn draw_text(
 		if path.is_empty() {
 			continue;
 		}
-		// The outline is font-frame, y up; the page is y down. Flip in y, then move onto the baseline
-		// at the glyph's own offset. The run is shaped in points, so no scale beyond the flip.
-		let t = Transform::scale(1.0, -1.0)
-			.then(&Transform::translate(base_x + glyph.x, base_y - glyph.y));
-		let placed = res!(path.transform(&t));
-		out.push_str(&fmt!(
-			"  <path d=\"{}\" {}/>\n",
-			write_path_data(&placed), presentation(Some(shaped.colour().to_rgba()), None)));
+		// The outline is font-frame, y up; the page is y down. The definition is flipped in y and the use
+		// moves it onto the baseline at the glyph's own offset. The run is shaped in points, so no scale
+		// beyond the flip.
+		res!(defs.place(out, &path, base_x + glyph.x, base_y - glyph.y, shaped.colour().to_rgba()));
 	}
 	Ok(())
 }
@@ -507,6 +587,28 @@ mod tests {
 		// The visible outlines are unaffected: still one filled black path per inked glyph, nothing new
 		// added to that part of the document.
 		assert!(svg.contains("fill=\"#000000\""), "the outline glyphs still draw in black");
+		Ok(())
+	}
+
+	/// A glyph drawn three times on a page is defined once, in the page's `<defs>`, and used at each
+	/// occurrence; no outline is written in place, and every use names the defined id.
+	#[test]
+	fn a_repeated_glyph_is_defined_once_and_used_at_each_occurrence() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let shaped	= res!(crate::font::ShapedText::new(fonts, Role::Body, Dir::Ltr, Sp::from_pt(11.0), "eee"));
+		let dims	= shaped.dims();
+		let mut frame = Frame::new();
+		frame.push(Placed::new(Sp::from_pt(60.0), Sp::from_pt(80.0), dims, PlacedKind::Text(shaped)));
+		let svg = res!(render_page(&Page::new(1, geom, frame)));
+
+		assert_eq!(svg.matches("<defs>").count(), 1, "one defs block, found: {}", svg);
+		assert_eq!(svg.matches("<path id=\"ag").count(), 1, "the 'e' outline is defined once, found: {}", svg);
+		assert_eq!(svg.matches("<use href=\"#ag").count(), 3, "each 'e' is a use, found: {}", svg);
+		assert!(!svg.contains("<path d="), "no outline is written in place, found: {}", svg);
+		let start	= res!(svg.find("<path id=\"").ok_or_else(|| err!("No glyph definition."; Test, Missing)));
+		let id		= &svg[start + 10..start + 28];
+		assert!(svg.contains(&fmt!("href=\"#{}\"", id)), "the uses name the defined id {}", id);
 		Ok(())
 	}
 

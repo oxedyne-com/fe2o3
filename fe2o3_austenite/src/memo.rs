@@ -131,6 +131,7 @@ pub struct PageEntry {
 	pub body_ink:		String,
 	pub body_tspans:	String,
 	pub seen_text:		bool,
+	pub body_defs:		crate::emit::svg::GlyphDefs,	// the body's glyph outlines, for the page's `<defs>`
 }
 
 /// The document's incremental memo: the block-authoring and page-emit caches, the global fingerprint
@@ -214,7 +215,14 @@ impl Memo {
 		}
 	}
 
-	pub fn page_store(&mut self, key: Fingerprint, body_ink: String, body_tspans: String, seen_text: bool) {
-		self.pages.insert(key, PageEntry { body_ink, body_tspans, seen_text }, 0);
+	pub fn page_store(
+		&mut self,
+		key:			Fingerprint,
+		body_ink:		String,
+		body_tspans:	String,
+		seen_text:		bool,
+		body_defs:		crate::emit::svg::GlyphDefs,
+	) {
+		self.pages.insert(key, PageEntry { body_ink, body_tspans, seen_text, body_defs }, 0);
 	}
 }

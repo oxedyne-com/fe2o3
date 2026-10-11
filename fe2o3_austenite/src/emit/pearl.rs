@@ -24,6 +24,10 @@
 //! bump.
 
 use crate::doc::Heading;
+use crate::emit::svg::{
+	assemble_sized,
+	GlyphDefs,
+};
 use crate::ir::{
 	DrawOp,
 	LinkTarget,
@@ -653,6 +657,13 @@ pub trait PageDevice {
 	fn begin(&mut self, w: usize, h: usize) -> Outcome<()>;
 	/// Fills the placed `path` with `colour`.
 	fn fill(&mut self, path: &Path, colour: Rgba) -> Outcome<()>;
+	/// Draws a glyph `outline` -- font frame, y up, at its point size -- with its origin at the page point
+	/// (`x`, `y`). A sink that can reuse an outline overrides this; the default fills it in place.
+	fn glyph(&mut self, outline: &Path, x: f32, y: f32, colour: Rgba) -> Outcome<()> {
+		let t = Transform::scale(1.0, -1.0).then(&Transform::translate(x, y));
+		let placed = res!(outline.transform(&t));
+		self.fill(&placed, colour)
+	}
 	/// Strokes the placed `path` with `colour` and pen `pen`.
 	fn stroke(&mut self, path: &Path, colour: Rgba, pen: &Stroke) -> Outcome<()>;
 	/// Places a base64 PNG at (`x`, `y`), `w` by `h` points.
@@ -664,15 +675,26 @@ pub trait PageDevice {
 }
 
 /// The [`PageDevice`] that reconstructs the SVG arm's own page markup, byte for byte. Every method writes
-/// through the very `write_path_data`, `presentation` and `.tsel` shapes the SVG arm uses, so a rendered
-/// page is that arm's output exactly.
+/// through the very `write_path_data`, `presentation`, [`GlyphDefs`] and `.tsel` shapes the SVG arm uses,
+/// and [`end`](PageDevice::end) wraps them in that arm's own document shell, so a rendered page is that
+/// arm's output exactly.
 pub struct SvgSink {
-	out: String,
+	size:	(usize, usize),
+	defs:	GlyphDefs,
+	ink:	String,
+	tspans:	String,
+	out:	String,
 }
 
 impl SvgSink {
 	pub fn new() -> Self {
-		Self { out: String::new() }
+		Self {
+			size:	(0, 0),
+			defs:	GlyphDefs::new(),
+			ink:	String::new(),
+			tspans:	String::new(),
+			out:	String::new(),
+		}
 	}
 
 	pub fn into_string(self) -> String {
@@ -688,30 +710,28 @@ impl Default for SvgSink {
 
 impl PageDevice for SvgSink {
 	fn begin(&mut self, w: usize, h: usize) -> Outcome<()> {
-		self.out.push_str(&fmt!(
-			"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
-			w, h, w, h));
-		self.out.push_str(&fmt!(
-			"<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"#ffffff\"/>\n", w, h));
-		// Matches the SVG arm's own `.tsel` style declaration, emitted at the very same point.
-		self.out.push_str("<style>.tsel { fill: transparent; }</style>\n");
+		self.size = (w, h);
 		Ok(())
 	}
 
 	fn fill(&mut self, path: &Path, colour: Rgba) -> Outcome<()> {
-		self.out.push_str(&fmt!(
+		self.ink.push_str(&fmt!(
 			"  <path d=\"{}\" {}/>\n", write_path_data(path), presentation(Some(colour), None)));
 		Ok(())
 	}
 
+	fn glyph(&mut self, outline: &Path, x: f32, y: f32, colour: Rgba) -> Outcome<()> {
+		self.defs.place(&mut self.ink, outline, x, y, colour)
+	}
+
 	fn stroke(&mut self, path: &Path, colour: Rgba, pen: &Stroke) -> Outcome<()> {
-		self.out.push_str(&fmt!(
+		self.ink.push_str(&fmt!(
 			"  <path d=\"{}\" {}/>\n", write_path_data(path), presentation(None, Some((colour, pen)))));
 		Ok(())
 	}
 
 	fn image(&mut self, png_base64: &str, x: f32, y: f32, w: f32, h: f32) -> Outcome<()> {
-		self.out.push_str(&fmt!(
+		self.ink.push_str(&fmt!(
 			"  <image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" \
 				href=\"data:image/png;base64,{}\"/>\n",
 			x, y, w, h, png_base64));
@@ -744,14 +764,13 @@ impl PageDevice for SvgSink {
 			buf.push_str(&tspans);
 			seen_text = true;
 		}
-		if !buf.is_empty() {
-			self.out.push_str(&fmt!("  <text class=\"tsel\">{}</text>\n", buf));
-		}
+		self.tspans = buf;
 		Ok(())
 	}
 
 	fn end(&mut self) -> Outcome<()> {
-		self.out.push_str("</svg>\n");
+		let (w, h) = self.size;
+		self.out = assemble_sized(w, h, &self.defs, &self.ink, &self.tspans);
 		Ok(())
 	}
 }
@@ -916,12 +935,9 @@ impl PearlDoc {
 						if path.is_empty() {
 							continue;
 						}
-						// The stored outline is font-frame, y up; flip in y and move onto the baseline at the
+						// The stored outline is font-frame, y up; the sink places it on the baseline at the
 						// glyph's offset, exactly as `draw_text` does.
-						let t = Transform::scale(1.0, -1.0)
-							.then(&Transform::translate(base_x + gx, base_y - gy));
-						let placed = res!(path.transform(&t));
-						res!(sink.fill(&placed, colour));
+						res!(sink.glyph(&path, base_x + gx, base_y - gy, colour));
 					}
 				},
 				"rule" | "reserved" => {
