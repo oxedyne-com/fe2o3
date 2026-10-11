@@ -69,6 +69,22 @@ pub struct Glyph {
 	pub safe_to_break:	bool,	// the shaper's own word: cutting the text before this cluster changes no glyph
 }
 
+/// A glyph made by hand rather than by the shaper: at the origin, safe to break. A literal that
+/// sets only what it knows and takes the rest with `..Default::default()` survives a new field.
+impl Default for Glyph {
+	fn default() -> Self {
+		Self {
+			id:				0,
+			face:			0,
+			x:				0.0,
+			y:				0.0,
+			adv:			0.0,
+			cluster:		0,
+			safe_to_break:	true,	// nothing shaped across it, so nothing to reshape
+		}
+	}
+}
+
 /// A run of shaped text: one string, one font, one size, one direction.
 #[derive(Clone, Debug, Default)]
 pub struct Run {
