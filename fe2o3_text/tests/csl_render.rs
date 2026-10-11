@@ -60,6 +60,7 @@ mod typst {
 	use oxedyne_fe2o3_text::csl::{
 		archive,
 		Citation,
+		CiteForm,
 		CiteRef,
 		CiteState,
 		item::{
@@ -67,8 +68,12 @@ mod typst {
 			Chunked,
 			DateVal,
 			Item,
+			NumVal,
 		},
-		node::Node,
+		node::{
+			Meta,
+			Node,
+		},
 		page::PageVal,
 		person::Person,
 		render_bibliography,
@@ -273,12 +278,13 @@ mod typst {
 				Node::Text(t, f)		=> out.push_str(&wrap(esc(t), f)),
 				Node::Math(m)			=> { out.push('$'); out.push_str(m); out.push('$'); }
 				Node::Link { text, fmt, url }	=> out.push_str(&wrap(format!("<a href=\"{}\">{}</a>", url, esc(text)), fmt)),
-				Node::Cite { .. }		=> {}
+				Node::Cite { .. }		=> out.push_str("p. 5"),	// the only supplement used
 				Node::Elem(e) => {
 					let mut inner = String::new();
 					html(&e.children, &mut inner);
-					match e.display {
-						Some(Display::LeftMargin)	=> { out.push_str("<span class=\"prefix\">"); out.push_str(&inner); out.push_str("</span> "); }
+					match (e.display, &e.meta) {
+						(Some(Display::LeftMargin), _)	=> { out.push_str("<span class=\"prefix\">"); out.push_str(&inner); out.push_str("</span> "); }
+						(_, Some(Meta::Entry(_)))	=> { out.push_str("<a>"); out.push_str(&inner); out.push_str("</a>"); }
 						_				=> out.push_str(&inner),
 					}
 				}
@@ -339,6 +345,90 @@ mod typst {
 			println!("{}", report);
 		}
 		Ok(matched)
+	}
+
+	/// The citations of `cites.typ`, in order, over the fixtures' keys.
+	fn cites_typ(items: &[Fx]) -> Vec<Citation> {
+		let at = |k: &str| items.iter().position(|f| f.key == k).unwrap_or(usize::MAX);
+		let r = |k: &str| CiteRef { entry: at(k), ..CiteRef::default() };
+		let loc = |k: &str| CiteRef { locator: Some(("custom".to_string(), NumVal::Transparent(0))), ..r(k) };
+		let form = |k: &str, form: CiteForm| CiteRef { form, ..r(k) };
+		let c = |refs: Vec<CiteRef>| Citation { refs, note: None };
+		vec![
+			c(vec![r("a1")]),
+			c(vec![r("n1")]),
+			c(vec![r("n1"), r("n2"), r("n3")]),
+			c(vec![r("n5"), r("n4")]),
+			c(vec![loc("n1")]),
+			c(vec![loc("n1")]),
+			c(vec![r("n1")]),
+			c(vec![r("n2"), r("n3"), r("a1")]),
+			c(vec![form("n1", CiteForm::Author)]),
+			c(vec![form("n1", CiteForm::Year)]),
+			c(vec![form("n1", CiteForm::Prose)]),
+			c(vec![form("n1", CiteForm::Full)]),
+		]
+	}
+
+	/// Typst's `<a ... role="doc-biblioref">` written as a bare `<a>`.
+	fn bare_links(s: &str) -> String {
+		let mut out = String::new();
+		let mut rest = s;
+		while let Some(i) = rest.find("<a ") {
+			out.push_str(&rest[..i]);
+			let tail = &rest[i..];
+			match (tail.find('>'), tail.find("role=\"doc-biblioref\">")) {
+				(Some(e), Some(r)) if r < e => { out.push_str("<a>"); rest = &tail[e + 1..]; }
+				(Some(e), _) => { out.push_str(&tail[..e + 1]); rest = &tail[e + 1..]; }
+				(None, _) => { out.push_str(tail); rest = ""; }
+			}
+		}
+		out.push_str(rest);
+		out
+	}
+
+	/// Each citation of `cites.typ` against Typst's `cites-<style>.html`: the indices that match.
+	fn check_cites(style_name: &str, items: Vec<Fx>, cites: Vec<Citation>, file: &str) -> Outcome<Vec<usize>> {
+		let style = res!(res!(archive::by_name(style_name).ok_or_else(|| err!("No style {}.", style_name; Missing))).style());
+		let files = res!(archive::locales_for(&style, Some("en")));
+		let chain = files.chain(&style, Some("en"));
+		let path = format!("{}/tests/data/csl/expect/{}", env!("CARGO_MANIFEST_DIR"), file);
+		let src = res!(std::fs::read_to_string(&path));
+		let want: Vec<String> = src.lines().map(|l| bare_links(l.trim_start_matches("<li>").trim_end_matches("</li>"))).collect();
+		let state = CiteState::new(&style, &chain, Some("en"), &items, &cites);
+		let mut ok = Vec::new();
+		let mut report = String::new();
+		for i in 0..cites.len() {
+			let mut got = String::new();
+			html(state.citation(i), &mut got);
+			if want.get(i) == Some(&got) {
+				ok.push(i);
+			} else {
+				report.push_str(&format!("\n{} cite {}: got  {}\n          want {}\n", style_name, i, got, want.get(i).map_or("", |w| w.as_str())));
+			}
+		}
+		if !report.is_empty() {
+			println!("{}", report);
+		}
+		Ok(ok)
+	}
+
+	#[test]
+	fn test_ieee_citations_as_typst() -> Outcome<()> {
+		let items = fixtures();
+		let cites = cites_typ(&items);
+		let ok = res!(check_cites("ieee", items, cites, "cites-ieee.html"));
+		assert_eq!(ok, (0..8).collect::<Vec<_>>());
+		Ok(())
+	}
+
+	#[test]
+	fn test_apa_citations_as_typst() -> Outcome<()> {
+		let items = fixtures();
+		let cites = cites_typ(&items);
+		let ok = res!(check_cites("apa", items, cites, "cites-apa.html"));
+		assert_eq!(ok, (0..8).collect::<Vec<_>>());
+		Ok(())
 	}
 
 	#[test]

@@ -642,6 +642,12 @@ enum NumOrPage {
 	Page(PageVal),
 }
 
+/// A `names` element's metadata: each variable's people, so that grouping and disambiguation can
+/// compare them.
+fn meta_people(people: &[(&[Person], &str)]) -> Meta {
+	Meta::Names(people.iter().map(|(p, v)| (p.to_vec(), v.to_string())).collect())
+}
+
 /// One rendering of one entry: the style, the locale chain, the item and the citation, over a
 /// writer.
 pub struct Ctx<'a, I: Item> {
@@ -690,6 +696,34 @@ pub fn bibliography_entry<'a, I: Item>(
 	ctx.w.pop_format(fi);
 	ctx.apply_suffix(layout.look.suffix.as_deref(), a);
 	Some(ctx.flush())
+}
+
+/// One cite rendered through the citation layout, which, as in hayagriva, applies its formatting
+/// and delimiter but leaves its affixes to the whole citation.
+#[derive(Clone, Debug, Default)]
+pub struct CiteOut {
+	pub nodes:		Vec<Node>,
+	pub checked_disamb:	bool,	// a `choose` asked `disambiguate`
+}
+
+pub fn citation_entry<'a, I: Item>(
+	style:	&'a Style,
+	chain:	&'a Chain<'a>,
+	item:	&'a I,
+	cite:	&'a Cite,
+	lang:	Option<&'a str>,
+)
+	-> CiteOut
+{
+	let mut ctx = Ctx::new(style, chain, item, cite, lang, false);
+	let layout = &style.citation.layout;
+	let fi = ctx.w.push_format(&layout.look.fmt);
+	let di = ctx.w.push_delim(layout.delimiter.clone());
+	ctx.render_all(&layout.elems);
+	ctx.w.pop_delim(di);
+	ctx.w.pop_format(fi);
+	let checked_disamb = ctx.checked_disambiguate();
+	CiteOut { nodes: ctx.flush(), checked_disamb }
 }
 
 impl<'a, I: Item> Ctx<'a, I> {
@@ -1311,7 +1345,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 					break;
 				}
 			}
-			self.w.commit_elem(depth, v.look.display, Some(Meta::Names));
+			self.w.commit_elem(depth, v.look.display, Some(meta_people(&people)));
 			self.w.suppressing = false;
 		}
 	}
@@ -1351,7 +1385,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 				.sum();
 			self.push_str(&n.to_string());
 			self.apply_suffix(v.look.suffix.as_deref(), a);
-			self.w.commit_elem(depth, v.look.display, Some(Meta::Names));
+			self.w.commit_elem(depth, v.look.display, Some(meta_people(people)));
 			return;
 		}
 		for (i, (persons, var)) in people.iter().filter(|(p, _)| !p.is_empty()).enumerate() {
@@ -1378,7 +1412,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 			}
 		}
 		self.apply_suffix(v.look.suffix.as_deref(), a);
-		self.w.commit_elem(depth, v.look.display, Some(Meta::Names));
+		self.w.commit_elem(depth, v.look.display, Some(meta_people(people)));
 	}
 
 	/// A label inside `names`, its term chosen by the caller.

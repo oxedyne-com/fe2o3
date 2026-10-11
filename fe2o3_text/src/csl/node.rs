@@ -4,6 +4,7 @@
 //! The shape is hayagriva's `ElemChildren`, which Typst realises: a host turns `Meta::Entry` into
 //! a link to the bibliography entry, a `left-margin` element into the entry's prefix column, and
 //! `Math` into an equation.
+use crate::csl::person::Person;
 use crate::csl::style::{
 	Decoration,
 	Display,
@@ -55,7 +56,7 @@ impl Formatting {
 /// What an element stands for, so that a host can find or link it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Meta {
-	Names,			// B2b adds the names and their variable
+	Names(Vec<(Vec<Person>, String)>),	// every variable's people, rendered or not
 	Date,
 	Text,
 	Number,

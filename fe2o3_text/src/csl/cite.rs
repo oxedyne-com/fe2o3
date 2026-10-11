@@ -22,12 +22,15 @@ use crate::csl::{
 	page::PageVal,
 	node::{
 		self,
+		Formatting,
+		Meta,
 		Node,
 	},
 	render::{
 		self,
 		Cite,
 		Ctx,
+		Ibid,
 		Sorting,
 	},
 	style::{
@@ -66,12 +69,29 @@ pub struct Citation {
 /// A bibliography entry: second-field-align's first field, then the rest.
 pub type BibEntry = (Option<Node>, Vec<Node>);
 
-/// What every citation in a document decides together: the bibliography's order and each
-/// entry's citation number. Built once from all the document's citations, in order.
+/// One cite as the driver carries it between rounds.
+#[derive(Clone, Debug)]
+struct Pending {
+	entry:		usize,
+	initial:	usize,				// its index in the citation as written
+	locator:	Option<(String, NumVal)>,
+	form:		CiteForm,
+	hidden:		bool,
+	cite:		Cite,
+	checked_disamb:	bool,
+	delim:		Option<String>,			// the delimiter before it, when grouping sets one
+	nodes:		Vec<Node>,
+}
+
+/// What every citation in a document decides together: the bibliography's order, each entry's
+/// citation number, and every citation's final rendering. Built once from all the document's
+/// citations, in order, as hayagriva's `BibliographyDriver::finish` is.
 #[derive(Clone, Debug, Default)]
 pub struct CiteState {
-	order:	Vec<usize>,	// entry indices in bibliography order
-	number:	Vec<usize>,	// per entry, from 1; 0 when uncited
+	order:	Vec<usize>,		// entry indices in bibliography order
+	number:	Vec<usize>,		// per entry, from 1; 0 when uncited
+	bib:	Vec<Option<Cite>>,	// per entry, what its bibliography entry inherits
+	cites:	Vec<Vec<Node>>,		// each citation, rendered
 }
 
 impl CiteState {
@@ -96,12 +116,131 @@ impl CiteState {
 		}
 		let bib_sort = style.bibliography.as_ref().and_then(|b| b.sort.as_ref());
 		let nil: Vec<usize> = vec![0; items.len()];
-		sort(style, chain, lang, items, &mut order, bib_sort, &nil);
+		sort(style, chain, lang, items, &mut order, |&e| e, bib_sort, &nil);
 		let mut number = vec![0; items.len()];
 		for (i, &e) in order.iter().enumerate() {
 			number[e] = i + 1;
 		}
-		Self { order, number }
+
+		// 1. Sort each citation, decide its cites' positions and render them without locators.
+		let mut seen = vec![false; items.len()];
+		let mut res: Vec<(Option<usize>, Vec<Pending>)> = Vec::new();
+		let mut last: Option<(usize, Option<(String, NumVal)>, bool)> = None;
+		for c in cites {
+			let mut refs: Vec<(usize, &CiteRef)> = c.refs.iter().enumerate()
+				.filter(|(_, r)| r.entry < items.len())
+				.collect();
+			sort(style, chain, lang, items, &mut refs, |(_, r)| r.entry, style.citation.sort.as_ref(), &number);
+			let mut ps = Vec::new();
+			for (initial, r) in refs {
+				let e = r.entry;
+				let near_note = c.note.is_some() && res.iter().rev()
+					.take(style.citation.near_note_distance as usize)
+					.any(|(n, ps)| n.is_some() && ps.iter().any(|p| p.entry == e));
+				let first_note = c.note.map(|n| res.iter()
+					.find_map(|(m, ps)| m.filter(|_| ps.iter().any(|p| p.entry == e)))
+					.unwrap_or(n));
+				let first = !seen[e];
+				seen[e] = true;
+				let cite = Cite {
+					number:		Some(number[e]),
+					first_note,
+					first,
+					ibid:		ibid(e, &r.locator, last.as_ref()),
+					near_note,
+					..Cite::default()
+				};
+				last = Some((e, r.locator.clone(), r.hidden));
+				let mut p = Pending {
+					entry:		e,
+					initial,
+					locator:	r.locator.clone(),
+					form:		r.form,
+					hidden:		r.hidden,
+					cite,
+					checked_disamb:	false,
+					delim:		None,
+					nodes:		Vec::new(),
+				};
+				let out = render::citation_entry(style, chain, &items[e], &p.cite, lang);
+				p.checked_disamb = out.checked_disamb;
+				p.nodes = out.nodes;
+				ps.push(p);
+			}
+			res.push((c.note, ps));
+		}
+
+		// 4. Final positions on the final order, and the locators.
+		let mut prev: Option<(usize, Option<(String, NumVal)>, bool)> = None;
+		for (_, ps) in res.iter_mut() {
+			for p in ps.iter_mut() {
+				p.cite.ibid = ibid(p.entry, &p.locator, prev.as_ref());
+				p.cite.locator = p.locator.clone();
+				prev = Some((p.entry, p.locator.clone(), false));
+			}
+		}
+		// Without a bibliography sort, numbers follow the cites as they now stand.
+		if bib_sort.is_none() {
+			let mut n = vec![0; items.len()];
+			let mut next = 1;
+			for p in res.iter_mut().flat_map(|(_, ps)| ps.iter_mut()) {
+				if n[p.entry] == 0 {
+					n[p.entry] = next;
+					next += 1;
+				}
+				p.cite.number = Some(n[p.entry]);
+			}
+			number = n;
+		}
+
+		// The bibliography inherits each entry's first cite.
+		let mut bib: Vec<Option<Cite>> = vec![None; items.len()];
+		for p in res.iter().flat_map(|(_, ps)| ps.iter()) {
+			if bib[p.entry].is_none() {
+				bib[p.entry] = Some(Cite { locator: None, ..p.cite.clone() });
+			}
+		}
+
+		// 5-6. The final render of each cite, then the citation's affixes and delimiters.
+		let layout = &style.citation.layout;
+		let fmt = Formatting::default().apply(&layout.look.fmt);
+		let mut out = Vec::with_capacity(res.len());
+		for (_, ps) in res.iter_mut() {
+			for p in ps.iter_mut() {
+				p.nodes = render::citation_entry(style, chain, &items[p.entry], &p.cite, lang).nodes;
+			}
+			if ps.iter().all(|p| p.hidden) {
+				out.push(Vec::new());
+				continue;
+			}
+			let affix = ps.iter().all(|p| p.form == CiteForm::Normal);
+			let mut nodes = Vec::new();
+			if let (true, Some(pre)) = (affix, layout.look.prefix.as_ref()) {
+				nodes.push(Node::Text(pre.clone(), fmt));
+			}
+			for (i, p) in ps.iter().enumerate() {
+				if p.hidden {
+					continue;
+				}
+				if i != 0 {
+					if let Some(d) = p.delim.as_ref().or(layout.delimiter.as_ref()) {
+						nodes.push(Node::Text(d.clone(), fmt));
+					}
+				}
+				nodes.push(Node::Elem(node::Elem {
+					children:	p.nodes.clone(),
+					display:	None,
+					meta:		Some(Meta::Entry(p.initial)),
+				}));
+			}
+			if let (true, Some(suf)) = (affix, layout.look.suffix.as_ref()) {
+				if !node::last_text(&nodes).map_or(false, |t| t.ends_with(suf.as_str())) {
+					nodes.push(Node::Text(suf.clone(), fmt));
+				}
+			}
+			out.push(node::simplify(nodes));
+		}
+		Self { order, number, bib, cites: out }
 	}
 
 	/// The entries in bibliography order.
@@ -111,6 +250,32 @@ impl CiteState {
 
 	pub fn number(&self, entry: usize) -> Option<usize> {
 		self.number.get(entry).copied().filter(|&n| n > 0)
+	}
+
+	/// The `i`th citation as given to [`CiteState::new`], rendered; empty when every cite in it is
+	/// hidden.
+	pub fn citation(&self, i: usize) -> &[Node] {
+		self.cites.get(i).map_or(&[], |c| c.as_slice())
+	}
+}
+
+/// hayagriva's `IbidState::with_last`: the same entry as the last cite, when that was printed, is
+/// ibid with an equal locator, and ibid-with-locator when only this one has a locator or they
+/// differ; without a locator after one with it, it is only subsequent.
+fn ibid(
+	entry:	usize,
+	loc:	&Option<(String, NumVal)>,
+	last:	Option<&(usize, Option<(String, NumVal)>, bool)>,
+)
+	-> Ibid
+{
+	match last {
+		Some((e, l, hidden)) if *e == entry && !*hidden => match (l == loc, loc.is_none()) {
+			(true, _)	=> Ibid::Ibid,
+			(false, true)	=> Ibid::No,
+			(false, false)	=> Ibid::WithLocator,
+		},
+		_ => Ibid::No,
 	}
 }
 
@@ -129,7 +294,10 @@ pub fn render_bibliography<'a, I: Item>(
 	let align = style.bibliography.as_ref().map_or(false, |b| b.second_field_align.is_some());
 	let mut out = Vec::new();
 	for &e in &state.order {
-		let cite = Cite { number: state.number(e), first: true, ..Cite::default() };
+		let cite = match state.bib.get(e).cloned().flatten() {
+			Some(c)	=> Cite { number: state.number(e), ..c },
+			None	=> Cite { number: state.number(e), first: true, ..Cite::default() },
+		};
 		let mut body = match render::bibliography_entry(style, chain, &items[e], &cite, lang) {
 			Some(n)	=> node::simplify(n),
 			None	=> return Vec::new(),
@@ -145,14 +313,15 @@ pub fn render_bibliography<'a, I: Item>(
 
 // Sorting
 
-/// Sorts entry indices by a style's keys, stably. `num` gives each entry's citation number for a
+/// Sorts cites, each naming its entry through `ent`, by a style's keys, stably. `num` gives each entry's citation number for a
 /// `citation-number` key.
-fn sort<'a, I: Item>(
+fn sort<'a, I: Item, T>(
 	style:	&'a Style,
 	chain:	&'a Chain<'a>,
 	lang:	Option<&'a str>,
 	items:	&'a [I],
-	idx:	&mut [usize],
+	idx:	&mut [T],
+	ent:	impl Fn(&T) -> usize,
 	keys:	Option<&'a Sort>,
 	num:	&[usize],
 ) {
@@ -160,7 +329,8 @@ fn sort<'a, I: Item>(
 		Some(k)	=> k,
 		None	=> return,
 	};
-	idx.sort_by(|&a, &b| {
+	idx.sort_by(|a, b| {
+		let (a, b) = (ent(a), ent(b));
 		for k in &keys.keys {
 			let o = cmp_key(style, chain, lang, (&items[a], num[a]), (&items[b], num[b]), k);
 			if o != Ordering::Equal {
