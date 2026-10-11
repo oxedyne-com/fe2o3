@@ -33,6 +33,7 @@ use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 use oxedyne_fe2o3_net::{
     http::{
+        fields::HeaderName,
         handler::WebHandler,
         msg::HttpMessage,
     },
@@ -93,6 +94,7 @@ pub struct VhostRuntime<
     pub permissions_policy: Option<String>, // replaces the default Permissions-Policy header when set
     pub tiles:          Option<Arc<TileService<TileSource>>>,
     pub access_log:     bool,   // `false` keeps this vhost's requests out of the log and the recorder
+    pub response_headers: Vec<(HeaderName, String)>, // set on every response, replacing that name
 }
 
 impl<

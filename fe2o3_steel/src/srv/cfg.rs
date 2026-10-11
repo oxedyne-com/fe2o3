@@ -1167,6 +1167,12 @@ pub struct VhostConfig {
     // it, trading write latency for losing nothing on a power cut. Defaults to `false`, which is
     // what every config written before the field existed says, and is ignored with no `db_dir_rel`.
     pub db_sync_on_write:       bool,
+    // Headers set on every response this vhost sends, a static file, a handler's answer or an
+    // error alike, each replacing any field of that name the response or Steel's baseline gave
+    // it. Names are held lower-case. A site that must not leak its readers (`Referrer-Policy:
+    // no-referrer`, `X-Robots-Tag: noindex`, its own CSP) says so here, once. Empty by default,
+    // which is what every config written before the field existed says.
+    pub response_headers:       Vec<(String, String)>,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -1216,6 +1222,7 @@ impl Default for VhostConfig {
             access_log:             true,
             admin_dashboard:        true,
             db_sync_on_write:       false,
+            response_headers:       Vec::new(),
         }
     }
 }
@@ -1585,6 +1592,26 @@ impl VhostConfig {
                 "VhostConfig: 'db_sync_on_write' must be a boolean.";
                 Invalid, Input, Mismatch)),
         };
+        let response_headers = match m.get(&dat!("response_headers")) {
+            Some(Dat::Map(sub)) => {
+                let mut out = Vec::new();
+                for (k, v) in sub.iter() {
+                    let (name, val) = match (k, v) {
+                        (Dat::Str(k), Dat::Str(v))  => (k.to_lowercase(), v.clone()),
+                        _ => return Err(err!(
+                            "VhostConfig: 'response_headers' maps header names to strings.";
+                            Invalid, Input, Mismatch)),
+                    };
+                    res!(Self::check_response_header(&name, &val));
+                    out.push((name, val));
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => return Err(err!(
+                "VhostConfig: 'response_headers' must be a map.";
+                Invalid, Input, Mismatch)),
+        };
         // A tile request names where its viewer looked, so a vhost serving tiles may not keep
         // even the connection lines that would pair a viewer's address with the time.
         if tiles.is_some() && access_log {
@@ -1616,7 +1643,36 @@ impl VhostConfig {
             access_log,
             admin_dashboard,
             db_sync_on_write,
+            response_headers,
         })
+    }
+
+    /// Can `name: val` be set on every response? The name must be an RFC 9110 token, the value
+    /// must hold no line break, and a field that frames the message or carries state (its length,
+    /// coding or type, the connection, a cookie) is the producer's, never the vhost's.
+    pub fn check_response_header(name: &str, val: &str) -> Outcome<()> {
+        let tchar = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
+        if name.is_empty() || !name.chars().all(tchar) {
+            return Err(err!(
+                "VhostConfig: response header name '{}' is not an HTTP token.", name;
+                Invalid, Input));
+        }
+        if val.chars().any(|c| c == '\r' || c == '\n' || c == '\0') {
+            return Err(err!(
+                "VhostConfig: response header '{}' has a line break or NUL in its value.", name;
+                Invalid, Input, Security));
+        }
+        const PRODUCERS: &[&str] = &[
+            "connection", "content-encoding", "content-length", "content-type", "keep-alive",
+            "set-cookie", "trailer", "transfer-encoding", "upgrade",
+        ];
+        if PRODUCERS.contains(&name) {
+            return Err(err!(
+                "VhostConfig: response header '{}' belongs to the response that carries it and \
+                cannot be set for a whole vhost.", name;
+                Invalid, Input, Conflict));
+        }
+        Ok(())
     }
 
     /// Every upstream this vhost's configuration can reach outward to, as
@@ -3106,6 +3162,20 @@ impl ServerConfig {
     /// nobody, which strips every caller-supplied forwarding header.
     pub fn get_forwarded_policy(&self) -> Outcome<ForwardedPolicy> {
         ForwardedPolicy::new(&self.trusted_proxies)
+    }
+
+    /// Does every listener this config opens bind a loopback address? The TLS port, the
+    /// plaintext redirect and the mail listeners bind `server_address`; the admin, loopback HTTP
+    /// and internal listeners bind loopback by construction. So the answer is whether
+    /// `server_address` is loopback, and a build meant only for development can refuse to start
+    /// when it is not. A listener added to Steel on any other address must be named here.
+    pub fn binds_loopback_only(&self) -> Outcome<bool> {
+        match self.server_address.parse::<std::net::IpAddr>() {
+            Ok(ip)  => Ok(ip.is_loopback()),
+            Err(e)  => Err(err!(e,
+                "Invalid server_address '{}' in config.", self.server_address;
+                Invalid, Input, Network)),
+        }
     }
 
     pub fn get_vhosts(&self) -> Outcome<Vec<VhostConfig>> {

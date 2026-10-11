@@ -857,65 +857,55 @@ impl<
                                     None,
                                 );
                             }
-                            // Baseline security response headers: cheap
-                            // defence in depth against content sniffing,
-                            // clickjacking and referrer leakage. Each one
-                            // is a hard-coded conservative default; tighten
-                            // via per-deployment patches if the defaults
-                            // bite an integration.
+                            // Baseline security response headers: cheap defence in depth
+                            // against content sniffing, clickjacking and referrer leakage.
+                            // Each is a conservative default, so it fills a field the response
+                            // left empty and never adds a second value beside a handler's own:
+                            // two `Referrer-Policy` fields leave the browser the laxer one.
                             if self.cfg.security_headers_enabled {
-                                msg.header.fields.insert(
-                                    HeaderName::XContentTypeOptions,
-                                    HeaderFieldValue::Generic(
-                                        "nosniff".to_string()),
-                                    None,
-                                );
-                                msg.header.fields.insert(
-                                    HeaderName::XFrameOptions,
-                                    HeaderFieldValue::Generic(
-                                        "SAMEORIGIN".to_string()),
-                                    None,
-                                );
-                                msg.header.fields.insert(
-                                    HeaderName::ReferrerPolicy,
-                                    HeaderFieldValue::Generic(
-                                        "strict-origin-when-cross-origin"
-                                        .to_string()),
-                                    None,
-                                );
-                                // Permissions-Policy: deny every sensor
-                                // feature by default. A vhost may replace the
-                                // whole policy through its `permissions_policy`
-                                // config -- a capture ceremony sets
-                                // `camera=(self)`, say -- so a browser-capability
-                                // grant is explicit and per-site, never a code
-                                // default that loosens every deployment at once.
+                                // Permissions-Policy denies every sensor feature unless the
+                                // vhost replaces the whole policy through `permissions_policy`
+                                // (a capture ceremony sets `camera=(self)`, say), so a
+                                // browser-capability grant is explicit and per-site.
                                 let permissions_policy = vhost.permissions_policy
                                     .as_deref()
                                     .unwrap_or("accelerometer=(), camera=(), \
                                         geolocation=(), gyroscope=(), \
                                         magnetometer=(), microphone=(), \
                                         payment=(), usb=()");
-                                msg.header.fields.insert(
-                                    HeaderName::PermissionsPolicy,
-                                    HeaderFieldValue::Generic(
-                                        permissions_policy.to_string()),
-                                    None,
-                                );
+                                for (nam, val) in [
+                                    (HeaderName::XContentTypeOptions,   "nosniff"),
+                                    (HeaderName::XFrameOptions,         "SAMEORIGIN"),
+                                    (HeaderName::ReferrerPolicy,        "strict-origin-when-cross-origin"),
+                                    (HeaderName::PermissionsPolicy,     permissions_policy),
+                                ] {
+                                    if msg.header.fields.get_all(&nam).is_none() {
+                                        msg.header.fields.insert(
+                                            nam, HeaderFieldValue::Generic(val.to_string()), None);
+                                    }
+                                }
                             }
-                            // Content-Security-Policy: only emit if the
-                            // operator configured a value. An empty CSP
-                            // string is not injected at all because the
-                            // absence of the header is different from
-                            // `default-src 'none'` -- the former is a
-                            // no-op, the latter blocks the whole page.
-                            if !self.cfg.content_security_policy.is_empty() {
+                            // Content-Security-Policy: only emit if the operator configured a
+                            // value. An empty CSP string is not injected at all because the
+                            // absence of the header is different from `default-src 'none'` --
+                            // the former is a no-op, the latter blocks the whole page.
+                            if !self.cfg.content_security_policy.is_empty()
+                                && msg.header.fields.get_all(&HeaderName::ContentSecurityPolicy).is_none()
+                            {
                                 msg.header.fields.insert(
                                     HeaderName::ContentSecurityPolicy,
                                     HeaderFieldValue::Generic(
                                         self.cfg.content_security_policy.clone()),
                                     None,
                                 );
+                            }
+                            // The vhost's own `response_headers` come last and replace any
+                            // field of the same name, so a static file, a handler's answer and
+                            // an error page all carry exactly what the site configured.
+                            for (nam, val) in &vhost.response_headers {
+                                msg.header.fields.remove(nam);
+                                msg.header.fields.insert(
+                                    nam.clone(), HeaderFieldValue::Generic(val.clone()), None);
                             }
                             // Pull the status code out for the
                             // traffic record before the message is

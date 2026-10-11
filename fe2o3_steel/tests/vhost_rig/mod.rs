@@ -162,6 +162,7 @@ pub struct Site {
     pub api_routes:         Vec<ApiRoute>,
     pub webhook_routes:     Vec<WebhookRoute>,
     pub admin_dashboard:    bool,
+    pub response_headers:   Vec<(String, String)>,
 }
 
 impl Site {
@@ -172,6 +173,7 @@ impl Site {
             api_routes:         Vec::new(),
             webhook_routes:     Vec::new(),
             admin_dashboard:    true,
+            response_headers:   Vec::new(),
         }
     }
 }
@@ -279,6 +281,9 @@ impl Rig {
                 permissions_policy: None,
                 tiles:          None,
                 access_log:     false,
+                response_headers: site.response_headers.iter()
+                    .map(|(k, v)| (oxedyne_fe2o3_net::http::fields::HeaderName::from(k.as_str()), v.clone()))
+                    .collect(),
             });
             vhosts.insert(site.host.to_lowercase(), runtime);
         }

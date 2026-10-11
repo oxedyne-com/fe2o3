@@ -202,6 +202,7 @@ async fn drive() -> Outcome<()> {
             permissions_policy: None,
             tiles:          None,
             access_log:     false,
+            response_headers: Vec::new(),
         }))
     };
     let mut vhosts = HashMap::new();

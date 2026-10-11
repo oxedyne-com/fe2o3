@@ -121,6 +121,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 permissions_policy:     None,
                 admin_dashboard:        true,
                 db_sync_on_write:       false,
+                response_headers:       Vec::new(),
             };
 
             let web_handler: AppWebHandler<HashMap<String, OsPath>> = AppWebHandler::new(
@@ -156,6 +157,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 permissions_policy: vhost_cfg.permissions_policy.clone(),
                 tiles:          None,
                 access_log:     vhost_cfg.access_log,
+                response_headers: Vec::new(),
             });
 
             let mut vhosts = HashMap::new();

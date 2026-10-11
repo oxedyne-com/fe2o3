@@ -778,6 +778,9 @@ impl AppShellContext {
                 permissions_policy: vh.permissions_policy.clone(),
                 tiles,
                 access_log:     vh.access_log,
+                response_headers: vh.response_headers.iter()
+                    .map(|(k, v)| (oxedyne_fe2o3_net::http::fields::HeaderName::from(k.as_str()), v.clone()))
+                    .collect(),
             });
 
             let primary_lc = vh.primary_hostname().to_lowercase();
