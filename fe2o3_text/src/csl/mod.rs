@@ -9,6 +9,7 @@ mod case_words;
 pub mod item;
 pub mod locale;
 pub mod node;
+pub mod render;
 pub mod style;
 
 pub use locale::{
