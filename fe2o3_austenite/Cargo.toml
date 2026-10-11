@@ -52,6 +52,7 @@ oxedyne_fe2o3_text 				= { path = "../fe2o3_text", features = ["hyphenation"] }
 # Cargo resolver 2 does not unify a target-specific feature into the other target.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 oxedyne_fe2o3_graphics 			= { path = "../fe2o3_graphics", features = ["fogra39"] }
+oxedyne_fe2o3_datime 			= { path = "../fe2o3_datime" }	# the host's zone, for `datetime.today()`
 
 # The wasm-bindgen compile surface's dependencies, confined to the wasm target exactly as `fe2o3_core`
 # confines its own, so Cargo feature unification never pulls them onto a native build.  They are present

@@ -210,19 +210,41 @@ pub fn datetime_sub(a: &Datetime, b: &Datetime) -> Option<Duration> {
 	Some(Duration { secs: (secs(a) - secs(b)) as f64 })
 }
 
-fn now() -> Option<(i64, u32, u32)> {
+// Milliseconds since the Unix epoch, UTC.
+fn now_ms() -> Option<i64> {
 	#[cfg(target_arch = "wasm32")]
 	{
-		let ms = js_sys::Date::now();
-		Some(civil_from_days((ms / 86_400_000.0).floor() as i64))
+		Some(js_sys::Date::now().floor() as i64)
 	}
 	#[cfg(not(target_arch = "wasm32"))]
 	{
 		match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-			Ok(d)	=> Some(civil_from_days((d.as_secs() / 86_400) as i64)),
+			Ok(d)	=> i64::try_from(d.as_millis()).ok(),
 			Err(_)	=> None,
 		}
 	}
+}
+
+// The host zone's offset from UTC at instant `utc`, in milliseconds east; none where the zone cannot be read.
+fn local_offset_ms(utc: i64) -> i64 {
+	#[cfg(target_arch = "wasm32")]
+	{
+		// `getTimezoneOffset` is in minutes, positive west of UTC.
+		let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(utc as f64));
+		-(d.get_timezone_offset() * 60_000.0) as i64
+	}
+	#[cfg(not(target_arch = "wasm32"))]
+	{
+		match oxedyne_fe2o3_datime::time::zone::CalClockZone::local().utc_to_local(utc) {
+			oxedyne_fe2o3_datime::time::tzif::LocalTimeResult::Single(l)	=> l - utc,
+			_																=> 0,
+		}
+	}
+}
+
+/// The calendar date at instant `utc` (milliseconds since the epoch) on a clock `shift` milliseconds east.
+pub fn date_at(utc: i64, shift: i64) -> (i64, u32, u32) {
+	civil_from_days(utc.saturating_add(shift).div_euclid(86_400_000))
 }
 
 fn opt_int(engine: &mut Engine, span: Span, v: Option<Value>) -> Outcome<Option<i64>> {
@@ -283,20 +305,17 @@ pub fn call(f: DatetimeFn, engine: &mut Engine, mut args: Args) -> Outcome<Value
 		}
 		DatetimeFn::Today		=> {
 			let offset = res!(args.named::<Value>("offset"));
-			let hours = match offset {
-				None | Some(Value::Auto)	=> 0,
-				Some(Value::Int(h))			=> h,
-				Some(other)					=> return Err(mismatch(engine, span, "auto or integer", &other)),
-			};
-			let (y, m, d) = match now() {
+			let utc = match now_ms() {
 				Some(t)	=> t,
 				None	=> return Err(engine.error(DiagnosticKind::Type, span, "unable to get the current date")),
 			};
-			let (y, m, d) = if hours != 0 {
-				civil_from_days(days_from_civil(y, m, d) + hours.div_euclid(24))
-			} else {
-				(y, m, d)
+			// As Typst: `auto` is the host's own zone, an integer that many hours east of UTC.
+			let shift = match offset {
+				None | Some(Value::Auto)	=> local_offset_ms(utc),
+				Some(Value::Int(h))			=> h.saturating_mul(3_600_000),
+				Some(other)					=> return Err(mismatch(engine, span, "auto or integer", &other)),
 			};
+			let (y, m, d) = date_at(utc, shift);
 			Value::Datetime(Datetime {
 				year: Some(y as i32), month: Some(m as u8), day: Some(d as u8), hour: None, minute: None, second: None,
 			})
@@ -542,4 +561,21 @@ pub fn display(dt: &Datetime, pat: &str) -> std::result::Result<String, String> 
 		i += chars[i..].iter().position(|(_, x)| *x == ']').unwrap_or(0) + 1;
 	}
 	Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_today_is_the_date_on_the_shifted_clock() {
+		// 2026-10-11 16:09 UTC is already 12 October in Perth, eight hours east, and still the 11th five west.
+		let utc = (days_from_civil(2026, 10, 11) * 86_400 + 16 * 3_600 + 9 * 60) * 1_000;
+		assert_eq!(date_at(utc, 0), (2026, 10, 11));
+		assert_eq!(date_at(utc, 8 * 3_600_000), (2026, 10, 12));
+		assert_eq!(date_at(utc, -5 * 3_600_000), (2026, 10, 11));
+		assert_eq!(date_at(utc, -17 * 3_600_000), (2026, 10, 10));
+		// The offset is in hours, so 24 is a whole day on.
+		assert_eq!(date_at(utc, 24 * 3_600_000), (2026, 10, 12));
+	}
 }

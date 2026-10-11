@@ -3077,6 +3077,7 @@ dependencies = [
  "js-sys",
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_data",
+ "oxedyne_fe2o3_datime",
  "oxedyne_fe2o3_font",
  "oxedyne_fe2o3_geom",
  "oxedyne_fe2o3_graphics",
