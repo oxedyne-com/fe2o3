@@ -1,3 +1,4 @@
+use crate::app::server::VhostDb;
 use crate::srv::{
     admin::{
         handler as admin_handler,
@@ -8,6 +9,7 @@ use crate::srv::{
     api::{
         self,
         ApiHandlerRegistry,
+        HandlerCtx,
     },
     cache,
     cfg::{
@@ -17,6 +19,11 @@ use crate::srv::{
     },
     dev::refresh::HtmlModifier,
     console as site_console,
+    context::VhostDbs,
+    id::{
+        self as steel_id,
+        Uid,
+    },
     publish::{
         self,
         PublishConfig,
@@ -112,6 +119,39 @@ enum Routed {
     Slash(String),  // a directory named without its slash, and where the slash form lives
 }
 
+/// One vhost's entry in Steel's database map, read at each request: the map is empty while Steel
+/// is sealed and filled when it is unsealed, so a handler sees the database from that moment on.
+#[derive(Clone)]
+pub struct VhostDbRef {
+    dbs:    VhostDbs<{ steel_id::UID_LEN }, Uid, VhostDb>,
+    key:    String,     // the vhost's primary hostname, lower case
+}
+
+impl VhostDbRef {
+    pub fn new(dbs: VhostDbs<{ steel_id::UID_LEN }, Uid, VhostDb>, vhost: &str) -> Self {
+        Self { dbs, key: vhost.to_lowercase() }
+    }
+
+    pub fn get(&self) -> Option<(Arc<RwLock<VhostDb>>, Uid)> {
+        match self.dbs.read() {
+            Ok(g)   => g.get(&self.key).cloned(),
+            Err(_)  => {
+                // As `ServerContext::db_for_vhost`: a map nobody can read is a vhost with no
+                // database, which a handler answers as it does while sealed.
+                fault!("The vhost database map lock is poisoned; treating '{}' as having no \
+                    database.", self.key);
+                None
+            }
+        }
+    }
+}
+
+impl Debug for VhostDbRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VhostDbRef({})", self.key)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AppWebHandler<
     M: MapMut<String, OsPath> + Clone + Debug + Send + Sync,
@@ -134,6 +174,7 @@ pub struct AppWebHandler<
     pub mail:                   Option<Arc<MailSender>>,
     pub site_admins:            Arc<Vec<String>>,
     pub admin_dashboard:        bool,   // `false` answers 404 for `/admin` and everything under it
+    pub vhost_db:               Option<VhostDbRef>, // what `HandlerCtx::db` is read from
 }
 
 impl<
@@ -177,6 +218,19 @@ impl<
             mail,
             site_admins,
             admin_dashboard:    true,
+            vhost_db:           None,
+        }
+    }
+
+    pub fn with_vhost_db(mut self, db: VhostDbRef) -> Self {
+        self.vhost_db = Some(db);
+        self
+    }
+
+    fn vhost_db(&self) -> Option<(Arc<RwLock<VhostDb>>, Uid)> {
+        match &self.vhost_db {
+            Some(r) => r.get(),
+            None    => None,
         }
     }
 
@@ -309,6 +363,7 @@ impl<
         // it: `request_path` never carries one, and splitting it on `?` finds nothing.
         let request_query = loc.query.clone();
         let api_routes = self.api_routes.clone();
+        let vhost_db = self.vhost_db();
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
         let upstream = UpstreamBounds::of(&self.cfg);
@@ -696,24 +751,27 @@ impl<
             // third-party APIs that the app wants to mirror through
             // Steel so browser calls pick up the operator-supplied
             // headers (auth tokens, rate-limit keys).
-            if let Some(route) = api_routes.iter().find(|r| r.path == request_path) {
+            // A handler that declines (`None`) leaves the path to the static files below.
+            if let Some(route) = ApiRoute::find(&api_routes, &request_path) {
                 if route.handler.is_some() {
                     debug!("{}: GET {} -> api handler '{}'",
                         id, request_path,
                         route.handler.as_deref().unwrap_or("?"));
-                    let resp = res!(api::dispatch(
-                        &api_handler_registry,
+                    let ctx = HandlerCtx {
                         route,
-                        HttpMethod::GET,
-                        &loc,
-                        &[],
-                        &req_headers,
-                        &tls_client,
-                        &id,
-                    ).await);
-                    return Ok(Some(resp));
-                }
-                if route.upstream_host.is_some() {
+                        method:         HttpMethod::GET,
+                        loc:            &loc,
+                        body:           &[],
+                        req_headers:    &req_headers,
+                        tls_client:     &tls_client,
+                        id:             &id,
+                        peer,
+                        db:             vhost_db,
+                    };
+                    if let Some(resp) = res!(api::dispatch_ctx(&api_handler_registry, ctx).await) {
+                        return Ok(Some(resp));
+                    }
+                } else if route.upstream_host.is_some() {
                     let resp = res!(forward_api_proxy(
                         route,
                         HttpMethod::GET,
@@ -1006,6 +1064,7 @@ impl<
         let request_query = loc.query.clone();
         let id = id.to_string();
         let api_routes = self.api_routes.clone();
+        let vhost_db = self.vhost_db();
         let webhook_routes = self.webhook_routes.clone();
         let webhook_registry = self.webhook_registry.clone();
         let api_handler_registry = self.api_handler_registry.clone();
@@ -1295,33 +1354,37 @@ impl<
             }
 
             // Find a matching API route.
-            let route = match api_routes.iter().find(|r| r.path == request_path) {
+            let no_route = || HttpMessage::respond_with_text(
+                HttpStatus::NotFound,
+                "No API route matches this path.",
+            );
+            let route = match ApiRoute::find(&api_routes, &request_path) {
                 Some(r) => r,
                 None => {
                     debug!("{}: POST {} -- no matching API route.", id, request_path);
-                    return Ok(Some(HttpMessage::respond_with_text(
-                        HttpStatus::NotFound,
-                        "No API route matches this path.",
-                    )));
+                    return Ok(Some(no_route()));
                 }
             };
 
-            // In-process handler path: dispatch to the registered ApiHandler.
+            // In-process handler path: dispatch to the registered ApiHandler. A POST has no
+            // static file to fall through to, so a handler that declines is a 404.
             if route.handler.is_some() {
                 debug!("{}: POST {} -> api handler '{}'",
                     id, request_path,
                     route.handler.as_deref().unwrap_or("?"));
-                let resp = res!(api::dispatch(
-                    &api_handler_registry,
+                let ctx = HandlerCtx {
                     route,
-                    HttpMethod::POST,
-                    &loc,
-                    &body,
-                    &req_headers,
-                    &tls_client,
-                    &id,
-                ).await);
-                return Ok(Some(resp));
+                    method:         HttpMethod::POST,
+                    loc:            &loc,
+                    body:           &body,
+                    req_headers:    &req_headers,
+                    tls_client:     &tls_client,
+                    id:             &id,
+                    peer,
+                    db:             vhost_db,
+                };
+                let resp = res!(api::dispatch_ctx(&api_handler_registry, ctx).await);
+                return Ok(Some(resp.unwrap_or_else(no_route)));
             }
 
             // Proxy path: forward to the upstream via the shared helper.
@@ -1336,6 +1399,67 @@ impl<
                 &id,
             ).await);
             Ok(Some(resp))
+        }
+    }
+
+    /// A `PUT`, `DELETE` or `PATCH` reaches an in-process handler route and nothing else: no
+    /// static file takes one, and a proxy route forwards `GET` and `POST` alone. `None`, which
+    /// the server answers with a `405`, everywhere else.
+    fn handle_other<
+        const SIDL: usize,
+        const UIDL: usize,
+        SID:    NumIdDat<SIDL> + 'static,
+        UID:    NumIdDat<UIDL> + 'static,
+        ENC:    Encrypter,
+        KH:     Hasher,
+        DB:     Database<UIDL, UID, ENC, KH>,
+    >(
+        &self,
+        method:         HttpMethod,
+        loc:            HttpLocator,
+        body:           Vec<u8>,
+        req_headers:    Arc<HeaderFields>,
+        _db:            Option<(Arc<RwLock<DB>>, UID)>,
+        _sid_opt:       &Option<SID>,
+        peer:           SocketAddr,
+        id:             &String,
+    )
+        -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
+    {
+        let request_path = loc.path.as_string().to_string();
+        let id = id.to_string();
+        let api_routes = self.api_routes.clone();
+        let vhost_db = self.vhost_db();
+        let api_handler_registry = self.api_handler_registry.clone();
+        let tls_client = self.tls_client.clone();
+        let admin_dashboard = self.admin_dashboard;
+
+        async move {
+            if !admin_dashboard && is_admin_path(&request_path) {
+                return Ok(Some(HttpMessage::respond_with_text(
+                    HttpStatus::NotFound,
+                    "Not found.",
+                )));
+            }
+            let route = match ApiRoute::find(&api_routes, &request_path) {
+                Some(r) if r.handler.is_some()  => r,
+                _                               => return Ok(None),
+            };
+            debug!("{}: {} {} -> api handler '{}'",
+                id, method, request_path,
+                route.handler.as_deref().unwrap_or("?"));
+            let ctx = HandlerCtx {
+                route,
+                method,
+                loc:            &loc,
+                body:           &body,
+                req_headers:    &req_headers,
+                tls_client:     &tls_client,
+                id:             &id,
+                peer,
+                db:             vhost_db,
+            };
+            api::dispatch_ctx(&api_handler_registry, ctx).await
         }
     }
 }

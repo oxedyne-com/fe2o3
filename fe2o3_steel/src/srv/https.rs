@@ -765,10 +765,37 @@ impl<
                                         ).await;
                                         response = res!(result);
                                     }
-                                    _ => if logged {
-                                        fault!("{}: Unsupported HTTP request method '{}'.",
-                                            id, method);
-                                    },
+                                    // These reach an in-process handler route, through
+                                    // `handle_ctx`, and nothing else. Every other method, and
+                                    // these where no handler takes them, is a 405: a request
+                                    // left unanswered holds its client until the read times
+                                    // out.
+                                    HttpMethod::PUT | HttpMethod::DELETE | HttpMethod::PATCH => {
+                                        let vhost_db = self.db_for_vhost(
+                                            vhost.primary_hostname(),
+                                        );
+                                        let result = vhost.web_handler.handle_other(
+                                            method,
+                                            loc,
+                                            body,
+                                            req_headers.clone(),
+                                            vhost_db,
+                                            &sid_opt,
+                                            src_addr,
+                                            &id,
+                                        ).await;
+                                        response = match res!(result) {
+                                            Some(r) => Some(r),
+                                            None    => Some(method_not_allowed()),
+                                        };
+                                    }
+                                    HttpMethod::OPTIONS
+                                    | HttpMethod::TRACE
+                                    | HttpMethod::CONNECT => {
+                                        alog!(logged, log_level,
+                                            "{}: {} is not served; 405.", id, method);
+                                        response = Some(method_not_allowed());
+                                    }
                                 }
                             }
                         }
@@ -1296,6 +1323,17 @@ pub enum TerminalGate {
     Dispatch,
     NotEnabled,
     NotAuthenticated,
+}
+
+/// The answer to a method Steel serves nowhere on this path.
+fn method_not_allowed() -> HttpMessage {
+    HttpMessage::respond_with_text(
+        HttpStatus::MethodNotAllowed,
+        "Method not allowed.",
+    ).with_field(
+        HeaderName::Allow,
+        HeaderFieldValue::Generic(fmt!("GET, HEAD, POST")),
+    )
 }
 
 /// Decides whether to dispatch an upgrade to the terminal bridge.

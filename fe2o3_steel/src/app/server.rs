@@ -2,7 +2,10 @@ use crate::{
     app::{
         self,
         constant as app_const,
-        https::AppWebHandler,
+        https::{
+            AppWebHandler,
+            VhostDbRef,
+        },
         repl::AppShellContext,
     },
     srv::{
@@ -726,7 +729,8 @@ impl AppShellContext {
                 publish,
                 mail_sender.clone(),
                 Arc::new(vh.site_admins.clone()),
-            ).with_admin_dashboard(vh.admin_dashboard);
+            ).with_admin_dashboard(vh.admin_dashboard)
+            .with_vhost_db(VhostDbRef::new(vhost_dbs.clone(), vh.primary_hostname()));
 
             // One terminal manager per vhost, built only where the config asks
             // for it. It is shared two ways: attached to the WS syntax handler
@@ -944,7 +948,7 @@ pub fn build_outbound_tls_client()
 // │ DATABASE OPENER AND CLOSER                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-type VhostDb = O3db<
+pub type VhostDb = O3db<
     { id::UID_LEN },
     id::Uid,
     EncryptionScheme,

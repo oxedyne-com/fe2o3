@@ -14,11 +14,21 @@
 /// that expects a response every time, so `ApiHandler::handle`
 /// returns `HttpMessage` unconditionally.
 
-use crate::srv::cfg::ApiRoute;
+use crate::{
+    app::server::VhostDb,
+    srv::{
+        cfg::ApiRoute,
+        id::Uid,
+    },
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
-    fields::HeaderFields,
+    fields::{
+        HeaderFieldValue,
+        HeaderFields,
+        HeaderName,
+    },
     header::HttpMethod,
     loc::HttpLocator,
     msg::HttpMessage,
@@ -28,8 +38,15 @@ use oxedyne_fe2o3_net::http::{
 use std::{
     collections::HashMap,
     future::Future,
+    net::{
+        IpAddr,
+        SocketAddr,
+    },
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        RwLock,
+    },
 };
 use tokio_rustls::rustls::ClientConfig;
 
@@ -56,6 +73,65 @@ pub trait ApiHandler: Send + Sync + 'static {
         tls_client:     &'a Option<Arc<ClientConfig>>,
         id:             &'a str,
     ) -> Pin<Box<dyn Future<Output = Outcome<HttpMessage>> + Send + 'a>>;
+
+    /// What Steel calls. A handler that needs the peer, the vhost's database or the right to
+    /// decline overrides this; the default hands the request to `handle`, so every handler
+    /// written before it is served as it was. `None` declines: Steel then serves the path from
+    /// `www/` as though no route had matched, so a prefix handler on `/` leaves the static
+    /// files to Steel.
+    fn handle_ctx<'a>(
+        &'a self,
+        ctx: HandlerCtx<'a>,
+    ) -> Pin<Box<dyn Future<Output = Outcome<Option<HttpMessage>>> + Send + 'a>> {
+        Box::pin(async move {
+            let resp = res!(self.handle(
+                ctx.route,
+                ctx.method,
+                ctx.loc,
+                ctx.body,
+                ctx.req_headers,
+                ctx.tls_client,
+                ctx.id,
+            ).await);
+            Ok(Some(resp))
+        })
+    }
+}
+
+/// Everything `ApiHandler::handle` is given, and what it is not: the connection's peer, the
+/// vhost's database and the method of a `PUT`, `DELETE` or `PATCH`. A `HEAD` arrives as `GET`
+/// with `head_only` set in `loc.data`, as it does for `handle`.
+pub struct HandlerCtx<'a> {
+    pub route:          &'a ApiRoute,
+    pub method:         HttpMethod,
+    pub loc:            &'a HttpLocator,
+    pub body:           &'a [u8],
+    pub req_headers:    &'a HeaderFields,
+    pub tls_client:     &'a Option<Arc<ClientConfig>>,
+    pub id:             &'a str,
+    pub peer:           SocketAddr,                         // the TCP peer, never a header
+    pub db:             Option<(Arc<RwLock<VhostDb>>, Uid)>, // `None` while Steel is sealed
+}
+
+impl<'a> HandlerCtx<'a> {
+    /// The client's address. Behind a Steel on this host the TCP peer is loopback, and the
+    /// front Steel's `X-Forwarded-For` -- which it rewrites, keeping no client-sent copy -- names
+    /// the client as its last entry. From any other peer the header is the client's own claim,
+    /// so the peer is the answer.
+    pub fn client(&self) -> IpAddr {
+        if !self.peer.ip().is_loopback() {
+            return self.peer.ip();
+        }
+        let last = match self.req_headers.get_last(&HeaderName::from("x-forwarded-for")) {
+            Some(HeaderFieldValue::Generic(v))  => v.rsplit(',').next().map(|s| s.trim().to_string()),
+            Some(other)                         => Some(other.to_string()),
+            None                                => None,
+        };
+        match last.and_then(|s| s.parse::<IpAddr>().ok()) {
+            Some(ip)    => ip,
+            None        => self.peer.ip(),
+        }
+    }
 }
 
 
@@ -147,6 +223,37 @@ pub async fn dispatch(
                 HttpStatus::NotFound,
                 "Unknown API handler.",
             ))
+        }
+    }
+}
+
+/// Steel's own dispatch, through `handle_ctx`. `None` when the handler declines, so the caller
+/// falls through to static serving.
+pub async fn dispatch_ctx(
+    registry:   &ApiHandlerRegistry,
+    ctx:        HandlerCtx<'_>,
+)
+    -> Outcome<Option<HttpMessage>>
+{
+    let handler_name = match &ctx.route.handler {
+        Some(n) => n,
+        None => {
+            warn!("{}: API route '{}' reached dispatch with no handler name.",
+                ctx.id, ctx.route.path);
+            return Ok(Some(HttpMessage::respond_with_text(
+                HttpStatus::InternalServerError,
+                "API route misconfigured: no handler name.",
+            )));
+        }
+    };
+    match registry.handlers.get(handler_name) {
+        Some(handler) => handler.handle_ctx(ctx).await,
+        None => {
+            warn!("{}: No registered API handler '{}'.", ctx.id, handler_name);
+            Ok(Some(HttpMessage::respond_with_text(
+                HttpStatus::NotFound,
+                "Unknown API handler.",
+            )))
         }
     }
 }

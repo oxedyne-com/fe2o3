@@ -181,6 +181,12 @@ impl ApiRoute {
                 "ApiRoute: 'path' field is required and must be a string.";
                 Invalid, Input, Missing)),
         };
+        if path.contains('*') {
+            return Err(err!(
+                "ApiRoute '{}': a path holds no '*'. A route that owns a subtree says \
+                'prefix: true'.", path;
+                Invalid, Input));
+        }
         // Either `upstream` (proxy) or `handler` (in-process). Not both.
         let upstream_str = match m.get(&dat!("upstream")) {
             Some(Dat::Str(s)) => Some(s.clone()),
@@ -207,6 +213,21 @@ impl ApiRoute {
                 both.", path;
                 Invalid, Input, Conflict)),
             _ => {}
+        }
+        // A prefix route hands its whole subtree to a handler. A proxy that wants a subtree is a
+        // `proxy_routes` entry, which already forwards the remainder of the path.
+        let prefix = match m.get(&dat!("prefix")) {
+            Some(Dat::Bool(b))  => *b,
+            None                => false,
+            _ => return Err(err!(
+                "ApiRoute '{}': 'prefix' must be a boolean when present.", path;
+                Invalid, Input, Mismatch)),
+        };
+        if prefix && upstream_str.is_some() {
+            return Err(err!(
+                "ApiRoute '{}': 'prefix' applies to handler routes only. A proxy for a whole \
+                subtree is a 'proxy_routes' entry.", path;
+                Invalid, Input, Conflict));
         }
         // Parse upstream URL into host, port, path, scheme (proxy mode only).
         let (upstream_host, upstream_port, upstream_path, upstream_tls) = match upstream_str {
@@ -263,6 +284,12 @@ impl ApiRoute {
             None => Vec::new(),
             _ => Vec::new(),
         };
+        // A prefix route is held under its pattern, `/edit/*`, so the route table needs no field
+        // beyond the path and an exact `/edit` and a prefix `/edit` stay two routes.
+        let path = match prefix {
+            true    => fmt!("{}/*", path.trim_end_matches('/')),
+            false   => path,
+        };
         Ok(Self {
             path,
             upstream_host,
@@ -273,6 +300,55 @@ impl ApiRoute {
             handler,
             config,
         })
+    }
+
+    /// The route that answers `path`, if any: the longest matching route wins, and an exact route
+    /// beats a prefix route of the same path.
+    pub fn find<'a>(routes: &'a [ApiRoute], path: &str) -> Option<&'a ApiRoute> {
+        routes.iter()
+            .filter(|r| r.matches(path))
+            .max_by_key(|r| (r.base().len(), !r.is_prefix()))
+    }
+
+    /// Does this route own the subtree under its path (config `prefix: true`)?
+    pub fn is_prefix(&self) -> bool {
+        self.path.ends_with("/*")
+    }
+
+    /// The path a prefix route owns the subtree of, `/edit` for `/edit/*` and `/` for `/*`; the
+    /// path itself for an exact route.
+    pub fn base(&self) -> &str {
+        match self.path.strip_suffix("/*") {
+            Some("")    => "/",
+            Some(b)     => b,
+            None        => self.path.as_str(),
+        }
+    }
+
+    /// Does this route answer `path`? An exact route answers its own path alone. A prefix route
+    /// answers its base and every path beneath it, on a segment boundary -- `/edit` owns `/edit/x`
+    /// but not `/editor` -- and never one whose remainder holds a `.` or `..` segment, which would
+    /// hand a handler a path naming somewhere outside the subtree it owns.
+    pub fn matches(&self, path: &str) -> bool {
+        if !self.is_prefix() {
+            return path == self.path;
+        }
+        let base = self.base();
+        if path == base {
+            return true;
+        }
+        let rest = match path.strip_prefix(base) {
+            Some(r) => r,
+            None    => return false,
+        };
+        let rest = match base.ends_with('/') {
+            true    => rest,
+            false   => match rest.strip_prefix('/') {
+                Some(r) => r,
+                None    => return false,
+            },
+        };
+        !rest.split('/').any(|seg| seg == "." || seg == "..")
     }
 
     pub fn get_config(&self, key: &str) -> Option<&str> {
@@ -3329,6 +3405,60 @@ impl AdminKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn route_map(path: &str, prefix: Option<bool>, upstream: Option<&str>) -> DaticleMap {
+        let mut m = DaticleMap::new();
+        m.insert(dat!("path"), dat!(path));
+        match upstream {
+            Some(u) => { m.insert(dat!("upstream"), dat!(u)); }
+            None    => { m.insert(dat!("handler"), dat!("h")); }
+        }
+        if let Some(p) = prefix {
+            m.insert(dat!("prefix"), Dat::Bool(p));
+        }
+        m
+    }
+
+    #[test]
+    fn test_api_route_prefix_parse_00() -> Outcome<()> {
+        let r = res!(ApiRoute::from_datmap(&route_map("/edit", Some(true), None)));
+        assert_eq!(r.path, "/edit/*");
+        assert!(r.is_prefix());
+        assert_eq!(r.base(), "/edit");
+        let r = res!(ApiRoute::from_datmap(&route_map("/", Some(true), None)));
+        assert_eq!((r.path.as_str(), r.base()), ("/*", "/"));
+        let r = res!(ApiRoute::from_datmap(&route_map("/edit", None, None)));
+        assert!(!r.is_prefix());
+        // A proxy owns no subtree here, and a path may not spell the pattern itself.
+        assert!(ApiRoute::from_datmap(
+            &route_map("/edit", Some(true), Some("https://api.example.com/x"))).is_err());
+        assert!(ApiRoute::from_datmap(&route_map("/edit/*", None, None)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_api_route_find_precedence_00() -> Outcome<()> {
+        let routes = vec![
+            res!(ApiRoute::from_datmap(&route_map("/", Some(true), None))),
+            res!(ApiRoute::from_datmap(&route_map("/edit", Some(true), None))),
+            res!(ApiRoute::from_datmap(&route_map("/edit", None, None))),
+            res!(ApiRoute::from_datmap(&route_map("/edit/raw", None, None))),
+        ];
+        let found = |p: &str| ApiRoute::find(&routes, p).map(|r| r.path.clone());
+        assert_eq!(found("/edit"),          Some(fmt!("/edit")));       // exact beats prefix
+        assert_eq!(found("/edit/x"),        Some(fmt!("/edit/*")));
+        assert_eq!(found("/edit/x/y"),      Some(fmt!("/edit/*")));
+        assert_eq!(found("/edit/raw"),      Some(fmt!("/edit/raw")));   // longest wins
+        assert_eq!(found("/editor"),        Some(fmt!("/*")));          // segment boundary
+        assert_eq!(found("/edit/../admin"), None);                     // no dot segments
+        assert_eq!(found("/edit/./x"),      None);
+        assert_eq!(found("/"),              Some(fmt!("/*")));
+        // Without the root prefix, a path beside the subtree reaches nothing.
+        let routes = vec![res!(ApiRoute::from_datmap(&route_map("/edit", Some(true), None)))];
+        assert!(ApiRoute::find(&routes, "/edit/..").is_none());
+        assert!(ApiRoute::find(&routes, "/editor").is_none());
+        Ok(())
+    }
 
     /// A whitelist address parses to an `IpAddr`, and a malformed one is a hard
     /// error rather than a silent skip -- the whole point of the entry is to keep
