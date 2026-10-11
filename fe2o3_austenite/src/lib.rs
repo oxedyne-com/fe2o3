@@ -29,6 +29,7 @@
 //! Anthropic Claude
 
 pub mod bib;
+pub mod bib_hayagriva;
 pub mod book;
 pub mod caches;
 pub mod compile;

@@ -1,0 +1,95 @@
+# Reduced from the Universe corpus (casson-uom-thesis, jaconf-mscs, ost-ifs-thesis, ensl-internship and others).
+jCAS10:
+    type: Article
+    title: Wearable electroencephalography
+    author: ["Casson, Alexander J.", "Yates, David C.", "Smith, Shelagh J.M."]
+    page-range: 44-56
+    date: 2010
+    parent:
+        type: Periodical
+        title: IEEE Eng. Biol. Med. Mag.
+        volume: 29
+        issue: 3
+        publisher: IEEE
+
+kimura2021:
+    type: Article
+    author:  ["Kimura, Shunsuke", "Naito,  Kakuya"]
+    title: Control barrier function based assist control
+    date: 2021
+    parent:
+        - type: Proceedings
+          title: IECON2021 - 47th annual conference of the IEEE industrial electronics society
+
+khalil2002:
+    type: Book
+    title: Control of nonlinear systems
+    author: Khalil, Hassan K
+    publisher: Pearson Education
+    edition: 3
+    date: 2002
+
+sample-book:
+  type: book
+  title: "An Example Book Title"
+  author:
+    - Author, Third
+    - Bennett, C.
+  date: 2021-03-14
+  publisher:
+    name: Example Press
+    location: New York
+
+chap:
+  type: chapter
+  title: Interpolation of operators
+  author: Sharpley, R.
+  page-range: 12-30
+  date: 1988
+  parent:
+    type: anthology
+    title: Pure and Applied Mathematics
+    editor: ["Bennett, Colin", "Doe, Jane"]
+    publisher:
+      name: Academic Press
+      location: Boston
+
+thesis1:
+  type: thesis
+  title: A layered storage framework
+  author: Hartwell, Elena Mavis
+  organization: Chalmers University of Technology
+  date: 2026-02
+
+web1:
+  type: Web
+  title:
+    value: "Diese Städte zittern um VW-Milliarden"
+    short: "VW"
+  author: Spiegel Online
+  url:
+    value: https://example.org/resources/vw
+    date: 2024-03-30
+  date: 2023
+
+doi1:
+  type: article
+  title: "Literate programming"
+  author: ["Knuth, Donald E."]
+  date: 1984
+  serial-number:
+    doi: 10.1093/comjnl/27.2.97
+  parent:
+    type: periodical
+    title: The Computer Journal
+    volume: 27
+    issue: 2
+  page-range: 97-111
+
+report1:
+  type: report
+  title: Annual energy outlook
+  author: International Energy Agency
+  organization: IEA
+  date: 2020
+  serial-number: TR-42

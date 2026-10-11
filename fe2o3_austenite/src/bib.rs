@@ -34,6 +34,7 @@ pub enum EntryKind {
 	Unpublished,
 	PhdThesis,
 	MastersThesis,
+	Thesis,			// BibLaTeX's `@thesis` and Hayagriva's `thesis`: no kind of thesis implied
 	Misc,
 }
 
@@ -48,7 +49,8 @@ impl EntryKind {
 			"report"				=> Self::Report,
 			"online" | "electronic" | "misc"	=> Self::Online,
 			"unpublished"				=> Self::Unpublished,
-			"phdthesis" | "thesis"			=> Self::PhdThesis,
+			"phdthesis"				=> Self::PhdThesis,
+			"thesis"				=> Self::Thesis,
 			"mastersthesis"				=> Self::MastersThesis,
 			_					=> Self::Misc,
 		}
@@ -65,6 +67,15 @@ pub struct Name {
 }
 
 impl Name {
+	pub fn personal<F: Into<String>, G: Into<String>>(family: F, given: G) -> Self {
+		Self { family: family.into(), given: given.into(), corporate: false }
+	}
+
+	/// A name kept whole, never inverted: an organisation, or a single name with no given part.
+	pub fn literal<S: Into<String>>(name: S) -> Self {
+		Self { family: name.into(), given: String::new(), corporate: true }
+	}
+
 	pub fn family(&self) -> &str { &self.family }
 	pub fn given(&self)  -> &str { &self.given }
 	pub fn is_corporate(&self) -> bool { self.corporate }
@@ -89,18 +100,27 @@ impl Name {
 	}
 }
 
-/// A parsed BibTeX entry. Fields are held decoded (LaTeX accents and escapes resolved) in file
-/// order; a reader wanting a raw field asks by name through [`Entry::field`].
+/// A bibliography entry, from BibTeX or Hayagriva YAML. Fields are held decoded (LaTeX accents and
+/// escapes resolved) in file order under their BibTeX names, and asked for through [`Entry::field`];
+/// authors and editors are held as names, parsed once.
 #[derive(Clone, Debug)]
 pub struct Entry {
-	key:    String,
-	kind:   EntryKind,
-	fields: Vec<(String, String)>,
+	key:		String,
+	kind:		EntryKind,
+	fields:		Vec<(String, String)>,
+	authors:	Vec<Name>,
+	editors:	Vec<Name>,
 }
 
 impl Entry {
+	pub fn new(key: String, kind: EntryKind, fields: Vec<(String, String)>, authors: Vec<Name>, editors: Vec<Name>) -> Self {
+		Self { key, kind, fields, authors, editors }
+	}
+
 	pub fn key(&self)  -> &str { &self.key }
 	pub fn kind(&self) -> EntryKind { self.kind }
+	pub fn authors(&self) -> &[Name] { &self.authors }
+	pub fn editors(&self) -> &[Name] { &self.editors }
 
 	/// Returns the decoded value of a field by name, case-insensitively.
 	pub fn field(&self, name: &str) -> Option<&str> {
@@ -111,12 +131,10 @@ impl Entry {
 
 	/// The names credited for citation: authors, or editors when there is no author.
 	pub fn credited(&self) -> Vec<Name> {
-		match self.field("author") {
-			Some(a) => parse_names(a),
-			None    => match self.field("editor") {
-				Some(e) => parse_names(e),
-				None    => Vec::new(),
-			},
+		if self.authors.is_empty() {
+			self.editors.clone()
+		} else {
+			self.authors.clone()
 		}
 	}
 
@@ -196,6 +214,22 @@ impl Bibliography {
 		}
 		Ok(Self { entries, index, cited: Vec::new() })
 	}
+
+	/// A bibliography of entries read elsewhere (another source format, or several sources joined); an
+	/// entry with a duplicate key keeps the first seen, as [`Bibliography::parse`] does.
+	pub fn from_entries(all: Vec<Entry>) -> Self {
+		let mut entries: Vec<Entry> = Vec::with_capacity(all.len());
+		let mut index:   BTreeMap<String, usize> = BTreeMap::new();
+		for entry in all {
+			if !index.contains_key(&entry.key) {
+				index.insert(entry.key.clone(), entries.len());
+				entries.push(entry);
+			}
+		}
+		Self { entries, index, cited: Vec::new() }
+	}
+
+	pub fn into_entries(self) -> Vec<Entry> { self.entries }
 
 	pub fn len(&self) -> usize { self.entries.len() }
 	pub fn is_empty(&self) -> bool { self.entries.is_empty() }
@@ -328,6 +362,8 @@ fn parse_entry(chars: &[char], start: usize) -> Outcome<(Option<Entry>, usize)> 
 		i += 1;
 	}
 	let mut fields: Vec<(String, String)> = Vec::new();
+	let mut authors: Vec<Name> = Vec::new();
+	let mut editors: Vec<Name> = Vec::new();
 	// Read fields.
 	loop {
 		// Skip separators and whitespace.
@@ -369,22 +405,19 @@ fn parse_entry(chars: &[char], start: usize) -> Outcome<(Option<Entry>, usize)> 
 			// value is one whole `{...}` group, and that surviving group is the only signal that the name is an
 			// organisation and must not be surname-inverted. `decode_value` collapses grouping braces, so
 			// decoding here would erase it and leave "International Energy Agency" to invert to "Agency,
-			// International Energy". These two fields are therefore stored raw; `parse_names` decodes each name
-			// part itself. Every other field is decoded now, as before.
-			let value = if name.eq_ignore_ascii_case("author") || name.eq_ignore_ascii_case("editor") {
-				raw
+			// International Energy". These two fields are therefore parsed from the raw text; `parse_names`
+			// decodes each name part itself. Every other field is decoded now, as before.
+			if name.eq_ignore_ascii_case("author") {
+				authors = parse_names(&raw);
+			} else if name.eq_ignore_ascii_case("editor") {
+				editors = parse_names(&raw);
 			} else {
-				decode_value(&raw)
-			};
-			fields.push((name.clone(), value));
+				fields.push((name.clone(), decode_value(&raw)));
+			}
 		}
 	}
 
-	let entry = Entry {
-		key,
-		kind: EntryKind::from_type(&lower),
-		fields,
-	};
+	let entry = Entry::new(key, EntryKind::from_type(&lower), fields, authors, editors);
 	Ok((Some(entry), i))
 }
 
@@ -892,7 +925,7 @@ impl RunBuilder {
 fn format_reference(entry: &Entry, suffix: &str) -> Reference {
 	let mut b = RunBuilder::new();
 	// Author. Year.
-	let author = author_list(&entry.credited(), entry.field("author").is_none());
+	let author = author_list(&entry.credited(), entry.authors.is_empty());
 	if !author.is_empty() {
 		b.normal(&author);
 		// A name ending in an initial already carries its full stop.
@@ -912,7 +945,7 @@ fn format_reference(entry: &Entry, suffix: &str) -> Reference {
 		EntryKind::InProceedings => format_inproceedings(&mut b, entry),
 		EntryKind::TechReport | EntryKind::Report => format_report(&mut b, entry),
 		EntryKind::Online => format_online(&mut b, entry),
-		EntryKind::PhdThesis | EntryKind::MastersThesis => format_thesis(&mut b, entry),
+		EntryKind::PhdThesis | EntryKind::MastersThesis | EntryKind::Thesis => format_thesis(&mut b, entry),
 		_ => format_book(&mut b, entry),
 	}
 	b.finish(entry.key())
@@ -1008,8 +1041,8 @@ fn format_incollection(b: &mut RunBuilder, entry: &Entry) {
 	if let Some(bt) = &bt {
 		b.italic(bt);
 	}
-	if let Some(ed) = entry.field("editor") {
-		let eds = parse_names(ed);
+	if !entry.editors.is_empty() {
+		let eds = &entry.editors;
 		b.normal(&fmt!(", edited by {}", natural_join(&eds)));
 	}
 	if let Some(bt) = &bt {
@@ -1047,19 +1080,23 @@ fn format_inproceedings(b: &mut RunBuilder, entry: &Entry) {
 	append_url(b, entry);
 }
 
-/// A report: its kind (`Technical Report` with a number, `Technical report` without, unless a `type`
-/// is given) and number, then its place; Typst's Chicago does not set the institution.
+/// A report: its kind (for a `@techreport`, `Technical Report` with a number and `Technical report`
+/// without, unless a `type` is given; a `@report` names none) and number, then its place; Typst's
+/// Chicago does not set the institution.
 fn format_report(b: &mut RunBuilder, entry: &Entry) {
 	if let Some(t) = entry.field("title") {
 		b.italic(&chicago_title_case(t));
 		b.normal(". ");
 	}
 	match entry.field("number") {
-		Some(num) => b.normal(&fmt!("{} No. {}.", entry.field("type").unwrap_or("Technical Report"), num)),
-		None => {
-			b.normal(entry.field("type").unwrap_or("Technical report"));
+		Some(num) => match report_word(entry, "Technical Report") {
+			Some(g)	=> b.normal(&fmt!("{} No. {}.", g, num)),
+			None	=> b.normal(&fmt!("No. {}.", num)),
+		},
+		None => if let Some(g) = report_word(entry, "Technical report") {
+			b.normal(g);
 			b.normal(".");
-		}
+		},
 	}
 	if let Some(a) = entry.field("address") {
 		b.normal(" ");
@@ -1074,20 +1111,37 @@ fn format_thesis(b: &mut RunBuilder, entry: &Entry) {
 	if let Some(t) = entry.field("title") {
 		b.normal("\u{201C}");
 		b.normal(&chicago_title_case(t));
-		b.normal(".\u{201D} ");
+		b.normal(".\u{201D}");
 	}
-	b.normal(thesis_word(entry));
-	b.normal(".");
+	if let Some(g) = thesis_word(entry) {
+		b.normal(" ");
+		b.normal(g);
+		b.normal(".");
+	}
 	append_url(b, entry);
 }
 
-/// What a thesis is called: its `type` field, else Doctoral dissertation or Master's thesis.
-fn thesis_word(entry: &Entry) -> &str {
+/// What a thesis is called: its `type` field, else Doctoral dissertation or Master's thesis; a thesis
+/// of no stated kind (BibLaTeX's `@thesis`) is called nothing.
+fn thesis_word(entry: &Entry) -> Option<&str> {
 	match entry.field("type") {
-		Some(t)	=> t,
+		Some(t)	=> Some(t),
 		None	=> match entry.kind {
-			EntryKind::MastersThesis	=> "Master\u{2019}s thesis",
-			_							=> "Doctoral dissertation",
+			EntryKind::MastersThesis	=> Some("Master\u{2019}s thesis"),
+			EntryKind::PhdThesis		=> Some("Doctoral dissertation"),
+			_							=> None,
+		},
+	}
+}
+
+/// What a report is called: its `type` field, else `techreport` (in the style's casing) for a
+/// `@techreport`; a `@report` is called nothing.
+fn report_word<'a>(entry: &'a Entry, techreport: &'a str) -> Option<&'a str> {
+	match entry.field("type") {
+		Some(t)	=> Some(t),
+		None	=> match entry.kind {
+			EntryKind::TechReport	=> Some(techreport),
+			_						=> None,
 		},
 	}
 }
@@ -1235,6 +1289,18 @@ fn chicago_title_case(title: &str) -> String {
 		let downcase = is_minor && !start_of_clause && k != 0;
 		if downcase {
 			out.push(lowered);
+		} else if w.chars().any(|c| c.is_alphabetic()) && !w.chars().any(|c| c.is_uppercase()) {
+			// An all-lowercase word is capitalised at its first letter; one with a capital anywhere
+			// (`VW-Milliarden`, `iPhone`) is kept as written.
+			let mut done = false;
+			out.push(w.chars().map(|c| {
+				if !done && c.is_alphabetic() {
+					done = true;
+					c.to_uppercase().collect::<String>()
+				} else {
+					c.to_string()
+				}
+			}).collect());
 		} else {
 			out.push(w.to_string());
 		}
@@ -1584,7 +1650,7 @@ fn ieee_quoted(b: &mut RunBuilder, title: &str, close: &str) {
 fn format_ieee(entry: &Entry) -> Reference {
 	let mut b = RunBuilder::new();
 	let names = entry.credited();
-	let authored = !names.is_empty() && entry.field("author").is_some();
+	let authored = !names.is_empty() && !entry.authors.is_empty();
 	if authored {
 		ieee_authors(&mut b, &names);
 		b.normal(", ");
@@ -1619,8 +1685,8 @@ fn format_ieee(entry: &Entry) -> Reference {
 			if let Some(bt) = entry.field("booktitle") {
 				b.italic(bt);
 			}
-			if let Some(ed) = entry.field("editor") {
-				let eds = parse_names(ed);
+			if !entry.editors.is_empty() {
+				let eds = &entry.editors;
 				b.normal(", ");
 				ieee_authors(&mut b, &eds);
 				b.normal(if eds.len() > 1 { ", Eds." } else { ", Ed." });
@@ -1652,26 +1718,28 @@ fn format_ieee(entry: &Entry) -> Reference {
 				b.normal(a);
 				b.normal(",");
 			}
-			b.normal(" ");
-			b.normal(entry.field("type").unwrap_or("technical report"));
-			if let Some(n) = entry.field("number") {
+			// A `@report` implies no kind of report, so it sets only its number; a `@techreport` is a technical one.
+			let genre = report_word(entry, "technical report");
+			let label = match (genre, entry.field("number")) {
+				(Some(g), Some(n))	=> Some(fmt!("{} {}", g, n)),
+				(Some(g), None)		=> Some(g.to_string()),
+				(None, Some(n))		=> Some(n.to_string()),
+				(None, None)		=> None,
+			};
+			let tail: Vec<&str> = label.as_deref().into_iter().chain(year.as_deref()).collect();
+			if !tail.is_empty() {
 				b.normal(" ");
-				b.normal(n);
-			}
-			if let Some(y) = &year {
-				b.normal(", ");
-				b.normal(y);
+				b.normal(&tail.join(", "));
 			}
 			b.normal(".");
 			ieee_doi(&mut b, entry);
 		}
-		EntryKind::PhdThesis | EntryKind::MastersThesis => {
+		EntryKind::PhdThesis | EntryKind::MastersThesis | EntryKind::Thesis => {
 			ieee_quoted(&mut b, title, ",");
-			b.normal(" ");
-			b.normal(thesis_word(entry));
-			if let Some(y) = &year {
-				b.normal(", ");
-				b.normal(y);
+			let tail: Vec<&str> = thesis_word(entry).into_iter().chain(year.as_deref()).collect();
+			if !tail.is_empty() {
+				b.normal(" ");
+				b.normal(&tail.join(", "));
 			}
 			b.normal(".");
 			ieee_doi(&mut b, entry);

@@ -5,7 +5,7 @@
 //
 // Sources are read when the element is constructed and kept on it (Typst keeps the parsed library the
 // same way), so a citation anywhere in the document can be formatted from the bibliography the previous
-// pass found. BibTeX and BibLaTeX sources are read; Hayagriva YAML is refused with a diagnostic. Two
+// pass found. BibTeX and BibLaTeX sources are read, and Hayagriva YAML through `bib_hayagriva`. Two
 // styles are set, IEEE (Typst's default) and Chicago author-date; another style name is an error, since
 // no CSL processor exists yet. Only the document's first bibliography is consulted: `target` and `group`,
 // which split citations across several bibliographies, are accepted but not applied. Adjacent citations
@@ -16,10 +16,12 @@ use crate::bib::{
 	Bibliography,
 	CiteForm,
 	CiteStyle,
+	Entry,
 	ListEntry,
 	RefRun,
 	RefStyle,
 };
+use crate::bib_hayagriva;
 use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
@@ -38,6 +40,7 @@ use crate::eval::lib::model::common::{
 	K,
 };
 use crate::eval::import;
+use crate::eval::lib::data;
 use crate::eval::lib::model::link;
 use crate::eval::lib::model::lookup;
 use crate::eval::select::Selector;
@@ -179,37 +182,43 @@ pub fn construct(engine: &mut Engine, args: &mut Args) -> Outcome<Content> {
 		Some(v)					=> vec![v.clone()],
 		None					=> Vec::new(),
 	};
-	let mut texts = Vec::new();
+	let mut srcs: Vec<(SourceFormat, String)> = Vec::new();
 	for s in sources {
-		let (text, name) = match s {
+		let (text, format) = match s {
 			Value::Str(p) => {
 				let path = res!(import::resolve_path(engine, &p, at.file, at));
 				let bytes = res!(import::read_file(engine, &path, at));
-				match String::from_utf8(bytes) {
-					Ok(t)	=> (t, p.to_string()),
-					Err(_)	=> return Err(engine.error(DiagnosticKind::Encoding, span, "file is not valid utf-8")),
-				}
+				let text = match String::from_utf8(bytes) {
+					Ok(t)	=> t,
+					Err(_)	=> return Err(engine.error(DiagnosticKind::Encoding, at, "file is not valid utf-8")),
+				};
+				// Typst chooses the reader by the path's extension.
+				let lower = p.to_ascii_lowercase();
+				let format = if lower.ends_with(".yml") || lower.ends_with(".yaml") {
+					SourceFormat::Yaml
+				} else if lower.ends_with(".bib") {
+					SourceFormat::Bib
+				} else {
+					return Err(engine.error(DiagnosticKind::Type, at, "unknown bibliography format (must be .yaml/.yml or .bib)"));
+				};
+				(text, format)
 			}
 			Value::Bytes(b) => match String::from_utf8((*b).clone()) {
-				Ok(t)	=> (t, String::new()),
-				Err(_)	=> return Err(engine.error(DiagnosticKind::Encoding, span, "file is not valid utf-8")),
+				Ok(t)	=> {
+					let format = SourceFormat::sniff(&t);
+					(t, format)
+				}
+				Err(_)	=> return Err(engine.error(DiagnosticKind::Encoding, at, "file is not valid utf-8")),
 			},
 			_ => continue,
 		};
-		let lower = name.to_ascii_lowercase();
-		if lower.ends_with(".yml") || lower.ends_with(".yaml") || (!lower.ends_with(".bib") && !text.contains('@')) {
-			return Err(engine.error(DiagnosticKind::Unsupported, span, "Hayagriva YAML bibliographies are not supported yet; use a BibTeX (.bib) file"));
-		}
-		if !name.is_empty() && !lower.ends_with(".bib") {
-			return Err(engine.error(DiagnosticKind::Type, span, "unknown bibliography format (must be .yaml/.yml or .bib)"));
-		}
-		texts.push(text);
+		srcs.push((format, text));
 	}
 	let mut seen: Vec<String> = Vec::new();
 	let mut dups: Vec<String> = Vec::new();
-	for t in &texts {
-		let one = res!(Bibliography::parse(t));
-		for k in one.keys() {
+	for (format, text) in &srcs {
+		for e in res!(read_source(engine, at, *format, text)) {
+			let k = e.key();
 			if seen.iter().any(|s| s == k) {
 				if !dups.iter().any(|d| d == k) {
 					dups.push(k.to_string());
@@ -224,15 +233,70 @@ pub fn construct(engine: &mut Engine, args: &mut Args) -> Outcome<Content> {
 	}
 	let keys: Vec<Value> = seen.into_iter().map(Value::str).collect();
 	elem.set(res!(common::fid(ElemKind::Bibliography, "keys")), Value::array(keys));
-	elem.set(res!(common::fid(ElemKind::Bibliography, "data")),
-		Value::array(texts.into_iter().map(Value::str).collect()));
+	// Each source is kept with its format, so that `works` reads it again with the same reader.
+	elem.set(res!(common::fid(ElemKind::Bibliography, "data")), Value::array(srcs.into_iter()
+		.map(|(f, t)| Value::array(vec![Value::str(f.tag()), Value::str(t)]))
+		.collect()));
 	Ok(elem)
 }
 
-/// The sources as one library.
-fn parse(texts: &[String]) -> Outcome<Bibliography> {
-	let joined = texts.join("\n");
-	Bibliography::parse(&joined)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceFormat {
+	Bib,
+	Yaml,
+}
+
+impl SourceFormat {
+	fn tag(self) -> &'static str {
+		match self {
+			Self::Bib	=> "bib",
+			Self::Yaml	=> "yaml",
+		}
+	}
+
+	fn from_tag(s: &str) -> Option<Self> {
+		match s {
+			"bib"	=> Some(Self::Bib),
+			"yaml"	=> Some(Self::Yaml),
+			_		=> None,
+		}
+	}
+
+	/// Bytes carry no extension: a source with a BibTeX entry opener at the start of a line is BibTeX,
+	/// anything else Hayagriva YAML, where `@` cannot start a plain scalar.
+	fn sniff(text: &str) -> Self {
+		if text.lines().any(|l| l.trim_start().starts_with('@')) {
+			Self::Bib
+		} else {
+			Self::Yaml
+		}
+	}
+}
+
+/// One source's entries, read by its format's reader; a fault is reported at `at`.
+fn read_source(engine: &mut Engine, at: Span, format: SourceFormat, text: &str) -> Outcome<Vec<Entry>> {
+	match format {
+		SourceFormat::Bib	=> Ok(res!(Bibliography::parse(text)).into_entries()),
+		SourceFormat::Yaml	=> {
+			let doc = match data::yaml_parse(text) {
+				Ok(v)			=> v,
+				Err((pos, m))	=> return Err(data::parse_error(engine, at, "YAML", text, pos, &m)),
+			};
+			match bib_hayagriva::entries(&doc) {
+				Ok(es)	=> Ok(es),
+				Err(m)	=> Err(engine.error(DiagnosticKind::Type, at, m)),
+			}
+		}
+	}
+}
+
+/// The sources as one library, an entry's first appearance kept.
+fn parse(engine: &mut Engine, span: Span, srcs: &[(SourceFormat, String)]) -> Outcome<Bibliography> {
+	let mut all = Vec::new();
+	for (format, text) in srcs {
+		all.extend(res!(read_source(engine, span, *format, text)));
+	}
+	Ok(Bibliography::from_entries(all))
 }
 
 /// Does this bibliography element hold `key`?
@@ -266,14 +330,17 @@ fn works(engine: &mut Engine, span: Span) -> Outcome<Works> {
 		Some(b)	=> b,
 		None	=> return Err(engine.error(DiagnosticKind::Type, span, "the document does not contain a bibliography")),
 	};
-	let texts: Vec<String> = match bib.field("data") {
+	let srcs: Vec<(SourceFormat, String)> = match bib.field("data") {
 		Some(Value::Array(a)) => a.iter().filter_map(|v| match v {
-			Value::Str(s)	=> Some(s.to_string()),
-			_				=> None,
+			Value::Array(pair) => match pair.as_slice() {
+				[Value::Str(f), Value::Str(t)]	=> SourceFormat::from_tag(f).map(|f| (f, t.to_string())),
+				_								=> None,
+			},
+			_ => None,
 		}).collect(),
 		_ => Vec::new(),
 	};
-	let lib = res!(parse(&texts));
+	let lib = res!(parse(engine, span, &srcs));
 	let style = match bib.field("style") {
 		Some(Value::Str(s))	=> CiteStyle::by_name(s).unwrap_or(CiteStyle::Ieee),
 		_					=> CiteStyle::Ieee,

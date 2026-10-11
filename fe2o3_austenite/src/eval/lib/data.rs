@@ -94,7 +94,7 @@ fn utf8<'a>(engine: &mut Engine, span: Span, b: &'a [u8]) -> Outcome<&'a str> {
 // A parse failure at a byte offset, as Typst words it: "failed to parse JSON (message at line L column C
 // at L:C)". The column counts the offending character, as serde's does, and at the end of input the
 // characters read.
-fn parse_error(engine: &mut Engine, span: Span, fmt_name: &str, text: &str, at: usize, msg: &str) -> Error<ErrTag> {
+pub(crate) fn parse_error(engine: &mut Engine, span: Span, fmt_name: &str, text: &str, at: usize, msg: &str) -> Error<ErrTag> {
 	let (line, col) = line_col(text, at);
 	engine.error(DiagnosticKind::Type, span, fmt!("failed to parse {} ({} at line {} column {} at {}:{})",
 		fmt_name, msg, line, col, line, col.max(1)))
@@ -1921,7 +1921,7 @@ fn strip_comment(t: &str) -> &str {
 	t.trim_end()
 }
 
-fn yaml_parse(src: &str) -> std::result::Result<Value, (usize, String)> {
+pub(crate) fn yaml_parse(src: &str) -> std::result::Result<Value, (usize, String)> {
 	let mut y = Yaml { lines: Vec::new(), i: 0, anchors: Vec::new(), src, fail: None };
 	match yaml_document(&mut y) {
 		Ok(v)	=> Ok(v),
