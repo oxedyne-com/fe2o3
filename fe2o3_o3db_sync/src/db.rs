@@ -350,7 +350,7 @@ impl<
             }
         }
 
-        // A refused open, or a run stopped by a failed sync, leaves the store refused until an
+        // A refused open, or a run stopped by a failed sync or cut back, leaves the store refused until an
         // operator clears it: the kernel will not report the error to this open again.
         // The refused start lets go of the lock, so the operator can clear the refusal while
         // this process lives on.

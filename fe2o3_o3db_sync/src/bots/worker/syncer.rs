@@ -28,6 +28,7 @@ use crate::{
             Cut,
             DurableMarks,
             Fault,
+            FaultCause,
         },
         msg::OzoneMsg,
         response::Responder,
@@ -471,7 +472,7 @@ impl<
                     index:      live.paths.1.clone(),
                     index_upto: live.sizes.1,
                 };
-                self.shared.fault.raise(&self.shared.root, vec![cut.clone()], &e);
+                self.shared.fault.raise(&self.shared.root, FaultCause::Barrier, vec![cut.clone()], &e);
                 if let Err(e) = self.shared.writer.send(OzoneMsg::Cut(vec![cut])) {
                     error!(sync_log::stream(), err!(e,
                         "{}: The writer could not be told to cut the file it rolled over to after \
@@ -544,7 +545,7 @@ impl<
             "{}: A durability barrier failed.  The store stops writing, and the files in doubt \
             are cut back to their last durable marks: {:?}", self.label, cuts;
             IO, File, Write, Fatal));
-        self.shared.fault.raise(&self.shared.root, cuts.clone(), e);
+        self.shared.fault.raise(&self.shared.root, FaultCause::Barrier, cuts.clone(), e);
         // Every cache bot holding a chunk's answer behind a mark that will not move now hears
         // of the fault, rather than its store waiting out the durability timeout.
         if let Some(fnum) = self.pair.as_ref().map(|p| p.fnum) {

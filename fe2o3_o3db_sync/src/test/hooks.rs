@@ -440,7 +440,8 @@ pub fn writes_torn() -> u64 {
     WRITES_TORN.load(Ordering::SeqCst)
 }
 
-/// How many bytes the append now starting may write before it fails, if it is to fail.
+/// How many bytes the append now starting may write before it fails, if it is to fail.  An
+/// append no longer than that is written whole and disarms the tear without counting it.
 pub(crate) fn write_tears(typ: &FileType) -> Option<u64> {
     let at = match typ {
         FileType::Data  => DATA_TEAR_AT.swap(u64::MAX, Ordering::SeqCst),
@@ -449,8 +450,12 @@ pub(crate) fn write_tears(typ: &FileType) -> Option<u64> {
     if at == u64::MAX {
         return None;
     }
-    WRITES_TORN.fetch_add(1, Ordering::SeqCst);
     Some(at)
+}
+
+// Counts a tear once the append has actually failed short (QA APPENDSEEK F3).
+pub(crate) fn write_torn() {
+    WRITES_TORN.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Makes cutting a torn append back off its live file fail, as a disk that refuses the truncate

@@ -15,7 +15,10 @@ use crate::{
         },
     },
     comm::{
-        channels::Cut,
+        channels::{
+            Cut,
+            FaultCause,
+        },
         msg::StoreRole,
     },
     file::{
@@ -340,9 +343,8 @@ impl<
         if let Some(fault) = self.api().chans().fault().get() {
             self.release_set(&role);
             return Err(err!(
-                "{}: The store stopped writing after a failed sync at {:?} ({}), so the write was \
-                refused.  Restart the store; it recovers from the disk.",
-                self.ozid(), fault.when, fault.error;
+                "{}: {}, so the write was refused.  Restart the store; it recovers from the disk.",
+                self.ozid(), fault.stopped();
                 Write, Fatal));
         }
         // A failed append is cut back off, so the next record starts where this one began.  The
@@ -553,9 +555,8 @@ impl<
         // names the files as they stood.
         if let Some(fault) = self.api().chans().fault().get() {
             return Err(err!(
-                "{}: The store stopped writing after a failed sync at {:?} ({}), so no new live \
-                file was opened.  Restart the store; it recovers from the disk.",
-                self.ozid(), fault.when, fault.error;
+                "{}: {}, so no new live file was opened.  Restart the store; it recovers from \
+                the disk.", self.ozid(), fault.stopped();
                 Write, Fatal));
         }
         let fnum_old = self.lpair().fnum;
@@ -741,7 +742,7 @@ impl<
         };
         error!(sync_log::stream(), e.clone());
         let root = self.api().db_root().to_path_buf();
-        self.api().chans().fault().raise(&root, vec![cut], &e);
+        self.api().chans().fault().raise(&root, FaultCause::CutBack, vec![cut], &e);
         Err(e)
     }
 
@@ -792,6 +793,7 @@ impl<
             }
             done += n;
             if n < vi.len() {
+                hooks::write_torn();
                 return (done, Some(std::io::Error::other(
                     "The append was torn part-way (test::hooks).")));
             }

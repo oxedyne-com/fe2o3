@@ -643,10 +643,72 @@ impl Cut {
     }
 }
 
+/// What stopped a store writing.  Every message about the stop, and the refusal marker's `why`
+/// line, is derived from it, so an operator is sent after the right path (QA APPENDSEEK F1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultCause {
+    Barrier,    // a durability barrier (sync) failed
+    CutBack,    // a torn append could not be cut back off its live pair
+}
+
+impl FaultCause {
+    /// The word for the cause in the fault record and the refusal marker.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Barrier   => "barrier",
+            Self::CutBack   => "cut-back",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word.trim() {
+            "barrier"   => Some(Self::Barrier),
+            "cut-back"  => Some(Self::CutBack),
+            _           => None,
+        }
+    }
+
+    /// The cause named in a fault record or refusal marker text, if it names one.
+    pub fn read(text: &str) -> Option<Self> {
+        text.lines().find_map(|l| l.strip_prefix("cause ").and_then(Self::from_word))
+    }
+
+    /// What failed, as it follows "after" in a message.
+    pub fn what(&self) -> &'static str {
+        match self {
+            Self::Barrier   => "a failed sync",
+            Self::CutBack   => "a failed cut back of a torn append",
+        }
+    }
+
+    /// The marker's `why` line, given the error's plain text.
+    pub fn why(&self, error: &str) -> String {
+        match self {
+            Self::Barrier   => fmt!("a sync failed at run time: {}", error),
+            Self::CutBack   => fmt!("a torn append could not be cut back at run time: {}", error),
+        }
+    }
+
+    /// Where the open cut the files in doubt back to, as it follows "cut back to".
+    pub fn to(&self) -> &'static str {
+        match self {
+            Self::Barrier   => "their last durable marks",
+            Self::CutBack   => "the lengths in the fault record",
+        }
+    }
+}
+
+impl std::fmt::Display for FaultCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.what())
+    }
+}
+
 /// Why and where a store stopped writing.
 #[derive(Clone, Debug)]
 pub struct FaultReport {
     pub when:   SystemTime,
+    pub cause:  FaultCause, // set by the first raise
     pub error:  String,
     pub cuts:   Vec<Cut>,
     pub record: Option<PathBuf>, // the durable fault record, if it could be written
@@ -661,11 +723,17 @@ impl FaultReport {
     pub fn recorded(&self) -> bool {
         self.record.is_some() || self.refusal.is_some()
     }
+
+    /// The headline every refusal on the stopped store leads with, derived from the cause.
+    pub fn stopped(&self) -> String {
+        fmt!("The store stopped writing after {} at {:?} ({})", self.cause, self.when, self.error)
+    }
 }
 
-/// The store's fault: set by the first failed barrier, and never cleared in the process.  After
-/// a failed fsync the page cache cannot be trusted and no later fsync can prove anything, so the
-/// store stops writing and the next open cuts each file in doubt back to its mark.
+/// The store's fault: set by the first failed barrier or failed cut back, and never cleared in
+/// the process.  After a failed fsync the page cache cannot be trusted and no later fsync can
+/// prove anything, so the store stops writing and the next open cuts each file in doubt back to
+/// its mark, or to the length named for it.
 #[derive(Clone, Debug, Default)]
 pub struct Fault(Arc<Mutex<Option<FaultReport>>>);
 
@@ -684,9 +752,18 @@ impl Fault {
 
     /// Sets the fault and writes the record of it into `root`, durably, then the refusal marker
     /// (`Refusal`), so no open replays the store until an operator has looked.  The first raise
-    /// sets the time and the error; a later one adds its cuts.  A record that cannot be written
-    /// leaves the store stopped in this process, and is logged as critical, naming the cuts.
-    pub fn raise(&self, root: &PathBuf, cuts: Vec<Cut>, error: &Error<ErrTag>) -> FaultReport {
+    /// sets the time, the cause and the error; a later one adds its cuts.  A record that cannot
+    /// be written leaves the store stopped in this process, and is logged as critical, naming the
+    /// cuts.
+    pub fn raise(
+        &self,
+        root:   &PathBuf,
+        cause:  FaultCause,
+        cuts:   Vec<Cut>,
+        error:  &Error<ErrTag>,
+    )
+        -> FaultReport
+    {
         let mut f = match self.0.lock() {
             Ok(f)   => f,
             Err(p)  => p.into_inner(),
@@ -703,6 +780,7 @@ impl Fault {
             },
             None => FaultReport {
                 when:   SystemTime::now(),
+                cause,
                 error:  error.plain(), // plain text, for the files an operator reads
                 cuts,
                 record: None,
@@ -716,24 +794,24 @@ impl Fault {
             Err(e) => {
                 report.record = None;
                 error!(sync_log::stream(), err!(e,
-                    "CRITICAL: The store at {:?} stopped after a failed sync, but its fault record \
-                    could not be written, so a restart will not cut the files in doubt unless the \
+                    "CRITICAL: The store at {:?} stopped after {}, but its fault record could \
+                    not be written, so a restart will not cut the files in doubt unless the \
                     refusal marker holds them.  Before restarting, truncate them by hand: {:?}",
-                    root, report.cuts;
+                    root, report.cause, report.cuts;
                     IO, File, Write, Fatal));
             },
         }
         hooks::halt(hooks::Halt::Recorded);
         // The marker is written anew on every raise with every cut, so that either file alone
         // is a whole record, and clearing the marker folds its cuts into the record (QA r2 F2).
-        let why = fmt!("a sync failed at run time: {}", report.error);
-        match Refusal::write(root, &why, &report.cuts) {
+        let why = report.cause.why(&report.error);
+        match Refusal::write(root, &why, Some(report.cause), &report.cuts) {
             Ok(path) => report.refusal = Some(path),
             Err(e) => {
                 report.refusal = None;
                 error!(sync_log::stream(), err!(e,
-                    "The store at {:?} stopped after a failed sync, and its refusal marker could \
-                    not be written with every cut: {:?}", root, report.cuts;
+                    "The store at {:?} stopped after {}, and its refusal marker could not be \
+                    written with every cut: {:?}", root, report.cause, report.cuts;
                     IO, File, Write, Fatal));
             },
         }
@@ -752,7 +830,8 @@ impl Fault {
             return Err(err!("The fault record could not be written (test::hooks)."; IO, Write));
         }
         let secs = report.when.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let mut text = fmt!("when {}\nerror {}\n", secs, report.error.replace('\n', " "));
+        let mut text = fmt!("when {}\ncause {}\nerror {}\n",
+            secs, report.cause.word(), report.error.replace('\n', " "));
         for c in &report.cuts {
             text.push_str(&c.line());
             text.push('\n');
@@ -807,9 +886,17 @@ impl Fault {
         let path = Self::record_path(&root.to_path_buf());
         let marker = Refusal::path(root);
         let mut cuts: Vec<Cut> = Vec::new();
+        // The cause the record or the marker names; one written before causes were kept names
+        // none, and the messages then say only that the store stopped.
+        let mut cause: Option<FaultCause> = None;
         for (src, what) in [(&path, "fault record"), (&marker, "refusal marker")] {
             if !src.exists() {
                 continue;
+            }
+            if cause.is_none() {
+                if let Ok(text) = fs::read_to_string(src) {
+                    cause = FaultCause::read(&text);
+                }
             }
             match Self::read_record(src, zdirs) {
                 Ok(more) => for c in more {
@@ -818,8 +905,8 @@ impl Fault {
                     }
                 },
                 Err(e) => return Err(err!(e,
-                    "The store at {:?} stopped after a failed sync, and its {} {:?} cannot be \
-                    read, so the files in doubt cannot be cut.", root, what, src;
+                    "The store at {:?} stopped writing, and its {} {:?} cannot be read, so the \
+                    files in doubt cannot be cut.", root, what, src;
                     Init, File, Read)),
             }
         }
@@ -827,6 +914,10 @@ impl Fault {
             return Ok(());
         }
         let named = if path.exists() { path.clone() } else { marker.clone() };
+        let (after, to) = match cause {
+            Some(c) => (fmt!(" after {}", c), c.to()),
+            None    => (String::new(), "the lengths named for them"),
+        };
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -837,12 +928,12 @@ impl Fault {
                 Ok((d, i)) => done.push(fmt!("file {} of zone {}: {} data and {} index bytes",
                     c.fnum, c.zone + 1, d, i)),
                 Err(e) => return Err(err!(e,
-                    "The store at {:?} stopped after a failed sync, and file {} of zone {} could \
-                    not be cut back to its durable mark, so it is not opened.  The cut is named \
+                    "The store at {:?} stopped writing{}, and file {} of zone {} could not be \
+                    cut back to the length named for it, so it is not opened.  The cut is named \
                     in {:?}, left over from a stop of the store.  Remove that file only if the \
                     store was restored whole from a copy taken before the stop; otherwise put \
                     the file back, or restore the whole store.",
-                    root, c.fnum, c.zone + 1, named;
+                    root, after, c.fnum, c.zone + 1, named;
                     Init, File, Write)),
             }
         }
@@ -857,8 +948,8 @@ impl Fault {
         }
         res!(crate::file::zdir::sync_dir(root));
         error!(sync_log::stream(), err!(
-            "The store at {:?} had stopped after a failed sync.  The files in doubt were cut back \
-            to their last durable marks before replay: {}.", root, done.join("; ");
+            "The store at {:?} had stopped writing{}.  The files in doubt were cut back to {} \
+            before replay: {}.", root, after, to, done.join("; ");
             Init, File, Fatal));
         Ok(())
     }

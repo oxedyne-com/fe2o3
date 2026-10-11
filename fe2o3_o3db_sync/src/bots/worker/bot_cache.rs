@@ -727,17 +727,17 @@ impl<
     )
         -> Outcome<()>
     {
-        // A store stopped by a failed sync goes on serving reads, but only of records a barrier
+        // A stopped store goes on serving reads, but only of records a barrier
         // proved: anything past a mark is cut at the restart, and must not be read and acted on
         // in the meantime (R4b).
         let chans = self.api().chans();
-        if chans.fault().is_set() {
+        if let Some(fault) = chans.fault().get() {
             if let Some(floc) = self.cache.located(key.as_bytes()) {
                 if !res!(chans.marks().covers(self.wind.z(), floc)) {
                     let e = err!(
-                        "{}: The store stopped writing after a failed sync, and the record cached \
-                        for this key, at {:?}, was never proven durable, so it is not served.  \
-                        Restart the store; it recovers from the disk.", self.ozid(), floc;
+                        "{}: {}, and the record cached for this key, at {:?}, was never proven \
+                        durable, so it is not served.  Restart the store; it recovers from the \
+                        disk.", self.ozid(), fault.stopped(), floc;
                         Read, Fatal);
                     res!(resp_r2.send(OzoneMsg::Error(e)));
                     return Ok(());

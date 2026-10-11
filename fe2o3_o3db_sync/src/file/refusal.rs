@@ -8,7 +8,10 @@
 
 use crate::{
     prelude::*,
-    comm::channels::Cut,
+    comm::channels::{
+        Cut,
+        FaultCause,
+    },
     file::zdir::{
         sync_dir,
         write_whole,
@@ -37,15 +40,21 @@ impl Refusal {
         root.join(constant::REFUSAL_FILENAME)
     }
 
-    /// Leaves the marker, naming `why` and every file in doubt in `cuts`, durably: through a
-    /// synced temporary file, renamed, and the root synced.  The cut lines are the fault
-    /// record's, so the marker alone can stand in for a record that was lost or never written.
-    pub fn write(root: &Path, why: &str, cuts: &[Cut]) -> Outcome<PathBuf> {
+    /// Leaves the marker, naming `why`, the run-time fault's `cause` if a fault left it, and
+    /// every file in doubt in `cuts`, durably: through a synced temporary file, renamed, and the
+    /// root synced.  The cause and cut lines are the fault record's, so the marker alone can
+    /// stand in for a record that was lost or never written.
+    pub fn write(root: &Path, why: &str, cause: Option<FaultCause>, cuts: &[Cut])
+        -> Outcome<PathBuf>
+    {
         if hooks::fault_record_fails() {
             return Err(err!("The refusal marker could not be written (test::hooks)."; IO, Write));
         }
         let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let mut text = fmt!("when {}\nwhy {}\n", secs, why.replace('\n', " "));
+        if let Some(c) = cause {
+            text.push_str(&fmt!("cause {}\n", c.word()));
+        }
         for c in cuts {
             text.push_str(&c.line());
             text.push('\n');
@@ -55,7 +64,7 @@ impl Refusal {
 
     /// Leaves the marker for the open refused by `e`, and returns `e` saying whether it was left.
     pub(crate) fn refuse(root: &Path, e: Error<ErrTag>) -> Error<ErrTag> {
-        match Self::write(root, &e.plain(), &[]) {
+        match Self::write(root, &e.plain(), None, &[]) {
             Ok(path) => err!(e,
                 "The refusal is kept in {:?}, so every later open of the store is refused too, \
                 since the kernel will not report the error again.  Once the files in doubt are \
@@ -151,6 +160,8 @@ impl Refusal {
                 for l in marker.lines() {
                     if let Some(w) = l.strip_prefix("when ") {
                         head.push_str(&fmt!("when {}\n", w));
+                    } else if let Some(w) = l.strip_prefix("cause ") {
+                        head.push_str(&fmt!("cause {}\n", w));
                     } else if let Some(w) = l.strip_prefix("why ") {
                         head.push_str(&fmt!("error {}\n", w));
                     }

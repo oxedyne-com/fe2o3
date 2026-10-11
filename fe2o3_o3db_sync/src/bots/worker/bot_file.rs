@@ -49,7 +49,7 @@ pub enum Hold {
     Readers,    // a read has it open
     Undrained,  // writes not yet accounted for
     Fault,      // the evaluation failed
-    Stopped,    // a failed sync stopped the store
+    Stopped,    // a failed sync or cut back stopped the store
     Unsynced,   // a barrier has yet to cover all of it
 }
 
@@ -707,7 +707,7 @@ impl<
         let self_id = self.ozid().clone();
         let ordered = force == Force::Yes;
         // A collection rewrites its file under the same number, so it must not touch one a cut may
-        // still name (R3), nor anything once a failed sync has stopped the store.
+        // still name (R3), nor anything once the store has stopped writing.
         let chans = self.api().chans();
         let stopped = chans.fault().is_set();
         let unsynced = res!(chans.marks().get(self.wind().z(), fnum)).is_some();

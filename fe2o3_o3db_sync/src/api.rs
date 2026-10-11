@@ -2107,7 +2107,7 @@ impl<
         Ok(map)
     }
 
-    /// Why the store stopped writing, if a failed sync has stopped it.  Reads go on, but only of
+    /// Why the store stopped writing, if a failed sync or a failed cut back has stopped it.  Reads go on, but only of
     /// records a barrier proved; a restart cuts the files in doubt and recovers.
     pub fn fault(&self) -> Option<FaultReport> {
         self.chans().fault().get()
@@ -2125,9 +2125,8 @@ impl<
     pub fn sync_now(&self, wait: Wait) -> Outcome<()> {
         if let Some(fault) = self.fault() {
             return Err(err!(
-                "{}: The store stopped writing after a failed sync at {:?} ({}), so no barrier \
-                can prove anything.  Restart the store; it recovers from the disk.",
-                self.ozid(), fault.when, fault.error;
+                "{}: {}, so no barrier can prove anything.  Restart the store; it recovers \
+                from the disk.", self.ozid(), fault.stopped();
                 Write, Fatal));
         }
         let resp = self.responder();
@@ -2174,9 +2173,8 @@ impl<
         let emsg = "compaction";
         if let Some(fault) = self.fault() {
             return Err(err!(
-                "{}: The store stopped writing after a failed sync at {:?} ({}), so it is not \
-                compacted.  Restart the store; it recovers from the disk.",
-                self.ozid(), fault.when, fault.error;
+                "{}: {}, so it is not compacted.  Restart the store; it recovers from the \
+                disk.", self.ozid(), fault.stopped();
                 Write, Fatal));
         }
         let start = Instant::now();

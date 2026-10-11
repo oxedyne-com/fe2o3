@@ -171,8 +171,9 @@ impl<
             }
             all.push(zdir);
         }
-        // A run stopped by a failed sync left the files it could not prove: each is cut back to
-        // its last durable mark before anything replays it, as a power cut at the failure would.
+        // A run stopped by a failed sync or cut back left the files it could not prove: each is
+        // cut back to the length its fault record names before anything replays it, as a power
+        // cut at the failure would.
         // The record names zones and file numbers, so the cut follows a store that has moved.
         let paths: Vec<PathBuf> = all.iter().map(|zd| zd.dir.clone()).collect();
         res!(Fault::cut_after(self.db_root(), &paths));

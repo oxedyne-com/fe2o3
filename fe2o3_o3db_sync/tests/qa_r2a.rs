@@ -16,6 +16,7 @@ use oxedyne_fe2o3_o3db_sync::{
     comm::channels::{
         Cut,
         Fault,
+        FaultCause,
         FaultReport,
     },
     db::O3db,
@@ -144,11 +145,11 @@ fn p1_stale_record_counts_as_recorded() -> Outcome<()> {
     res!(fs::create_dir_all(root.join(fmt!("{}.tmp", constant::REFUSAL_FILENAME))));
     let f = Fault::default();
     let e = err!("injected barrier failure"; Test);
-    let r1 = f.raise(&root, vec![cut(1)], &e);
+    let r1 = f.raise(&root, FaultCause::Barrier, vec![cut(1)], &e);
     println!("P1 first raise: record {:?} refusal {:?}", r1.record, r1.refusal);
     assert!(r1.record.is_some() && r1.refusal.is_none(), "setup: record only");
     hooks::set_fault_record_fails(true);
-    let r2 = f.raise(&root, vec![cut(2)], &e);
+    let r2 = f.raise(&root, FaultCause::Barrier, vec![cut(2)], &e);
     hooks::set_fault_record_fails(false);
     let text = res!(fs::read_to_string(root.join(constant::FAULT_FILENAME)));
     let marker = Refusal::path(&root).exists();
@@ -364,10 +365,10 @@ fn b1_recorded_matches_the_record_on_disk() -> Outcome<()> {
     let root = res!(fresh("./test_db_qa_r2a_b1"));
     let f = Fault::default();
     let e = err!("injected barrier failure"; Test);
-    let r1 = f.raise(&root, vec![cut(1)], &e);
+    let r1 = f.raise(&root, FaultCause::Barrier, vec![cut(1)], &e);
     assert!(r1.record.is_some() && r1.refusal.is_some(), "setup: both written");
     hooks::set_fault_record_fails_at(1);
-    let r2 = f.raise(&root, vec![cut(2)], &e);
+    let r2 = f.raise(&root, FaultCause::Barrier, vec![cut(2)], &e);
     hooks::set_fault_record_fails_at(0);
     let rec = res!(fs::read_to_string(root.join(constant::FAULT_FILENAME)));
     let mk = fs::read_to_string(Refusal::path(&root)).unwrap_or_default();
