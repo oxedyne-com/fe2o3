@@ -86,7 +86,7 @@ pub fn blocks_in(items: &[Item], base: &SiteBase) -> Vec<Block> {
 				floating:	*floating,
 				clearance:	*clearance,
 			}),
-			Item::Space { height, .. }			=> out.push(Block::space(*height)),
+			Item::Space { amount, weak, .. }	=> out.push(Block::Space { amount: *amount, weak: *weak }),
 			Item::Figure { body, caption, supplement, label, placement, span }	=> {
 				let site	= base.site(*span);
 				let caption	= caption.as_ref().map(|runs| lower_runs_in(runs, &site));

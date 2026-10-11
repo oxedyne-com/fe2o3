@@ -31,6 +31,7 @@ use crate::doc::{
 	Answer,
 };
 use crate::ir::Node;
+use crate::ir::Sp;
 use crate::ledger::AnchorId;
 
 use oxedyne_fe2o3_data::gen_map::GenMap;
@@ -56,6 +57,7 @@ pub struct BlockState {
 	pub fig_no:			u32,
 	pub heads_len:		u32,
 	pub index_no:		u32,
+	pub weak_gap:		Option<Sp>,	// a weak `#v` standing in place of the next block's spacing
 }
 
 impl BlockState {
@@ -75,6 +77,8 @@ impl BlockState {
 		h.write_u32(self.fig_no);
 		h.write_u32(self.heads_len);
 		h.write_u32(self.index_no);
+		h.write_bool(self.weak_gap.is_some());
+		h.write_i32(self.weak_gap.map_or(0, |sp| sp.raw()));
 	}
 }
 

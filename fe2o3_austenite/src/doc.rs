@@ -315,9 +315,11 @@ pub enum Block {
 	// style only that subtree, not the document. This is the general mechanism the rule engine's set-fields
 	// transform reuses to patch a subtree.
 	Scoped { patch: ThemePatch, blocks: Vec<Block> },
-	// A vertical space a `#show` template's `v(<len>)` lowers to: a fixed leading emitted as a sibling
-	// before or after the element the template wraps. It carries no words and anchors no reference.
-	Space(Sp),
+	// A `#v(<len>)`, line-leading or a `#show` template's sibling of the element it wraps: an `em` amount
+	// resolves against the text size in force where it is set. A weak one collapses as Typst's does -- at the
+	// start of a flow, against an adjacent weak space, and in place of the block spacing it falls between.
+	// It carries no words and anchors no reference.
+	Space { amount: Spacing, weak: bool },
 	// A line-leading `#pagebreak()` (strong, the default) or `#pagebreak(weak: true)`: a forced page eject at
 	// this point in the flow. A STRONG break always ejects, opening a blank page when there is nothing left to
 	// place (trailing) or when the current page is already empty (consecutive breaks); a WEAK break ejects only
@@ -377,8 +379,6 @@ impl Block {
 	pub fn rule(width: Length, thickness: f64, grey: u8) -> Self {
 		Self::Rule { width, thickness, grey }
 	}
-
-	pub fn space(height: Sp) -> Self { Self::Space(height) }
 
 	pub fn page_break(weak: bool) -> Self { Self::PageBreak { weak } }
 
@@ -669,7 +669,7 @@ pub fn asks_of(blocks: &[Block], out: &mut Vec<(Site, Asked)>) {
 			| Block::Glossary
 			| Block::Index
 			| Block::ClaimIndex
-			| Block::Space(_)
+			| Block::Space { .. }
 			| Block::PageBreak { .. }
 			| Block::ColBreak { .. }				=> {},
 		}
@@ -843,6 +843,7 @@ struct Authoring<'a> {
 	heads:		Vec<Heading>,
 	// Running document-order state.
 	first:			bool,
+	weak_gap:		Option<Sp>,	// a weak `#v` just set, which stands in place of the next block's spacing
 	sec:			[u32; 6],
 	prev_para:		bool,
 	pending_banner:	bool,
@@ -954,6 +955,7 @@ impl<'a> Authoring<'a> {
 			nodes:				Vec::new(),
 			heads:				Vec::new(),
 			first:				true,
+			weak_gap:			None,
 			sec:				[0; 6],
 			prev_para:			false,
 			pending_banner:		false,
@@ -1012,6 +1014,7 @@ impl<'a> Authoring<'a> {
 		let outer_measure	= self.measure;
 		let outer_first		= self.first;
 		let outer_para		= self.prev_para;
+		let outer_weak		= self.weak_gap.take();
 		self.measure	= measure;
 		self.first		= true;
 		self.prev_para	= false;
@@ -1020,6 +1023,7 @@ impl<'a> Authoring<'a> {
 		self.measure	= outer_measure;
 		self.first		= outer_first;
 		self.prev_para	= outer_para;
+		self.weak_gap	= outer_weak;
 		let _ = res!(walked);
 		let mut out: Vec<Node> = Vec::with_capacity(material.len());
 		for node in material {
@@ -1194,6 +1198,12 @@ impl<'a> Authoring<'a> {
 					counters_before:	self.counters.clone(),
 				});
 			}
+			// A weak `#v` waives the spacing of the block that follows it, as Typst's weak spacing displaces the
+			// block spacing beside it; a strong space or a float between them passes the waiver on.
+			let waived = match &blocks[i] {
+				Block::Space { .. } | Block::Place { .. }	=> false,
+				_											=> self.weak_gap.take().is_some(),
+			};
 			match &blocks[i] {
 				Block::Heading { level, segments, label } => {
 					// Step the counters for a numbered level (1..); a part divider (level 0) steps none.
@@ -1268,7 +1278,7 @@ impl<'a> Authoring<'a> {
 					// Space above the heading. At a page top the driver discards it, so the first heading on a
 					// page still sits flush to the text block. A heading following a non-consuming heading omits
 					// it, so the gap between the two is the upper heading's `space_below` alone.
-					if !self.first {
+					if !self.first && !waived {
 						self.nodes.push(Node::Glue(Glue::fixed(style.space_above(*level))));
 					}
 
@@ -1329,7 +1339,7 @@ impl<'a> Authoring<'a> {
 					self.prev_para = consumed_para;
 				},
 				Block::Paragraph { text } => {
-					if !self.first {
+					if !self.first && !waived {
 						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					}
 					// A plain paragraph is set through the piece breaker so a leading indent box can ride the
@@ -1348,7 +1358,7 @@ impl<'a> Authoring<'a> {
 					self.prev_para = true;
 				},
 				Block::RichParagraph { segments } => {
-					if !self.first {
+					if !self.first && !waived {
 						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					}
 					let mut pieces = Vec::new();
@@ -1366,7 +1376,7 @@ impl<'a> Authoring<'a> {
 					self.prev_para = true;
 				},
 				Block::List { ordered, items, loose } => {
-					if !self.first {
+					if !self.first && !waived {
 						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					}
 					let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.measure);
@@ -1379,7 +1389,7 @@ impl<'a> Authoring<'a> {
 					self.prev_para = false;
 				},
 				Block::Code { lines: src } => {
-					if !self.first {
+					if !self.first && !waived {
 						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					}
 					res!(code_block(&mut self.nodes, self.fonts.clone(), style, src));
@@ -1392,7 +1402,7 @@ impl<'a> Authoring<'a> {
 					// Space above the table, discarded at a page top like any other leading. A plain table lowers
 					// to one keep box, moved whole to the next page when it will not fit; a breakable table (the
 					// glossary) sets one keep box per row, so the driver paginates between its rows.
-					if !self.first {
+					if !self.first && !waived {
 						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 					}
 					let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.measure);
@@ -1409,7 +1419,7 @@ impl<'a> Authoring<'a> {
 					self.prev_para = false;
 				},
 				Block::Equation { expr, numbered, .. } => {
-					if !self.first {
+					if !self.first && !waived {
 						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					}
 					let number = if *numbered { self.eq_no += 1; Some(self.eq_no) } else { None };
@@ -1431,7 +1441,7 @@ impl<'a> Authoring<'a> {
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
-							if !self.first {
+							if !self.first && !waived {
 								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 							}
 							res!(figure(&mut self.nodes, self.fonts.clone(), style, self.measure, graphic.clone(), caption.as_deref(), self.fig_no));
@@ -1453,7 +1463,7 @@ impl<'a> Authoring<'a> {
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
-							if !self.first {
+							if !self.first && !waived {
 								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 							}
 							let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.measure);
@@ -1482,7 +1492,7 @@ impl<'a> Authoring<'a> {
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
-							if !self.first {
+							if !self.first && !waived {
 								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 							}
 							let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.measure);
@@ -1509,7 +1519,7 @@ impl<'a> Authoring<'a> {
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
-							if !self.first {
+							if !self.first && !waived {
 								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 							}
 							let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.measure);
@@ -1558,7 +1568,7 @@ impl<'a> Authoring<'a> {
 					// the body paragraph skip (`par.skip`, 1.2 em at the body size) scaled by the same 0.85 -- the
 					// earlier fix sized the entry text and leading this way but left this gap on the footnote metric,
 					// which set the entries far too tight.
-					if !self.first {
+					if !self.first && !waived {
 						let gap = Sp(style.par.skip.raw() * 85 / 100);
 						self.nodes.push(Node::Glue(Glue::fixed(gap)));
 					}
@@ -1568,7 +1578,7 @@ impl<'a> Authoring<'a> {
 					self.prev_para = false;
 				},
 				Block::Rule { width, thickness, grey } => {
-					if !self.first {
+					if !self.first && !waived {
 						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					}
 					rule_divider(&mut self.nodes, self.measure, *width, *thickness, *grey);
@@ -1624,7 +1634,7 @@ impl<'a> Authoring<'a> {
 							push_float(&mut self.nodes, mid, float_clearance(style), Floating::column(*p));
 						},
 						None => {
-							if !self.first {
+							if !self.first && !waived {
 								self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 							}
 							res!(callout(&mut self.nodes, &scoped, self.measure, &frame, material, fill));
@@ -1650,13 +1660,36 @@ impl<'a> Authoring<'a> {
 				Block::ClaimIndex => { self.want_claim_index = true; self.claim_index_at = Some(self.nodes.len()); i += 1; },
 				// A scope is handled by the recursion at the loop top; named here only for exhaustiveness.
 				Block::Scoped { .. } => { i += 1; },
-				Block::Space(sp) => {
-					// A template's `v(<len>)`, set as a fixed leading between its siblings. Not discarded at a
-					// page top: the author asked for it, so it holds like any authored space.
-					self.nodes.push(Node::Glue(Glue::fixed(*sp)));
+				Block::Space { amount, weak } => {
+					let sp = match amount {
+						Spacing::Pt(pt)	=> Sp::from_pt(*pt),
+						Spacing::Em(em)	=> Sp::from_pt(style.text.body_size.to_pt() * em),	// the text size in force here
+					};
+					if !*weak {
+						// A strong space holds as the author set it, beside any block spacing.
+						self.nodes.push(Node::Glue(Glue::fixed(sp)));
+						self.first = false;
+						self.prev_para = false;
+					} else if let Some(prev) = self.weak_gap {
+						// Two weak spaces with nothing set between them collapse to the larger, as in Typst.
+						if sp > prev {
+							for node in self.nodes.iter_mut().rev() {
+								match node {
+									Node::Glue(g) if g.natural == prev	=> { g.natural = sp; break; },
+									Node::Glue(_)						=> {},
+									_									=> break,
+								}
+							}
+							self.weak_gap = Some(sp);
+						}
+					} else if !self.first {
+						// A weak space displaces the block spacing of the block that follows; at a flow's start
+						// (`first`) it collapses away, and at a page top the driver discards it as any glue.
+						self.nodes.push(Node::Glue(Glue::fixed(sp)));
+						self.weak_gap = Some(sp);
+						self.prev_para = false;
+					}
 					i += 1;
-					self.first = false;
-					self.prev_para = false;
 				},
 				Block::ColBreak { weak } => {
 					// A column break sets no ink, so the block that follows leads against the column top.
@@ -1713,6 +1746,7 @@ impl<'a> Authoring<'a> {
 			fig_no:			self.fig_no,
 			heads_len:		self.heads.len() as u32,
 			index_no:		self.index_gather.no,
+			weak_gap:		self.weak_gap,
 		}
 	}
 
@@ -1731,6 +1765,7 @@ impl<'a> Authoring<'a> {
 		self.eq_no			= s.eq_no;
 		self.fig_no			= s.fig_no;
 		self.index_gather.no	= s.index_no;
+		self.weak_gap			= s.weak_gap;
 	}
 
 	/// An order-independent fingerprint of the glossary first-use set: a block that sets a term bold-italic
@@ -1891,7 +1926,8 @@ impl<'a> Authoring<'a> {
 /// claim-index placeholders set nothing but a document-position or a flag the post-walk assembly reads, so
 /// neither is cached; every other block is a self-contained authoring unit keyed on its content and state.
 fn memoisable(block: &Block) -> bool {
-	!matches!(block, Block::Scoped { .. } | Block::Index | Block::ClaimIndex | Block::Glossary)
+	// A weak space may rewrite the space before it, which a replayed delta would not carry.
+	!matches!(block, Block::Scoped { .. } | Block::Index | Block::ClaimIndex | Block::Glossary | Block::Space { .. })
 }
 
 /// The markers of a block being authored on a cache miss: its key, where it starts in each accumulator,
@@ -4486,7 +4522,7 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 			Block::Scoped { blocks, .. }		=> n += count_words(blocks),
 			Block::Equation { .. } | Block::Rule { .. } | Block::Image { .. }
 			| Block::SectionBanner { .. } | Block::Glossary | Block::Index | Block::ClaimIndex
-			| Block::Space(_) | Block::PageBreak { .. } | Block::ColBreak { .. }	=> {},
+			| Block::Space { .. } | Block::PageBreak { .. } | Block::ColBreak { .. }	=> {},
 			Block::Place { blocks, .. }			=> n += count_words(blocks),
 		}
 	}

@@ -9,7 +9,6 @@ use crate::ir::FloatPlacement;
 use crate::ir::Floating;
 use crate::ir::Length;
 use crate::ir::Span;
-use crate::ir::Sp;
 use crate::lang::codefig::CodeFigure;
 use crate::math::Atom;
 use crate::table::Align;
@@ -35,7 +34,7 @@ pub enum Item {
 	// A line-leading `#place(<side>, float: true, scope: .., clearance: ..)[ ... ]`: its body set as a float at
 	// the top or foot of its column, or -- `scope: "parent"` -- spanning every column of the page.
 	Place { items: Vec<Item>, floating: Floating, clearance: Option<Spacing>, span: Span },	// a line-leading `#pagebreak()` (strong) or `#pagebreak(weak: true)`; a strong break always ejects, a weak one only a page carrying content
-	Space { height: Sp, span: Span },	// a line-leading `#v(<abs len>)`, a fixed vertical space (absolute units only)
+	Space { amount: Spacing, weak: bool, span: Span },	// a line-leading `#v(<len>)`, in pt or em; a weak one collapses as Typst's does
 	PrintGlossary { span: Span },	// a line-leading `#print-glossary()`, a placeholder the book layer fills with the Term/Definition table
 	// A line-leading `#context { ... collect-claim-refs() ... }`: the reverse claim-reference index the Logic
 	// appendix builds. Recognised by the signature `collect-claim-refs(` in the block, not by evaluating the

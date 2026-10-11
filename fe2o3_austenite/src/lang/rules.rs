@@ -39,6 +39,7 @@
 //! computes no address or hash from them yet.
 
 use crate::doc::Block;
+use crate::lang::ast::Spacing;
 use crate::ir::{
 	FloatPlacement,
 	Length,
@@ -777,7 +778,7 @@ fn make_spacer(
 		return Ok(None);
 	}
 	match kind {
-		SpacerKind::Vertical	=> Ok(Some(Block::Space(res!(spacer_length(s))))),
+		SpacerKind::Vertical	=> Ok(Some(Block::Space { amount: Spacing::Pt(res!(spacer_length(s)).to_pt()), weak: false })),
 		SpacerKind::Line		=> Ok(Some(res!(read_line(s)))),
 	}
 }
@@ -3256,7 +3257,7 @@ mod tests {
 			other					=> panic!("expected a template, got {:?}", other),
 		};
 		assert_eq!(t.pre.len(), 1, "the leading v() is a sibling before the element");
-		assert!(matches!(t.pre[0], Block::Space(sp) if sp == Sp::from_pt(6.0)));
+		assert!(matches!(t.pre[0], Block::Space { amount: Spacing::Pt(pt), weak: false } if (pt - 6.0).abs() < 1e-9));
 		assert_eq!(t.post.len(), 1, "the trailing line() is a sibling after the element");
 		assert!(matches!(t.post[0], Block::Rule { width: Length::Rel(f), .. } if (f - 0.5).abs() < 1e-9),
 			"the divider keeps its relative width until placement");
@@ -3275,7 +3276,7 @@ mod tests {
 		match &blocks[0] {
 			Block::Scoped { blocks: seq, .. } => {
 				assert_eq!(seq.len(), 3, "pre, hole, post: {:?}", seq);
-				assert!(matches!(seq[0], Block::Space(_)));
+				assert!(matches!(seq[0], Block::Space { .. }));
 				assert!(matches!(seq[1], Block::Box { .. }));
 				match &seq[2] {
 					Block::Rule { width: Length::Abs(pt), .. }	=> assert!((pt - 200.0).abs() < 1e-6,

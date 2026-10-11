@@ -2397,7 +2397,7 @@ enum CaptureKind {
 enum BuiltinKind {
 	PageBreak,	// `#pagebreak()` / `#pagebreak(weak: true)`: a forced page eject
 	Lorem,		// `#lorem(<n>)`: n words of the standard lorem-ipsum placeholder, set as a paragraph
-	Vspace,		// `#v(<abs len>)`: a fixed vertical space, absolute units only
+	Vspace,		// `#v(<len>)`: a vertical space in an absolute unit or em, strong or weak
 	ColBreak,	// `#colbreak()` / `#colbreak(weak: true)`: a forced column break
 }
 
@@ -3015,23 +3015,26 @@ fn dispatch_capture(
 						skips.record("#lorem", span);	// a non-numeric argument stays a visible refusal
 					}
 				},
-				// `#v(<abs len>)`: a fixed vertical space. Only an absolute first argument (pt/mm/cm/in) is set;
-				// an `em`, `%` or `fr` length has no running size here, and a `weak:` argument asks for a
-				// collapsing space the reader does not model -- either is refused visibly rather than set as the
-				// wrong space, exactly as the heading-template spacer does (see [`crate::lang::rules`]).
 				// `#colbreak()` or `#colbreak(weak: true)`: a forced column break, which on a page of one column
 				// breaks the page, as Typst makes it.
 				BuiltinKind::ColBreak => {
 					let list = lex::args(&call_inner(&cap.buf, "colbreak").unwrap_or_default());
 					items.push(Item::ColBreak { weak: pagebreak_is_weak(&list), span });
 				},
+				// `#v(<len>)`: a vertical space in pt/mm/cm/in or em, the em resolved against the text size in force
+				// where it is set; `weak: true` collapses it as Typst does. A `%` or `fr` amount (a share of the
+				// region, which the page breaker does not stretch) is refused visibly rather than set wrongly.
 				BuiltinKind::Vspace => {
 					let list = lex::args(&call_inner(&cap.buf, "v").unwrap_or_default());
 					let first = list.iter().find(|a| a.key.is_none()).map(|a| a.value.as_str()).unwrap_or_default();
-					match parse_length(first) {
-						Some(Length::Abs(pt)) if lex::named(&list, "weak").is_none()	=>
-							items.push(Item::Space { height: crate::ir::Sp::from_pt(pt), span }),
-						_																=> skips.record("#v", span),
+					let weak = match lex::named(&list, "weak") {
+						None | Some("false")	=> Some(false),
+						Some("true")			=> Some(true),
+						Some(_)					=> None,	// an expression the reader cannot evaluate
+					};
+					match (vspace_amount(first), weak) {
+						(Some(amount), Some(weak))	=> items.push(Item::Space { amount, weak, span }),
+						_							=> skips.record("#v", span),
 					}
 				},
 			}
@@ -3079,6 +3082,19 @@ fn lorem_arg(buf: &str) -> Option<usize> {
 /// `weak: false` and an absent argument are both the STRONG default (Typst 0.15.1), which always ejects.
 /// The argument is the list's own, as [`lex::args`] reads it, so one named in a comment or a string asks for
 /// nothing.
+/// The amount of a `#v(..)`: an absolute length in points or ems of the text size in force. `None` for a
+/// `%`, an `fr` or anything else, which the reader does not set.
+fn vspace_amount(v: &str) -> Option<Spacing> {
+	let v = v.trim();
+	if let Some(num) = v.strip_suffix("em") {
+		return num.trim().parse::<f64>().ok().map(Spacing::Em);
+	}
+	match parse_length(v) {
+		Some(Length::Abs(pt))	=> Some(Spacing::Pt(pt)),
+		_						=> None,
+	}
+}
+
 fn pagebreak_is_weak(list: &[lex::Arg]) -> bool {
 	lex::named(list, "weak") == Some("true")
 }
@@ -4740,8 +4756,8 @@ mod tests {
 
 	/// An own-line `#pagebreak()`, `#lorem(n)` and `#v(<abs len>)` are set on the block path rather than
 	/// tallied as skipped constructs: the page break lowers to an `Item::PageBreak`, the lorem call to a
-	/// plain paragraph of the oracle text, and the absolute vertical space to an `Item::Space`. A relative
-	/// `#v(2em)` has no running size here, so it stays a visible refusal.
+	/// plain paragraph of the oracle text, and the vertical space to an `Item::Space`, an `em` one included.
+	/// A `#v(10%)`, a share of the region, stays a visible refusal.
 	#[test]
 	fn block_builtins_are_set_not_skipped() -> Outcome<()> {
 		let src = "Opening prose.\n\n#lorem(5)\n\n#v(12pt)\n\n#pagebreak()\n\nAfter.\n";
@@ -4752,8 +4768,12 @@ mod tests {
 		assert!(items.iter().any(|it| matches!(it,
 			Item::Paragraph { runs, .. } if matches!(runs.as_slice(), [Inline::Text(t)] if t == "Lorem ipsum dolor sit amet."))),
 			"the #lorem call sets its oracle text as a paragraph: {:?}", items);
-		// A relative `#v(2em)` cannot be resolved here, so it stays a visible refusal rather than a wrong space.
-		let (items2, skips2) = res!(document_with_refusals("#v(2em)\n"));
+		let (items, skips) = res!(document_with_refusals("#v(2em)\n"));
+		assert!(skips.report().is_none(), "an em #v is set: {:?}", skips.report());
+		assert!(items.iter().any(|it| matches!(it, Item::Space { amount: Spacing::Em(em), weak: false, .. } if *em == 2.0)),
+			"the em #v keeps its em: {:?}", items);
+		// A share of the region is not set, so it stays a visible refusal rather than a wrong space.
+		let (items2, skips2) = res!(document_with_refusals("#v(10%)\n"));
 		assert!(!items2.iter().any(|it| matches!(it, Item::Space { .. })), "a relative #v must not be set: {:?}", items2);
 		assert!(skips2.report().is_some(), "a relative #v is refused visibly");
 		Ok(())
@@ -4850,16 +4870,20 @@ mod tests {
 	}
 
 	/// An ignored keyword argument is refused, not silently set as the wrong thing: `#pagebreak(to: "odd")`
-	/// selects a parity target the reader does not model, and `#v(24pt, weak: true)` asks for a collapsing
-	/// space it does not model -- each stays a visible refusal rather than a plain break or a fixed space.
+	/// selects a parity target the reader does not model, and `#v(24pt, weak: flag)` names a weakness it
+	/// cannot evaluate -- each stays a visible refusal rather than a plain break or a fixed space; a literal
+	/// `weak: true` is set as a weak space.
 	#[test]
 	fn unsupported_keyword_args_are_refused() -> Outcome<()> {
 		let (items, skips) = res!(document_with_refusals("#pagebreak(to: \"odd\")\n"));
 		assert!(!items.iter().any(|it| matches!(it, Item::PageBreak { .. })), "a `to:` pagebreak is not set: {:?}", items);
 		assert!(skips.report().map_or(false, |r| r.contains("#pagebreak")), "a `to:` pagebreak is refused: {:?}", skips.report());
-		let (items2, skips2) = res!(document_with_refusals("#v(24pt, weak: true)\n"));
-		assert!(!items2.iter().any(|it| matches!(it, Item::Space { .. })), "a weak #v is not set: {:?}", items2);
-		assert!(skips2.report().map_or(false, |r| r.contains("#v")), "a weak #v is refused: {:?}", skips2.report());
+		let (items2, skips2) = res!(document_with_refusals("#v(24pt, weak: flag)\n"));
+		assert!(!items2.iter().any(|it| matches!(it, Item::Space { .. })), "an unread weakness is not set: {:?}", items2);
+		assert!(skips2.report().map_or(false, |r| r.contains("#v")), "an unread weakness is refused: {:?}", skips2.report());
+		let (items3, skips3) = res!(document_with_refusals("#v(24pt, weak: true)\n"));
+		assert!(skips3.report().is_none(), "a weak #v is set: {:?}", skips3.report());
+		assert!(items3.iter().any(|it| matches!(it, Item::Space { weak: true, .. })), "the space is weak: {:?}", items3);
 		Ok(())
 	}
 
@@ -4896,9 +4920,10 @@ mod tests {
 		let (items, skips) = res!(document_with_refusals("#v(12pt /* , weak: true */)\n"));
 		assert!(skips.report().is_none(), "a commented `weak:` refuses nothing: {:?}", skips.report());
 		assert!(items.iter().any(|it| matches!(it, Item::Space { .. })), "the fixed space is set: {:?}", items);
+		assert!(items.iter().any(|it| matches!(it, Item::Space { weak: false, .. })), "the commented space is strong: {:?}", items);
 		let (items, skips) = res!(document_with_refusals("#v(/* weak: true, */ 12pt, weak: true)\n"));
-		assert!(!items.iter().any(|it| matches!(it, Item::Space { .. })), "a real `weak:` is refused: {:?}", items);
-		assert!(skips.report().map_or(false, |r| r.contains("#v")), "{:?}", skips.report());
+		assert!(skips.report().is_none(), "a real `weak:` is set: {:?}", skips.report());
+		assert!(items.iter().any(|it| matches!(it, Item::Space { weak: true, .. })), "a real `weak:` is weak: {:?}", items);
 		Ok(())
 	}
 

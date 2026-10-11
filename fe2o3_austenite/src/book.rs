@@ -1293,7 +1293,7 @@ fn collect_glossary_terms(block: &Block, seen: &mut HashSet<String>, ordered: &m
 		| Block::Glossary
 		| Block::Index
 		| Block::ClaimIndex
-		| Block::Space(_)
+		| Block::Space { .. }
 		| Block::PageBreak { .. }
 		| Block::ColBreak { .. }				=> {},
 	}
