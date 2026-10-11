@@ -22,6 +22,22 @@
 //! asks, so a host answers any `font:` need by supplying the whole pack. A native build embeds the pack
 //! (feature `embed-fonts`, on by default) and never asks.
 //!
+//! **The size profile.** The browser build uses the workspace profile `wasm-release` (`release` with
+//! `opt-level = "s"`, `lto` and one codegen unit), then `wasm-opt -O`; the native `release` profile is left
+//! for speed. `"z"` saves another 0.6 MB raw but compiles 58% slower, `"s"` within 2% of `release`.
+//! wasm-pack 0.13 cannot name a profile (it adds `--release`, which cargo refuses beside `--profile`), so the
+//! module is built in three steps, from the workspace root:
+//!
+//! ```text
+//! cargo build -p oxedyne_fe2o3_austenite --lib --target wasm32-unknown-unknown --profile wasm-release \
+//!     --no-default-features --features wasm
+//! wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/wasm-release/oxedyne_fe2o3_austenite.wasm
+//! wasm-opt -O pkg/oxedyne_fe2o3_austenite_bg.wasm -o pkg/oxedyne_fe2o3_austenite_bg.wasm
+//! ```
+//!
+//! `wasm-bindgen` must be the version in `Cargo.lock`. Without fonts or plugins this gives 6.12 MB, 2.82 MB
+//! gzipped, against 8.59 MB, 3.40 MB at plain `release` without `wasm-opt` (12 October 2026).
+//!
 //! **Holding only the pages on screen.** `compileProjectDelta` keeps the laid-out pages of the compile it
 //! answered (their frames, not their SVG), and `renderPage` draws any one of them on request, byte for byte
 //! as the delta would have sent it. A consumer therefore holds the SVG of only the pages it shows: it sends
