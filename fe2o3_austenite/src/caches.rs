@@ -14,6 +14,7 @@
 
 use crate::eval::eval::library;
 use crate::eval::value::Value;
+use crate::flow::par::ParMemo;
 use crate::fonts::ShapeStats;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -80,9 +81,10 @@ fn whole_bytes(name: &str, n: f64) -> Outcome<usize> {
 // │ COUNTERS                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// What a compile's caches did, read off its result. The paragraph and page counts are filled by the units
-/// that own those caches and are zero until then; the shape stats are the shaped-run cache's, as the
-/// compile left it.
+/// What a compile's caches did, read off its result. Every paragraph laid counts as a hit or a miss of the
+/// paragraph memo, one that is not kept (it holds an inline box or equation) as a miss; the page counts are
+/// filled by the unit that owns the ledger and are zero until then; the shape stats are the shaped-run
+/// cache's, as the compile left it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counters {
 	pub replayed:		u64,	// pages replayed from the ledger
@@ -139,12 +141,13 @@ pub fn sys_inputs() -> Vec<(String, String)> {
 // │ CACHES                                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The session's caches. Its entries (the paragraph memo and the page ledger add theirs) are all scoped by
+/// The session's caches. Its entries (the paragraph memo, and the page ledger when it comes) are all scoped by
 /// one configuration fingerprint and swept by generation.
 #[derive(Debug, Default)]
 pub struct Caches {
 	pub budgets:	Budgets,
 	pub counters:	Counters,			// this compile's
+	pub pars:		ParMemo,			// the paragraphs broken into lines
 	config:			Option<Fingerprint>,	// what the entries were made under, none before the first compile
 	resets:			u64,				// how many times a changed configuration emptied them
 }
@@ -168,14 +171,19 @@ impl Caches {
 		}
 		self.config		= Some(config);
 		self.counters	= Counters::default();
+		self.pars.begin(self.budgets.pars);
 		moved
 	}
 
 	/// Closes the compile: each cache drops what neither this compile nor the one before touched.
-	pub fn end(&mut self) {}
+	pub fn end(&mut self) {
+		self.pars.sweep();
+	}
 
 	/// Empties every cache. A panic, which leaves entries of unknown worth, drops the whole session instead.
-	pub fn clear(&mut self) {}
+	pub fn clear(&mut self) {
+		self.pars.clear();
+	}
 
 	/// The configuration the entries were made under.
 	pub fn config(&self) -> Option<Fingerprint> { self.config }

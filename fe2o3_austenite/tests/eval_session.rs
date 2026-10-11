@@ -290,6 +290,7 @@ fn a_new_face_empties_the_caches_and_the_same_faces_do_not() {
 	// The configuration is the one the parts name, read where the compile read them.
 	let faces = s.fonts().clone().book().expect("a book").fingerprint();
 	assert_eq!(first, caches::configuration(faces, &caches::sys_inputs(), compile::engine_git_hash()));
+	assert!(s.caches().pars.len() > 0, "the paragraphs were kept under the first faces");
 	let mut store = FontStore::default();
 	store.add_bytes(noto());
 	s.set_fonts(store);
@@ -298,6 +299,12 @@ fn a_new_face_empties_the_caches_and_the_same_faces_do_not() {
 	assert_eq!(s.caches().resets(), 1, "and the caches were emptied once for it");
 	let _ = pdf(&mut s, &main, false);
 	assert_eq!(s.caches().resets(), 1, "and not again while the faces stand");
+	// A main with no paragraph under other faces keeps none: without the emptying, what the last compile
+	// touched would outlive one sweep.
+	write(&main, "#set page(width: 220pt, height: 130pt)\n");
+	s.set_fonts(FontStore::default());
+	let _ = pdf(&mut s, &main, false);
+	assert_eq!((s.caches().resets(), s.caches().pars.len()), (2, 0), "a face change left paragraphs in the memo");
 }
 
 #[test]
@@ -313,8 +320,11 @@ fn the_budgets_are_the_hosts_the_shaped_run_cache_takes_its_share_and_the_counte
 	assert_eq!(done.counters.shapes.budget, 32 << 20, "the shaped-run cache holds the default share");
 	assert!(done.counters.shapes.misses > 0 && done.counters.shapes.entries > 0, "and the compile shaped into it");
 	assert_eq!(s.caches().counters, done.counters, "the session keeps what the result reports");
-	assert_eq!((done.counters.replayed, done.counters.relaid, done.counters.par_hits, done.counters.par_misses),
-		(0, 0, 0, 0), "the page and paragraph counts are zero until those caches exist");
+	assert_eq!((done.counters.replayed, done.counters.relaid), (0, 0), "the page counts are zero until the ledger exists");
+	// Five of the six paragraphs are alike, and a paragraph alike in children, settings and width shares the
+	// first one's lines, so a first compile already hits.
+	let c = done.counters;
+	assert!(c.par_misses > 0 && c.par_hits + c.par_misses >= 6, "every paragraph laid is a hit or a miss: {:?}", c);
 	let set = Budgets { shapes: 1 << 20, pars: 2 << 20, ledger: 3 << 20 };
 	s.set_budgets(set);
 	assert_eq!(s.budgets(), set);

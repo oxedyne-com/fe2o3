@@ -862,12 +862,28 @@ fn is_hard_break(c: char) -> bool {
 	matches!(LineBreakClass::of(c), LineBreakClass::BK | LineBreakClass::CR | LineBreakClass::LF | LineBreakClass::NL)
 }
 
-/// Breaks a prepared paragraph into lines `width` points wide.
-pub fn linebreak(p: &Prep, width: f64) -> Outcome<Vec<Line>> {
+/// Where a chosen line ends: the byte offset in the paragraph's text, and the kind of break.
+pub type LineEnd = (usize, Breakpoint);
+
+/// Breaks a prepared paragraph into lines `width` points wide, with the break that ends each line.
+pub fn linebreak(p: &Prep, width: f64) -> Outcome<(Vec<Line>, Vec<LineEnd>)> {
 	match p.config.linebreaks {
 		Linebreaks::Simple		=> linebreak_simple(p, width),
 		Linebreaks::Optimized	=> linebreak_optimized(p, width),
 	}
+}
+
+/// The lines `linebreak` chose, built again from their breaks over a fresh preparation of the same
+/// paragraph. Each line is made as the breaker made it, from its start, its end and the line before.
+pub fn rebuild(p: &Prep, breaks: &[LineEnd]) -> Outcome<Vec<Line>> {
+	let mut lines: Vec<Line> = Vec::with_capacity(breaks.len());
+	let mut start = 0;
+	for &(end, bp) in breaks {
+		let l = res!(line(p, start, end, bp, lines.last()));
+		lines.push(l);
+		start = end;
+	}
+	Ok(lines)
 }
 
 fn fits(width: f64, other: f64) -> bool {
@@ -875,35 +891,39 @@ fn fits(width: f64, other: f64) -> bool {
 }
 
 /// First fit: each line as long as fits.
-fn linebreak_simple(p: &Prep, width: f64) -> Outcome<Vec<Line>> {
+fn linebreak_simple(p: &Prep, width: f64) -> Outcome<(Vec<Line>, Vec<LineEnd>)> {
 	let mut lines: Vec<Line> = Vec::with_capacity(16);
+	let mut breaks: Vec<LineEnd> = Vec::with_capacity(16);
 	let mut start = 0;
-	let mut last: Option<(Line, usize)> = None;
+	let mut last: Option<(Line, LineEnd)> = None;
 	for (end, bp) in breakpoints(p) {
 		let mut attempt = res!(line(p, start, end, bp, lines.last()));
 		if !fits(width, attempt.width) {
-			if let Some((last_attempt, last_end)) = last.take() {
+			if let Some((last_attempt, last_break)) = last.take() {
 				lines.push(last_attempt);
-				start = last_end;
+				breaks.push(last_break);
+				start = last_break.0;
 				attempt = res!(line(p, start, end, bp, lines.last()));
 			}
 		}
 		if bp == Breakpoint::Mandatory || !fits(width, attempt.width) {
 			lines.push(attempt);
+			breaks.push((end, bp));
 			start = end;
 			last = None;
 		} else {
-			last = Some((attempt, end));
+			last = Some((attempt, (end, bp)));
 		}
 	}
-	if let Some((l, _)) = last {
+	if let Some((l, b)) = last {
 		lines.push(l);
+		breaks.push(b);
 	}
-	Ok(lines)
+	Ok((lines, breaks))
 }
 
 /// Knuth-Plass over Typst's cost, bounded by the exact cost of an estimated layout.
-fn linebreak_optimized(p: &Prep, width: f64) -> Outcome<Vec<Line>> {
+fn linebreak_optimized(p: &Prep, width: f64) -> Outcome<(Vec<Line>, Vec<LineEnd>)> {
 	let metrics = CostMetrics::compute(p);
 	let bound = res!(linebreak_optimized_approximate(p, width, &metrics));
 	linebreak_optimized_bounded(p, width, &metrics, bound)
@@ -914,10 +934,13 @@ struct Entry {
 	total:	Cost,
 	line:	Line,
 	end:	usize,
+	bp:		Breakpoint,
 }
 
-fn linebreak_optimized_bounded(p: &Prep, width: f64, metrics: &CostMetrics, upper_bound: Cost) -> Outcome<Vec<Line>> {
-	let mut table: Vec<Entry> = vec![Entry { pred: 0, total: 0.0, line: Line::empty(), end: 0 }];
+fn linebreak_optimized_bounded(p: &Prep, width: f64, metrics: &CostMetrics, upper_bound: Cost)
+	-> Outcome<(Vec<Line>, Vec<LineEnd>)>
+{
+	let mut table: Vec<Entry> = vec![Entry { pred: 0, total: 0.0, line: Line::empty(), end: 0, bp: Breakpoint::Mandatory }];
 	let mut active = 0;
 	let mut prev_end = 0;
 	for (end, bp) in breakpoints(p) {
@@ -942,7 +965,7 @@ fn linebreak_optimized_bounded(p: &Prep, width: f64, metrics: &CostMetrics, uppe
 				continue;
 			}
 			if best.as_ref().map_or(true, |b| b.total >= total) {
-				best = Some(Entry { pred: pred_index, total, line: attempt, end });
+				best = Some(Entry { pred: pred_index, total, line: attempt, end, bp });
 			}
 		}
 		if bp == Breakpoint::Mandatory {
@@ -963,6 +986,7 @@ fn linebreak_optimized_bounded(p: &Prep, width: f64, metrics: &CostMetrics, uppe
 		return linebreak_optimized_bounded(p, width, metrics, Cost::INFINITY);
 	}
 	let mut lines = Vec::with_capacity(16);
+	let mut breaks = Vec::with_capacity(16);
 	let mut idx = last;
 	while idx != 0 {
 		table.truncate(idx + 1);
@@ -972,9 +996,11 @@ fn linebreak_optimized_bounded(p: &Prep, width: f64, metrics: &CostMetrics, uppe
 		};
 		idx = entry.pred;
 		lines.push(entry.line);
+		breaks.push((entry.end, entry.bp));
 	}
 	lines.reverse();
-	Ok(lines)
+	breaks.reverse();
+	Ok((lines, breaks))
 }
 
 struct ApproxEntry {

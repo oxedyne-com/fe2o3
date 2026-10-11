@@ -66,6 +66,8 @@ use crate::linebreak::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 use oxedyne_fe2o3_text::unicode::bidi;
 use oxedyne_fe2o3_text::unicode::lookup::Partitioned;
 use oxedyne_fe2o3_text::unicode::prop::Script;
@@ -135,6 +137,48 @@ pub struct Config {
 	pub lang:				Option<String>,	// ditto
 	pub cjk_latin_spacing:	bool,
 	pub costs:				Costs,
+}
+
+impl Config {
+	/// The fingerprint of every setting, for a key that must change when any of them does. The pattern
+	/// names each field, so a field added to the struct fails to compile here until it is hashed.
+	pub fn fingerprint(&self) -> Fingerprint {
+		let Config {
+			justify, linebreaks, first_line_indent, hanging_indent, align, font_size, rtl, hyphenate, lang,
+			cjk_latin_spacing, costs,
+		} = self;
+		let Costs { hyphenation, runt, widow, orphan } = costs;
+		let mut f = Fingerprinter::new();
+		f.write_bool(*justify);
+		f.write_u8(match linebreaks {
+			Linebreaks::Simple		=> 0,
+			Linebreaks::Optimized	=> 1,
+		});
+		f.write_f64(*first_line_indent);
+		f.write_f64(*hanging_indent);
+		f.write_u8(match align {
+			FixedAlign::Start	=> 0,
+			FixedAlign::Center	=> 1,
+			FixedAlign::End		=> 2,
+		});
+		f.write_f64(*font_size);
+		f.write_bool(*rtl);
+		f.write_u8(match hyphenate {
+			None		=> 0,
+			Some(false)	=> 1,
+			Some(true)	=> 2,
+		});
+		match lang {
+			Some(l)	=> { f.write_u8(1); f.write_str(l); }
+			None	=> f.write_u8(0),
+		}
+		f.write_bool(*cjk_latin_spacing);
+		f.write_f64(*hyphenation);
+		f.write_f64(*runt);
+		f.write_f64(*widow);
+		f.write_f64(*orphan);
+		f.finish()
+	}
 }
 
 /// Laid-out inline content: a list set from its top-left, `baseline` below which a line seats it.
@@ -552,6 +596,20 @@ fn collect(
 		}
 	}
 	Ok((c.full, c.segments))
+}
+
+/// Can the breaks of these children be kept from one compile to the next? They can when every child is one
+/// of the kinds below, whose preparation depends on nothing but their own content, their style chain and the
+/// region's width. The list is an allowlist, so a kind added to `collect` is left out until it is considered
+/// here. An inline box or equation is laid out through the engine as it is collected, where it may read the
+/// region's height and base and ask the introspector, none of which a fingerprint of the children holds.
+pub fn keepable(children: &[Pair]) -> bool {
+	children.iter().all(|c| c.is_tag() || match c.content.kind() {
+		None	=> true,	// empty, skipped by `collect`
+		Some(k)	=> matches!(k,
+			ElemKind::Tag | ElemKind::Space | ElemKind::Text | ElemKind::Symbol | ElemKind::H
+			| ElemKind::Linebreak | ElemKind::SmartQuote),
+	})
 }
 
 /// A laid-out node as an inline frame, its baseline its height above the baseline.

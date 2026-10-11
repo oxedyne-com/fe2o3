@@ -10,6 +10,7 @@
 // applies after another paragraph (or everywhere with `all: true`, never to a first paragraph inside a
 // list), and a paragraph fills its region's width unless it may shrink to its longest line.
 
+use crate::caches::PAR_BUDGET;
 use crate::eval::content::{
 	Content,
 	ElemKind,
@@ -26,6 +27,7 @@ use crate::eval::Engine;
 use crate::flow::inline::{
 	commit,
 	fixed_align,
+	keepable,
 	lang_of,
 	prepare,
 	Config,
@@ -46,9 +48,18 @@ use crate::ir::{
 	Penalty,
 	Sp,
 };
-use crate::linebreak::linebreak;
+use crate::linebreak::{
+	linebreak,
+	rebuild,
+	LineEnd,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_data::gen_map::GenMap;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
+
+use std::sync::Arc;
 
 /// The `par` settings an inline layout starts from: a paragraph's own, or the chain's for inline content
 /// that is not a paragraph.
@@ -64,11 +75,10 @@ pub struct ConfigBase {
 /// under its own fields folded onto the chain, and the lines stacked its `leading` apart. `situation` is
 /// where the flow met the paragraph, which decides the first-line indent.
 ///
-/// Nothing is kept between calls. The lines depend only on the paragraph, its chain, `region` (the
-/// width, and the base and height that relative and fractional inline boxes resolve against),
-/// `situation` and the faces of `engine.fonts`; an inline box or equation inside may also read the
-/// introspector, take locations and warn, through `engine`, as any layout does. That is the whole key
-/// a paragraph cache needs.
+/// The lines depend only on the paragraph, its chain, `region` (the width, and the base and height that
+/// relative and fractional inline boxes resolve against), `situation` and the faces of `engine.fonts`; an
+/// inline box or equation inside may also read the introspector, take locations and warn, through
+/// `engine`, as any layout does. [`layout_with`] keeps the breaks of a paragraph that does none of that.
 pub fn layout_par(
 	engine:		&mut Engine,
 	par:		&Content,
@@ -219,7 +229,80 @@ fn configuration(
 	})
 }
 
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ MEMO                                                                       │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The paragraphs a session has broken into lines, as the break that ends each line, on a generation-swept
+/// map under the `pars` budget. A paragraph is kept only where [`keepable`] says its preparation depends on
+/// nothing but the key below. A hit prepares the paragraph again, which puts the current source's tags and
+/// spans in its items and repeats whatever the preparation reads or says, and builds each line from its
+/// kept break, taking its shaped runs from the shaped-run cache; only the search for the breaks is saved.
+///
+/// The key is the configuration the caches stand under, the paragraph's [`Config`], the region's width
+/// and each child [`Pair`]'s fingerprint in order. The region's height and base, and `expand`, are left
+/// out: no kept paragraph reads them in `prepare` or `linebreak`, and the width the lines fill is worked
+/// out again from `expand` and the lines on every call, as is each line's box.
+#[derive(Debug)]
+pub struct ParMemo {
+	map:	GenMap<Fingerprint, Arc<Vec<LineEnd>>>,
+}
+
+impl Default for ParMemo {
+	fn default() -> Self { Self { map: GenMap::new(PAR_BUDGET) } }
+}
+
+impl ParMemo {
+	/// Opens a compile under the budget given.
+	pub fn begin(&mut self, ceiling: usize) {
+		self.map.set_ceiling(ceiling);
+		self.map.begin();
+	}
+
+	/// Drops what neither this compile nor the one before touched.
+	pub fn sweep(&mut self) { self.map.sweep(); }
+
+	pub fn clear(&mut self) { self.map.clear(); }
+
+	/// Is anything kept at all? A budget of nothing turns the memo off, key and all.
+	pub fn on(&self) -> bool { self.map.ceiling() > 0 }
+
+	/// The paragraphs held.
+	pub fn len(&self) -> usize { self.map.len() }
+
+	/// The estimated bytes held.
+	pub fn bytes(&self) -> usize { self.map.bytes() }
+
+	/// The paragraphs refused at the budget since the memo was made.
+	pub fn refused(&self) -> u64 { self.map.refused() }
+
+	fn get(&mut self, key: &Fingerprint) -> Option<Arc<Vec<LineEnd>>> { self.map.get(key).cloned() }
+
+	fn store(&mut self, key: Fingerprint, breaks: Vec<LineEnd>) {
+		let size = std::mem::size_of::<Vec<LineEnd>>() + breaks.len() * std::mem::size_of::<LineEnd>();
+		self.map.insert(key, Arc::new(breaks), size);
+	}
+}
+
+fn memo_key(caches: Option<Fingerprint>, config: &Config, region: Region, children: &[Pair]) -> Fingerprint {
+	let mut f = Fingerprinter::new();
+	match caches {
+		Some(c)	=> { f.write_u8(1); f.write_fingerprint(c); }
+		None	=> f.write_u8(0),
+	}
+	f.write_fingerprint(config.fingerprint());
+	f.write_i32(region.width.raw());
+	f.write_usize(children.len());
+	for c in children {
+		f.write_fingerprint(c.fingerprint());
+	}
+	f.finish()
+}
+
 /// Lines under an explicit configuration base, for a caller that holds the `par` settings itself.
+///
+/// A paragraph already broken under the same key takes its breaks from the memo ([`ParMemo`]) and builds
+/// its lines from them over a fresh preparation, so a hit makes the same boxes as a miss.
 pub fn layout_with(
 	engine:		&mut Engine,
 	children:	&[Pair],
@@ -233,9 +316,33 @@ pub fn layout_with(
 {
 	let config = res!(configuration(base, children, styles, situation));
 	let hang = config.hanging_indent;
-	let p = res!(prepare(engine, children, config, region));
 	let region_w = region.width.to_pt();
-	let lines = res!(linebreak(&p, region_w - hang));
+	let key = if engine.caches.pars.on() && keepable(children) {
+		Some(memo_key(engine.caches.config(), &config, region, children))
+	} else {
+		None
+	};
+	let p = res!(prepare(engine, children, config, region));
+
+	// Kept breaks are taken only when they end at the end of the text, which a key that matches assures.
+	let kept = match &key {
+		Some(k)	=> engine.caches.pars.get(k).filter(|b| b.last().map_or(0, |(end, _)| *end) == p.text.len()),
+		None	=> None,
+	};
+	let lines = match kept {
+		Some(breaks) => {
+			engine.caches.counters.par_hits += 1;
+			res!(rebuild(&p, &breaks))
+		}
+		None => {
+			engine.caches.counters.par_misses += 1;
+			let (lines, breaks) = res!(linebreak(&p, region_w - hang));
+			if let Some(k) = key {
+				engine.caches.pars.store(k, breaks);
+			}
+			lines
+		}
+	};
 
 	// The width the lines fill: the region's, unless the content may shrink to its longest line and has
 	// no fractional spacing.

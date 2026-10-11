@@ -1330,8 +1330,8 @@ fn the_cache_budgets_are_the_hosts_and_the_result_carries_the_counters() -> Outc
 	let made = res!(must_pdf(inst.compile_pdf(&p)));
 	assert_eq!(made.counters.shapes.budget, default.shapes, "the shaped-run cache holds the default share");
 	assert!(made.counters.shapes.entries > 0 && made.counters.shapes.bytes > 0, "and the compile filled it");
-	assert_eq!((made.counters.replayed, made.counters.relaid, made.counters.par_hits, made.counters.par_misses),
-		(0, 0, 0, 0), "the page and paragraph counts are zero until those caches exist");
+	assert_eq!((made.counters.replayed, made.counters.relaid), (0, 0), "the page counts are zero until the ledger exists");
+	assert_eq!((made.counters.par_hits, made.counters.par_misses), (0, 1), "the one paragraph was laid afresh");
 	let by_default = pdf_of(&made);
 
 	// A budget too small to keep any run slows the compile and changes nothing it makes.
