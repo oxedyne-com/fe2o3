@@ -161,54 +161,12 @@ fn zdir(root: &Path, c: &OzoneConfig, z: usize) -> PathBuf {
     c.zone_root(root).join(fmt!("zone_{:03}", z + 1))
 }
 
-/// A power cut now: the store is copied to `to` as its files stand, and each live file of the
-/// copy is cut to the mark its last barrier published.  Only files that exist when the marks are
-/// read are copied, so a file begun since, which no barrier has covered, is not.
+/// A power cut now: the store is imaged at one instant (`gc_pair::instant_cut`), and each
+/// live file of the image is cut to the mark its last barrier published.
 fn power_cut(db: &TestDb, root: &Path, c: &OzoneConfig, to: &str) -> Outcome<PathBuf> {
-    let mut marks = Vec::new();
-    for z in 0..c.num_zones as usize {
-        for (f, m) in res!(db.api().chans().marks().files(z)) {
-            marks.push((z, f, m));
-        }
-    }
-    let mut files = Vec::new();
-    res!(list(root, &mut files));
     let dst = res!(fresh(to));
-    for f in &files {
-        let rel = res!(f.strip_prefix(root).map_err(|e| err!(e, "Not under the root."; Test)));
-        let out = dst.join(rel);
-        if let Some(p) = out.parent() {
-            res!(fs::create_dir_all(p));
-        }
-        if fs::copy(f, &out).is_err() {
-            continue; // collected since it was listed
-        }
-    }
-    let _ = fs::remove_file(dst.join(constant::FAULT_FILENAME));
-    let _ = fs::remove_file(dst.join(constant::REFUSAL_FILENAME));
-    for (z, f, (d, i)) in marks {
-        for (typ, upto) in [(FileType::Data, d), (FileType::Index, i)] {
-            let p = zdir(&dst, c, z).join(ZoneDir::relative_file_path(&typ, f));
-            if let Ok(file) = fs::OpenOptions::new().write(true).open(&p) {
-                if res!(file.metadata()).len() > upto {
-                    res!(file.set_len(upto));
-                }
-            }
-        }
-    }
+    res!(instant_cut(db, root, c, &dst));
     Ok(dst)
-}
-
-fn list(dir: &Path, out: &mut Vec<PathBuf>) -> Outcome<()> {
-    for e in res!(fs::read_dir(dir)) {
-        let p = res!(e).path();
-        if p.is_dir() {
-            res!(list(&p, out));
-        } else {
-            out.push(p);
-        }
-    }
-    Ok(())
 }
 
 // Reads `keys` from a store cut at a power cut, and closes it.

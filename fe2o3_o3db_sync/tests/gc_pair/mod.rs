@@ -293,3 +293,93 @@ pub fn files_holding(root: &Path, cfg: &OzoneConfig, needle: &[u8]) -> Vec<PathB
     }
     found.into_iter().collect()
 }
+
+// The marks of every zone, in zone order.
+fn all_marks(db: &TestDb, c: &OzoneConfig) -> Outcome<Vec<(usize, u32, (u64, u64))>> {
+    let mut marks = Vec::new();
+    for z in 0..c.num_zones as usize {
+        for (f, m) in res!(db.api().chans().marks().files(z)) {
+            marks.push((z, f, m));
+        }
+    }
+    Ok(marks)
+}
+
+// Every file under `dir` with its inode, so that a file replaced by a rename is told from itself.
+fn inodes(dir: &Path, out: &mut BTreeMap<PathBuf, u64>) -> Outcome<()> {
+    use std::os::unix::fs::MetadataExt;
+    let list = match fs::read_dir(dir) {
+        Ok(list) => list,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()), // removed since listed
+        Err(e) => return Err(err!(e, "Listing {:?} for a power cut.", dir; IO, Test)),
+    };
+    for entry in list {
+        let p = res!(entry).path();
+        match fs::symlink_metadata(&p) {
+            Ok(m) if m.is_dir() => res!(inodes(&p, out)),
+            Ok(m) => { out.insert(p, m.ino()); },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (), // removed since listed
+            Err(e) => return Err(err!(e, "Reading {:?} for a power cut.", p; IO, Test)),
+        }
+    }
+    Ok(())
+}
+
+/// A power cut at one instant of the live store `root`, imaged into the empty directory `dst`:
+/// each live file of the image is cut to the mark its last barrier published.  The copy takes
+/// time while collection deletes, renames and rolls files over, so the marks and the directory
+/// (names and inodes) are read before and after it, and the copy is taken again until neither
+/// moved.  A file that vanishes mid-copy is such a move.  An image mixing a directory from after
+/// a collection with marks from before it is a state no real crash leaves (2026-10-11).
+/// `RACES_COPY_DELAY_MS` widens each copy, to show the image stays single-instant under a slow disk.
+pub fn instant_cut(db: &TestDb, root: &Path, c: &OzoneConfig, dst: &Path) -> Outcome<()> {
+    const TRIES: usize = 200;
+    let delay = std::env::var("RACES_COPY_DELAY_MS").ok().and_then(|s| s.parse::<u64>().ok());
+    for _ in 0..TRIES {
+        let marks = res!(all_marks(db, c));
+        let mut before = BTreeMap::new();
+        res!(inodes(root, &mut before));
+        let _ = fs::remove_dir_all(dst);
+        res!(fs::create_dir_all(dst));
+        let mut moved = false;
+        for f in before.keys() {
+            let rel = res!(f.strip_prefix(root).map_err(|e| err!(e, "{:?} is not under the root.", f; Test)));
+            let out = dst.join(rel);
+            if let Some(p) = out.parent() {
+                res!(fs::create_dir_all(p));
+            }
+            if let Some(ms) = delay {
+                thread::sleep(Duration::from_millis(ms));
+            }
+            if fs::copy(f, &out).is_err() {
+                moved = true; // gone or replaced mid-copy: take the image again
+                break;
+            }
+        }
+        if !moved {
+            let mut after = BTreeMap::new();
+            res!(inodes(root, &mut after));
+            moved = after != before || res!(all_marks(db, c)) != marks;
+        }
+        if moved {
+            thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        let _ = fs::remove_file(dst.join(constant::FAULT_FILENAME));
+        let _ = fs::remove_file(dst.join(constant::REFUSAL_FILENAME));
+        for (z, f, (d, i)) in marks {
+            let zd = c.zone_root(dst).join(fmt!("zone_{:03}", z + 1));
+            for (typ, upto) in [(FileType::Data, d), (FileType::Index, i)] {
+                let p = zd.join(ZoneDir::relative_file_path(&typ, f));
+                if let Ok(file) = fs::OpenOptions::new().write(true).open(&p) {
+                    if res!(file.metadata()).len() > upto {
+                        res!(file.set_len(upto));
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+    Err(err!("No instant image of {:?} was taken in {} tries: the store kept moving under \
+        every copy.", root, TRIES; Test, Timeout))
+}
