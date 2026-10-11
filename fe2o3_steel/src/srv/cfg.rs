@@ -2673,6 +2673,13 @@ pub struct ServerConfig {
     // Anything other than `/admin*` returns 404. Defaults to 0, disabled.
     #[optional]
     pub admin_local_port:               u16,
+    // Optional plaintext HTTP listener on the loopback interface, 127.0.0.1 and ::1, serving
+    // every vhost as the TLS port does, with the vhost chosen from each request's Host header and
+    // no HSTS sent. It is for a process on this host -- a sidecar, a local tool, a front Steel --
+    // that has no reason to speak TLS to its neighbour. It cannot be bound anywhere else. Defaults
+    // to 0, disabled.
+    #[optional]
+    pub loopback_http_port:             u16,
     pub session_expiry_default_secs:    u32,            // seconds
     pub ws_ping_interval_secs:          u8,             // seconds
     pub server_max_errors_allowed:      u8,             // consecutive, on one connection
@@ -2915,6 +2922,7 @@ impl Default for ServerConfig {
             compression_enabled:            true,
             compression_min_bytes:          encoding::MIN_BYTES_DEFAULT as u64,
             admin_local_port:               0,      // disabled by default
+            loopback_http_port:             0,      // disabled by default
             session_expiry_default_secs:    604_800, // 1 week.
             ws_ping_interval_secs:          30,
             server_max_errors_allowed:      30,

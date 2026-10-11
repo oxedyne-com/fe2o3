@@ -13,6 +13,7 @@ pub mod fleet;
 pub mod http;
 pub mod https;
 pub mod id;
+pub mod loopback;
 pub mod mail;
 pub mod publish;
 pub mod server;

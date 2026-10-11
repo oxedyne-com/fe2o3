@@ -214,7 +214,7 @@ async fn serve_and_ask() -> Outcome<Vec<u8>> {
                 Ok(s) => s,
                 Err(e) => return Err(err!(e, "TLS accept failed."; Network)),
             };
-            ctx.handle_https(stream, Some(HOST.to_string()), peer).await
+            ctx.handle_https(stream, Some(HOST.to_string()), peer, false).await
         });
         let tcp = res!(TcpStream::connect(addr).await, Network, Init);
         let name = res!(ServerName::try_from(HOST.to_string()), Invalid);

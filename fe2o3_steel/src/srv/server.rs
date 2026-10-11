@@ -417,6 +417,24 @@ impl<
         // per connection for it.
         let inflight = Arc::new(AtomicUsize::new(0));
 
+        // The loopback plain-HTTP listener, beside the admin one above but serving every vhost,
+        // and counted in `inflight` so a stop waits for its connections as for the TLS port's.
+        let loopback_port = self.context.cfg.loopback_http_port;
+        if loopback_port != 0 {
+            let ctx_for_loopback = self.context.clone();
+            let inflight_loopback = inflight.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ctx_for_loopback.run_loopback_http(
+                    loopback_port,
+                    inflight_loopback,
+                ).await {
+                    error!(err!(e,
+                        "Loopback HTTP listener exited.";
+                        Init, Network));
+                }
+            });
+        }
+
         loop {
             // Two ways out of a wait that used to have none. Both arms are
             // cancel-safe -- tokio documents `accept` as such, and a stop
@@ -542,6 +560,7 @@ impl<
                                             tls_stream,
                                             sni,
                                             src_addr,
+                                            false,
                                         ).await {
                                             error!(err!(e,
                                                 "Error handling HTTPS connection.";

@@ -76,7 +76,6 @@ use tokio::{
         AsyncWriteExt,
     },
 };
-use tokio_rustls::server::TlsStream;
 
 
 // A log line about one connection or request, written only where the vhost
@@ -160,26 +159,40 @@ impl<
             .with_body(body.to_json().into_bytes()))
     }
 
-    pub async fn handle_https(
+    /// Serves one connection: a TLS stream from the public port, or, with `plain`, a TCP stream
+    /// from the loopback listener (`srv::loopback`), which has no SNI, so each request's vhost is
+    /// taken from its Host header, and is sent no HSTS.
+    pub async fn handle_https<S>(
         self,
-        mut stream: TlsStream<TcpStream>,
+        mut stream: S,
         sni:        Option<String>,
         src_addr:   SocketAddr,
+        plain:      bool,
     )
         -> Outcome<()>
+        where S: AsyncRead + AsyncWrite + Unpin + Send + 'static
     {
-        let id = fmt!("Https|Cx:{}", IdDat::<4, u32>::randef()); // Cx = Connection id.
+        let id = if plain {
+            fmt!("Http|Cx:{}", IdDat::<4, u32>::randef())
+        } else {
+            fmt!("Https|Cx:{}", IdDat::<4, u32>::randef()) // Cx = Connection id.
+        };
 
         // Resolve the vhost once per connection from the SNI. All requests
         // on a single TLS connection are considered to target the same vhost,
-        // which matches how every HTTP/1.1 and HTTP/2 client behaves.
-        let vhost = self.vhost_for(sni.as_deref());
+        // which matches how every HTTP/1.1 and HTTP/2 client behaves. A plain
+        // connection has no SNI and resolves it per request instead, below.
+        let conn_vhost = self.vhost_for(sni.as_deref());
         let log_level = res!(self.cfg.log_level());
         // A vhost with its access log off writes no line naming a peer or a
         // request, and gives the traffic recorder nothing.
-        let logged = vhost.access_log;
-        alog!(logged, log_level, "{}: connection from {:?}, sni={:?}, vhost='{}'.",
-            id, src_addr, sni, vhost.primary_hostname());
+        // On a plain connection this is the default vhost's until a request names its own.
+        let mut logged = conn_vhost.access_log;
+        if !plain {
+            alog!(logged, log_level,
+                "{}: connection from {:?}, sni={:?}, vhost='{}'.",
+                id, src_addr, sni, conn_vhost.primary_hostname());
+        }
 
         let (mut read_stream, mut write_stream) = tokio::io::split(&mut stream);
 
@@ -216,6 +229,22 @@ impl<
                         }
                         break;
                     }
+                    // On a plain connection the Host header picks the vhost, and a
+                    // Host that names none lands on the default, where the check
+                    // below answers it 421 as it would a TLS client's.
+                    let vhost = if plain {
+                        let host = match request.header.fields.get_one(&HeaderName::Host) {
+                            Some(HeaderFieldValue::Generic(h)) => Some(match h.find(':') {
+                                Some(i) => h[..i].to_string(),
+                                None    => h.clone(),
+                            }),
+                            _ => None,
+                        };
+                        self.vhost_for(host.as_deref())
+                    } else {
+                        conn_vhost.clone()
+                    };
+                    logged = vhost.access_log;
                     // Validate the Host header against the vhost hostnames.
                     // A mismatch means an SNI/Host disagreement, which is a
                     // misdirected client; we return 421.
@@ -817,7 +846,8 @@ impl<
                             }
                             // Inject HSTS header if configured, so browsers
                             // remember to use HTTPS for subsequent visits.
-                            if self.cfg.hsts_max_age_secs > 0 {
+                            // Never over plain HTTP, where the header means nothing.
+                            if !plain && self.cfg.hsts_max_age_secs > 0 {
                                 msg.header.fields.insert(
                                     HeaderName::StrictTransportSecurity,
                                     HeaderFieldValue::Generic(fmt!(
