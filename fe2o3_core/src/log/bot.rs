@@ -102,12 +102,14 @@ impl<ETAG: GenTag> Config<ETAG>
 
 #[derive(Clone, Debug, Default)]
 pub struct FileConfig {
-    pub dir:    PathBuf,        // Directory for numbered log files.
-    pub name:   String,         // Log file base name.
-    pub ext:    String,         // Log file extension.
-    pub num:    u16,            // Current log file number.
-    pub max:    Option<u64>,    // Maximum file size.
-    pub path:   PathBuf,        // Current log file path.
+    pub dir:        PathBuf,                // Directory for numbered log files.
+    pub name:       String,                 // Log file base name.
+    pub ext:        String,                 // Log file extension.
+    pub num:        u16,                    // Next archive number.
+    pub max:        Option<u64>,            // Maximum file size.
+    pub path:       PathBuf,                // Current log file path.
+    pub keep:       Option<usize>,          // archives kept, newest first; `None` keeps all
+    pub keep_age:   Option<time::Duration>, // archives older than this go; `None` keeps all
 }
 
 impl FileConfig {
@@ -127,11 +129,85 @@ impl FileConfig {
             ext,
             num,
             max,
-            path: PathBuf::new(),
+            path:       PathBuf::new(),
+            keep:       None,
+            keep_age:   None,
         };
         result.path = result.path();
         trace!("Log file path = {:?}", result.path);
         result
+    }
+
+    /// Bounds the archives a size limit (`max`) makes: at most `keep` of them, the newest,
+    /// and none older than `age`. Either bound alone may be given, and the smaller wins.
+    /// They are applied after each archive, when the file is opened, and hourly.
+    pub fn with_retention(mut self, keep: Option<usize>, age: Option<time::Duration>) -> Self {
+        self.keep = keep;
+        self.keep_age = age;
+        self
+    }
+
+    /// Every archive of this log in its directory, `<name>.<ext>.<number>.gz`, newest first by
+    /// modification time, with its number.
+    pub fn archives(&self) -> Outcome<Vec<(PathBuf, time::SystemTime, u16)>> {
+        let stem = fmt!("{}.{}.", self.name, self.ext);
+        let list = match std::fs::read_dir(&self.dir) {
+            Ok(l) => l,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(err!(e,
+                "Listing the log directory {:?} for archives.", self.dir;
+            IO, File, Read)),
+        };
+        let mut out = Vec::new();
+        for entry in list {
+            let entry = res!(entry);
+            let fname = entry.file_name();
+            let num = match fname.to_str()
+                .and_then(|f| f.strip_prefix(&stem))
+                .and_then(|f| f.strip_suffix(".gz"))
+            {
+                Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) =>
+                    match n.parse::<u16>() {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    },
+                _ => continue,
+            };
+            let meta = res!(entry.metadata());
+            if !meta.is_file() {
+                continue;
+            }
+            let at = meta.modified().unwrap_or(time::UNIX_EPOCH);
+            out.push((entry.path(), at, num));
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+        Ok(out)
+    }
+
+    /// Removes the archives past `keep` or older than `keep_age` at `now`, and gives how many
+    /// went.
+    pub fn prune(&self, now: time::SystemTime) -> Outcome<usize> {
+        if self.keep.is_none() && self.keep_age.is_none() {
+            return Ok(0);
+        }
+        let mut n = 0;
+        for (i, (path, at, _)) in res!(self.archives()).into_iter().enumerate() {
+            let too_many = self.keep.map(|k| i >= k).unwrap_or(false);
+            let too_old = match self.keep_age {
+                Some(age) => now.duration_since(at).map(|d| d > age).unwrap_or(false),
+                None => false,
+            };
+            if too_many || too_old {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => n += 1,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(err!(e,
+                        "Removing the log archive {:?}.", path;
+                    IO, File, Write)),
+                }
+            }
+        }
+        Ok(n)
     }
 
     pub fn path(&self) -> PathBuf {
@@ -150,6 +226,13 @@ impl FileConfig {
         res!(self.make_dir());
         let path = self.path();
         self.path = path.clone();
+        // Number on from the archives already there, so a restart never writes over one.
+        if let Some(last) = res!(self.archives()).iter().map(|(_, _, n)| *n).max() {
+            if last >= self.num {
+                self.num = last.wrapping_add(1);
+            }
+        }
+        res!(self.prune(time::SystemTime::now()));
         let file = res!(OpenOptions::new()
             .create(true)
             .append(true)
@@ -167,6 +250,7 @@ pub struct LogBot<ETAG: GenTag>
     file:   Option<File>,   
     cfg:    Arc<RwLock<Config<ETAG>>>,
     chan:   Simplex<Msg<ETAG>>,
+    pruned: Option<time::Instant>,  // the last age prune
 }
 
 impl<ETAG: GenTag> LogBot<ETAG>
@@ -293,28 +377,33 @@ impl<ETAG: GenTag> LogBot<ETAG>
                 }
             }
         }
+        // An age bound must hold on a quiet log too, which may archive once a month.
+        const PRUNE_EVERY: time::Duration = time::Duration::from_secs(3600);
+        if self.pruned.map(|t| t.elapsed() >= PRUNE_EVERY).unwrap_or(true) {
+            self.pruned = Some(time::Instant::now());
+            let unlocked_cfg = lock_read!(self.cfg);
+            if let Some(file_cfg) = unlocked_cfg.file.as_ref() {
+                res!(file_cfg.prune(time::SystemTime::now()));
+            }
+        }
         Ok(())
     }
 
     fn archive(&mut self) -> Outcome<()> {
         let mut unlocked_cfg = lock_write!(self.cfg);
-        if let Some(file_cfg) = unlocked_cfg.file.as_mut() {
+        if let (Some(file_cfg), Some(old)) = (unlocked_cfg.file.as_mut(), self.file.as_mut()) {
             let mut log_path = file_cfg.dir.clone();
-            let mut name = file_cfg.name.clone();
-            name.push('.');
-            name.push_str(&file_cfg.ext);
-            name.push('.');
-            name.push_str(&fmt!("{:02}.gz", file_cfg.num));
-            log_path.push(name);
+            log_path.push(fmt!("{}.{}.{:02}.gz", file_cfg.name, file_cfg.ext, file_cfg.num));
             let mut new = res!(File::create(log_path));
-            let old = self.file.as_mut().unwrap();
             res!(old.seek(SeekFrom::Start(0)));
-            let old_buf = BufReader::new(old);
-            let mut gz = GzEncoder::new(old_buf, Compression::fast());
-            res!(io::copy(&mut gz, &mut new));
-            // Archive to new compressed file.
-            res!(self.file.as_mut().unwrap().set_len(0)); // Return to start.
-            file_cfg.num = file_cfg.num.wrapping_add(1); 
+            {
+                let old_buf = BufReader::new(&mut *old);
+                let mut gz = GzEncoder::new(old_buf, Compression::fast());
+                res!(io::copy(&mut gz, &mut new));
+            }
+            res!(old.set_len(0)); // Return to start.
+            file_cfg.num = file_cfg.num.wrapping_add(1);
+            res!(file_cfg.prune(time::SystemTime::now()));
         }
         Ok(())
     }
@@ -511,5 +600,61 @@ impl<ETAG: GenTag> LogBot<ETAG>
             _ => (),
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(fmt!("fe2o3_log_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn touch_archive(cfg: &FileConfig, num: u16, age_secs: u64) -> Outcome<()> {
+        let p = cfg.dir.join(fmt!("{}.{}.{:02}.gz", cfg.name, cfg.ext, num));
+        let f = res!(File::create(&p));
+        let at = time::SystemTime::now() - time::Duration::from_secs(age_secs);
+        res!(f.set_modified(at));
+        Ok(())
+    }
+
+    #[test]
+    fn test_prune_keeps_the_newest_and_drops_the_old() -> Outcome<()> {
+        let dir = scratch("prune");
+        res!(std::fs::create_dir_all(&dir));
+        let cfg = FileConfig::new(dir.clone(), fmt!("app"), fmt!("log"), 0, Some(10))
+            .with_retention(Some(3), Some(time::Duration::from_secs(30 * 86_400)));
+        // Five archives a day apart, and one past the age bound.
+        for n in 0..5u16 {
+            res!(touch_archive(&cfg, n, (5 - n as u64) * 86_400));
+        }
+        res!(touch_archive(&cfg, 7, 31 * 86_400));
+        // Neither a stranger nor the live file is an archive.
+        res!(File::create(dir.join("app.log")));
+        res!(File::create(dir.join("other.log.01.gz")));
+        assert_eq!(res!(cfg.archives()).len(), 6);
+        let gone = res!(cfg.prune(time::SystemTime::now()));
+        assert_eq!(gone, 3);
+        let left: Vec<u16> = res!(cfg.archives()).into_iter().map(|(_, _, n)| n).collect();
+        assert_eq!(left, vec![4, 3, 2]);
+        assert!(dir.join("app.log").exists() && dir.join("other.log.01.gz").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_reopening_numbers_on_from_the_last_archive() -> Outcome<()> {
+        let dir = scratch("renum");
+        res!(std::fs::create_dir_all(&dir));
+        let mut cfg = FileConfig::new(dir.clone(), fmt!("app"), fmt!("log"), 0, Some(10));
+        res!(touch_archive(&cfg, 0, 60));
+        res!(touch_archive(&cfg, 1, 30));
+        let _f = res!(cfg.update());
+        assert_eq!(cfg.num, 2, "A restart would have written over archive 00.");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

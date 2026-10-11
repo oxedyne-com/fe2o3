@@ -307,6 +307,7 @@ impl AdminState {
         for r in self.host_sampler.residents().unwrap_or_default() {
             b.set_resident(&r);
         }
+        b.set_gauges();
         b.set_stamps(&self.health_stamps, SystemTime::now());
         b
     }

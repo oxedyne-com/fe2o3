@@ -2698,6 +2698,16 @@ pub struct ServerConfig {
 
     // --- Server bind and policy (shared) ------------------------------------
     pub log_level:                      String,         // used by the server once running
+    // The log file's rotation, under `<app root>/www/logs/`. A file past `log_file_max_bytes`
+    // is archived as `<app>.log.<n>.gz`; at most `log_files_max` files are kept, the live one
+    // included, and none older than `log_max_age_days`. Zero -- the default for each -- means
+    // 1 MiB, every archive, and any age, as before these fields.
+    #[optional]
+    pub log_file_max_bytes:             u64,
+    #[optional]
+    pub log_files_max:                  u16,
+    #[optional]
+    pub log_max_age_days:               u16,
     pub server_address:                 String,         // typically "0.0.0.0"
     pub server_port_tcp:                u16,            // the primary HTTPS port
     // Optional plaintext HTTP listener port. When non-zero, Steel binds this port too and
@@ -2983,6 +2993,9 @@ impl Default for ServerConfig {
         Self {
             tls_dir_rel:                    fmt!("./tls"),
             log_level:                      fmt!("debug"),
+            log_file_max_bytes:             0,      // 1 MiB
+            log_files_max:                  0,      // every archive kept
+            log_max_age_days:               0,      // archives of any age kept
             server_address:                 fmt!("0.0.0.0"),
             server_port_tcp:                8443,
             server_port_tcp_plaintext:      0,      // disabled by default
@@ -3029,6 +3042,24 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+
+    /// The log file's size limit, the archives kept beside the live file, and their age limit,
+    /// with each zero field read as its default (see `log_file_max_bytes`).
+    pub fn log_rotation(&self) -> (u64, Option<usize>, Option<std::time::Duration>) {
+        let max = match self.log_file_max_bytes {
+            0 => 1_048_576,
+            n => n,
+        };
+        let keep = match self.log_files_max {
+            0 => None,
+            n => Some(n as usize - 1),  // the live file is one of them
+        };
+        let age = match self.log_max_age_days {
+            0 => None,
+            d => Some(std::time::Duration::from_secs(d as u64 * 86_400)),
+        };
+        (max, keep, age)
+    }
 
     /// Validate the whole server configuration: each vhost's webroot, static
     /// routes, default index files and hostnames, plus the ACME cache path.

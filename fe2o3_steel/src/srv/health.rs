@@ -45,6 +45,7 @@ use std::{
     sync::{
         Arc,
         Mutex,
+        OnceLock,
     },
     time::{
         SystemTime,
@@ -263,6 +264,48 @@ impl Default for RollingCounter {
     }
 }
 
+// ── App gauges ───────────────────────────────────────────────────────────────
+//
+// Figures an app in this process knows and Steel does not -- a store's size against its cap,
+// say -- set by the app whenever it measures them and carried in every body until changed.
+// A stamp's age is read at request time; a gauge is whatever the app last set, so an app
+// that must show a figure that keeps moving on its own sets a stamp instead.
+pub const GAUGES_MAX:       usize = 16;
+
+fn gauge_map() -> &'static Mutex<BTreeMap<String, i64>> {
+    static GAUGES: OnceLock<Mutex<BTreeMap<String, i64>>> = OnceLock::new();
+    GAUGES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Sets an app's figure in this process's health body. The name follows a stamp's rule (see
+/// [`is_stamp_name`]), so it can be neither a built-in field nor a resident key, and at most
+/// [`GAUGES_MAX`] names are held.
+pub fn set_gauge(name: &str, value: i64) -> Outcome<()> {
+    if !is_stamp_name(name) {
+        return Err(err!(
+            "The health gauge name '{}' is not usable: it must be 1 to {} of lower-case \
+            letters, digits and '_', and none of the body's own fields.", name, STAMP_NAME_MAX;
+            Invalid, Input, Name));
+    }
+    let mut g = lock_mutex!(gauge_map());
+    if !g.contains_key(name) && g.len() >= GAUGES_MAX {
+        return Err(err!(
+            "The health body already carries {} gauges, the most it holds; '{}' was not added.",
+            GAUGES_MAX, name;
+            LimitReached, Input));
+    }
+    g.insert(name.to_string(), value);
+    Ok(())
+}
+
+/// Every gauge an app has set, by name.
+pub fn gauges() -> BTreeMap<String, i64> {
+    match gauge_map().lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),   // a poisoned map still holds the last values
+    }
+}
+
 /// A flat map of integer health fields, emitted as JSON and parsed back the same.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HealthBody {
@@ -330,6 +373,13 @@ impl HealthBody {
         b.set(F_UPTIME_S,       uptime_s as i64);
         b.set(F_SEALED,         if sealed { 1 } else { 0 });
         b
+    }
+
+    /// Every gauge an app has set (see [`set_gauge`]), under its own name.
+    pub fn set_gauges(&mut self) {
+        for (k, v) in gauges() {
+            self.set(&k, v);
+        }
     }
 
     /// Each stamp's age in whole seconds, under its own field. See
@@ -469,6 +519,20 @@ mod tests {
         let mut b = HealthBody::new();
         b.set_resident(&Resident { name: fmt!("bad,name"), procs: 1, ..Resident::default() });
         assert!(b.fields.is_empty(), "an unsafe name must never reach the body");
+    }
+
+    #[test]
+    fn gauges_ride_in_the_body_and_refuse_a_built_in_name() {
+        assert!(set_gauge("zz_test_store_pct", 41).is_ok());
+        assert!(set_gauge(F_MEM_PCT, 1).is_err(), "A gauge took a built-in field's name.");
+        assert!(set_gauge("res.x.procs", 1).is_err(), "A gauge took a resident key.");
+        let mut b = HealthBody::new();
+        b.set_gauges();
+        assert_eq!(b.get("zz_test_store_pct"), Some(41));
+        assert!(set_gauge("zz_test_store_pct", 42).is_ok());
+        let mut b = HealthBody::new();
+        b.set_gauges();
+        assert_eq!(b.get("zz_test_store_pct"), Some(42));
     }
 
     #[test]
