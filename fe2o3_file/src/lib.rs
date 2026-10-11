@@ -44,4 +44,5 @@ pub mod glob;
 pub mod office;
 pub mod quiet;
 pub mod tree;
+pub mod walk;
 pub mod zip;

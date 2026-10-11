@@ -5,6 +5,7 @@ mod odf;
 mod office;
 mod quiet;
 mod tree;
+mod walk;
 mod pptx;
 mod xlsx;
 mod zip;
@@ -43,6 +44,7 @@ fn run_tests() -> Outcome<()> {
     res!(pptx::test_pptx(filter));
     res!(odf::test_odf(filter));
     res!(edit::test_edit(filter));
+    res!(walk::test_walk(filter));
 
     Ok(())
 }
