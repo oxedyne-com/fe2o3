@@ -7,6 +7,7 @@ use crate::file::core::FileType;
 use oxedyne_fe2o3_jdat::Dat;
 
 use std::{
+    collections::BTreeMap,
     sync::{
         Mutex,
         atomic::{
@@ -81,6 +82,7 @@ static DELETE_OLD_ORDER: AtomicBool = AtomicBool::new(false); // a whole-file de
 static DELETE_ABORT_AT:  AtomicU64  = AtomicU64::new(0);      // the process aborts after the first unlink of this delete, 0 never
 static DELETES_BEGUN:    AtomicU64  = AtomicU64::new(0);      // whole-file deletes counted for the above
 static HEAD_DROPS:       AtomicBool = AtomicBool::new(false); // a chunked store never sends its head
+static BARRIERS:         Mutex<BTreeMap<(usize, usize), u64>> = Mutex::new(BTreeMap::new()); // completed, by (zone, writer)
 static HALT:             Mutex<Option<(Halt, std::path::PathBuf)>> = Mutex::new(None); // where to wait for a kill
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
@@ -644,6 +646,28 @@ pub(crate) fn collect_fails_for(fnum: u32) -> bool {
 
 pub(crate) fn dir_sync_fails() -> bool {
     DIR_SYNC_FAILS.load(Ordering::Relaxed)
+}
+
+/// The durability barriers completed since the process began, over every store and writer, so
+/// that a test counts barriers rather than timing them.
+pub fn barriers() -> u64 {
+    barriers_by_writer().values().sum()
+}
+
+/// The barriers completed since the process began, by (zone, writer).
+pub fn barriers_by_writer() -> BTreeMap<(usize, usize), u64> {
+    match BARRIERS.lock() {
+        Ok(m)   => m.clone(),
+        Err(p)  => p.into_inner().clone(),
+    }
+}
+
+pub(crate) fn barrier_made(zone: usize, bot: usize) {
+    let mut m = match BARRIERS.lock() {
+        Ok(m)   => m,
+        Err(p)  => p.into_inner(),
+    };
+    *m.entry((zone, bot)).or_insert(0) += 1;
 }
 
 /// Is the disk to fail this sync?  Counted when it is.

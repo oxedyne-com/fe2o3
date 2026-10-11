@@ -104,7 +104,10 @@ impl SyncPolicy {
 /// replaces is sealed, made durable before any record written to the new one is released.  A
 /// `Record` is one appended record with the insert that releases it to its cache bot, and the
 /// data and index ends after it.  `SyncNow` asks for a barrier over everything handed before it,
-/// `SyncOwed` for one within `constant::HELD_BARRIER`.
+/// `SyncOwed` for one within `constant::HELD_BARRIER`.  A store's chunk is not answered until a
+/// barrier covers it, and its store sends `SyncNow` behind its last chunk, so a chunk leaves the
+/// timed and every-N barriers to the records they protect: a barrier due on the first chunk
+/// would cover only that one, and the rest would wait on a second, in series.
 pub enum Handed<
     const UIDL: usize,
     UID:    NumIdDat<UIDL>,
@@ -119,6 +122,7 @@ pub enum Handed<
         resp:   Responder<UIDL, UID, ENC, KH>,
         policy: SyncPolicy,
         ends:   (u64, u64),
+        chunk:  bool,               // a store's chunk, covered by its store's `SyncNow`
     },
     SyncNow(Responder<UIDL, UID, ENC, KH>),
     SyncOwed,
@@ -245,6 +249,7 @@ struct Barrier<
     told:       BTreeMap<usize, Simplex<OzoneMsg<UIDL, UID, ENC, KH>>>, // cache bots released to since the last barrier
     policy:     SyncPolicy,         // the latest record's
     dirty:      bool,               // the pair holds records no barrier has covered
+    policed:    bool,               // ... of which one is not a store's chunk
     since:      u32,                // records released since the last barrier
     last:       Option<Instant>,    // when the last barrier completed
     owed:       Option<Instant>,    // a held discard's barrier is due by then
@@ -279,6 +284,7 @@ impl<
             told:       BTreeMap::new(),
             policy:     SyncPolicy::Never,
             dirty:      false,
+            policed:    false,
             since:      0,
             last:       None,
             owed:       None,
@@ -321,8 +327,8 @@ impl<
             while let Some(item) = self.queue.pop_front() {
                 match item {
                     Handed::Pair(live) => self.seal(live),
-                    Handed::Record { cbot, cbpind, insert, resp, policy, ends } =>
-                        self.records(cbot, cbpind, insert, resp, policy, ends),
+                    Handed::Record { cbot, cbpind, insert, resp, policy, ends, chunk } =>
+                        self.records(cbot, cbpind, insert, resp, policy, ends, chunk),
                     Handed::SyncNow(resp) => {
                         let result = match (&self.poisoned, self.dirty) {
                             (Some(e), _)    => Err(e.clone()),
@@ -370,17 +376,20 @@ impl<
         resp:   Responder<UIDL, UID, ENC, KH>,
         policy: SyncPolicy,
         ends:   (u64, u64),
+        chunk:  bool,
     ) {
         let mut run = vec![(cbot, cbpind, insert, resp)];
         self.taken = ends;
+        self.policed |= !chunk;
         if policy == SyncPolicy::EveryWrite {
             while let Some(Handed::Record { policy: next, .. }) = self.queue.front() {
                 if *next != policy {
                     break;
                 }
-                if let Some(Handed::Record { cbot, cbpind, insert, resp, ends, .. }) = self.queue.pop_front() {
+                if let Some(Handed::Record { cbot, cbpind, insert, resp, ends, chunk, .. }) = self.queue.pop_front() {
                     run.push((cbot, cbpind, insert, resp));
                     self.taken = ends;
+                    self.policed |= !chunk;
                 }
             }
         }
@@ -389,6 +398,8 @@ impl<
         self.since = self.since.saturating_add(run.len() as u32);
         let due = match policy {
             SyncPolicy::EveryWrite  => true,
+            // Its store's `SyncNow` follows it, and nothing waits on it before then.
+            _ if chunk              => false,
             SyncPolicy::EveryN(n)   => self.since >= n,
             SyncPolicy::Interval(p) => match self.last {
                 None        => true,
@@ -502,7 +513,9 @@ impl<
             return Err(e);
         }
         hooks::halt(hooks::Halt::Synced);
+        hooks::barrier_made(self.shared.zone, self.shared.bot);
         self.dirty = false;
+        self.policed = false;
         self.since = 0;
         self.last = Some(Instant::now());
         self.owed = None;
@@ -596,15 +609,18 @@ impl<
     }
 
     /// How long until the interval policy or a held discard owes a barrier, while one is owed.
-    /// A poisoned syncer owes nothing: no barrier of its can prove anything again.
+    /// A poisoned syncer owes nothing: no barrier of its can prove anything again.  Chunks alone
+    /// owe no period: the timer would otherwise barrier the first of a store's chunks before the
+    /// next arrived.
     fn owed_in(&self) -> Option<Duration> {
         if self.poisoned.is_some() || !self.dirty {
             return None;
         }
-        let period = match (self.policy, self.last) {
-            (SyncPolicy::Interval(p), Some(t))  => Some(p.saturating_sub(t.elapsed())),
-            (SyncPolicy::Interval(_), None)     => Some(Duration::ZERO),
-            _                                   => None,
+        let period = match (self.policy, self.last, self.policed) {
+            (_, _, false)                               => None,
+            (SyncPolicy::Interval(p), Some(t), true)    => Some(p.saturating_sub(t.elapsed())),
+            (SyncPolicy::Interval(_), None, true)       => Some(Duration::ZERO),
+            _                                           => None,
         };
         let held = self.owed.map(|t| t.saturating_duration_since(Instant::now()));
         match (period, held) {

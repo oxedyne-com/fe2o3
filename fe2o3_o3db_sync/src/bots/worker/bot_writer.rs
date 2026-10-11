@@ -397,6 +397,7 @@ impl<
         kbyts.truncate(klen_cache); // remove metadata
         let resp = resp_w1.clone();
         let ticketed = matches!(role, Some(StoreRole::Head(_)));
+        let chunk = matches!(role, Some(StoreRole::Chunk));
         let insert = OzoneMsg::Insert(
             kbyts,
             Some(vstored),
@@ -412,7 +413,7 @@ impl<
         let handed = if ticketed && hooks::head_hand_fails() {
             Err(err!("A store's head could not be handed to the syncer (test::hooks)."; Thread, Write))
         } else {
-            self.syncer.hand(Handed::Record { cbot, cbpind, insert, resp, policy, ends })
+            self.syncer.hand(Handed::Record { cbot, cbpind, insert, resp, policy, ends, chunk })
         };
         if let Err(e) = handed {
             // The syncer stopped after the check above, and the record is in the files.
