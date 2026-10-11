@@ -1039,6 +1039,15 @@ impl<
         None
     }
 
+    /// The `Strict-Transport-Security` value this server gives a proxied response that sets
+    /// none: never when `hsts_max_age_secs` is 0. This release has no plain listener.
+    fn hsts_value(&self) -> Option<String> {
+        match self.cfg.hsts_max_age_secs > 0 {
+            true    => Some(fmt!("max-age={}; includeSubDomains", self.cfg.hsts_max_age_secs)),
+            false   => None,
+        }
+    }
+
     async fn handle_proxy_http<W>(
         &self,
         request:    HttpMessage,
@@ -1155,8 +1164,20 @@ impl<
                         }
                     }
 
-                    // Forward the response headers to the client.
-                    match client_w.write_all(header_bytes).await {
+                    // Forward the response headers to the client. TLS ends at this hop, so
+                    // this hop is where HSTS belongs: the upstream behind it speaks plain
+                    // loopback HTTP and rightly sends none. Filled as on Steel's own responses,
+                    // only where the upstream left the field empty, so its own is never doubled.
+                    let filled = match self.hsts_value() {
+                        Some(hsts)  => fwd::fill_head_field(
+                            header_bytes, "Strict-Transport-Security", &hsts),
+                        None        => None,
+                    };
+                    let head_out = match &filled {
+                        Some(h) => h.as_slice(),
+                        None    => header_bytes,
+                    };
+                    match client_w.write_all(head_out).await {
                         Ok(()) => (),
                         Err(e) => return Err(err!(e,
                             "{}: proxy: failed to write response headers to client.", id;
