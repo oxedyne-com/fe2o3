@@ -39,6 +39,7 @@ use crate::eval::value::{
 	Alignment,
 	Dict,
 	HAlign,
+	Length,
 	Type,
 	Value,
 };
@@ -528,6 +529,43 @@ pub fn show(_engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcom
 }
 
 // Paper sizes
+
+/// The page's width and height as the chain sets them, each the nearer of its own setting and a `paper`,
+/// which sets both, else A4's: a length or `auto`, unresolved. `flipped` does not swap them, as in Typst.
+pub fn page_dims(styles: &StyleChain) -> (Value, Value) {
+	let ids = (
+		ElemKind::Page.field_id("width"),
+		ElemKind::Page.field_id("height"),
+		ElemKind::Page.field_id("paper"),
+	);
+	let (mut w, mut h): (Option<Value>, Option<Value>) = (None, None);
+	for s in styles.walk() {
+		let p = match s {
+			Style::Property(p) if p.elem == ElemKind::Page	=> p,
+			_												=> continue,
+		};
+		let field = Some(p.field);
+		if field == ids.2 {
+			if let Value::Str(name) = &p.value {
+				if let Some((pw, ph)) = paper(name) {
+					w = w.or(Some(Value::Length(Length::pt(pw * PT_PER_MM))));
+					h = h.or(Some(Value::Length(Length::pt(ph * PT_PER_MM))));
+				}
+			}
+		} else if field == ids.0 && w.is_none() {
+			w = Some(p.value.clone());
+		} else if field == ids.1 && h.is_none() {
+			h = Some(p.value.clone());
+		}
+		if w.is_some() && h.is_some() {
+			break;
+		}
+	}
+	let a4 = |mm: f64| Value::Length(Length::pt(mm * PT_PER_MM));
+	(w.unwrap_or_else(|| a4(210.0)), h.unwrap_or_else(|| a4(297.0)))
+}
+
+const PT_PER_MM: f64 = 72.0 / 25.4;
 
 /// A paper's width and height in millimetres, by its Typst name.
 pub fn paper(name: &str) -> Option<(f64, f64)> {

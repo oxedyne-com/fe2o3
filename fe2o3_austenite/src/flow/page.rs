@@ -37,7 +37,6 @@ use crate::eval::realise::{
 	Tag,
 };
 use crate::eval::styles::{
-	Style,
 	StyleChain,
 	Styles,
 };
@@ -580,7 +579,7 @@ impl PageSetup {
 	/// content), the margins (`auto` is 2.5/21 of the shorter side, of A4's width when both fit), the
 	/// binding for two-sided margins, the columns and their gutter, and the furniture.
 	fn of(engine: &mut Engine, styles: &StyleChain, span: Span) -> Outcome<PageSetup> {
-		let (mut w, mut h) = page_size(engine, styles, span);
+		let (mut w, mut h) = page_size(styles);
 		if matches!(res!(page_field(styles, "flipped")), Some(Value::Bool(true))) {
 			std::mem::swap(&mut w, &mut h);
 		}
@@ -691,44 +690,10 @@ pub(crate) fn page_field(styles: &StyleChain, name: &str) -> Outcome<Option<Valu
 	}
 }
 
-/// The page's width and height in points, infinite for `auto`. Each is the nearer of its own setting and
-/// a `paper`, which sets both; A4 where neither is set.
-fn page_size(engine: &mut Engine, styles: &StyleChain, span: Span) -> (f64, f64) {
-	let ids = (
-		ElemKind::Page.field_id("width"),
-		ElemKind::Page.field_id("height"),
-		ElemKind::Page.field_id("paper"),
-	);
-	let (mut w, mut h): (Option<f64>, Option<f64>) = (None, None);
-	for s in styles.walk() {
-		let p = match s {
-			Style::Property(p) if p.elem == ElemKind::Page	=> p,
-			_												=> continue,
-		};
-		let field = Some(p.field);
-		if field == ids.2 {
-			let (pw, ph) = match &p.value {
-				Value::Str(name) => match lay::paper(name) {
-					Some((a, b))	=> (a * PT_PER_MM, b * PT_PER_MM),
-					None			=> {
-						engine.warn(DiagnosticKind::Unsupported, span, fmt!("unknown paper size: {}", name));
-						(A4_WIDTH_MM * PT_PER_MM, 297.0 * PT_PER_MM)
-					},
-				},
-				_ => continue,
-			};
-			w = w.or(Some(pw));
-			h = h.or(Some(ph));
-		} else if field == ids.0 && w.is_none() {
-			w = Some(length_or_inf(styles, &p.value));
-		} else if field == ids.1 && h.is_none() {
-			h = Some(length_or_inf(styles, &p.value));
-		}
-		if w.is_some() && h.is_some() {
-			break;
-		}
-	}
-	(w.unwrap_or(A4_WIDTH_MM * PT_PER_MM), h.unwrap_or(297.0 * PT_PER_MM))
+/// The page's width and height in points, infinite for `auto`.
+fn page_size(styles: &StyleChain) -> (f64, f64) {
+	let (w, h) = lay::page_dims(styles);
+	(length_or_inf(styles, &w), length_or_inf(styles, &h))
 }
 
 fn length_or_inf(styles: &StyleChain, v: &Value) -> f64 {

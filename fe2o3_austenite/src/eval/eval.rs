@@ -2056,6 +2056,11 @@ impl<'a> Vm<'a> {
 			return Ok(None);
 		}
 		let styles = res!(intro::context_styles(self.engine, span));
+		// A page's size is read through its paper when no width or height is set nearer.
+		if kind == ElemKind::Page && (name == "width" || name == "height") {
+			let (w, h) = lib::layout::page_dims(&styles);
+			return Ok(Some(if name == "width" { w } else { h }));
+		}
 		match res!(styles.get(kind, id)) {
 			Some(v)	=> Ok(Some(res!(lib::text::as_read(kind, name, v)))),
 			None	=> Ok(content::default_field(kind, id)),
