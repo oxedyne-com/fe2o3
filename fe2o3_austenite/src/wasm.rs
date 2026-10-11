@@ -12,6 +12,14 @@
 //! line, so a caller composes its diagnostics from a value it always receives. Columns are 1-based
 //! UTF-16 code units. A project carrying `strict: true` turns a result that was not set as written into
 //! such a failure, so a partial PDF never reads as success.
+//!
+//! **Holding only the pages on screen.** `compileProjectDelta` keeps the laid-out pages of the compile it
+//! answered (their frames, not their SVG), and `renderPage` draws any one of them on request, byte for byte
+//! as the delta would have sent it. A consumer therefore holds the SVG of only the pages it shows: it sends
+//! `known` as the ids it still holds and `want: [from, to]` as the span of `order` it shows, and the delta
+//! sends the SVG of the changed pages inside that span alone, with the whole `order` as ever. A page that
+//! scrolls into view and is not held is fetched with `renderPage(id)`. The kept pages are replaced by the
+//! next successful delta and by nothing else, so a failed compile leaves the last good pages drawable.
 
 use crate::caches::Counters;
 use crate::compile::{
@@ -22,6 +30,9 @@ use crate::compile::{
 use crate::delta::{
 	Changed,
 	Head,
+	PageAt,
+	PageMiss,
+	Window,
 };
 use crate::door::{
 	self,
@@ -92,12 +103,69 @@ impl DaimondTypst {
 	/// `version` is this instance's tick, stepped by each delta and left where it was by a refusal. See
 	/// [`crate::delta`] for the shape. Ids are opaque decimal strings, since a JavaScript number cannot
 	/// hold every 64-bit hash exactly. A success also carries `counters`.
+	///
+	/// The project may carry `want: [from, to]`, whole numbers, the span `order.slice(from, to)` the consumer
+	/// shows: then `changed` carries only the changed pages inside it, and the consumer fetches any other
+	/// with [`Self::render_page`] when it comes into view. With no `want`, or one that is not two whole
+	/// numbers in order, every changed page is sent, as before `want` existed.
 	#[wasm_bindgen(js_name = compileProjectDelta)]
 	pub fn compile_project_delta(&mut self, project: &JsValue) -> JsValue {
 		match self.inst.compile_delta_into(&project_of(project), JsChanged::default()) {
 			Ok(made)	=> ok_delta(&made),
 			Err(fail)	=> err_obj(&fail),
 		}
+	}
+
+	/// One page of the last delta, drawn from the pages it kept: `{ id, index, version, svg }`, the SVG
+	/// byte for byte what the delta sends for that id. `page` is an id from `order` (a decimal string) or an
+	/// index into `order` (a whole number from 0). The answer is `{ error, code, version }` when there is no
+	/// such page: `code` is `"uncompiled"` before any delta, `"gone"` for an id the last delta's `order`
+	/// does not hold, `"range"` for an index past its end, and `"input"` for a `page` of another kind;
+	/// `version` is the last delta's, `0` before any. A fault in drawing gives `{ error, code: "internal",
+	/// diagnostics, skipped, needs }`.
+	#[wasm_bindgen(js_name = renderPage)]
+	pub fn render_page(&self, page: &JsValue) -> JsValue {
+		let version = self.inst.kept().map(|k| k.version()).unwrap_or(0);
+		let at = if let Some(s) = page.as_string() {
+			s.parse::<u64>().ok().map(PageAt::Id)
+		} else {
+			match page.as_f64() {
+				Some(n) if n >= 0.0 && n.fract() == 0.0 && n <= 9_007_199_254_740_991.0	=> Some(PageAt::Index(n as usize)),
+				_																		=> None,
+			}
+		};
+		let obj = js_sys::Object::new();
+		let miss = |obj: &js_sys::Object, code: &str, message: &str| {
+			set(obj, "error", &JsValue::from_str(message));
+			set(obj, "code", &JsValue::from_str(code));
+			set(obj, "version", &JsValue::from_f64(version as f64));
+		};
+		let at = match at {
+			Some(a)	=> a,
+			None	=> {
+				miss(&obj, "input", "a page is an id from order, as a decimal string, or an index into order from 0");
+				return obj.into();
+			},
+		};
+		match self.inst.page(at) {
+			Ok(Ok((id, index, svg)))	=> {
+				set(&obj, "id", &JsValue::from_str(&fmt!("{}", id)));
+				set(&obj, "index", &JsValue::from_f64(index as f64));
+				set(&obj, "version", &JsValue::from_f64(version as f64));
+				set(&obj, "svg", &JsValue::from_str(&svg));
+			},
+			Ok(Err(m))					=> miss(&obj, m.code(), match m {
+				PageMiss::Uncompiled	=> "no delta has been compiled",
+				PageMiss::Gone			=> "the last delta has no page with that id",
+				PageMiss::Range			=> "the index is past the last page of the last delta",
+			}),
+			Err(fail)					=> {
+				let out = err_obj(&fail);
+				let _ = js_sys::Reflect::set(&out, &JsValue::from_str("code"), &JsValue::from_str("internal"));
+				return out;
+			},
+		}
+		obj.into()
 	}
 
 	/// The font families a compile of `project` can set by name, as a sorted `string[]`: the embedded
@@ -302,6 +370,7 @@ fn project_of(v: &JsValue) -> Project {
 		main:		string_field(v, "main").unwrap_or_default(),
 		strict:		bool_field(v, "strict"),
 		known:		parse_known(v),
+		want:		parse_want(v),
 		..Project::default()
 	};
 	for (path, text) in text_pairs(v, "sources") {
@@ -388,6 +457,23 @@ fn parse_known(project: &JsValue) -> Vec<u64> {
 		}
 	}
 	ids
+}
+
+/// The span of `order` the consumer shows, from the project's `want: [from, to]`: two whole numbers,
+/// `from` not past `to`. Anything else is no window, and every changed page is sent.
+fn parse_want(project: &JsValue) -> Option<Window> {
+	let arr = match array_field(project, "want") {
+		Some(a) if a.length() == 2	=> a,
+		_							=> return None,
+	};
+	let whole = |v: JsValue| match v.as_f64() {
+		Some(n) if n >= 0.0 && n.fract() == 0.0 && n <= 9_007_199_254_740_991.0	=> Some(n as usize),
+		_																		=> None,
+	};
+	match (whole(arr.get(0)), whole(arr.get(1))) {
+		(Some(from), Some(to)) if from <= to	=> Some(Window { from, to }),
+		_										=> None,
+	}
 }
 
 /// Sets one property; a failed set on a fresh plain object cannot happen, so it is not reported.

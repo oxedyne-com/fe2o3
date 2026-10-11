@@ -13,6 +13,8 @@ use crate::delta::{
 	Builder,
 	Changed,
 	Head,
+	Kept,
+	Window,
 };
 use crate::emit::pdf::PdfOptions;
 use crate::emit::svg;
@@ -226,28 +228,31 @@ impl PageSink for VectorSink {
 }
 
 /// Takes each page of the pass as the live view's changed-only delta ([`crate::delta`]): the page's content
-/// id, and the page itself when the consumer does not hold that id. Nothing is drawn while a pass runs,
-/// because the fixpoint cannot say a pass has settled before its last page: a pass that has not is
-/// discarded whole and the builder restarts with it, so none of its pages is ever drawn. `finish`, which
-/// runs once, after the pass that stands, draws each page the consumer lacks and hands its SVG to `out`.
+/// id and the page itself. Nothing is drawn while a pass runs, because the fixpoint cannot say a pass has
+/// settled before its last page: a pass that has not is discarded whole and the builder restarts with it,
+/// so none of its pages is ever drawn. `finish`, which runs once, after the pass that stands, draws each
+/// page the consumer lacks inside the window and hands its SVG to `out`, and keeps every page as a
+/// [`Kept`] for the door to draw any one of them on request.
 #[derive(Debug)]
 pub struct DeltaSink<C: Changed> {
-	build:	Option<Builder>,	// none once the delta is finished
+	build:	Option<Builder>,		// none once the delta is finished
 	out:	C,
-	head:	Option<Head>,
+	head:	Option<(Head, Kept)>,
 }
 
 impl<C: Changed> DeltaSink<C> {
-	/// A sink against the consumer's `known` ids, stepping `prior_version`, sending each changed page to `out`.
-	pub fn new(known: &[u64], prior_version: u32, out: C) -> Self {
-		Self { build: Some(Builder::new(known, prior_version)), out, head: None }
+	/// A sink against the consumer's `known` ids, stepping `prior_version`, sending each changed page inside
+	/// `want` (every changed page when none) to `out`.
+	pub fn new(known: &[u64], prior_version: u32, want: Option<Window>, out: C) -> Self {
+		Self { build: Some(Builder::windowed(known, prior_version, want)), out, head: None }
 	}
 
-	/// The delta's head and the consumer of its changed pages, once the fixpoint has run `finish`.
-	pub fn into_delta(self) -> Option<(Head, C)> {
+	/// The delta's head, the consumer of its changed pages and the pages kept, once the fixpoint has run
+	/// `finish`.
+	pub fn into_delta(self) -> Option<(Head, C, Kept)> {
 		match self.head {
-			Some(head)	=> Some((head, self.out)),
-			None		=> None,
+			Some((head, kept))	=> Some((head, self.out, kept)),
+			None				=> None,
 		}
 	}
 }

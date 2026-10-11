@@ -74,6 +74,7 @@ impl Doc {
 			fonts:		self.fonts.clone(),
 			strict:		false,
 			known:		known.to_vec(),
+			want:		None,
 		}
 	}
 

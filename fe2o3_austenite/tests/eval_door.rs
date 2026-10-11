@@ -24,7 +24,10 @@ use oxedyne_fe2o3_austenite::caches::Budgets;
 use oxedyne_fe2o3_austenite::compile::DiagnosticKind;
 use oxedyne_fe2o3_austenite::delta::{
 	Changed,
+	PageAt,
 	PageDelta,
+	PageMiss,
+	Window,
 };
 use oxedyne_fe2o3_austenite::door::{
 	self,
@@ -1389,5 +1392,170 @@ fn a_panic_drops_the_whole_session_and_keeps_the_hosts_budgets() -> Outcome<()> 
 	assert_eq!(inst.caches().resets(), 0, "and nothing was emptied for it");
 	assert_eq!(made.counters.shapes.budget, budgets.shapes, "the budget still reaches the shaped-run cache");
 	assert!(inst.font_families(Some(&p)).iter().any(|f| f == "Noto Sans"));
+	Ok(())
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ PAGES ON REQUEST                                                            │
+// └───────────────────────────────────────────────────────────────────────────┘
+//
+// The consumer holds the SVG of the pages it shows and asks for any other: the delta keeps its compile's
+// frames, a window limits what it sends, and `page` draws one page from the frames kept.
+
+fn page_svg(inst: &Instance, at: PageAt) -> Outcome<(u64, usize, String)> {
+	match inst.page(at) {
+		Ok(Ok(r))	=> Ok(r),
+		Ok(Err(m))	=> Err(err!("No page at {:?}: {:?}.", at, m; Test)),
+		Err(f)		=> Err(err!("Drawing the page at {:?} failed: {}", at, f.head; Test)),
+	}
+}
+
+fn page_miss(inst: &Instance, at: PageAt) -> Outcome<PageMiss> {
+	match inst.page(at) {
+		Ok(Ok((id, _, _)))	=> Err(err!("A page {} was drawn at {:?}, where none should be.", id, at; Test)),
+		Ok(Err(m))			=> Ok(m),
+		Err(f)				=> Err(err!("Drawing the page at {:?} failed: {}", at, f.head; Test)),
+	}
+}
+
+#[test]
+fn a_page_requested_after_a_compile_is_byte_identical_to_the_one_the_delta_sent() -> Outcome<()> {
+	let mut inst = Instance::new();
+	assert_eq!(res!(page_miss(&inst, PageAt::Index(0))), PageMiss::Uncompiled, "nothing kept before a delta");
+	let p = strict(&[("/main.typ", &six_pages(None))]);
+	let d = res!(delta_made(&mut inst, &p)).product;
+	assert_eq!(d.changed.len(), 6);
+	for (i, (id, svg)) in d.changed.iter().enumerate() {
+		let (got, at, by_id) = res!(page_svg(&inst, PageAt::Id(*id)));
+		assert_eq!((got, at), (*id, i), "the id names its own page");
+		assert!(by_id == *svg, "page {} by id is the delta's bytes", i);
+		let (got, _, by_index) = res!(page_svg(&inst, PageAt::Index(i)));
+		assert!(got == *id && by_index == *svg, "page {} by index is the delta's bytes", i);
+	}
+	match inst.kept() {
+		Some(k)	=> assert!(k.len() == 6 && k.version() == d.version && k.order() == &d.order[..]),
+		None	=> return Err(err!("The delta kept no pages."; Test)),
+	}
+	Ok(())
+}
+
+#[test]
+fn a_page_requested_after_an_edit_reflects_the_edit_and_the_old_id_is_gone() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let mut p = strict(&[("/main.typ", &six_pages(None))]);
+	let was = res!(delta_made(&mut inst, &p)).product;
+	let (_, _, old) = res!(page_svg(&inst, PageAt::Index(2)));
+	assert!(text_layer(&old).contains("quartz"));
+	p.sources = vec![("/main.typ".to_string(), six_pages(Some(2)))];
+	p.known = was.order.clone();
+	let now = res!(delta_made(&mut inst, &p)).product;
+	assert_eq!(now.changed.len(), 1, "one page changed");
+	let (id, at, svg) = res!(page_svg(&inst, PageAt::Index(2)));
+	assert_eq!((id, at), (now.order[2], 2));
+	assert!(svg == now.changed[0].1 && text_layer(&svg).contains("quarts"), "the page drawn is the edited one");
+	assert_eq!(res!(page_miss(&inst, PageAt::Id(was.order[2]))), PageMiss::Gone, "the page the edit replaced is gone");
+	assert_eq!(res!(page_miss(&inst, PageAt::Index(6))), PageMiss::Range, "six pages, so index 6 is past the end");
+	let (_, _, same) = res!(page_svg(&inst, PageAt::Id(was.order[3])));
+	assert!(text_layer(&same).contains("quartz"), "an unedited page keeps its id and draws as before");
+	Ok(())
+}
+
+#[test]
+fn a_window_limits_what_the_delta_sends_and_a_page_outside_it_is_drawn_on_request() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let mut p = strict(&[("/main.typ", &six_pages(None))]);
+	p.want = Some(Window { from: 2, to: 4 });
+	let first = res!(delta_made(&mut inst, &p));
+	let d = &first.product;
+	assert!(d.reset && d.order.len() == 6, "the order is every page, the window or not");
+	let sent: Vec<u64> = d.changed.iter().map(|(id, _)| *id).collect();
+	assert_eq!(sent, d.order[2..4].to_vec(), "only the pages in the window are sent");
+	assert_eq!(d.rendered, 2, "and only they are drawn");
+	// The consumer holds pages 2 and 3; an edit on page 0 and on page 3 sends page 3 alone.
+	p.known = d.order[2..4].to_vec();
+	p.sources = vec![("/main.typ".to_string(), six_pages(Some(3)))];
+	let second = res!(delta_made(&mut inst, &p)).product;
+	assert_eq!(second.changed.len(), 1);
+	assert_eq!(second.changed[0].0, second.order[3], "the edited page inside the window is sent");
+	assert_eq!(second.order[0], d.order[0], "page 0 is unedited and keeps its id");
+	// A page outside the window comes on request, as a window covering it would have sent it.
+	let (_, _, far) = res!(page_svg(&inst, PageAt::Index(5)));
+	p.known = Vec::new();
+	p.want = Some(Window { from: 5, to: 99 });
+	let third = res!(delta_made(&mut inst, &p)).product;
+	assert_eq!(third.changed.len(), 1, "a window past the end stops at the last page");
+	assert!(third.changed[0].1 == far, "the page drawn on request is the bytes a delta sends");
+	// No window is every changed page, as before.
+	p.want = None;
+	assert_eq!(res!(delta_made(&mut inst, &p)).product.changed.len(), 6);
+	Ok(())
+}
+
+#[test]
+fn a_failed_compile_leaves_the_last_deltas_pages_drawable() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let p = strict(&[("/main.typ", &six_pages(None))]);
+	let d = res!(delta_made(&mut inst, &p)).product;
+	let _ = res!(delta_fail(&mut inst, &strict(&[("/main.typ", "#nonesuch()\n")])));
+	let (id, _, svg) = res!(page_svg(&inst, PageAt::Index(1)));
+	assert!(id == d.changed[1].0 && svg == d.changed[1].1, "the consumer still shows them, so they stay");
+	Ok(())
+}
+
+/// Many pages of prose, one paragraph a page, each page different.
+fn prose_pages(n: usize) -> String {
+	let mut t = String::from("#set page(width: 300pt, height: 400pt, margin: 20pt, numbering: \"1\")\n#set par(justify: true)\n");
+	for k in 0..n {
+		if k > 0 {
+			t.push_str("#pagebreak()\n");
+		}
+		t.push_str(&fmt!("= Part {}\n", k));
+		for j in 0..4 {
+			t.push_str(&fmt!("Paragraph {} of part {} turns the batter, rests the pan and waits for the edges to lift before it is served warm. \n\n", j, k));
+		}
+	}
+	t
+}
+
+#[test]
+fn the_kept_pages_stay_bounded_by_one_compile_and_well_under_their_svg() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let mut p = strict(&[("/main.typ", &prose_pages(24))]);
+	let d = res!(delta_made(&mut inst, &p)).product;
+	let svg: usize = d.changed.iter().map(|(_, s)| s.len()).sum();
+	let held = match inst.kept() { Some(k) => k.heap_bytes(), None => 0 };
+	assert!(held > 0 && held * 3 < svg, "kept frames {} B against {} B of SVG", held, svg);
+	// Recompiles, edited and not, hold one compile's frames: nothing accumulates.
+	p.known = d.order.clone();
+	for edit in 0..4 {
+		p.sources = vec![("/main.typ".to_string(), prose_pages(24).replace("Part 3", &fmt!("Part 3{}", edit)))];
+		let _ = res!(delta_made(&mut inst, &p));
+		let now = match inst.kept() { Some(k) => (k.len(), k.heap_bytes()), None => (0, 0) };
+		assert_eq!(now.0, 24);
+		assert!(now.1 * 10 < held * 11 && now.1 * 11 > held * 10, "recompile {} holds {} B, the first {} B", edit, now.1, held);
+	}
+	eprintln!("[pg] 24 pages: kept {} B ({} B a page), SVG {} B ({} B a page)", held, held / 24, svg, svg / 24);
+	Ok(())
+}
+
+/// The resident cost of the kept frames on the 300-page fixtures, from `PG_FIXTURES`, a directory holding
+/// `syn300.typ` (tools/bench/gen_synthetic.py 300) and `book300.typ` (Daimond's 300-page bench book).
+#[test]
+#[ignore]
+fn measure_the_kept_frames_of_a_300_page_book() -> Outcome<()> {
+	let dir = match std::env::var("PG_FIXTURES") {
+		Ok(d)	=> PathBuf::from(d),
+		Err(_)	=> return Err(err!("Set PG_FIXTURES to the fixture directory."; Missing, Input)),
+	};
+	for name in ["syn300.typ", "book300.typ"] {
+		let text = res!(std::fs::read_to_string(dir.join(name)));
+		let mut inst = Instance::new();
+		let p = project(&[("/main.typ", &text)]);
+		let d = res!(delta_made(&mut inst, &p)).product;
+		let svg: usize = d.changed.iter().map(|(_, s)| s.len()).sum();
+		let (n, held) = match inst.kept() { Some(k) => (k.len(), k.heap_bytes()), None => (0, 0) };
+		eprintln!("[pg] {}: {} pages, kept {:.2} MB ({} B a page), SVG {:.1} MB ({} B a page), ratio {:.1}x",
+			name, n, held as f64 / 1e6, held / n.max(1), svg as f64 / 1e6, svg / n.max(1), svg as f64 / held.max(1) as f64);
+	}
 	Ok(())
 }

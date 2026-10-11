@@ -248,6 +248,12 @@ impl ShapedText {
 	/// The shaped source string, whose byte offsets a glyph's [`cluster`](Glyph::cluster) indexes.
 	pub fn source(&self) -> &str { &self.text }
 
+	/// The heap bytes the run holds of its own: its glyphs and its source string. The fonts it draws from
+	/// are shared with the session and every other run, so they are not counted.
+	pub fn heap_bytes(&self) -> usize {
+		self.run.glyphs.capacity() * std::mem::size_of::<Glyph>() + self.text.capacity()
+	}
+
 	/// The family, weight and slant of the face heading the run's font chain: the face the run was set in
 	/// wherever that face covered its characters.
 	pub fn face_info(&self) -> Outcome<oxedyne_fe2o3_font::face::FaceInfo> {

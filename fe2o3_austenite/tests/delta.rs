@@ -443,7 +443,7 @@ fn measure_delta_cold_versus_warm_recompile() -> Outcome<()> {
 /// The builder's delta, its changed pages collected.
 fn finished(build: delta::Builder) -> Outcome<delta::PageDelta> {
 	let mut changed = Vec::new();
-	let head = res!(build.finish(&mut changed));
+	let (head, _) = res!(build.finish(&mut changed));
 	Ok(delta::PageDelta::of(head, changed))
 }
 

@@ -415,8 +415,8 @@ fn a_host_sets_the_loop_budget_to_a_number_or_to_none_and_a_small_one_refuses_ea
 fn a_project_is_document_data_and_carries_no_loop_budget() -> Outcome<()> {
 	// Every field of a project, named: one added for a budget stops this compiling, so the choice to let a
 	// project that arrives by sync set its own bound is made here, deliberately, or not at all.
-	let Project { main, sources, assets, fonts, strict, known } = Project::single("#[a]\n");
-	assert!(main.is_empty() && assets.is_empty() && fonts.is_empty() && known.is_empty() && !strict);
+	let Project { main, sources, assets, fonts, strict, known, want } = Project::single("#[a]\n");
+	assert!(main.is_empty() && assets.is_empty() && fonts.is_empty() && known.is_empty() && want.is_none() && !strict);
 	assert_eq!(sources.len(), 1);
 	// A source that spells a budget is only source: the door's bound is the same with it.
 	let mut inst = Instance::new();

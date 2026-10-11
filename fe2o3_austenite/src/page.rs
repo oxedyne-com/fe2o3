@@ -8,6 +8,7 @@
 use crate::font::ShapedText;
 use crate::ir::{
 	Dims,
+	DrawOp,
 	Graphic,
 	Sp,
 	Transform,
@@ -278,4 +279,24 @@ impl Page {
 	/// The split point clamped to the current frame, so `placed[..body_len()]` is always in bounds even
 	/// after the verso mirror shift has moved items around (it never adds or removes any).
 	pub fn body_len(&self) -> usize { self.body_len.min(self.frame.placed.len()) }
+
+	/// The bytes the page holds of its own: the page, its placed items, each text run's glyphs and string,
+	/// and each graphic's list of drawing operations. What an operation or a group shares by `Arc` beyond
+	/// that, a font or an image's pixels, is held by the session's caches as well and is not counted, so
+	/// this is the cost of keeping the page, not of everything it reaches.
+	pub fn heap_bytes(&self) -> usize {
+		let mut n = std::mem::size_of::<Page>() + self.frame.placed.capacity() * std::mem::size_of::<Placed>();
+		for p in &self.frame.placed {
+			n += match &p.kind {
+				PlacedKind::Text(t)		=> t.heap_bytes(),
+				PlacedKind::Graphic(g)	=> std::mem::size_of::<Graphic>()
+					+ g.ops.capacity() * std::mem::size_of::<DrawOp>(),
+				PlacedKind::Group(_)	=> std::mem::size_of::<Group>(),
+				PlacedKind::Rule
+				| PlacedKind::Reserved
+				| PlacedKind::GroupEnd	=> 0,
+			};
+		}
+		n
+	}
 }

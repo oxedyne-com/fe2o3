@@ -22,6 +22,10 @@ use crate::compile::{
 use crate::delta::{
 	self,
 	Changed,
+	Kept,
+	PageAt,
+	PageMiss,
+	Window,
 };
 use crate::diag::DiagnosticKind;
 use crate::emit::sinks::{
@@ -95,6 +99,7 @@ pub struct Project {
 	pub fonts:		Vec<(String, Vec<u8>)>,	// the name is not read: the face declares its own family
 	pub strict:		bool,
 	pub known:		Vec<u64>,				// the delta's page ids the consumer already holds
+	pub want:		Option<Window>,			// the span of the delta's `order` whose changed pages are sent, all when none
 }
 
 impl Project {
@@ -189,6 +194,7 @@ pub struct Instance {
 	good:		bool,						// the last compile laid pages without a refusal, so queries answer
 	version:	u32,						// the delta's tick
 	budget:		Option<u64>,				// the loop budget of a compile, none for no bound
+	kept:		Option<Kept>,				// the last delta's pages, drawn on request
 }
 
 // A font file's fingerprint, to tell a project's fonts unchanged from one call to the next.
@@ -216,6 +222,7 @@ impl Instance {
 			good:		false,
 			version:	0,
 			budget:		Some(LOOP_BUDGET),
+			kept:		None,
 		}
 	}
 
@@ -430,15 +437,44 @@ impl Instance {
 
 	/// As [`compile_delta`](Self::compile_delta), each changed page's SVG handed to `out` the moment it is
 	/// drawn, so the compile holds none of them: the browser door pushes each into a JavaScript array.
+	///
+	/// A delta keeps the laid-out pages of its compile, every one of them, for [`page`](Self::page) to draw
+	/// on request. They replace the pages the delta before kept; a compile that fails leaves those standing,
+	/// since the consumer still shows them.
 	pub fn compile_delta_into<C: Changed>(&mut self, p: &Project, out: C)
 		-> Result<Made<(delta::Head, C)>, Failure>
 	{
-		let made = self.run(p, DeltaSink::new(&p.known, self.version, out), false, |s| s.into_delta());
-		if let Ok(m) = &made {
-			self.version = m.product.0.version;
+		let sink = DeltaSink::new(&p.known, self.version, p.want, out);
+		let made = self.run(p, sink, false, |s| s.into_delta());
+		match made {
+			Ok(m)	=> {
+				let (head, out, kept) = m.product;
+				self.version	= head.version;
+				self.kept		= Some(kept);
+				Ok(Made { product: (head, out), report: m.report, needs: m.needs, counters: m.counters })
+			},
+			Err(f)	=> Err(f),
 		}
-		made
 	}
+
+	/// The id, index in `order` and SVG of one page of the last delta, drawn from the pages it kept, byte
+	/// for byte the SVG the delta sends for that id. The inner error says why there is no such page.
+	pub fn page(&self, at: PageAt) -> Result<Result<(u64, usize, String), PageMiss>, Failure> {
+		let kept = match &self.kept {
+			Some(k)	=> k,
+			None	=> return Ok(Err(PageMiss::Uncompiled)),
+		};
+		let _turn = turn();
+		let main = Path::new(MAIN);
+		match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| kept.render(at))) {
+			Ok(Ok(r))	=> Ok(r),
+			Ok(Err(e))	=> Err(Failure::of(&e, main)),
+			Err(_)		=> Err(Failure::internal(main, "the compiler panicked while drawing a page")),
+		}
+	}
+
+	/// The pages the last delta kept, none before the first.
+	pub fn kept(&self) -> Option<&Kept> { self.kept.as_ref() }
 }
 
 /// Hands a package's files to the engine, `spec` as `@namespace/name:version`; the count of files held.
