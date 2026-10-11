@@ -678,24 +678,31 @@ impl<
             }
         }
     
-        // A data file whose index stands, with records in it, was lost: serving the zone without
-        // it answers its keys "not found", so the open is refused, naming it, as a missing file in
-        // doubt is (QA r2 F4).  A lost index is not refused, since it is rebuilt from the data, and
-        // nor is an empty index, which names no record: a rollover abandoned with nothing written
-        // can leave one.  Collection removes the index of a file before its data, so a crash
-        // between the two leaves a data file, rebuilt and collected again, never an index alone.
-        for shard in &shards {
-            for (fnum, st) in shard.map() {
-                if matches!(st.present(), Present::Solo(FileType::Index)) && st.get_index_file_size() > 0 {
-                    let data = self.zdir().dir.join(ZoneDir::relative_file_path(&FileType::Data, *fnum));
-                    return Err(err!(
-                        "{}: Zone {}: the data file {:?} is missing while its index, of {} bytes, \
-                        stands, so the keys it holds would read as absent.  The file was lost, or \
-                        left behind when the store was moved or restored: put it back, or restore \
-                        the whole store.  The open is refused.",
-                        self.ozid(), self.zind(), data, st.get_index_file_size();
-                        Init, File, Missing));
+        // An index standing without its data file, with records in it, is not replayed here and
+        // is kept out of the zone's file states and size.  The data file is gone either because a
+        // collection deleting the pair was interrupted, the index outliving it (builds before
+        // 2026-10-11 removed the data first, and a filesystem that does not order two unlinks can
+        // do the same), or because it was lost.  Which one only the whole store can tell, so
+        // `lone_index::settle` judges it once every zone has replayed, and either completes the
+        // delete or refuses the open (QA r2 F4).  Its number is still in use until then: a live
+        // file must never be given it, or the old index would name the new file's records.  An
+        // empty index names no record, and a rollover abandoned with nothing written can leave one.
+        for shard in &mut shards {
+            let lone: Vec<FileNum> = shard.map().iter()
+                .filter(|(_, st)| matches!(st.present(), Present::Solo(FileType::Index))
+                    && st.get_index_file_size() > 0)
+                .map(|(fnum, _)| *fnum)
+                .collect();
+            for fnum in lone {
+                if let Some(st) = shard.map_mut().remove(&fnum) {
+                    dir_size = dir_size.saturating_sub(st.get_index_file_size());
                 }
+                if fnum > max_data_fnum {
+                    max_data_fnum = fnum;
+                }
+                info!(sync_log::stream(), "{}: Zone {}: index file {} stands without its data \
+                    file and is not replayed; the start judges it once every zone is up.",
+                    self.ozid(), self.zind(), fnum);
             }
         }
 
@@ -827,7 +834,6 @@ impl<
         for mut shard in shards {
 
             // 2. Loop through all previously surveyed files and check their status.
-            let mut missing_data_files: Option<Vec<u32>> = None;
             for (fnum, fstate) in shard.map_mut() {
                 match fstate.present() {
                     Present::Pair => {
@@ -889,21 +895,8 @@ impl<
                             by_data += 1;
                         }
                     },
-                    Present::Solo(FileType::Index) => {
-                        // An index file without a data file is bad, it means data has been lost.
-                        // Keep a track of all such instances and warn the user.
-                        match missing_data_files {
-                            None => missing_data_files = Some(vec![*fnum]),
-                            Some(ref mut missing) => missing.push(*fnum),
-                        }
-                    },
-                }
-            }
-            // 3. Warn the user of missing data files.
-            if let Some(missing) = missing_data_files {
-                for fnum in missing {
-                    warn!(sync_log::stream(), "{:?}: Data file {} is missing, suggesting loss of data.",
-                        self.ozid(), fnum);
+                    // Only an empty one reaches here (`survey_files`), naming no record.
+                    Present::Solo(FileType::Index) => (),
                 }
             }
         }

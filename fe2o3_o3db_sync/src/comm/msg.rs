@@ -217,6 +217,7 @@ pub enum OzoneMsg<
     Ready,
     ReadCache(Key, Responder<UIDL, UID, ENC, KH>),
     ReadFileRequest(FileNum, Vec<u8>, MetaLocation<UIDL, UID>, Responder<UIDL, UID, ENC, KH>), // key bytes
+    RecordsOf(Vec<Vec<u8>>, Responder<UIDL, UID, ENC, KH>), // stored keys, for the record each holds now
     ScanRequest {
         opts:   ScanOpts,
         schms2: Option<RestSchemesOverride<ENC, KH>>,
@@ -257,6 +258,7 @@ pub enum OzoneMsg<
     Value(Value<UIDL, UID>),
     Written, // a write's record is appended; its durable answer follows
     ReadResult(ReadResult<UIDL, UID>),
+    RecordsAt(Vec<Option<(Meta<UIDL, UID>, FileLocation)>>), // answers RecordsOf, in its order
     // Wrap
     ProcessGcBuffer(Box<OzoneMsg<UIDL, UID, ENC, KH>>),
     // Server

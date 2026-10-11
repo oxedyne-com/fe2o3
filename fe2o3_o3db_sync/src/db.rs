@@ -413,7 +413,14 @@ impl<
             Some(self.chans().sup().clone()),
         );
 
-        if let Err(e) = self.await_ready(&sentinel) {
+        // Every zone has replayed.  An index left without its data file is judged before the
+        // handle is given out: until then nothing can write, collect or sweep, since collection
+        // starts off (`gc_on`) and is turned on, ordered or swept only through the handle's API.
+        let started = match self.await_ready(&sentinel) {
+            Ok(()) => crate::lone_index::settle(&self.api).map(|_| ()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = started {
             // A supervisor that failed to start the database stops its bots itself.  One still
             // starting is asked to once it is done, since nobody will use what it starts.
             let stop = OzoneMsg::Shutdown(self.ozid().clone(), Responder::none(Some(self.ozid())));

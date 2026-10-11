@@ -313,6 +313,12 @@ impl<
                             let result = self.read(key, resp_r2);
                             self.result(&result);
                         },
+                        OzoneMsg::RecordsOf(keys, resp) => {
+                            let held = keys.iter()
+                                .map(|k| self.cache.record_at(k).map(|(m, f)| (m.clone(), f.clone())))
+                                .collect();
+                            self.respond(Ok(OzoneMsg::RecordsAt(held)), &resp);
+                        },
                         _ => return self.listen_more(msg),
                     }
                 }

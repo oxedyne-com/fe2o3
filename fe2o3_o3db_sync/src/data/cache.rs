@@ -701,6 +701,14 @@ impl<
         }
     }
 
+    /// The record held for the stored key `k` itself, following no box.
+    pub fn record_at(&self, k: &[u8]) -> Option<(&Meta<UIDL, UID>, &FileLocation)> {
+        match self.map.get(k) {
+            Some(CacheEntry::LocatedValue(mloc, _)) => Some((&mloc.meta, mloc.file_location())),
+            None => None,
+        }
+    }
+
     /// Where the record cached for `k` is in the files, following a key referral as `get` does.
     /// A deletion is a tombstone record, so it has one too.
     pub fn located(&self, k: &[u8]) -> Option<&FileLocation> {

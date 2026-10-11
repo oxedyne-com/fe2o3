@@ -151,9 +151,6 @@ pub fn sweep_orphans<
             api.ozid(), fault.stopped();
             Write, Fatal));
     }
-    let enc = api.schemes().encrypter();
-    let or_enc = schms2.map(|s| s.encrypter());
-
     // 1. Watch the set registry before touching the store: every set held from here until the
     //    chunks are classified is spared, whether its store finished before then or not, since its
     //    bunch key may be published after the live scan reads its key.
@@ -161,33 +158,9 @@ pub fn sweep_orphans<
 
     let bytes_before = res!(zone_data_bytes(api.db_root()));
 
-    // 2. Build the LIVE chunk-key set from every live bunch key.  Scan for main keys, fetch each to
-    //    its stored value, and for a chunked value (a Tup5u64 bunch value) reconstruct its chunk
-    //    keys exactly as the reader does.  A read error aborts: never narrow the live set on
-    //    uncertainty.  An absent value (a tombstone, or a value mid-write) contributes no live
-    //    chunks, which is safe because the watch keeps the chunks of any store during the sweep.
-    let main_opts = ScanOpts::all();
-    let main_entries = res!(api.scan_with_wait(&main_opts, schms2, dup_wait(&scan_wait)));
-    let scanned_main_keys = main_entries.len();
-
-    let mut live: HashSet<[u64; 5]> = HashSet::new();
-    for (kdat, _empty, _meta) in &main_entries {
-        let resp = res!(api.fetch_using_schemes(kdat, schms2));
-        match res!(resp.recv_daticle(enc, or_enc)) {
-            (Some((Dat::Tup5u64(tup), _)), _) => {
-                // A chunked value: its bunch value is the part key naming its chunks.
-                let set_id    = tup[0];
-                let data_len  = tup[2];
-                let num_parts = tup[3];
-                let part_size = tup[4];
-                for i in 1..(num_parts + 1) {
-                    live.insert([set_id, i, data_len, num_parts, part_size]);
-                }
-            },
-            // An unchunked value, or an absent one (tombstone / mid-write): no live chunks.
-            _ => (),
-        }
-    }
+    // 2. Build the LIVE chunk-key set from every live bunch key.  An absent value contributes no
+    //    live chunks, which is safe because the watch keeps the chunks of any store during the sweep.
+    let (live, scanned_main_keys) = res!(live_chunk_keys(api, schms2, dup_wait(&scan_wait)));
     let live_chunk_keys = live.len();
     hooks::sweep_hold();
 
@@ -303,6 +276,52 @@ pub fn open_store_alone(
             }
         },
     }
+}
+
+/// Every chunk key a live bunch key names, with the number of main keys scanned.  Scans for main
+/// keys, fetches each to its stored value, and for a chunked value (a Tup5u64 bunch value)
+/// reconstructs its chunk keys exactly as the reader does.  A read error aborts: never narrow the
+/// live set on uncertainty.  An absent value (a tombstone, or a value mid-write) contributes no
+/// live chunks.
+pub fn live_chunk_keys<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>(
+    api:    &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
+    schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    wait:   Wait,
+)
+    -> Outcome<(HashSet<[u64; 5]>, usize)>
+{
+    let enc = api.schemes().encrypter();
+    let or_enc = schms2.map(|s| s.encrypter());
+    let main_opts = ScanOpts::all();
+    let main_entries = res!(api.scan_with_wait(&main_opts, schms2, wait));
+    let scanned_main_keys = main_entries.len();
+
+    let mut live: HashSet<[u64; 5]> = HashSet::new();
+    for (kdat, _empty, _meta) in &main_entries {
+        let resp = res!(api.fetch_using_schemes(kdat, schms2));
+        match res!(resp.recv_daticle(enc, or_enc)) {
+            (Some((Dat::Tup5u64(tup), _)), _) => {
+                // A chunked value: its bunch value is the part key naming its chunks.
+                let set_id    = tup[0];
+                let data_len  = tup[2];
+                let num_parts = tup[3];
+                let part_size = tup[4];
+                for i in 1..(num_parts + 1) {
+                    live.insert([set_id, i, data_len, num_parts, part_size]);
+                }
+            },
+            // An unchunked value, or an absent one (tombstone / mid-write): no live chunks.
+            _ => (),
+        }
+    }
+    Ok((live, scanned_main_keys))
 }
 
 /// A fresh copy of a `Wait`, since `scan_with_wait` and `recv_number` take it by value and it is not
