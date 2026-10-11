@@ -118,11 +118,10 @@ pub fn glyph_id(font_d: &str) -> String {
 /// bytes: it renders every placed item -- body and furniture alike -- as one slice.
 pub fn render_page(page: &Page) -> Outcome<String> {
 	let mut ink		= String::new();
-	let mut tspans	= String::new();
-	let mut seen	= false;
+	let mut tsel	= TselLayer::new();
 	let mut defs	= GlyphDefs::new();
-	res!(render_slice(&page.frame.placed, &mut ink, &mut tspans, &mut seen, &mut defs));
-	Ok(assemble(page, &defs, &ink, &tspans))
+	res!(render_slice(&page.frame.placed, &mut ink, &mut tsel, &mut defs));
+	Ok(assemble(page, &defs, &ink, &tsel.finish()))
 }
 
 /// Renders one page through the emit memo. The body frame (`placed[..body_len]`) is content-hashed;
@@ -137,30 +136,27 @@ pub fn render_page_memo(page: &Page, memo: &mut Memo) -> Outcome<String> {
 	let furn	= &page.frame.placed[split..];
 
 	let key = page_key(page, body);
-	let (body_ink, body_tspans, seen_after, body_defs) = match memo.page_lookup(key) {
-		Some(e)	=> (e.body_ink, e.body_tspans, e.seen_text, e.body_defs),
+	let (body_ink, body_tsel, body_defs) = match memo.page_lookup(key) {
+		Some(e)	=> (e.body_ink, e.body_tsel, e.body_defs),
 		None	=> {
 			let mut ink		= String::new();
-			let mut tspans	= String::new();
-			let mut seen	= false;
+			let mut tsel	= TselLayer::new();
 			let mut defs	= GlyphDefs::new();
-			res!(render_slice(body, &mut ink, &mut tspans, &mut seen, &mut defs));
-			memo.page_store(key, ink.clone(), tspans.clone(), seen, defs.clone());
-			(ink, tspans, seen, defs)
+			res!(render_slice(body, &mut ink, &mut tsel, &mut defs));
+			memo.page_store(key, ink.clone(), tsel.clone(), defs.clone());
+			(ink, tsel, defs)
 		},
 	};
 
 	// The furniture, drawn fresh, its selectable tspans continuing the body's interword spacing and its
 	// outlines joining the body's, so a glyph both use is defined once.
 	let mut furn_ink	= String::new();
-	let mut furn_tspans	= String::new();
-	let mut seen		= seen_after;
+	let mut tsel		= body_tsel;
 	let mut defs		= body_defs;
-	res!(render_slice(furn, &mut furn_ink, &mut furn_tspans, &mut seen, &mut defs));
+	res!(render_slice(furn, &mut furn_ink, &mut tsel, &mut defs));
 
-	let ink		= fmt!("{}{}", body_ink, furn_ink);
-	let tspans	= fmt!("{}{}", body_tspans, furn_tspans);
-	Ok(assemble(page, &defs, &ink, &tspans))
+	let ink = fmt!("{}{}", body_ink, furn_ink);
+	Ok(assemble(page, &defs, &ink, &tsel.finish()))
 }
 
 /// The stable identity of a whole page for the changed-only delta ([`crate::delta`]): the content hash of
@@ -272,7 +268,7 @@ pub(crate) fn assemble_sized(w: usize, h: usize, defs: &GlyphDefs, ink: &str, ts
 }
 
 /// Renders one slice of a page's placed items into two buffers: `ink` gets the visible glyph outlines,
-/// rules and graphics; `tspans` gets the invisible selectable text layer. `seen_text` threads across
+/// rules and graphics; `tsel` gets the invisible selectable text layer, and its state threads across
 /// slices, so the furniture's first run takes its leading interword space exactly as it would in a
 /// single-pass whole-frame render. This is the per-item logic [`render_page`] always ran, split out so
 /// the body and the furniture can be rendered -- and the body cached -- independently.
@@ -287,8 +283,7 @@ pub(crate) fn assemble_sized(w: usize, h: usize, defs: &GlyphDefs, ink: &str, ts
 fn render_slice(
 	placed:		&[Placed],
 	ink:		&mut String,
-	tspans:		&mut String,
-	seen_text:	&mut bool,
+	tsel:		&mut TselLayer,
 	defs:		&mut GlyphDefs,
 )
 	-> Outcome<()>
@@ -352,9 +347,7 @@ fn render_slice(
 				bent.pop();
 			},
 			PlacedKind::Text(shaped) if !bent.last().copied().unwrap_or(false) => {
-				if res!(run_text_layer(tspans, p.x, p.y, p.dims.height, shaped, *seen_text)) {
-					*seen_text = true;
-				}
+				run_text_layer(tsel, p.x, p.y, p.dims.height, shaped);
 			},
 			_ => (),
 		}
@@ -466,54 +459,126 @@ fn draw_text(
 	Ok(())
 }
 
-/// Appends a placed run's invisible, selectable tspans to the page's one `.tsel` text buffer: one
-/// `<tspan>` per inked glyph, each carrying the source text [`ShapedText::glyph_text`] maps that glyph
-/// to, its own `font-size` (runs on a page differ -- a heading against a caption), and sitting exactly
-/// on that glyph's own baseline position -- the same `(base_x + glyph.x, base_y - glyph.y)`
-/// [`draw_text`] paints the outline at, so the invisible character and the visible one it stands in for
-/// never drift apart. The mapping is the very one the PDF writer's `/ToUnicode` CMap uses, not a fresh
-/// derivation, so the two extraction paths can never disagree about what a glyph says.
-///
-/// `sep` asks for a leading space, ahead of this run's own tspans, standing in for the interword gap the
-/// line breaker never gives a glyph of its own (see the call site in `render_page`). Returns whether
-/// anything was appended, so the caller only counts a run that actually carried a character towards
-/// "there was a previous run to space this one from".
-fn run_text_layer(
-	buf:	&mut String,
-	bx:		Sp,
-	by:		Sp,
-	height:	Sp,
-	shaped:	&ShapedText,
-	sep:	bool,
-)
-	-> Outcome<bool>
-{
+/// Appends a placed run's invisible, selectable characters to the page's one `.tsel` layer, each
+/// carrying the source text [`ShapedText::glyph_text`] maps its glyph to -- the very mapping the PDF
+/// writer's `/ToUnicode` CMap uses, so the two extraction paths never disagree -- and sitting on that
+/// glyph's own baseline position, `(base_x + glyph.x, base_y - glyph.y)`, where [`draw_text`] paints the
+/// outline.
+fn run_text_layer(tsel: &mut TselLayer, bx: Sp, by: Sp, height: Sp, shaped: &ShapedText) {
 	let base_x	= bx.to_pt() as f32;
 	let base_y	= (by + height).to_pt() as f32;
-	let size	= shaped.size();
 	let texts	= shaped.glyph_text();
+	let glyphs	= shaped.run().glyphs.iter().zip(texts.iter()).map(|(g, t)| (g.x, g.y, t.as_str()));
+	tsel.run(base_x, base_y, shaped.size(), glyphs);
+}
 
-	let mut spans = String::new();
-	for (glyph, text) in shaped.run().glyphs.iter().zip(texts.iter()) {
-		// A glyph with no text of its own -- a later part of a ligature or decomposed mark, already
-		// claimed by an earlier glyph at the same cluster -- contributes no span; the earlier one already
-		// carries the character.
-		if text.is_empty() {
-			continue;
+/// A page's selectable text layer as it is written: the markup so far, whether a run has yet written
+/// text, and the line its last span left open. Both the SVG arm and Pearl's `SvgSink` write through it,
+/// so their pages agree byte for byte, and the emit memo keeps the body's state, so the furniture carries
+/// on from it exactly as a single-pass render does.
+///
+/// A line -- spans on one baseline at one size -- is one `<tspan y font-size>`, and within it each
+/// stretch of characters between spaces is one `<tspan x>` listing a position for every UTF-16 unit, on
+/// its glyph's own offset, so selection and the browser's find still land on the outline. The layer has
+/// no font of its own, so the browser's advances say nothing about where a glyph sits and every position
+/// is written, rounded to 0.01 pt. A space is left bare between the spans: `<text>` collapses a run of
+/// spaces, and a collapsed character takes no position from an `x` list, so a space inside a span would
+/// push every later position one character along. Bare, it collapses exactly as the old
+/// one-span-per-glyph layer's did, and the text a copy or a search reads is the same. The later
+/// characters of a ligature are bare too, flowing on from its first as they did there.
+#[derive(Clone, Debug, Default)]
+pub struct TselLayer {
+	buf:	String,
+	seen:	bool,				// a run has written text, so the next one takes a leading space
+	line:	Option<(f32, f32)>,	// the open line's baseline and size
+}
+
+impl TselLayer {
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Appends one run, `glyphs` being each glyph's offset from the run's baseline origin and the text it
+	/// stands for. Every run but the first takes a leading space, standing in for the interword gap the
+	/// line breaker never gives a glyph of its own; a run with no text writes nothing.
+	pub fn run<'a, I>(&mut self, base_x: f32, base_y: f32, size: f32, glyphs: I)
+		where I: Iterator<Item = (f32, f32, &'a str)>
+	{
+		let mut out		= String::new();
+		let mut xs		= String::new();	// the open span's positions
+		let mut txt		= String::new();	// the open span's characters
+		let mut line	= self.line;
+		let mut any		= false;
+		let close = |out: &mut String, xs: &mut String, txt: &mut String| {
+			if !xs.is_empty() {
+				out.push_str(&fmt!("<tspan x=\"{}\">{}</tspan>", xs, xml_escape(txt)));
+				xs.clear();
+				txt.clear();
+			}
+		};
+		for (gx, gy, text) in glyphs {
+			// A later part of a ligature or decomposed mark has no text of its own; the earlier glyph at
+			// the same cluster already carries the character.
+			if text.is_empty() {
+				continue;
+			}
+			any = true;
+			let at	= (base_y - gy, size);
+			let x	= num2(base_x + gx);
+			for (k, ch) in text.chars().enumerate() {
+				if matches!(ch, ' ' | '\t' | '\n' | '\r') || k > 0 {
+					close(&mut out, &mut xs, &mut txt);
+					out.push_str(&xml_escape(&ch.to_string()));
+					continue;
+				}
+				if line != Some(at) {
+					close(&mut out, &mut xs, &mut txt);
+					if line.is_some() {
+						out.push_str("</tspan>");
+					}
+					out.push_str(&fmt!("<tspan y=\"{}\" font-size=\"{}\">", num2(at.0), num2(at.1)));
+					line = Some(at);
+				}
+				for _ in 0..ch.len_utf16() {
+					if !xs.is_empty() {
+						xs.push(' ');
+					}
+					xs.push_str(&x);
+				}
+				txt.push(ch);
+			}
+			// A browser that counts an astral character once, not as its two UTF-16 units, would read
+			// every later position one along; a fresh span after it keeps that inside this glyph.
+			if text.chars().any(|c| c.len_utf16() > 1) {
+				close(&mut out, &mut xs, &mut txt);
+			}
 		}
-		spans.push_str(&fmt!(
-			"<tspan x=\"{}\" y=\"{}\" font-size=\"{}\">{}</tspan>",
-			base_x + glyph.x, base_y - glyph.y, size, xml_escape(text)));
+		close(&mut out, &mut xs, &mut txt);
+		if !any {
+			return;
+		}
+		if self.seen {
+			self.buf.push(' ');
+		}
+		self.buf.push_str(&out);
+		self.seen = true;
+		self.line = line;
 	}
-	// A run with nothing inked -- entirely spaces -- has nothing to select.
-	if spans.is_empty() {
-		return Ok(false);
+
+	/// The layer's markup, its open line closed.
+	pub fn finish(&self) -> String {
+		match self.line {
+			Some(_)	=> fmt!("{}</tspan>", self.buf),
+			None	=> self.buf.clone(),
+		}
 	}
-	if sep {
-		buf.push_str(&fmt!("<tspan x=\"{}\" y=\"{}\" font-size=\"{}\"> </tspan>", base_x, base_y, size));
-	}
-	buf.push_str(&spans);
-	Ok(true)
+}
+
+/// A selectable-layer coordinate: two decimals, trailing zeros trimmed.
+fn num2(v: f32) -> String {
+	let s = fmt!("{:.2}", v);
+	let s = s.trim_end_matches('0').trim_end_matches('.');
+	if s == "-0" { "0".to_string() } else { s.to_string() }
 }
 
 #[cfg(test)]
@@ -579,15 +644,66 @@ mod tests {
 
 		assert!(svg.contains("class=\"tsel\""), "a selectable text layer is drawn, found: {}", svg);
 		assert!(svg.contains(".tsel { fill: transparent; }"), "the layer is transparent");
-		// The word is recoverable letter by letter, as `window.find`/copy-paste would see it: each
-		// character sits in its own positioned `<tspan>`, in order.
-		for ch in "Oxegen".chars() {
-			assert!(svg.contains(&fmt!(">{}</tspan>", ch)), "'{}' is drawn as a selectable tspan, found: {}", ch, svg);
-		}
+		// The word is recoverable as `window.find`/copy-paste would see it: one positioned span, one `x`
+		// per character.
+		assert_eq!(tsel_text(&svg), "Oxegen", "the layer reads as the word, found: {}", svg);
+		assert_eq!(svg.matches("<tspan x=").count(), 1, "a word is one span, found: {}", svg);
+		let xs = res!(svg.split("<tspan x=\"").nth(1).and_then(|t| t.split('"').next())
+			.ok_or_else(|| err!("no tspan x in {}", svg; Missing)));
+		assert_eq!(xs.split(' ').count(), 6, "every character has its own position, found: {}", xs);
 		// The visible outlines are unaffected: still one filled black path per inked glyph, nothing new
 		// added to that part of the document.
 		assert!(svg.contains("fill=\"#000000\""), "the outline glyphs still draw in black");
 		Ok(())
+	}
+
+	/// The selectable layer's text is what the old one-span-per-glyph layer held, character for
+	/// character, so a copy or a search reads the same: spaces and a ligature's later characters stand
+	/// bare between spans, each span's `x` has one position per UTF-16 unit, an astral character closes its
+	/// span, and a line is one `<tspan y font-size>` the next run carries on in.
+	#[test]
+	fn the_selectable_layer_keeps_its_text_and_one_position_per_character() -> Outcome<()> {
+		let glyphs = [
+			(0.0f32,	0.0f32,	"fi"),
+			(5.0,		0.0,	""),
+			(9.0,		0.0,	"x"),
+			(12.0,		0.0,	" "),
+			(15.0,		0.0,	"<a>"),
+			(20.0,		0.0,	"\u{1D400}"),
+			(30.0,		0.0,	"z"),
+			(34.0,		2.0,	"q"),
+		];
+		let mut tsel = TselLayer::new();
+		tsel.run(10.0, 100.0, 11.0, glyphs.iter().map(|(x, y, t)| (*x, *y, *t)));
+		// A run of nothing but ligature tails carries no text and writes nothing, not even its space.
+		tsel.run(0.0, 0.0, 11.0, [(0.0f32, 0.0f32, "")].into_iter());
+		tsel.run(50.0, 98.0, 11.0, [(0.0f32, 0.0f32, "w")].into_iter());
+		let buf = tsel.finish();
+		let svg = fmt!("<text class=\"tsel\">{}</text>", buf);
+		assert_eq!(tsel_text(&svg), "fix <a>\u{1D400}zq w", "the text is unchanged, found: {}", buf);
+		assert_eq!(buf, [
+			"<tspan y=\"100\" font-size=\"11\"><tspan x=\"10\">f</tspan>i<tspan x=\"19\">x</tspan> ",
+			"<tspan x=\"25\">&lt;</tspan>a&gt;<tspan x=\"30 30\">\u{1D400}</tspan><tspan x=\"40\">z</tspan>",
+			"</tspan><tspan y=\"98\" font-size=\"11\"><tspan x=\"44\">q</tspan> <tspan x=\"50\">w</tspan></tspan>",
+		].concat(), "the layout");
+		Ok(())
+	}
+
+	// The `.tsel` layer's text content as a browser reads it before collapsing spaces: tags dropped,
+	// entities resolved.
+	fn tsel_text(svg: &str) -> String {
+		let body = svg.split("<text class=\"tsel\">").nth(1).unwrap_or("").split("</text>").next().unwrap_or("");
+		let mut out = String::new();
+		let mut tag = false;
+		for c in body.chars() {
+			match c {
+				'<'			=> tag = true,
+				'>'			=> tag = false,
+				_ if !tag	=> out.push(c),
+				_			=> (),
+			}
+		}
+		out.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&")
 	}
 
 	/// A glyph drawn three times on a page is defined once, in the page's `<defs>`, and used at each
