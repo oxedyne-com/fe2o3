@@ -15,6 +15,9 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 # modules) and in `fe2o3_data` (`iblt`, `hll`); this flag gates their
 # compilation so local-only callers do not pull the peer-to-peer graph in.
 dist = []
+# The libtest benches (`#![feature(test)]`), which build only on nightly:
+# `cargo +nightly bench -p oxedyne_fe2o3_o3db_sync --features nightly`.
+nightly = []
 
 [dependencies]
 oxedyne_fe2o3_bot 		   		= { path = "../fe2o3_bot" }
@@ -57,3 +60,11 @@ nix = { version = "0.31", default-features = false, features = ["fs"] }
 [dev-dependencies]
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
 oxedyne_fe2o3_sys 				= { path = "../fe2o3_sys" }
+
+[[bench]]
+name = "hash"
+required-features = ["nightly"]
+
+[[bench]]
+name = "map"
+required-features = ["nightly"]

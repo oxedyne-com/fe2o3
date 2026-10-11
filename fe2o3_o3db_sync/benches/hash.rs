@@ -10,21 +10,19 @@
 extern crate test;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_crypto::{
-    hash::HashScheme,
-};
+use oxedyne_fe2o3_hash::hash::HashScheme;
+use oxedyne_fe2o3_iop_hash::api::Hasher;
 
 use test::Bencher;
 
 const INPUT_LEN: usize = 32;
-const CRYPTO_HASH_LEN: usize = 32;
 
 fn gen_input() -> [u8; INPUT_LEN] {
     [42u8; INPUT_LEN]
 }
 
 #[bench]
-fn bench_seahash(b: &mut Bencher) -> Result<()> {
+fn bench_seahash(b: &mut Bencher) -> Outcome<()> {
     let input = gen_input();
     b.iter(|| {
         test::black_box({
@@ -36,15 +34,10 @@ fn bench_seahash(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_sha_256(b: &mut Bencher) -> Result<()> {
+fn bench_sha3_256(b: &mut Bencher) -> Outcome<()> {
     let input = gen_input();
-    let mut output = [0u8; CRYPTO_HASH_LEN];
     b.iter(|| {
-        test::black_box({
-            let mut hasher = HashScheme::new_sha3_256();
-            hasher.update(&input);
-            hasher.finalize(&mut output);
-        });
+        test::black_box(HashScheme::new_sha3_256().hash(&[&input], []));
     });
     Ok(())
 }
