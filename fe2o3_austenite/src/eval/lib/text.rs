@@ -240,32 +240,39 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 	}
 	let span = args.span;
 	let mut rest = args.take();
-	// The body is the last positional argument that is content-like; a positional length is the size
-	// and a positional paint the fill.
-	let body_at = rest.items.iter().rposition(|a| a.name.is_none() && FieldType::Content.accepts(&a.value)
-		&& !matches!(a.value, Value::Int(_) | Value::Float(_) | Value::None));
-	let body = match body_at {
-		Some(i)	=> rest.items.remove(i).value,
-		None	=> return Err(engine.error(DiagnosticKind::Type, span, "missing argument: body")),
-	};
+	// Typst's order: `size` and `fill` are each the named argument or else the first positional one of
+	// their type (`named_or_find`), and the body is then the first positional argument left, whatever
+	// it is, cast to content -- so `text(red, none)` is empty text and `text(red, 2)` a type error.
 	let mut styles = Styles::new();
 	for name in ["size", "fill"] {
+		if rest.items.iter().any(|b| b.name.as_deref() == Some(name)) {
+			continue;
+		}
 		let pos = rest.items.iter().position(|a| a.name.is_none() && match name {
 			"size"	=> matches!(a.value, Value::Length(_)),
 			_		=> matches!(a.value, Value::Color(_) | Value::Gradient(_) | Value::Tiling(_)),
 		});
 		if let Some(p) = pos {
 			let a = rest.items.remove(p);
-			if !rest.items.iter().any(|b| b.name.as_deref() == Some(name)) {
-				if let Some(id) = ElemKind::Text.field_id(name) {
-					styles.push(Style::Property(Property::new(ElemKind::Text, id, a.value, a.span)));
-				}
+			if let Some(id) = ElemKind::Text.field_id(name) {
+				styles.push(Style::Property(Property::new(ElemKind::Text, id, a.value, a.span)));
 			}
 		}
 	}
+	let body = match rest.items.iter().position(|a| a.name.is_none()) {
+		Some(i)	=> rest.items.remove(i),
+		None	=> return Err(engine.error(DiagnosticKind::Type, span, "missing argument: body")),
+	};
 	let named = res!(set_rule(engine, ElemKind::Text, rest));
 	styles.extend(&named);
-	let body: Content = res!(body.cast());
+	let body: Content = match body.value {
+		Value::Int(_) | Value::Float(_) => return Err(engine.error(DiagnosticKind::Type, body.span,
+			fmt!("expected content, found {}", body.value.ty().long_name()))),
+		v => match v.cast() {
+			Ok(c)	=> c,
+			Err(e)	=> return Err(engine.error(DiagnosticKind::Type, body.span, crate::diag::message_of(&e))),
+		},
+	};
 	Ok(Some(body.styled(styles)))
 }
 

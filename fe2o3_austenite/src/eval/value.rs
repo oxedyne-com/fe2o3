@@ -725,6 +725,7 @@ impl FromValue for Content {
 			Value::None			=> Ok(Content::empty()),
 			Value::Str(s)		=> Ok(Content::text(&s)),
 			Value::Int(i)		=> Ok(Content::text(&fmt!("{}", i))),
+			Value::Symbol(s)	=> Ok(Content::symbol(&crate::eval::ops::symbol_text(&s))),
 			other				=> Err(mismatch("content", &other)),
 		}
 	}
