@@ -160,7 +160,7 @@ const PAGEBREAK: &[FieldSpec] = &[
 // `paper` spreads into `width` and `height` (see the file header), so it precedes them: within one `set`,
 // an explicit width or height is the nearer of the two.
 const PAGE: &[FieldSpec] = &[
-	FieldSpec::named("paper",			ANY,	FieldDefault::Str("a4")),	// a keyword: `cast_field` checks it
+	FieldSpec::named("paper",			ANY,	FieldDefault::Str("a4")).positional(),	// a keyword: `cast_field` checks it
 	FieldSpec::named("width",			ANY,	FieldDefault::Computed),
 	FieldSpec::named("height",			ANY,	FieldDefault::Computed),
 	FieldSpec::named("flipped",			BOOL,	FieldDefault::Bool(false)),

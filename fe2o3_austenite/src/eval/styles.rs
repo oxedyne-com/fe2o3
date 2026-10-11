@@ -1038,8 +1038,8 @@ pub fn set_rule(engine: &mut Engine, kind: ElemKind, mut args: Args) -> Outcome<
 			continue;
 		}
 		let id = FieldId(i as u8);
-		// The last argument of the field's name, else for a positional field the first unnamed one its
-		// type accepts: Typst's `named_or_find`.
+		// The last argument of the field's name, else for a positional field the first unnamed one that
+		// casts to it: Typst's `named_or_find`, so `set page("a4")` finds its paper by name.
 		let mut taken = None;
 		let mut j = 0;
 		while j < args.items.len() {
@@ -1050,7 +1050,9 @@ pub fn set_rule(engine: &mut Engine, kind: ElemKind, mut args: Args) -> Outcome<
 			}
 		}
 		if taken.is_none() && spec.positional {
-			if let Some(p) = args.items.iter().position(|a| a.name.is_none() && spec.ty.castable(&a.value)) {
+			if let Some(p) = args.items.iter().position(|a| a.name.is_none() && spec.ty.castable(&a.value)
+				&& content::cast_field(kind, spec.name, spec.ty.cast(a.value.clone())).is_ok())
+			{
 				taken = Some(args.items.remove(p));
 			}
 		}
