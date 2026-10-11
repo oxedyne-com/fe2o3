@@ -863,6 +863,14 @@ pub fn native_show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> 
 /// Casts a value into an element's field as its family casts it. Construction and `set` rules both
 /// cast through here, so a value one accepts the other accepts. A family whose fields need no more
 /// than their schema type takes the value as it is.
+/// The arguments an element takes that are not fields but stand for several: `(shorthand, fields)`.
+pub fn shorthands(kind: ElemKind) -> &'static [(&'static str, &'static [&'static str])] {
+	match kind {
+		ElemKind::Grid | ElemKind::Table	=> &[("gutter", &["column-gutter", "row-gutter"])],
+		_									=> &[],
+	}
+}
+
 pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 	match kind.family() {
 		Family::Visual	=> lib::visual::cast_field(kind, name, v),

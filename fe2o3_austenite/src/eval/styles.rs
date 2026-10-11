@@ -1033,6 +1033,24 @@ pub fn expected_message(ty: FieldType, found: &Value) -> String {
 /// Anything left over -- a required field, a synthesised one, an unknown name -- is "unexpected argument".
 pub fn set_rule(engine: &mut Engine, kind: ElemKind, mut args: Args) -> Outcome<Styles> {
 	let mut styles = Styles::new();
+	// A shorthand stands for the fields it names, behind any of them given outright: `set grid(gutter: g)`
+	// is `column-gutter: g, row-gutter: g`, as Typst's grid parses it.
+	for (short, targets) in content::shorthands(kind) {
+		let mut j = 0;
+		while j < args.items.len() {
+			if args.items[j].name.as_deref() == Some(*short) {
+				let a = args.items.remove(j);
+				for (k, t) in targets.iter().enumerate() {
+					let mut b = a.clone();
+					b.name = Some(t.to_string());
+					args.items.insert(k, b);
+				}
+				j += targets.len();
+			} else {
+				j += 1;
+			}
+		}
+	}
 	for (i, spec) in kind.fields().iter().enumerate() {
 		if !spec.settable || spec.synthesised || spec.required {
 			continue;
