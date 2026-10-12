@@ -43,6 +43,7 @@ pub mod exif;
 pub mod glob;
 pub mod office;
 pub mod quiet;
+pub mod relpath;
 pub mod tree;
 pub mod walk;
 pub mod zip;
