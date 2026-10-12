@@ -38,5 +38,6 @@
 pub mod exif;
 pub mod glob;
 pub mod office;
+pub mod relpath;
 pub mod tree;
 pub mod zip;

@@ -3,6 +3,7 @@ mod exif;
 mod glob;
 mod odf;
 mod office;
+mod relpath;
 mod tree;
 mod pptx;
 mod xlsx;
@@ -35,6 +36,7 @@ fn run_tests() -> Outcome<()> {
     res!(tree::test_tree(filter));
     res!(exif::test_exif(filter));
     res!(glob::test_glob(filter));
+    res!(relpath::test_relpath(filter));
     res!(zip::test_zip(filter));
     res!(office::test_office(filter));
     res!(xlsx::test_xlsx(filter));
