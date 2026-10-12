@@ -16,7 +16,7 @@ use crate::eval::func::{
 };
 use crate::eval::import::{
 	read_file,
-	resolve_path,
+	file_of,
 };
 use crate::eval::lib::foundations::{
 	finish,
@@ -75,12 +75,11 @@ pub fn func_scope(f: DataFn, name: &str) -> Option<Value> {
 // The bytes a data function reads: a path through the vfs, or bytes given inline.
 pub(crate) fn source(engine: &mut Engine, span: Span, v: Value) -> Outcome<Arc<Vec<u8>>> {
 	match v.symbol_as_str() {
-		Value::Str(p) => {
-			let path = res!(resolve_path(engine, &p, span.file, span));
-			Ok(Arc::new(res!(read_file(engine, &path, span))))
-		}
 		Value::Bytes(b) => Ok(b),
-		other => Err(mismatch(engine, span, "string or bytes", &other)),
+		other => match res!(file_of(engine, &other, span.file, span)) {
+			Some(path)	=> Ok(Arc::new(res!(read_file(engine, &path, span)))),
+			None		=> Err(mismatch(engine, span, "path, string, or bytes", &other)),
+		},
 	}
 }
 
@@ -118,11 +117,10 @@ pub fn call(f: DataFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let p = res!(need(engine, &mut args, "path"));
 			let enc = res!(args.named::<Value>("encoding"));
 			res!(finish(engine, args));
-			let path = match p.symbol_as_str() {
-				Value::Str(s)	=> s,
-				other			=> return Err(mismatch(engine, span, "string", &other)),
+			let b = match p.symbol_as_str() {
+				v @ (Value::Str(_) | Value::Path(_))	=> res!(source(engine, at, v)),
+				other									=> return Err(mismatch(engine, span, "path or string", &other)),
 			};
-			let b = res!(source(engine, at, Value::Str(path)));
 			match enc {
 				None | Some(Value::Str(_)) => {
 					if let Some(Value::Str(e)) = &enc {

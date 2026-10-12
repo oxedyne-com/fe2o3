@@ -344,6 +344,7 @@ impl Walk for Value {
 			Value::Symbol(v)	=> { fp.tag(17); v.mix(fp); },
 			Value::Str(v)		=> { fp.tag(18); v.mix(fp); },
 			Value::Bytes(v)		=> { fp.tag(19); fp.bytes(v); },
+			Value::Path(v)		=> { fp.tag(37); fp.bytes(v.key().as_bytes()); },
 			Value::Label(v)		=> { fp.tag(20); v.mix(fp); },
 			Value::Datetime(v)	=> { fp.tag(21); v.mix(fp); },
 			Value::Duration(v)	=> { fp.tag(22); v.mix(fp); },

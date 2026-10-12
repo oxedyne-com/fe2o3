@@ -1564,8 +1564,11 @@ fn layout_image(engine: &mut Engine, g: &Get, pod: Pod) -> Outcome<Frame> {
 	let span = g.elem.span();
 	let (data, ext) = match res!(g.val("source")) {
 		Some(Value::Bytes(b)) => ((*b).clone(), None),
-		Some(Value::Str(p)) => {
-			let path = res!(crate::eval::import::resolve_path(engine, &p, span.file, span));
+		Some(v @ (Value::Str(_) | Value::Path(_))) => {
+			let path = match res!(crate::eval::import::file_of(engine, &v, span.file, span)) {
+				Some(p)	=> p,
+				None	=> return Err(err!("image source names no file"; Bug)),
+			};
 			let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_string());
 			(res!(crate::eval::import::read_file(engine, &path, span)), ext)
 		},

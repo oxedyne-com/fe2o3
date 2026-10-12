@@ -343,7 +343,8 @@ impl K {
 			K::Rel			=> matches!(v, Value::Length(_) | Value::Ratio(_) | Value::Relative(_)),
 			// Content takes what displays as content, and `none` as nothing.
 			K::Content		=> matches!(v, Value::Content(_) | Value::Str(_) | Value::Symbol(_) | Value::None),
-			K::Str | K::Path	=> matches!(v, Value::Str(_)),
+			K::Str			=> matches!(v, Value::Str(_)),
+			K::Path			=> matches!(v, Value::Path(_)),
 			K::Label		=> matches!(v, Value::Label(_)),
 			K::Func			=> matches!(v, Value::Func(_)),
 			K::Dict			=> matches!(v, Value::Dict(_)),

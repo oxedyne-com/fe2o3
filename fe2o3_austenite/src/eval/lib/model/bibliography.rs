@@ -96,7 +96,9 @@ pub fn cast(_kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 		"full"		=> expect(&v, &[K::Bool]).map(|_| v),
 		"style"		=> match &v {
 			Value::Str(s)	=> style_name(s).map(|_| style_value(s)),
-			other			=> Err(CastErr::Type(common::mismatch("string", other))),
+			// A path names a style file, which is a CSL style.
+			Value::Path(p)	=> style_name(&p.vpath).map(|_| v.clone()),
+			other			=> Err(CastErr::Type(common::mismatch("path, string, or bytes", other))),
 		},
 		"target"	=> expect(&v, &[K::Label, K::Func, K::Location, K::Selector, K::Auto]).map(|_| v),
 		"group"		=> expect_cast(v, &[K::Str, K::None, K::Auto]),
@@ -185,8 +187,11 @@ pub fn construct(engine: &mut Engine, args: &mut Args) -> Outcome<Content> {
 	let mut srcs: Vec<(SourceFormat, String)> = Vec::new();
 	for s in sources {
 		let (text, format) = match s {
-			Value::Str(p) => {
-				let path = res!(import::resolve_path(engine, &p, at.file, at));
+			Value::Str(_) | Value::Path(_) => {
+				let path = match res!(import::file_of(engine, &s, at.file, at)) {
+					Some(p)	=> p,
+					None	=> return Err(err!("bibliography source {:?} names no file", s.ty().long_name(); Bug)),
+				};
 				let bytes = res!(import::read_file(engine, &path, at));
 				let text = match String::from_utf8(bytes) {
 					Ok(t)	=> t,

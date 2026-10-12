@@ -5,6 +5,7 @@
 use crate::eval::args::Args;
 use crate::eval::content::Content;
 use crate::eval::func::Func;
+use crate::eval::import::RootedPath;
 use crate::eval::lib::decimal::Decimal;
 use crate::eval::lib::foundations::{
 	as_func,
@@ -48,6 +49,7 @@ pub enum Value {
 	Symbol(Symbol),
 	Str(Arc<String>),
 	Bytes(Arc<Vec<u8>>),
+	Path(Arc<RootedPath>),
 	Label(Label),
 	Datetime(Datetime),
 	Duration(Duration),
@@ -107,17 +109,18 @@ pub enum Type {
 	Counter,
 	State,
 	Location,
+	Path,
 }
 
 impl Type {
 	// Every type, Typst's registry of them, in the order they are declared.
-	pub const ALL: [Type; 37] = [
+	pub const ALL: [Type; 38] = [
 		Type::None, Type::Auto, Type::Bool, Type::Int, Type::Float, Type::Decimal, Type::Length, Type::Angle,
 		Type::Ratio, Type::Relative, Type::Fraction, Type::Color, Type::Gradient, Type::Tiling, Type::Stroke,
 		Type::Alignment, Type::Direction, Type::Symbol, Type::Str, Type::Bytes, Type::Label, Type::Datetime,
 		Type::Duration, Type::Version, Type::Regex, Type::Content, Type::Array, Type::Dict, Type::Func,
 		Type::Args, Type::Module, Type::Type, Type::Styles, Type::Selector, Type::Counter, Type::State,
-		Type::Location,
+		Type::Location, Type::Path,
 	];
 
 	/// The type a name stands for, in either spelling: `int` or `integer`, `relative` or `relative length`.
@@ -148,6 +151,7 @@ impl Type {
 			Type::Symbol	=> "symbol",
 			Type::Str		=> "str",
 			Type::Bytes		=> "bytes",
+			Type::Path		=> "path",
 			Type::Label		=> "label",
 			Type::Datetime	=> "datetime",
 			Type::Duration	=> "duration",
@@ -203,6 +207,7 @@ impl Value {
 			Value::Symbol(_)	=> Type::Symbol,
 			Value::Str(_)		=> Type::Str,
 			Value::Bytes(_)		=> Type::Bytes,
+			Value::Path(_)		=> Type::Path,
 			Value::Label(_)		=> Type::Label,
 			Value::Datetime(_)	=> Type::Datetime,
 			Value::Duration(_)	=> Type::Duration,
@@ -811,7 +816,7 @@ mod tests {
 			Type::Label => 20, Type::Datetime => 21, Type::Duration => 22, Type::Version => 23, Type::Regex => 24,
 			Type::Content => 25, Type::Array => 26, Type::Dict => 27, Type::Func => 28, Type::Args => 29,
 			Type::Module => 30, Type::Type => 31, Type::Styles => 32, Type::Selector => 33, Type::Counter => 34,
-			Type::State => 35, Type::Location => 36,
+			Type::State => 35, Type::Location => 36, Type::Path => 37,
 		}
 	}
 

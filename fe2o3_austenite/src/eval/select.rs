@@ -57,6 +57,12 @@ impl Selector {
 				let root = StyleChain::root();
 				let chain = styles.unwrap_or(&root);
 				for (id, want) in fields {
+					if *id == FieldId::LABEL {
+						match elem.label() {
+							Some(l) if ops::equal(&Value::Label(l.clone()), want)	=> continue,
+							_														=> return Ok(false),
+						}
+					}
 					// A field that only synthesis fills in reads as it will once the element is prepared,
 					// so a rule written for it matches the element before realisation has met it.
 					let have = match res!(chain.resolve(elem, *id)) {
@@ -269,7 +275,7 @@ pub fn call(f: StyleFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					None	=> { i += 1; continue; }
 				};
 				let a = args.items.remove(i);
-				let id = match kind.field_id(&name) {
+				let id = match kind.filter_id(&name) {
 					Some(id)	=> id,
 					None		=> {
 						let span = if a.span.is_detached() { args.span } else { a.span };

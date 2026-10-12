@@ -50,21 +50,46 @@ native_fns! {
 
 const DEFAULT_TEXT_SIZE: f64 = 11.0;
 
+const ALIGNMENTS: [&str; 8] = ["start", "left", "center", "right", "end", "top", "horizon", "bottom"];
+const DIRECTIONS: [&str; 4] = ["ltr", "rtl", "ttb", "btt"];
+
 pub fn define(scope: &mut Scope) {
-	let h = |x| Value::Alignment(Alignment { x: Some(x), y: None });
-	let v = |y| Value::Alignment(Alignment { x: None, y: Some(y) });
-	scope.define("start", h(HAlign::Start));
-	scope.define("left", h(HAlign::Left));
-	scope.define("center", h(HAlign::Center));
-	scope.define("right", h(HAlign::Right));
-	scope.define("end", h(HAlign::End));
-	scope.define("top", v(VAlign::Top));
-	scope.define("horizon", v(VAlign::Horizon));
-	scope.define("bottom", v(VAlign::Bottom));
-	scope.define("ltr", Value::Direction(Direction::Ltr));
-	scope.define("rtl", Value::Direction(Direction::Rtl));
-	scope.define("ttb", Value::Direction(Direction::Ttb));
-	scope.define("btt", Value::Direction(Direction::Btt));
+	for name in ALIGNMENTS.iter().chain(DIRECTIONS.iter()) {
+		if let Some(v) = constant(name) {
+			scope.define(name, v);
+		}
+	}
+}
+
+/// An alignment or direction constant, which Typst defines both globally and in its type's scope
+/// (`alignment.center`, `direction.ltr`).
+fn constant(name: &str) -> Option<Value> {
+	let h = |x| Some(Value::Alignment(Alignment { x: Some(x), y: None }));
+	let v = |y| Some(Value::Alignment(Alignment { x: None, y: Some(y) }));
+	match name {
+		"start"		=> h(HAlign::Start),
+		"left"		=> h(HAlign::Left),
+		"center"	=> h(HAlign::Center),
+		"right"		=> h(HAlign::Right),
+		"end"		=> h(HAlign::End),
+		"top"		=> v(VAlign::Top),
+		"horizon"	=> v(VAlign::Horizon),
+		"bottom"	=> v(VAlign::Bottom),
+		"ltr"		=> Some(Value::Direction(Direction::Ltr)),
+		"rtl"		=> Some(Value::Direction(Direction::Rtl)),
+		"ttb"		=> Some(Value::Direction(Direction::Ttb)),
+		"btt"		=> Some(Value::Direction(Direction::Btt)),
+		_			=> None,
+	}
+}
+
+/// `alignment.name` and `direction.name`: the type's constants.
+pub fn type_constant(ty: Type, name: &str) -> Option<Value> {
+	match ty {
+		Type::Alignment if ALIGNMENTS.contains(&name)	=> constant(name),
+		Type::Direction if DIRECTIONS.contains(&name)	=> constant(name),
+		_												=> None,
+	}
 }
 
 /// The methods of length, angle, alignment and direction, by name; `axis` and `inv` serve both alignment

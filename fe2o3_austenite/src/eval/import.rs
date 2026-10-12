@@ -75,6 +75,14 @@ pub enum PathError {
 }
 
 impl RootedPath {
+	/// A key naming the file across roots, for hashing.
+	pub fn key(&self) -> String {
+		match &self.root {
+			Root::Project		=> self.vpath.clone(),
+			Root::Package(p)	=> fmt!("{:?}{}", p, self.vpath),
+		}
+	}
+
 	/// The rooted path of a file loaded from vfs path `path`: in a package when under a package's root,
 	/// else in the project. `None` for a project file outside `project_root`.
 	pub fn of(path: &Path, project_root: &Path) -> Option<Self> {
@@ -167,6 +175,16 @@ pub fn resolve(engine: &mut Engine, path: &str, from: FileId, span: Span) -> Out
 pub fn resolve_path(engine: &mut Engine, spec: &str, from: FileId, span: Span) -> Outcome<PathBuf> {
 	let p = res!(resolve(engine, spec, from, span));
 	Ok(p.vfs(&engine.world.root))
+}
+
+/// The vfs path of the file a loader's source value names: a string resolved in the file `from`, or a
+/// `path` value, which names its file already. `None` for any other value.
+pub fn file_of(engine: &mut Engine, v: &Value, from: FileId, span: Span) -> Outcome<Option<PathBuf>> {
+	match v {
+		Value::Str(s)	=> Ok(Some(res!(resolve_path(engine, s, from, span)))),
+		Value::Path(p)	=> Ok(Some(p.vfs(&engine.world.root))),
+		_				=> Ok(None),
+	}
 }
 
 // Typst's message for a path that cannot be formed, with its hints.

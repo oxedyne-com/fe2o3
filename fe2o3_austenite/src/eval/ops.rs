@@ -631,6 +631,7 @@ pub fn equal(a: &Value, b: &Value) -> bool {
 		(Value::Symbol(x), Value::Symbol(y))	=> symbol_text(x) == symbol_text(y) && x.modifiers == y.modifiers,
 		(Value::Str(x), Value::Str(y))			=> x == y,
 		(Value::Bytes(x), Value::Bytes(y))		=> x == y,
+		(Value::Path(x), Value::Path(y))		=> x == y,
 		(Value::Label(x), Value::Label(y))		=> x == y,
 		(Value::Datetime(x), Value::Datetime(y))	=> x == y,
 		(Value::Duration(x), Value::Duration(y))	=> x == y,

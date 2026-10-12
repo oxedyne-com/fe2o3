@@ -285,6 +285,24 @@ impl ElemKind {
 		self.fields().iter().position(|f| f.name == name).map(|i| FieldId(i as u8))
 	}
 
+	/// The field `where` filters on: a schema field, else the label every element carries.
+	pub fn filter_id(self, name: &str) -> Option<FieldId> {
+		match self.field_id(name) {
+			Some(id)				=> Some(id),
+			None if name == "label"	=> Some(FieldId::LABEL),
+			None					=> None,
+		}
+	}
+
+	/// The name of a field `filter_id` gave.
+	pub fn filter_name(self, id: FieldId) -> &'static str {
+		match self.field_spec(id) {
+			Some(f)						=> f.name,
+			None if id == FieldId::LABEL	=> "label",
+			None						=> "?",
+		}
+	}
+
 	pub fn field_spec(self, id: FieldId) -> Option<&'static FieldSpec> {
 		self.fields().get(id.0 as usize)
 	}
@@ -295,6 +313,10 @@ impl ElemKind {
 /// A field's index into its element's schema slice. Stable for a build, never serialised.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldId(pub u8);
+
+impl FieldId {
+	pub const LABEL: FieldId = FieldId(u8::MAX); // the label, which every element has outside its schema, as Typst's 255
+}
 
 /// What a field accepts. `Any` defers checking to the owning unit's typed accessor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

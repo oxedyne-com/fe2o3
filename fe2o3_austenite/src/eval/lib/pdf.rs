@@ -12,7 +12,7 @@ use crate::eval::func::{
 };
 use crate::eval::import::{
 	read_file,
-	resolve_path,
+	file_of,
 };
 use crate::eval::lib::foundations::{
 	define_nth,
@@ -80,8 +80,8 @@ pub fn call(f: PdfFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let (at_rel, at_mime, at_desc) = (
 				value_span(&args, "relationship"), value_span(&args, "mime-type"), value_span(&args, "description"));
 			let path = match res!(need(engine, &mut args, "path")).symbol_as_str() {
-				Value::Str(s)	=> s,
-				other			=> return Err(mismatch(engine, span, "string", &other)),
+				v @ (Value::Str(_) | Value::Path(_))	=> v,
+				other									=> return Err(mismatch(engine, span, "path or string", &other)),
 			};
 			// The data is the second positional, and never a named argument.
 			let data		= res!(args.eat::<Value>());
@@ -106,7 +106,10 @@ pub fn call(f: PdfFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				Some(Value::Bytes(_))	=> (),
 				// Typst reads the file the path names when no data is given, so a path that names none fails.
 				None | Some(Value::Auto)	=> {
-					let file = res!(resolve_path(engine, &path, at.file, at));
+					let file = match res!(file_of(engine, &path, at.file, at)) {
+						Some(f)	=> f,
+						None	=> return Err(err!("attachment path names no file"; Bug)),
+					};
 					let _ = res!(read_file(engine, &file, at));
 				},
 				Some(other)	=> return Err(mismatch(engine, span, "bytes or auto", &other)),

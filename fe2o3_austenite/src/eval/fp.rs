@@ -374,6 +374,7 @@ pub fn hash_value(h: &mut Fingerprinter, v: &Value) {
 		Value::Symbol(s)		=> { h.write_u8(17); hash_symbol(h, s); }
 		Value::Str(s)			=> { h.write_u8(18); h.write_str(s); }
 		Value::Bytes(b)			=> { h.write_u8(19); h.write_u64(b.len() as u64); h.write(b); }
+		Value::Path(p)			=> { h.write_u8(37); h.write_str(&p.key()); }
 		Value::Label(l)			=> { h.write_u8(20); h.write_str(l.as_str()); }
 		Value::Datetime(d)		=> { h.write_u8(21); hash_datetime(h, d); }
 		Value::Duration(d)		=> { h.write_u8(22); h.write_f64(d.secs); }

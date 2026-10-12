@@ -57,7 +57,7 @@ pub fn type_method(ty: Type, name: &str) -> Option<NativeFunc> {
 		Type::Datetime | Type::Duration
 						=> lib::datetime::method(name).map(NativeFunc::Datetime),
 		Type::Version | Type::Bytes | Type::Int | Type::Float
-						=> lib::foundations::method(name).map(NativeFunc::Found),
+						=> lib::foundations::method_of(ty, name).map(NativeFunc::Found),
 		Type::Symbol	=> lib::sym::method(name).map(NativeFunc::Sym),
 		Type::Length | Type::Angle | Type::Ratio | Type::Relative | Type::Fraction | Type::Alignment
 			| Type::Direction

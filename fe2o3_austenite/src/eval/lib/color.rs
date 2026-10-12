@@ -127,13 +127,20 @@ pub fn define(scope: &mut Scope) {
 	for f in [ColorFn::Rgb, ColorFn::Luma, ColorFn::Cmyk, ColorFn::Oklab, ColorFn::Oklch] {
 		scope.define(f.name(), func(f));
 	}
-	for (name, space, c) in NAMED {
-		let col = Color { space, c: [c[0], c[1], c[2], 0.0], alpha: 1.0 };
-		scope.define(name, Value::Color(col));
+	for (name, _, _) in NAMED {
+		if let Some(col) = named(name) {
+			scope.define(name, col);
+		}
 	}
 }
 
-/// `color.name`: the constructors Typst scopes under the type, `mix`, and the colour maps.
+/// A named colour, which Typst defines both globally and in the colour type's scope.
+fn named(name: &str) -> Option<Value> {
+	NAMED.iter().find(|(n, _, _)| *n == name)
+		.map(|(_, space, c)| Value::Color(Color { space: *space, c: [c[0], c[1], c[2], 0.0], alpha: 1.0 }))
+}
+
+/// `color.name`: the constructors Typst scopes under the type, `mix`, the colour maps and the named colours.
 pub fn color_static(name: &str) -> Option<Value> {
 	let f = match name {
 		"linear-rgb"	=> ColorFn::LinearRgb,
@@ -146,7 +153,7 @@ pub fn color_static(name: &str) -> Option<Value> {
 		"oklab"			=> ColorFn::Oklab,
 		"oklch"			=> ColorFn::Oklch,
 		"map"			=> return Some(Value::Module(Arc::new(color_maps()))),
-		_				=> return None,
+		_				=> return named(name),
 	};
 	Some(func(f))
 }

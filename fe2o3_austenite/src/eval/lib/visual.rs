@@ -692,12 +692,12 @@ fn build_image(engine: &mut Engine, args: &mut Args) -> Outcome<Fields> {
 	match &source {
 		// A path is resolved and the file checked now, as Typst reads it when the element is built, so a
 		// missing file is reported at the argument that names it.
-		Value::Str(p) => {
-			let path = res!(crate::eval::import::resolve_path(engine, p, at.file, at));
-			res!(crate::eval::import::require_file(engine, &path, at));
-		},
 		Value::Bytes(_) => (),
-		other => return Err(err!("expected string or bytes, found {}", other.ty().long_name(); Input, Mismatch)),
+		other => match res!(crate::eval::import::file_of(engine, other, at.file, at)) {
+			Some(path)	=> res!(crate::eval::import::require_file(engine, &path, at)),
+			None		=> return Err(err!("expected path, string, or bytes, found {}", other.ty().long_name();
+				Input, Mismatch)),
+		},
 	}
 	f.push((res!(fid(kind, "source")), source));
 	res!(take_named(&mut f, kind, args, "format"));

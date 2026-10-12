@@ -86,6 +86,7 @@ native_fns! {
 		Str				=> "str",
 		Bool			=> "bool",
 		Label			=> "label",
+		Path			=> "path",
 		Regex			=> "regex",
 		Version			=> "version",
 		Bytes			=> "bytes",
@@ -122,7 +123,7 @@ pub fn define(scope: &mut Scope) {
 		Type::Selector, Type::Datetime, Type::Symbol, Type::Duration, Type::Version, Type::Length,
 		Type::Angle, Type::Ratio, Type::Relative, Type::Fraction, Type::Direction, Type::Alignment,
 		Type::Color, Type::Gradient, Type::Tiling, Type::Stroke, Type::Location, Type::Counter,
-		Type::State,
+		Type::State, Type::Path,
 	] {
 		scope.define(ty.name(), Value::Type(ty));
 	}
@@ -167,6 +168,7 @@ pub fn constructor(ty: Type) -> Option<NativeFunc> {
 		Type::Regex		=> Some(NativeFunc::Found(FoundFn::Regex)),
 		Type::Version	=> Some(NativeFunc::Found(FoundFn::Version)),
 		Type::Bytes		=> Some(NativeFunc::Found(FoundFn::Bytes)),
+		Type::Path		=> Some(NativeFunc::Found(FoundFn::Path)),
 		Type::Args		=> Some(NativeFunc::Found(FoundFn::Arguments)),
 		Type::Type		=> Some(NativeFunc::Found(FoundFn::Type)),
 		Type::Array		=> Some(NativeFunc::Array(array::ArrayFn::Construct)),
@@ -206,10 +208,10 @@ pub fn func_refusal(v: &Value) -> String {
 /// The type whose constructor `f` is, for a constructor function's scope (`str.from-unicode` read
 /// through a function bound to `str`).
 pub fn constructed_type(f: NativeFunc) -> Option<Type> {
-	const TYPES: [Type; 21] = [
+	const TYPES: [Type; 22] = [
 		Type::Bool, Type::Int, Type::Float, Type::Decimal, Type::Str, Type::Label, Type::Regex, Type::Version,
 		Type::Bytes, Type::Args, Type::Type, Type::Array, Type::Dict, Type::Datetime, Type::Duration,
-		Type::Symbol, Type::Stroke, Type::Tiling, Type::Selector, Type::Counter, Type::State,
+		Type::Symbol, Type::Stroke, Type::Tiling, Type::Selector, Type::Counter, Type::State, Type::Path,
 	];
 	TYPES.iter().copied().find(|t| constructor(*t) == Some(f))
 }
@@ -234,6 +236,14 @@ pub fn method(name: &str) -> Option<FoundFn> {
 		_				=> return None,
 	};
 	Some(f)
+}
+
+/// The method `name` of a value of type `ty`: one of this area's methods whose receiver is that type.
+pub fn method_of(ty: Type, name: &str) -> Option<FoundFn> {
+	method(name).filter(|f| {
+		let types = method_types(*f);
+		types.is_empty() || types.contains(&ty)
+	})
 }
 
 // The receiver types each method of this area accepts.
@@ -270,7 +280,9 @@ pub fn type_scope(ty: Type, name: &str) -> Option<Value> {
 		(Type::Datetime, "today")			=> Some(Value::Func(Func::Native(
 			NativeFunc::Datetime(datetime::DatetimeFn::Today)))),
 		(Type::Direction, _)				=> geom::type_static(ty, name)
-			.map(|f| Value::Func(Func::Native(NativeFunc::Geom(f)))),
+			.map(|f| Value::Func(Func::Native(NativeFunc::Geom(f))))
+			.or_else(|| geom::type_constant(ty, name)),
+		(Type::Alignment, _)				=> geom::type_constant(ty, name),
 		_									=> None,
 	};
 	match stat {
@@ -465,12 +477,20 @@ pub fn str_of(engine: &mut Engine, span: Span, v: Value) -> Outcome<Arc<String>>
 
 pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	let span = args.span;
+	// A method call has checked its receiver's type already (`method_of`), so a receiver of another type
+	// means the function was reached through its type (`float.is-nan(1)`), where the receiver is a
+	// parameter and casts to the type as any parameter does: an integer to a float, else nothing.
 	let types = method_types(f);
-	let recv_ty = args.items.iter().find(|a| a.name.is_none()).map(|a| a.value.ty());
 	if !types.is_empty() {
-		if let Some(ty) = recv_ty {
-			if !types.contains(&ty) {
-				return Err(no_method(engine, span, ty, f.name()));
+		if let Some(a) = args.items.iter_mut().find(|a| a.name.is_none()) {
+			if !types.contains(&a.value.ty()) {
+				match (&a.value, types.contains(&Type::Float)) {
+					(Value::Int(i), true)	=> a.value = Value::Float(*i as f64),
+					(other, _)				=> {
+						let other = other.clone();
+						return Err(mismatch(engine, span, types[0].long_name(), &other));
+					},
+				}
 			}
 		}
 	}
@@ -575,6 +595,14 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				return Err(engine.error(DiagnosticKind::Type, span, "label name must not be empty"));
 			}
 			Value::Label(Label::new(&s))
+		}
+		// Resolved now, against the file that calls it, so the value names one file wherever it travels.
+		FoundFn::Path => {
+			let at = args.items.iter().find(|a| a.name.is_none()).map(|a| a.span).unwrap_or(span);
+			let v = res!(need(engine, &mut args, "path"));
+			res!(finish(engine, args));
+			let s = res!(str_of(engine, at, v));
+			Value::Path(Arc::new(res!(crate::eval::import::resolve(engine, &s, at.file, at))))
 		}
 		FoundFn::Regex => {
 			let v = res!(need(engine, &mut args, "regex"));
@@ -1270,6 +1298,7 @@ pub fn repr(v: &Value) -> String {
 		Value::Symbol(s)		=> sym::repr_symbol(s),
 		Value::Str(s)			=> repr_str(s),
 		Value::Bytes(b)			=> fmt!("bytes({})", b.len()),
+		Value::Path(p)			=> fmt!("path({})", repr_str(&p.vpath)),
 		Value::Label(l)			=> repr_label(l),
 		Value::Datetime(d)		=> repr_datetime(d),
 		Value::Duration(d)		=> repr_duration(d),
@@ -1537,7 +1566,7 @@ fn repr_selector(s: &Selector) -> String {
 		Selector::Elem(k, None)			=> k.name().to_string(),
 		Selector::Elem(k, Some(fields))	=> {
 			let parts: Vec<String> = fields.iter().map(|(id, v)| {
-				let name = k.field_spec(*id).map(|f| f.name).unwrap_or("?");
+				let name = k.filter_name(*id);
 				fmt!("{}: {}", name, repr(v))
 			}).collect();
 			fmt!("{}.where{}", k.name(), pretty_array_like(&parts, false))
