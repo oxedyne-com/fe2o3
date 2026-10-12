@@ -7,6 +7,7 @@
 //! adds the special forms, sorting (which reverses names and strips institutional articles), name
 //! disambiguation, the implicit year-suffix, the citation layout and second-field-align.
 use crate::csl::{
+	cite::CiteForm,
 	case::{
 		is_language_dependent,
 		Case,
@@ -41,6 +42,7 @@ use crate::csl::{
 	style::{
 		And,
 		Choose,
+		CiteFormat,
 		Cond,
 		Date,
 		DatePart,
@@ -55,6 +57,7 @@ use crate::csl::{
 		Fmt,
 		Group,
 		Label,
+		Layout,
 		Look,
 		Match,
 		Name,
@@ -762,6 +765,8 @@ pub struct Ctx<'a, I: Item> {
 	sorting:	Option<Sorting>,
 	sort_names:	NameOpts,	// a macro sort key's names-min, -use-first and -use-last
 	special:	Option<Special>,
+	bib_names:	bool,		// the bibliography's name options, outside the bibliography
+	ibid:		Option<Ibid>,	// overrides the cite's for the Author form's retry
 	w:	Writer,
 }
 
@@ -810,6 +815,9 @@ pub struct CiteOut {
 	pub first_name:		Option<NameDisamb>,
 }
 
+/// One cite in a citation form: the citation layout for `Normal` and `Year` (whose final text
+/// [`year_only`] gives), the bibliography layout for `Full`, the author alone for `Author`, and
+/// the author followed by the rest for `Prose`. hayagriva's `do_citation`.
 pub fn citation_entry<'a, I: Item>(
 	style:	&'a Style,
 	chain:	&'a Chain<'a>,
@@ -817,19 +825,89 @@ pub fn citation_entry<'a, I: Item>(
 	cite:	&'a Cite,
 	lang:	Option<&'a str>,
 	special:	Option<Special>,
+	form:	CiteForm,
 )
 	-> CiteOut
 {
-	let mut ctx = Ctx::new(style, chain, item, cite, lang, false).special(special);
-	let layout = &style.citation.layout;
-	let fi = ctx.w.push_format(&layout.look.fmt);
-	let di = ctx.w.push_delim(layout.delimiter.clone());
-	ctx.render_all(&layout.elems);
-	ctx.w.pop_delim(di);
-	ctx.w.pop_format(fi);
+	let mut ctx = Ctx::new(style, chain, item, cite, lang, false);
+	match (form, style.bibliography.as_ref()) {
+		(CiteForm::Author, _) => ctx.cite_author(),
+		(CiteForm::Full, Some(bib)) => {
+			ctx.bib_names = true;
+			ctx.render_layout(&bib.layout, true);
+			ctx.bib_names = false;
+			if bib.second_field_align.is_some() {
+				ctx.w.save();
+				let top = &mut ctx.w.base;
+				if let Some(mut first) = node::remove_any_meta(top) {
+					match &mut first {
+						Node::Text(t, _)	=> t.push(' '),
+						Node::Elem(e)		=> if let Some(t) = node::last_text_mut(&mut e.children) { t.push(' ') },
+						_			=> (),
+					}
+					top.insert(0, first);
+				}
+			}
+		}
+		(CiteForm::Prose, _) => {
+			ctx.cite_author();
+			let layout = &style.citation.layout;
+			let pre = layout.look.prefix.as_deref();
+			if !pre.map_or(false, |p| p.chars().next().map_or(false, char::is_whitespace)) {
+				ctx.w.ensure_space();
+			}
+			let label = matches!(style.info.format, Some(CiteFormat::Label | CiteFormat::Numeric));
+			let suf = layout.look.suffix.as_deref();
+			match label {
+				true => {
+					if let Some(p) = pre {
+						ctx.push_str(p);
+					}
+					ctx.regular(special);
+					if let Some(s) = suf {
+						ctx.push_str(s);
+					}
+				}
+				false => {
+					ctx.push_str(pre.unwrap_or("("));
+					ctx.regular(Some(Special::SuppressAuthor));
+					ctx.push_str(suf.unwrap_or(")"));
+				}
+			}
+		}
+		_ => ctx.regular(special),
+	}
 	let checked_disamb = ctx.checked_disambiguate();
 	let first_name = ctx.w.first_name.take();
 	CiteOut { nodes: ctx.flush(), checked_disamb, first_name }
+}
+
+/// The Year form's final text: the year of the first of issued, event, submitted and original
+/// dates, else the `no date` term. hayagriva's `date_replacement`.
+pub fn year_only<'a, I: Item>(
+	chain:	&'a Chain<'a>,
+	item:	&'a I,
+)
+	-> Vec<Node>
+{
+	let date = ["issued", "event-date", "submitted", "original-date"].iter()
+		.find_map(|v| item.date(v));
+	let term = |name: &str| chain.term_text(name, TermForm::Long, false);
+	let text = match date {
+		Some(d) => {
+			let y = d.year;
+			let mut s = if y > 0 { y.to_string() } else { (y.abs() + 1).to_string() };
+			if y < 1000 {
+				s.push_str(match y <= 0 {
+					true	=> term("bc").unwrap_or(" BC"),
+					false	=> term("ad").unwrap_or(" AD"),
+				});
+			}
+			s
+		}
+		None => term("no date").unwrap_or("n.d.").to_string(),
+	};
+	vec![Node::Text(text, Formatting::default())]
 }
 
 impl<'a, I: Item> Ctx<'a, I> {
@@ -844,7 +922,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 	)
 		-> Self
 	{
-		Self { style, chain, item, cite, lang, bib, sorting: None, sort_names: NameOpts::default(), special: None, w: Writer::default() }
+		Self { style, chain, item, cite, lang, bib, sorting: None, sort_names: NameOpts::default(), special: None, bib_names: bib, ibid: None, w: Writer::default() }
 	}
 
 	/// This context renders a sort key.
@@ -858,6 +936,91 @@ impl<'a, I: Item> Ctx<'a, I> {
 	pub fn special(mut self, s: Option<Special>) -> Self {
 		self.special = s;
 		self
+	}
+
+	/// The citation layout, with its formatting and delimiter but not its affixes, in a special
+	/// form or none.
+	fn regular(&mut self, special: Option<Special>) {
+		let prev = std::mem::replace(&mut self.special, special);
+		self.render_layout(&self.style.citation.layout, false);
+		self.special = prev;
+	}
+
+	/// A layout's elements, with its formatting and delimiter, and its affixes when asked.
+	fn render_layout(&mut self, layout: &'a Layout, affixes: bool) {
+		let a = match affixes {
+			true	=> Some(self.w.apply_prefix(layout.look.prefix.as_deref())),
+			false	=> None,
+		};
+		let fi = self.w.push_format(&layout.look.fmt);
+		let di = self.w.push_delim(layout.delimiter.clone());
+		self.render_all(&layout.elems);
+		self.w.pop_delim(di);
+		self.w.pop_format(fi);
+		if let Some(a) = a {
+			self.apply_suffix(layout.look.suffix.as_deref(), a);
+		}
+	}
+
+	/// The cite's ibid position, or the override.
+	fn ibid(&self) -> Ibid {
+		self.ibid.unwrap_or(self.cite.ibid)
+	}
+
+	/// The Author form: the author, or the editor when there is no author, as the citation
+	/// layout renders it; failing that, with ibid set aside; failing that, as the bibliography
+	/// renders it; failing that, a plain `names` element.
+	fn cite_author(&mut self) {
+		let style: &'a Style = self.style;
+		let var = match self.item.names("author").is_empty() && !self.item.names("editor").is_empty() {
+			true	=> "editor",
+			false	=> "author",
+		};
+		let layout = &style.citation.layout;
+		let only = Some(Special::VarOnly(var.to_string()));
+		if self.will_render_all(&layout.elems, var) {
+			self.regular(only);
+			return;
+		}
+		if self.ibid() != Ibid::No {
+			let prev = self.ibid.replace(Ibid::No);
+			let found = self.will_render_all(&layout.elems, var);
+			if found {
+				self.regular(only.clone());
+			}
+			self.ibid = prev;
+			if found {
+				return;
+			}
+		}
+		self.special = only;
+		match style.bibliography.as_ref() {
+			Some(b) if self.will_render_all(&b.layout.elems, var) => {
+				self.bib_names = true;
+				self.render_layout(&b.layout, true);
+				self.bib_names = false;
+			}
+			_ => {
+				// hayagriva synthesises `<names variable="author"/>` with the citation layout's
+				// formatting, the special form still set.
+				static SYNTH: std::sync::OnceLock<Elem> = std::sync::OnceLock::new();
+				let synth = SYNTH.get_or_init(|| Elem::Names(Names {
+					vars:		vec!["author".to_string()],
+					delimiter:	None,
+					opts:		NameOpts::default(),
+					name:		None,
+					et_al:		None,
+					label:		None,
+					label_first:	false,
+					substitute:	None,
+					look:		Look::default(),
+				}));
+				let fi = self.w.push_format(&layout.look.fmt);
+				self.render(synth);
+				self.w.pop_format(fi);
+			}
+		}
+		self.special = None;
 	}
 
 	pub fn render_all(&mut self, elems: &'a [Elem]) {
@@ -1527,7 +1690,7 @@ impl<'a, I: Item> Ctx<'a, I> {
 		if self.sorting == Some(Sorting::Macro) {
 			return (self.sort_names.over(&style.names), style.names_delimiter.as_deref());
 		}
-		let (o, d) = match (self.bib, style.bibliography.as_ref()) {
+		let (o, d) = match (self.bib_names, style.bibliography.as_ref()) {
 			(true, Some(b))	=> (&b.names, b.names_delimiter.as_deref()),
 			_		=> (&style.citation.names, style.citation.names_delimiter.as_deref()),
 		};
@@ -2124,6 +2287,10 @@ impl<'a, I: Item> Ctx<'a, I> {
 		if d.var.is_empty() {
 			return (false, Usage { vars: true, ..Usage::default() });
 		}
+		// A special form that will not render this date leaves no trace of it.
+		if !self.date_passes(&d.var) {
+			return (false, Usage::default());
+		}
 		let found = self.resolve_date(&d.var).is_some();
 		(found, Usage { vars: true, non_empty: found, ..Usage::default() })
 	}
@@ -2257,8 +2424,8 @@ impl<'a, I: Item> Ctx<'a, I> {
 			Test::Position(p) => match p {
 				Position::First			=> self.cite.first,
 				Position::Subsequent		=> !self.cite.first,
-				Position::Ibid			=> self.cite.ibid != Ibid::No,
-				Position::IbidWithLocator	=> self.cite.ibid == Ibid::WithLocator,
+				Position::Ibid			=> self.ibid() != Ibid::No,
+				Position::IbidWithLocator	=> self.ibid() == Ibid::WithLocator,
 				Position::NearNote		=> self.cite.near_note,
 			},
 			Test::Type(ty)	=> self.item.is_type(ty),

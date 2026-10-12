@@ -24,7 +24,11 @@ pub struct Info {
 	pub updated:	String,
 	pub rights:	Option<String>,
 	pub parent:	Option<String>,	// `independent-parent` link of a dependent style
+	pub format:	Option<CiteFormat>,	// `category citation-format`
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CiteFormat { AuthorDate, Author, Numeric, Label, Note }
 
 // Formatting
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -529,12 +533,22 @@ impl<'a> Rd<'a> {
 		let parent = e.children("link").into_iter()
 			.find(|l| l.attr("rel") == Some("independent-parent"))
 			.and_then(|l| l.attr("href").map(str::to_string));
+		let format = e.children("category").into_iter()
+			.find_map(|c| match c.attr("citation-format") {
+				Some("author-date")	=> Some(CiteFormat::AuthorDate),
+				Some("author")		=> Some(CiteFormat::Author),
+				Some("numeric")		=> Some(CiteFormat::Numeric),
+				Some("label")		=> Some(CiteFormat::Label),
+				Some("note")		=> Some(CiteFormat::Note),
+				_			=> None,
+			});
 		Info {
 			id:		txt("id").unwrap_or_default(),
 			title:		txt("title").unwrap_or_default(),
 			updated:	txt("updated").unwrap_or_default(),
 			rights:		txt("rights"),
 			parent,
+			format,
 		}
 	}
 

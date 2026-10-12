@@ -175,7 +175,7 @@ impl CiteState {
 					special:	None,
 					nodes:		Vec::new(),
 				};
-				let out = render::citation_entry(style, chain, &items[e], &p.cite, lang, None);
+				let out = render::citation_entry(style, chain, &items[e], &p.cite, lang, None, p.form);
 				p.checked_disamb = out.checked_disamb;
 				p.first_name = out.first_name;
 				p.nodes = out.nodes;
@@ -214,7 +214,7 @@ impl CiteState {
 			for p in res.iter_mut().flat_map(|(_, ps)| ps.iter_mut()) {
 				if let Some(d) = &marks[p.entry] {
 					p.cite.disamb = d.clone();
-					p.nodes = render::citation_entry(style, chain, &items[p.entry], &p.cite, lang, None).nodes;
+					p.nodes = render::citation_entry(style, chain, &items[p.entry], &p.cite, lang, None, p.form).nodes;
 				}
 			}
 		}
@@ -269,7 +269,10 @@ impl CiteState {
 				collapse(style, ps);
 			}
 			for p in ps.iter_mut() {
-				p.nodes = render::citation_entry(style, chain, &items[p.entry], &p.cite, lang, p.special.clone()).nodes;
+				p.nodes = match p.form {
+					CiteForm::Year	=> render::year_only(chain, &items[p.entry]),
+					f		=> render::citation_entry(style, chain, &items[p.entry], &p.cite, lang, p.special.clone(), f).nodes,
+				};
 			}
 			if ps.iter().all(|p| p.hidden) {
 				out.push(Vec::new());

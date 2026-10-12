@@ -421,7 +421,7 @@ mod typst {
 		let items = fixtures();
 		let cites = cites_typ(&items);
 		let ok = res!(check_cites("ieee", items, cites, "cites-ieee.html"));
-		assert_eq!(ok, (0..8).collect::<Vec<_>>());
+		assert_eq!(ok, (0..12).collect::<Vec<_>>());
 		Ok(())
 	}
 
@@ -430,7 +430,7 @@ mod typst {
 		let items = fixtures();
 		let cites = cites_typ(&items);
 		let ok = res!(check_cites("apa", items, cites, "cites-apa.html"));
-		assert_eq!(ok, (0..8).collect::<Vec<_>>());
+		assert_eq!(ok, (0..12).collect::<Vec<_>>());
 		Ok(())
 	}
 
@@ -495,6 +495,29 @@ mod typst {
 	fn test_group_collapse_as_typst() -> Outcome<()> {
 		assert_eq!(res!(check_group("apa")), (0..9).collect::<Vec<_>>());
 		assert_eq!(res!(check_group("american-meteorological-society")), (0..9).collect::<Vec<_>>());
+		Ok(())
+	}
+
+	/// Styles that may add given names (chicago-author-date by primary-name, mla by-cite with no
+	/// year-suffix). Typst's hayagriva separates these Smiths by year-suffix or by `choose
+	/// disambiguate` instead, and so must this port.
+	#[test]
+	fn test_givenname_styles_as_typst() -> Outcome<()> {
+		assert_eq!(res!(check_group("chicago-author-date")), (0..9).collect::<Vec<_>>());
+		for style in ["modern-language-association", "chicago-author-date"] {
+			let items = group_fixtures();
+			let cites: Vec<Citation> = [&["d1"][..], &["d4"], &["d1", "d4"], &["d5", "d6"]].iter()
+				.map(|keys| Citation {
+					refs: keys.iter().map(|k| CiteRef {
+						entry: items.iter().position(|f| f.key == *k).unwrap_or(usize::MAX),
+						..CiteRef::default()
+					}).collect(),
+					note: None,
+				})
+				.collect();
+			let ok = res!(check_cites(style, items, cites, &format!("given-{}.html", style)));
+			assert_eq!(ok, (0..4).collect::<Vec<_>>(), "{}", style);
+		}
 		Ok(())
 	}
 
