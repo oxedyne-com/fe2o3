@@ -198,7 +198,7 @@ pub fn construct(engine: &mut Engine, args: &mut Args) -> Outcome<Content> {
 					Err(_)	=> return Err(engine.error(DiagnosticKind::Encoding, at, "file is not valid utf-8")),
 				};
 				// Typst chooses the reader by the path's extension.
-				let lower = p.to_ascii_lowercase();
+				let lower = path.to_string_lossy().to_ascii_lowercase();
 				let format = if lower.ends_with(".yml") || lower.ends_with(".yaml") {
 					SourceFormat::Yaml
 				} else if lower.ends_with(".bib") {

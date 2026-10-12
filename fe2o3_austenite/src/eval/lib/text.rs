@@ -75,7 +75,7 @@ const TEXT: &[FieldSpec] = &[
 	FieldSpec::named("font", FieldType::OneOf(&[Type::Str, Type::Array, Type::Dict]), FieldDefault::Computed),
 	FieldSpec::named("fallback", FieldType::Of(Type::Bool), FieldDefault::Bool(true)),
 	FieldSpec::named("style", FieldType::Keyword(&[], STYLE), FieldDefault::Str("normal")),
-	FieldSpec::named("weight", FieldType::Keyword(&[Type::Int], WEIGHT), FieldDefault::Int(400)),
+	FieldSpec::named("weight", FieldType::Keyword(&[Type::Int], WEIGHT), FieldDefault::Str("regular")),
 	FieldSpec::named("stretch", FieldType::Of(Type::Ratio), FieldDefault::Ratio(1.0)),
 	FieldSpec::named("size", FieldType::Of(Type::Length), FieldDefault::Pt(11.0)).fold(Fold::Add).positional(),
 	FieldSpec::named("fill", PAINT, FieldDefault::Computed).positional(),
@@ -322,6 +322,30 @@ fn internal(content: Content, field: &str, value: Value) -> Outcome<Content> {
 /// A text field's default where the schema holds none (`Computed`): the font is the one Typst names, in the
 /// lower case it keeps family names in, the fill is black, the costs are all 100%, and no feature or variation
 /// is set. A highlight's fill is Typst's yellow.
+/// Typst keeps a weight as a number from 100 to 900 and reads a named one back by its name, so
+/// `set text(weight: 400)` and the default both read `"regular"` (abbr's `text.weight <= "medium"`).
+pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
+	match (kind, name, &v) {
+		(ElemKind::Text, "weight", Value::Int(i))	=> Ok(weight_value((*i).clamp(100, 900) as u16)),
+		_											=> Ok(v),
+	}
+}
+
+fn weight_value(w: u16) -> Value {
+	match w {
+		100	=> Value::str("thin"),
+		200	=> Value::str("extralight"),
+		300	=> Value::str("light"),
+		400	=> Value::str("regular"),
+		500	=> Value::str("medium"),
+		600	=> Value::str("semibold"),
+		700	=> Value::str("bold"),
+		800	=> Value::str("extrabold"),
+		900	=> Value::str("black"),
+		n	=> Value::Int(n as i64),
+	}
+}
+
 pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
 	match (kind, name) {
 		(ElemKind::Text, "font")	=> Some(Value::str("libertinus serif")),

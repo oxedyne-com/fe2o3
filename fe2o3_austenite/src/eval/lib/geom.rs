@@ -54,7 +54,7 @@ const ALIGNMENTS: [&str; 8] = ["start", "left", "center", "right", "end", "top",
 const DIRECTIONS: [&str; 4] = ["ltr", "rtl", "ttb", "btt"];
 
 pub fn define(scope: &mut Scope) {
-	for name in ALIGNMENTS.iter().chain(DIRECTIONS.iter()) {
+	for &name in ALIGNMENTS.iter().chain(DIRECTIONS.iter()) {
 		if let Some(v) = constant(name) {
 			scope.define(name, v);
 		}

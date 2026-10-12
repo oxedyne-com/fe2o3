@@ -1,0 +1,1 @@
+#math.equation([x]) $x$

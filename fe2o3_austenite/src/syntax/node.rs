@@ -100,6 +100,17 @@ impl SyntaxNode {
 		}
 	}
 
+	/// Gives this node and every descendant the span `span`, as Typst's `synthesize` does for a string
+	/// given to `eval`: the code then belongs to the file that called `eval`, so a path in it resolves there.
+	pub fn synthesise(&mut self, span: Span) {
+		self.span = span;
+		if let Repr::Inner(inner) = &mut self.repr {
+			for c in Arc::make_mut(inner).children.iter_mut() {
+				c.synthesise(span);
+			}
+		}
+	}
+
 	/// An empty, detached leaf of the given kind, which a typed view falls back to when the tree lacks
 	/// the child it expects.
 	pub const fn placeholder(kind: SyntaxKind) -> Self {

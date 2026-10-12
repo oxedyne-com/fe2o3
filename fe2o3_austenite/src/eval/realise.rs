@@ -41,6 +41,7 @@ use crate::eval::styles::{
 	Transformation,
 };
 use crate::eval::value::{
+	FromValue,
 	Label,
 	Type,
 	Value,
@@ -156,6 +157,9 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 			for v in items.iter() {
 				match v {
 					Value::Content(c)	=> children.push(c.clone()),
+					// Typst casts a child as content: a string, a symbol and `none` are, a number is not.
+					v @ (Value::Str(_) | Value::Symbol(_) | Value::None)
+										=> children.push(res!(Content::from_value(v.clone()))),
 					other				=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 						"expected content, found {}", other.ty().long_name()))),
 				}

@@ -494,6 +494,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			}
 		}
 	}
+	let recv_ty = args.items.iter().find(|a| a.name.is_none()).map(|a| a.value.ty());
 	let v = match f {
 		FoundFn::Type => {
 			let v = res!(need(engine, &mut args, "value"));

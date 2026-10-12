@@ -143,7 +143,7 @@ pub fn eval_string(
 )
 	-> Outcome<Value>
 {
-	let root = match mode {
+	let mut root = match mode {
 		EvalMode::Markup	=> parser::parse(text, FileId::DETACHED),
 		EvalMode::Code		=> parser::parse_code(text, FileId::DETACHED),
 		EvalMode::Math		=> parser::parse_math(text, FileId::DETACHED),
@@ -151,9 +151,10 @@ pub fn eval_string(
 	if report_syntax_errors(engine, &root, Some(span)) {
 		return Err(err!("The string passed to eval does not parse."; Input, Invalid));
 	}
+	// The string's nodes take the call's span, as Typst's, so a path in it resolves from the calling file.
+	root.synthesise(span);
 	let lib = library();
 	let base = Scope { map: scope.map, parent: Some(lib.clone()) };
-	// The string's own nodes have no file; a path in it resolves from the file that called `eval`.
 	let mut vm = Vm::new(engine, &base, lib.clone(), span.file, false, span);
 	let out = match mode {
 		EvalMode::Markup	=> Value::Content(res!(vm.eval_markup(root.children()))),
@@ -1206,7 +1207,8 @@ impl<'a> Vm<'a> {
 
 	fn eval_math_attach(&mut self, node: &SyntaxNode) -> Outcome<Value> {
 		let kids = node.children();
-		let base = match kids.first() {
+		// The base is the first expression, as Typst's `cast_first`: embedded code leaves its `#` before it.
+		let base = match kids.iter().find(|c| is_code_expr(c.kind())) {
 			Some(b)	=> {
 				let v = res!(self.eval(b));
 				res!(self.display(v, b.span()))
