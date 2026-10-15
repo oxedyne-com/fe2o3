@@ -639,11 +639,8 @@ fn layout_inline_box(
 	-> Outcome<Frame>
 {
 	let props = res!(cache.get(styles));
-	let inner = match (&props.link, ElemKind::Link.field_id("current")) {
-		(Some(_), Some(id))	=> styles.chain(&Styles::from_style(Style::Property(Property::new(
-			ElemKind::Link, id, Value::None, crate::syntax::Span::detached())))),
-		_					=> styles.clone(),
-	};
+	// The line links the box as a whole, so the box itself is laid out unlinked.
+	let inner = crate::flow::block::unlink(styles, &props.link);
 	let mut frame = res!(layout_box(engine, elem, &inner, region, share));
 	let book = res!(engine.fonts.book());
 	frame.link = props.link.clone();

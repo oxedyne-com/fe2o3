@@ -33,7 +33,12 @@ use crate::eval::realise::{
 	Pair,
 	Tag,
 };
-use crate::eval::styles::StyleChain;
+use crate::eval::styles::{
+	Property,
+	Style,
+	StyleChain,
+	Styles,
+};
 use crate::eval::value::{
 	Alignment,
 	Dict,
@@ -53,12 +58,19 @@ use crate::flow::carry;
 use crate::flow::grid::RowSplit;
 use crate::flow::inline::ParSituation;
 use crate::flow::page::Level;
+use crate::flow::text::{
+	elem_field,
+	link_target,
+};
 use crate::flow::Region;
 use crate::ir::{
 	BoxNode,
 	ClipNode,
 	Dims,
 	FrameNode,
+	Graphic,
+	Leaf,
+	LinkTarget,
 	Node,
 	Sp,
 	Transform,
@@ -701,6 +713,19 @@ impl Frame {
 		self.items = kept;
 	}
 
+	/// Applies what the chain asks of a laid-out frame, Typst's `modify_frame`: a link over the whole frame,
+	/// then hiding, which takes the link off again.
+	pub fn modify(&mut self, mods: &Modifiers) {
+		if let Some(target) = &mods.link {
+			let mut g	= Graphic::new(Vec::new(), Dims::new(Sp::from_pt(self.w), Sp::from_pt(self.h), Sp::ZERO));
+			g.link		= Some(target.clone());
+			self.items.push((0.0, 0.0, Item::Node(Node::Leaf(Leaf::graphic(g)))));
+		}
+		if mods.hidden {
+			self.hide();
+		}
+	}
+
 	/// The frame as an IR frame node, its box split at the baseline.
 	pub fn into_node(self) -> Node {
 		let base	= self.baseline();
@@ -729,6 +754,32 @@ impl Frame {
 			out.items.push((Sp::from_pt(x), Sp::from_pt(y), node));
 		}
 		Node::Frame(out)
+	}
+}
+
+/// Typst's `FrameModifiers`: what the chain asks of a block's frame once it is laid out.
+#[derive(Clone, Debug, Default)]
+pub struct Modifiers {
+	pub hidden:	bool,
+	pub link:	Option<LinkTarget>,	// `link.current`
+}
+
+impl Modifiers {
+	pub fn get(styles: &StyleChain) -> Outcome<Self> {
+		Ok(Self {
+			hidden:	res!(vis::is_hidden(styles)),
+			link:	res!(elem_field(styles, ElemKind::Link, "current")).as_ref().and_then(link_target),
+		})
+	}
+}
+
+/// The chain a linked frame's contents are laid out under, the link taken off, as Typst's
+/// `layout_and_modify` does: the frame carries the link, so nothing inside it is linked a second time.
+pub fn unlink(styles: &StyleChain, link: &Option<LinkTarget>) -> StyleChain {
+	match (link, ElemKind::Link.field_id("current")) {
+		(Some(_), Some(id))	=> styles.chain(&Styles::from_style(Style::Property(Property::new(
+			ElemKind::Link, id, Value::None, Span::detached())))),
+		_					=> styles.clone(),
 	}
 }
 
@@ -1028,12 +1079,19 @@ pub(super) enum Body {
 #[derive(Clone, Debug)]
 pub(super) struct BlockSpec {
 	pub(super) elem:		Content,
-	pub(super) styles:		StyleChain,
+	pub(super) styles:		StyleChain,	// with any link taken off, which `mods` carries
 	pub(super) body:		Body,
 	pub(super) explicit:	bool,
+	pub(super) mods:		Modifiers,
 }
 
 impl BlockSpec {
+	fn new(elem: Content, styles: &StyleChain, body: Body, explicit: bool) -> Outcome<Self> {
+		let mods	= res!(Modifiers::get(styles));
+		let styles	= unlink(styles, &mods.link);
+		Ok(Self { elem, styles, body, explicit, mods })
+	}
+
 	fn field(&self, name: &str) -> Outcome<Option<Value>> {
 		if self.explicit {
 			field(&self.elem, &self.styles, name)
@@ -1166,20 +1224,20 @@ impl PlacedChild {
 			Some(a)	=> a,
 			None	=> Alignment { x: Some(HAlign::Center), y: Some(VAlign::Horizon) },
 		};
+		let mods	= res!(Modifiers::get(&self.styles));
+		let outer	= unlink(&self.styles, &mods.link);
 		let styles = match ElemKind::Align.field_id("alignment") {
-			Some(id) => self.styles.chain(&crate::eval::styles::Styles::from_style(
+			Some(id) => outer.chain(&crate::eval::styles::Styles::from_style(
 				crate::eval::styles::Style::Property(crate::eval::styles::Property::new(
 					ElemKind::Align, id, Value::Alignment(align), self.elem.span())))),
-			None => self.styles.clone(),
+			None => outer,
 		};
 		let body = match res!(field(&self.elem, &self.styles, "body")) {
 			Some(v)	=> res!(v.cast::<Content>()),
 			None	=> Content::empty(),
 		};
 		let mut frame = res!(layout_frame_in(engine, self.elem.place(), &body, &styles, region));
-		if res!(vis::is_hidden(&self.styles)) {
-			frame.hide();
-		}
+		frame.modify(&mods);
 		if self.float {
 			frame.parent = Some(self.mark);
 		}
@@ -1232,7 +1290,7 @@ fn collect_pair(
 				None | Some(Value::None)	=> Body::Empty,
 				Some(v)						=> Body::Content(res!(v.cast::<Content>())),
 			};
-			res!(collect_block(BlockSpec { elem: c.clone(), styles: styles.clone(), body, explicit: true }, alone, None, out));
+			res!(collect_block(res!(BlockSpec::new(c.clone(), styles, body, true)), alone, None, out));
 			*par = ParSituation::Other;
 		},
 		ElemKind::Place		=> res!(collect_place(engine, c, styles, out)),
@@ -1246,7 +1304,7 @@ fn collect_pair(
 		// Shown by Typst as breakable blocks with a layout routine of their own.
 		ElemKind::Pad | ElemKind::Stack | ElemKind::Columns | ElemKind::Grid | ElemKind::Table
 			| ElemKind::Layout | ElemKind::Equation | ElemKind::List | ElemKind::Enum => {
-			let spec = BlockSpec { elem: c.clone(), styles: styles.clone(), body: Body::Layouter, explicit: false };
+			let spec = res!(BlockSpec::new(c.clone(), styles, Body::Layouter, false));
 			res!(collect_block(spec, alone, Some(true), out));
 			*par = ParSituation::Other;
 		},
@@ -1255,7 +1313,7 @@ fn collect_pair(
 		ElemKind::Image | ElemKind::Line | ElemKind::Rect | ElemKind::Square | ElemKind::Circle
 			| ElemKind::Ellipse | ElemKind::Polygon | ElemKind::Curve | ElemKind::Move | ElemKind::Scale
 			| ElemKind::Rotate | ElemKind::Skew | ElemKind::Repeat => {
-			let spec = BlockSpec { elem: c.clone(), styles: styles.clone(), body: Body::Layouter, explicit: false };
+			let spec = res!(BlockSpec::new(c.clone(), styles, Body::Layouter, false));
 			res!(collect_block(spec, alone, Some(false), out));
 			*par = ParSituation::Other;
 		},
@@ -2553,7 +2611,7 @@ pub fn layout_box(engine: &mut Engine, elem: &Content, styles: &StyleChain, regi
 		Some(Value::Content(c))	=> Body::Content(c),
 		_						=> Body::Empty,
 	};
-	let spec = BlockSpec { elem: elem.clone(), styles: styles.clone(), body, explicit: true };
+	let spec = res!(BlockSpec::new(elem.clone(), styles, body, true));
 	let width = match share {
 		Some(w)	=> Sizing::Rel(Rel::pt(w)),
 		None	=> res!(spec.sizing("width")),
@@ -2609,9 +2667,7 @@ fn layout_single_sized(engine: &mut Engine, spec: &BlockSpec, region: &Regions, 
 		grow(&mut frame, &inset);
 	}
 	res!(decorate(engine, spec, &mut frame, true));
-	if res!(vis::is_hidden(styles)) {
-		frame.hide();
-	}
+	frame.modify(&spec.mods);
 	if spec.explicit && spec.elem.label().is_some() {
 		frame.label();
 	}
@@ -2663,9 +2719,7 @@ impl MultiChild {
 			grow(&mut frame, &inset);
 		}
 		res!(decorate(engine, spec, &mut frame, !skip));
-		if res!(vis::is_hidden(styles)) {
-			frame.hide();
-		}
+		frame.modify(&spec.mods);
 		// A label goes on every frame but an empty orphan one, which it would make non-empty.
 		if spec.explicit && spec.elem.label().is_some() && !skip {
 			frame.label();

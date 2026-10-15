@@ -890,7 +890,7 @@ impl Walk for Body {
 
 impl Walk for BlockSpec {
 	fn mix(&self, fp: &mut Fp) {
-		let BlockSpec { elem, styles, body, explicit } = self;
+		let BlockSpec { elem, styles, body, explicit, mods: _ } = self;	// read from the chain
 		elem.mix(fp);
 		styles.mix(fp);
 		body.mix(fp);
