@@ -150,8 +150,16 @@ impl Draw {
 	}
 }
 
-/// A clickable link over a rectangle of the page: a `/Link` annotation whose action opens a URI. The
-/// rectangle is in the engine's page frame -- top-left origin, y down, in points -- exactly as a draw's
+/// Where a link annotation goes: out of the document by a URI action, or into it by a named destination,
+/// which [`PdfStream::close_with_dests`] places once every page is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTo {
+	Uri(String),	// an external address
+	Named(String),	// a destination in the document, by name
+}
+
+/// A clickable link over a rectangle of the page: a `/Link` annotation that opens a URI or jumps to a
+/// named destination. The rectangle is in the engine's page frame -- top-left origin, y down, in points -- exactly as a draw's
 /// coordinates are, so a caller hands over the same rectangle it placed the ink in and [`PdfStream`]
 /// flips it into PDF's y-up frame when it writes the annotation. The border is drawn away, so a linked
 /// image reads as the picture alone.
@@ -161,7 +169,17 @@ pub struct LinkAnnot {
 	pub y0:		f64,	// top
 	pub x1:		f64,	// right
 	pub y1:		f64,	// bottom
-	pub uri:	String,	// the destination the link opens
+	pub to:		LinkTo,	// where the link goes
+}
+
+/// A named destination: the place a [`LinkTo::Named`] link of that name jumps to, a point on a page in
+/// the engine's y-down point frame, which the viewer scrolls to the top of its window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedDest {
+	pub name:	String,
+	pub page:	usize,	// zero-based
+	pub x:		f64,	// points from the left
+	pub y:		f64,	// points from the top
 }
 
 /// One page: its size in points, the shapes drawn on it back to front, and any clickable link
@@ -188,7 +206,14 @@ impl PdfPage {
 	/// engine's y-down point frame -- the same frame [`image`](Self::image) places a raster in -- opening
 	/// `uri`. The page gains an `/Annots` entry; a page with no link stays byte-identical to before.
 	pub fn link(&mut self, x: f64, y: f64, w: f64, h: f64, uri: String) {
-		self.annots.push(LinkAnnot { x0: x, y0: y, x1: x + w, y1: y + h, uri });
+		self.annots.push(LinkAnnot { x0: x, y0: y, x1: x + w, y1: y + h, to: LinkTo::Uri(uri) });
+	}
+
+	/// As [`link`](Self::link), but jumping to the named destination `name` within the document. Only a
+	/// stream opened by [`PdfStream::open`] writes it, since only its catalogue, written at the close, can
+	/// name the destinations; a stream with a fixed page count leaves the link out.
+	pub fn link_named(&mut self, x: f64, y: f64, w: f64, h: f64, name: String) {
+		self.annots.push(LinkAnnot { x0: x, y0: y, x1: x + w, y1: y + h, to: LinkTo::Named(name) });
 	}
 
 	pub fn fill(&mut self, path: Path, colour: impl Into<Ink>) {
@@ -488,6 +513,8 @@ pub struct PdfStream<W: Write> {
 	cid_fonts:	Vec<CidFont>,	// one embedded font per program, in order of first use
 	deferred:	bool,			// opened by `open`: the page tree, outline and Info are written by `close`
 	page_objs:	Vec<usize>,		// a deferred stream's page object numbers, in page order
+	heights:	Vec<f64>,		// a deferred stream's page heights, in page order, to flip a destination
+	named:		BTreeSet<String>,	// the destination names a written link jumps to
 	colour_out:	ColourOut,		// how a colour is written, `Rgb` unless set
 }
 
@@ -653,6 +680,8 @@ impl<W: Write> PdfStream<W> {
 			cid_fonts:	Vec::new(),
 			deferred:	false,
 			page_objs:	Vec::new(),
+			heights:	Vec::new(),
+			named:		BTreeSet::new(),
 			colour_out:	ColourOut::default(),
 		};
 
@@ -723,6 +752,8 @@ impl<W: Write> PdfStream<W> {
 			cid_fonts:	Vec::new(),
 			deferred:	true,
 			page_objs:	Vec::new(),
+			heights:	Vec::new(),
+			named:		BTreeSet::new(),
 			colour_out:	ColourOut::default(),
 		};
 		res!(s.body(fmt!("%PDF-1.{}\n", minor).as_bytes()));
@@ -758,6 +789,7 @@ impl<W: Write> PdfStream<W> {
 			let p = self.next_extra;
 			self.next_extra += 2;
 			self.page_objs.push(p);
+			self.heights.push(page.height);
 			(p, p + 1)
 		} else {
 			(3 + 2 * i, 4 + 2 * i)
@@ -785,7 +817,17 @@ impl<W: Write> PdfStream<W> {
 
 		// The link annotations, if any, take one further object -- the `/Annots` array -- numbered after the
 		// images. A page with no link claims no number and writes no `/Annots`, so its bytes are unchanged.
-		let annots_obj = if page.annots.is_empty() {
+		// A named link is written only where the close can name its destination.
+		let deferred = self.deferred;
+		let written = |a: &&LinkAnnot| deferred || matches!(a.to, LinkTo::Uri(_));
+		if deferred {
+			for a in &page.annots {
+				if let LinkTo::Named(name) = &a.to {
+					self.named.insert(name.clone());
+				}
+			}
+		}
+		let annots_obj = if !page.annots.iter().any(|a| written(&a)) {
 			None
 		} else {
 			let a = self.next_extra;
@@ -1268,20 +1310,24 @@ impl<W: Write> PdfStream<W> {
 
 	/// Writes a page's `/Annots` array: one `/Link` annotation per [`LinkAnnot`], its rectangle flipped from
 	/// the engine's top-left, y-down frame into PDF's bottom-left, y-up one, its border drawn away, and its
-	/// action opening the URI. The dictionaries are inlined in the array object, so a page's links cost one
+	/// action opening the URI or its `/Dest` naming the destination. The dictionaries are inlined in the array object, so a page's links cost one
 	/// object however many they are. Only called when the page carries at least one link.
 	fn write_annots(&mut self, obj: usize, page: &PdfPage) -> Outcome<()> {
 		self.set_extra_offset(obj);
 		let mut s = fmt!("{} 0 obj\n[ ", obj);
 		for a in &page.annots {
+			let to = match &a.to {
+				LinkTo::Uri(uri)						=> fmt!("/A << /S /URI /URI {} >>", pdf_text_string(uri)),
+				LinkTo::Named(name) if self.deferred	=> fmt!("/Dest {}", pdf_text_string(name)),
+				LinkTo::Named(_)						=> continue,
+			};
 			// Flip y: a point at engine y lands at PDF `height - y`, so the top edge (smaller engine y)
 			// becomes the upper PDF coordinate and the bottom edge the lower one.
 			let lly = page.height - a.y1;
 			let ury = page.height - a.y0;
 			s.push_str(&fmt!(
-				"<< /Type /Annot /Subtype /Link /Border [0 0 0] /Rect [{} {} {} {}] \
-					/A << /S /URI /URI {} >> >> ",
-				numf(a.x0), numf(lly), numf(a.x1), numf(ury), pdf_text_string(&a.uri)));
+				"<< /Type /Annot /Subtype /Link /Border [0 0 0] /Rect [{} {} {} {}] {} >> ",
+				numf(a.x0), numf(lly), numf(a.x1), numf(ury), to));
 		}
 		s.push_str("]\nendobj\n");
 		res!(self.body(s.as_bytes()));
@@ -1405,7 +1451,21 @@ impl<W: Write> PdfStream<W> {
 	/// Closes a stream opened by [`open`](Self::open): the catalogue and the page tree naming every page
 	/// written, the document outline and the Info dictionary, the fonts and the cross-reference table. Each
 	/// outline entry's page must be one written.
-	pub fn close(mut self, outline: Vec<OutlineItem>, info: Option<PdfInfo>) -> Outcome<W> {
+	pub fn close(self, outline: Vec<OutlineItem>, info: Option<PdfInfo>) -> Outcome<W> {
+		self.close_with_dests(outline, Vec::new(), info)
+	}
+
+	/// As [`close`](Self::close), and the catalogue's `/Dests` name tree places every destination a written
+	/// link names, from `dests`. A destination no link names is not written, so a caller may hand over every
+	/// place it knows; the first of a name stands. A link whose name `dests` lacks is left inert.
+	pub fn close_with_dests(
+		mut self,
+		outline:	Vec<OutlineItem>,
+		dests:		Vec<NamedDest>,
+		info:		Option<PdfInfo>,
+	)
+		-> Outcome<W>
+	{
 		if !self.deferred {
 			return Err(err!(
 				"close ends a stream opened by open; a stream opened for a fixed page count is ended by finish.";
@@ -1419,19 +1479,40 @@ impl<W: Write> PdfStream<W> {
 					page(s); its destination could not be named.", it.page, n; Input, Invalid, Range));
 			}
 		}
+		// The destinations some link names, in the byte order a name tree's keys must stand in.
+		let mut placed: BTreeMap<String, NamedDest> = BTreeMap::new();
+		for d in dests {
+			if self.named.contains(&d.name) && !placed.contains_key(&d.name) {
+				if d.page >= n {
+					return Err(err!(
+						"The destination '{}' points at page {} (zero-based), but the document has only {} \
+						page(s).", d.name, d.page, n; Input, Invalid, Range));
+				}
+				placed.insert(d.name.clone(), d);
+			}
+		}
 		self.info = info.filter(|i| !i.is_empty());
 		if !outline.is_empty() {
 			self.outline_root	= self.next_extra;
 			self.next_extra		+= 1 + outline.len();
 			self.outline		= outline;
 		}
-		self.set_extra_offset(1);
-		let cat = if self.outline_root > 0 {
-			fmt!("1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Outlines {} 0 R /PageMode /UseOutlines >>\nendobj\n",
-				self.outline_root)
+		let dests_obj = if placed.is_empty() {
+			None
 		} else {
-			"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string()
+			let d = self.next_extra;
+			self.next_extra += 1;
+			Some(d)
 		};
+		self.set_extra_offset(1);
+		let mut cat = String::from("1 0 obj\n<< /Type /Catalog /Pages 2 0 R");
+		if self.outline_root > 0 {
+			cat.push_str(&fmt!(" /Outlines {} 0 R /PageMode /UseOutlines", self.outline_root));
+		}
+		if let Some(d) = dests_obj {
+			cat.push_str(&fmt!(" /Names << /Dests {} 0 R >>", d));
+		}
+		cat.push_str(" >>\nendobj\n");
 		res!(self.body(cat.as_bytes()));
 		self.set_extra_offset(2);
 		let mut kids = String::new();
@@ -1443,6 +1524,18 @@ impl<W: Write> PdfStream<W> {
 		}
 		let tree = fmt!("2 0 obj\n<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n", kids, n);
 		res!(self.body(tree.as_bytes()));
+		// The name tree is a single leaf, its keys sorted; each destination puts its point at the top left
+		// of the window, flipped into PDF's y-up frame, and keeps the zoom.
+		if let Some(obj) = dests_obj {
+			self.set_extra_offset(obj);
+			let mut s = fmt!("{} 0 obj\n<< /Names [", obj);
+			for (name, d) in &placed {
+				s.push_str(&fmt!(" {} [{} 0 R /XYZ {} {} null]", pdf_text_string(name),
+					self.page_objs[d.page], numf(d.x), numf(self.heights[d.page] - d.y)));
+			}
+			s.push_str(" ] >>\nendobj\n");
+			res!(self.body(s.as_bytes()));
+		}
 		self.end()
 	}
 
@@ -2460,6 +2553,38 @@ mod tests {
 		let text = String::from_utf8_lossy(&res!(w.to_bytes())).into_owned();
 		assert!(text.contains("/GS128 gs\n0.5 g\n"), "{}", text);
 		assert!(text.contains("/GS128 << /ca "), "{}", text);
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_named_link_jumps_to_its_destination_placed_at_the_close_24() -> Outcome<()> {
+		// Two pages 100 by 200; a link on the first names "b", placed at (5, 30) on the second, so the
+		// destination's top is 200 - 30 = 170. A second destination no link names is not written.
+		let mut s = res!(PdfStream::open(Vec::new(), false));
+		let mut one = PdfPage::new(100.0, 200.0);
+		one.link_named(10.0, 20.0, 30.0, 40.0, "b".to_string());
+		res!(s.page(&one));
+		res!(s.page(&PdfPage::new(100.0, 200.0)));
+		let dests = vec![
+			NamedDest { name: "b".to_string(),		page: 1, x: 5.0, y: 30.0 },
+			NamedDest { name: "unused".to_string(),	page: 0, x: 0.0, y: 0.0 },
+		];
+		let bytes = res!(s.close_with_dests(Vec::new(), dests, None));
+		let text = String::from_utf8_lossy(&bytes);
+		let second = 6;	// after the first page, its content stream and its annotation array
+		assert!(text.contains("/Rect [10 140 40 180] /Dest (b)"), "the link names its destination: {}", text);
+		assert!(text.contains("/Names << /Dests "), "the catalogue names the destinations: {}", text);
+		assert!(text.contains(&fmt!("<< /Names [ (b) [{} 0 R /XYZ 5 170 null] ] >>", second)), "{}", text);
+		assert!(!text.contains("(unused)"), "a destination no link names is left out: {}", text);
+		res!(xref_is_exact(&bytes));
+
+		// A stream with a fixed page count cannot name a destination, so it leaves the named link out.
+		let mut w = PdfWriter::new();
+		let mut page = PdfPage::new(100.0, 200.0);
+		page.link_named(10.0, 20.0, 30.0, 40.0, "b".to_string());
+		w.add_page(page);
+		let text = String::from_utf8_lossy(&res!(w.to_bytes())).to_string();
+		assert!(!text.contains("/Annots"), "no annotation is written: {}", text);
 		Ok(())
 	}
 }

@@ -148,7 +148,11 @@ impl PageSink for PdfSink {
 		};
 		let outline	= if self.opts.outline { res!(outline(engine, intro)) } else { Vec::new() };
 		let info	= self.opts.info(intro.info());
-		self.out	= Some(res!(stream.close(outline, info)));
+		// Every located element is a place a link may jump to; the writer keeps those a link names.
+		let dests	= intro.iter()
+			.filter_map(|r| r.elem.location().and_then(|loc| crate::emit::pdf::named_dest(&loc.anchor(), &r.pos)))
+			.collect();
+		self.out	= Some(res!(stream.close_with_dests(outline, dests, info)));
 		Ok(())
 	}
 }

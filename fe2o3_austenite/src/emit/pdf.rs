@@ -19,6 +19,10 @@ use crate::ir::{
 	LinkTarget,
 	Sp,
 };
+use crate::ledger::{
+	AnchorId,
+	Position,
+};
 use crate::page::{
 	Page,
 	PlacedKind,
@@ -35,6 +39,7 @@ use oxedyne_fe2o3_graphics::{
 	},
 	pdf::{
 		ColourOut,
+		NamedDest,
 		OutlineItem,
 		PdfInfo,
 		PdfPage,
@@ -45,6 +50,27 @@ use oxedyne_fe2o3_graphics::{
 };
 
 const ENGINE_NAME: &str = "Austenite";	// `/Creator` and `/Producer`: a name, never a version or a build
+const DEST_LIFT: f64 = 10.0;			// points a destination sits above its anchor, as Typst's do
+
+/// The PDF destination name an internal link to `id` jumps by: the anchor's kind and key, which stay the
+/// same however the document repaginates.
+pub fn dest_name(id: &AnchorId) -> String {
+	fmt!("{}:{}", id.kind.name(), id.key)
+}
+
+/// Where a link to the anchor `id`, which landed at `pos`, jumps: a little above the anchor, so the line
+/// it marks is not flush with the window's top edge. A position on no page has none.
+pub fn named_dest(id: &AnchorId, pos: &Position) -> Option<NamedDest> {
+	if pos.page < 1 {
+		return None;
+	}
+	Some(NamedDest {
+		name:	dest_name(id),
+		page:	(pos.page - 1) as usize,
+		x:		pos.x.to_pt(),
+		y:		(pos.y.to_pt() - DEST_LIFT).max(0.0),
+	})
+}
 
 /// The Info dictionary a document's metadata lowers to, `/Creator` and `/Producer` always naming the engine.
 pub fn pdf_info(doc_info: &DocInfo) -> PdfInfo {
@@ -225,16 +251,16 @@ fn draw_graphic(
 	let t = Transform::translate(bx.to_pt() as f32, by.to_pt() as f32);
 	let ox = bx.to_pt();
 	let oy = by.to_pt();
-	// A linked graphic (the meta page's "Made with AI" chip) draws a clickable link annotation over its
-	// placement box, in the same y-down engine frame the ink is placed in; the writer flips it into PDF
-	// space. Only the mark carries the link, matching the template, where the words beside it are plain.
-	// v0 draws only an external URI annotation here; an internal `LinkTarget::Anchor` needs the ledger to
-	// resolve its destination page, which this per-graphic call does not hold, so it is left for a
-	// follow-up (Pearl already carries the internal target for a reader that has the ledger).
-	if let Some(LinkTarget::Uri(url)) = &graphic.link {
-		let w = graphic.dims.width.to_pt();
-		let h = (graphic.dims.height + graphic.dims.depth).to_pt();
-		out.link(ox, oy, w, h, url.clone());
+	// A linked graphic -- a link area over text, an image or a block, or the meta page's "Made with AI"
+	// chip -- draws a clickable link annotation over its placement box, in the same y-down engine frame the
+	// ink is placed in; the writer flips it into PDF space. An internal link names its anchor's destination,
+	// which the writer places at the close, once every anchor has landed.
+	let w = graphic.dims.width.to_pt();
+	let h = (graphic.dims.height + graphic.dims.depth).to_pt();
+	match &graphic.link {
+		Some(LinkTarget::Uri(url))		=> out.link(ox, oy, w, h, url.clone()),
+		Some(LinkTarget::Anchor(id))	=> out.link_named(ox, oy, w, h, dest_name(id)),
+		None							=> (),
 	}
 	for op in &graphic.ops {
 		match op {
