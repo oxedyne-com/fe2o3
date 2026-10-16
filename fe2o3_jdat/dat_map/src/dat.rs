@@ -31,8 +31,8 @@ enum Side {
 fn tri(expr: TokenStream) -> TokenStream {
     quote! {
         match #expr {
-            Ok(v)   => v,
-            Err(e)  => return Err(e),
+            ::core::result::Result::Ok(v)  => v,
+            ::core::result::Result::Err(e) => return ::core::result::Result::Err(e),
         }
     }
 }
@@ -86,7 +86,7 @@ fn encode_fields(fields: &Fields, bindings: &[syn::Ident], ty: &str) -> TokenStr
                 let at = i.to_string();
                 items.push(tri(quote! { __d::enc(#b, #ty, #at) }));
             }
-            quote! { __d::Dat::List(vec![#(#items),*]) }
+            quote! { __d::Dat::List(::std::vec![#(#items),*]) }
         },
         Fields::Unit => quote! { __d::Dat::Empty },
     }
@@ -115,7 +115,7 @@ fn decode_fields(fields: &Fields, ctor: TokenStream, ty: &str) -> TokenStream {
                 let mut __m = #take;
                 #(#lets)*
                 #done;
-                Ok(#ctor { #(#inits),* })
+                ::core::result::Result::Ok(#ctor { #(#inits),* })
             }}
         },
         Fields::Unnamed(unnamed) => {
@@ -132,14 +132,14 @@ fn decode_fields(fields: &Fields, ctor: TokenStream, ty: &str) -> TokenStream {
             quote! {{
                 let mut __it = #take;
                 #(#lets)*
-                Ok(#ctor ( #(#vs),* ))
+                ::core::result::Result::Ok(#ctor ( #(#vs),* ))
             }}
         },
         Fields::Unit => {
             let take = tri(quote! { __d::take_unit(__p, #ty) });
             quote! {{
                 #take;
-                Ok(#ctor)
+                ::core::result::Result::Ok(#ctor)
             }}
         },
     }
@@ -179,10 +179,10 @@ pub fn derive_to_dat(ast: DeriveInput) -> TokenStream {
             let (pat, binds) = pattern(&st.fields, quote! { Self });
             let enc = encode_fields(&st.fields, &binds, &tname);
             match &st.fields {
-                Fields::Unit    => quote! { Ok(#enc) },
+                Fields::Unit    => quote! { ::core::result::Result::Ok(#enc) },
                 _               => quote! {
                     let #pat = self;
-                    Ok(#enc)
+                    ::core::result::Result::Ok(#enc)
                 },
             }
         },
@@ -194,7 +194,7 @@ pub fn derive_to_dat(ast: DeriveInput) -> TokenStream {
                 let vty = format!("{}::{}", tname, vname);
                 let (pat, binds) = pattern(&v.fields, quote! { Self::#vident });
                 let enc = encode_fields(&v.fields, &binds, &vty);
-                arms.push(quote! { #pat => Ok(__d::variant(#vname, #enc)), });
+                arms.push(quote! { #pat => ::core::result::Result::Ok(__d::variant(#vname, #enc)), });
             }
             if arms.is_empty() {
                 quote! { match *self {} }
@@ -247,7 +247,7 @@ pub fn derive_from_dat(ast: DeriveInput) -> TokenStream {
                 let (__n, __p) = #take;
                 match __n.as_str() {
                     #(#arms)*
-                    _ => Err(__d::unknown_variant(#tname, &__n)),
+                    _ => ::core::result::Result::Err(__d::unknown_variant(#tname, &__n)),
                 }
             }
         },

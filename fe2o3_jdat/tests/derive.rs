@@ -205,3 +205,43 @@ fn an_error_survives_the_trip() -> Outcome<()> {
     }
     Ok(())
 }
+
+/// A module that glob-imports an enum whose variants are named `Ok`, `Err`, `Some` and `None`,
+/// so bare names in the generated code would resolve to these and not to the prelude's.
+mod glob {
+    use oxedyne_fe2o3_jdat::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, ToDat, FromDat)]
+    pub enum Reply {
+        Ok,
+        Err(String),
+        Some { n: u8 },
+        None,
+    }
+
+    pub use Reply::*;
+
+    #[derive(Clone, Debug, PartialEq, ToDat, FromDat)]
+    pub struct Held {
+        pub reply:  Reply,
+        pub bytes:  Vec<u8>,
+        pub pair:   (u8, u16),
+    }
+
+    #[derive(Clone, Debug, PartialEq, ToDat, FromDat)]
+    pub struct Tup(pub Reply, pub u8);
+
+    #[derive(Clone, Debug, PartialEq, ToDat, FromDat)]
+    pub struct Nil;
+}
+
+#[test]
+fn a_glob_import_of_ok_and_err_does_not_break_the_derive() -> Outcome<()> {
+    use glob::{Held, Nil, Reply, Tup};
+    for r in [Reply::Ok, Reply::Err("no".to_string()), Reply::Some { n: 3 }, Reply::None] {
+        res!(round(&Held { reply: r.clone(), bytes: vec![1, 2], pair: (4, 5) }));
+        res!(round(&Tup(r, 9)));
+    }
+    res!(round(&Nil));
+    Ok(())
+}

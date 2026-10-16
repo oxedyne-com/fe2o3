@@ -491,8 +491,21 @@ impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
                     // One of ours, so its words are reachable and are gathered in turn.
                     Some(e) => e.gather(out),
                     // Somebody else's, so all we have is what it says of itself. `Display` is the
-                    // right form here: a foreign error has no ANSI colour of ours in it.
-                    None => push_words(out, &fmt!("{}", arc_e)),
+                    // right form here: a foreign error has no ANSI colour of ours in it. It may
+                    // itself wrap one of ours, so the walk goes on through it to the first error
+                    // of ours, as `gather_tags` does, and the words and tags read one chain.
+                    None => {
+                        push_words(out, &fmt!("{}", arc_e));
+                        let mut cause: Option<&(dyn std::error::Error + 'static)> =
+                            arc_e.source();
+                        while let Some(c) = cause {
+                            if let Some(e) = c.downcast_ref::<Error<T>>() {
+                                e.gather(out);
+                                break;
+                            }
+                            cause = c.source();
+                        }
+                    },
                 }
             },
             Error::Collection(boxerrs) => {

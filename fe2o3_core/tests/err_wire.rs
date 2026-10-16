@@ -76,3 +76,35 @@ fn an_unknown_tag_on_the_wire_is_kept_as_text() -> Outcome<()> {
     assert!(plain.contains("Marmalade"), "{}", plain);
     Ok(())
 }
+
+/// Somebody else's error that wraps one of ours, as its `source()`.
+#[derive(Debug)]
+struct Foreign(Error<ErrTag>);
+
+impl std::fmt::Display for Foreign {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "foreign layer")
+    }
+}
+
+impl std::error::Error for Foreign {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+#[test]
+fn the_words_walk_through_a_foreign_layer_as_the_tags_do() -> Outcome<()> {
+    let ours: Error<ErrTag> = err!("deep words"; Input, Missing);
+    let e: Error<ErrTag> = Error::Upstream(
+        std::sync::Arc::new(Foreign(ours)),
+        ErrMsg { msg: "outer".to_string(), tags: &[ErrTag::Wire] },
+    );
+    assert_eq!(e.msgs(), vec!["outer", "foreign layer", "deep words"]);
+    assert_eq!(e.tags(), vec![ErrTag::Wire, ErrTag::Input, ErrTag::Missing]);
+    let back = e.to_wire().to_error();
+    assert_eq!(back.msgs(), e.msgs());
+    assert_eq!(back.tags(), e.tags());
+    assert_eq!(back.plain(), e.plain());
+    Ok(())
+}
