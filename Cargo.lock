@@ -3390,6 +3390,7 @@ dependencies = [
  "oxedyne_fe2o3_namex",
  "oxedyne_fe2o3_net",
  "oxedyne_fe2o3_num",
+ "oxedyne_fe2o3_o3db_sync",
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_syntax",
  "oxedyne_fe2o3_sys",

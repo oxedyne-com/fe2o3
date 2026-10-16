@@ -3,21 +3,31 @@
 //!
 //! - **Keys.** A value sits at `ns:{space}:v:{path}`, a directory's index at `ns:{space}:d:{dir}`,
 //!   the root's at `ns:{space}:d:`. A directory exists while its index record does.
+//! - **Spaces.** A space name is non-empty and holds no `:`, so no two spaces share a key.
 //! - **Order.** An index record exists only while its parent lists it. `put` writes the value,
 //!   then the index records top-down (a parent it made first), so a crash leaves at worst a
 //!   parent listing a directory whose record is not there yet; that entry reads as absent and the
 //!   next `put` through it writes the record. `delete` drops a value's entry before the value, and
 //!   a directory's record before its entry. `delete_tree` deletes the values, then the records
-//!   deepest first, then the entry. `rename` copies, links the copy top-down, then deletes the
-//!   original as `delete_tree` does.
+//!   deepest first, then the entry. `rename` copies, links the copy top-down, makes it all
+//!   durable with one `sync_now` barrier, then deletes the original as `delete_tree` does.
+//! - **The crash model.** A process crash (a panic, an OOM kill, `SIGKILL`) is always safe: each
+//!   step waits for its ack, and an acked record is in the page cache, which outlives the
+//!   process. A power loss or kernel crash can lose the writes of the last sync interval, and,
+//!   since the zones sync on their own timers, keep a later write while losing an earlier one.
+//!   `rename`'s barrier means it still never leaves neither tree, and `put` climbs until a parent
+//!   already lists the child (not merely until a record exists), so a directory record whose
+//!   parent's entry was lost is listed again by the next `put` through it: the tree heals.
 //! - **Reads trust the index only so far.** `stat` and `list` ignore an entry whose value (or, for
 //!   a directory, whose index record) is absent, and `put` replaces such a dead entry.
 //! - **One mutation lane.** Every mutation holds the handle's FIFO lane ([`O3db::ns_lane`]) across
 //!   its reads, checks and writes, including the parent index's read-modify-write, so a second
 //!   `Ns` over the same handle cannot interleave with it. Reads take no lane. `put_if` and
 //!   `delete_if` run their `pred` under it, so a mutation called from inside `pred` is refused.
-//! - **Orphans.** A crash leaves values (and, from older stores, directory records) that no live
-//!   chain reaches; [`orphans`] finds them by walking the store, for a background sweep only.
+//! - **Orphans.** A crash leaves values and directory records that no live chain reaches;
+//!   [`orphans`] finds them by walking the store, for a background sweep only. Its list is valid
+//!   only while the lane is held: a torn `put` leaves an orphan at the very key a later `put`
+//!   makes live, so whatever deletes orphans must re-check each under the lane as it deletes.
 //!
 //! Meant for a single caller thread (the lane makes other threads safe, not fast). Nothing on a
 //! request path may scan; only [`orphans`] does, from `sweep`.
@@ -25,7 +35,15 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::O3db;
+use crate::{
+	O3db,
+	comm::response::Wait,
+	test::hooks::{
+		self,
+		NsStep,
+		NsTear,
+	},
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
@@ -93,9 +111,9 @@ impl Lane {
 		while turn.serving != mine {
 			turn = match self.moved.wait(turn) {
 				Ok(t)	=> t,
-				Err(_)	=> return Err(err!(
-					"The ns mutation lane was poisoned while waiting for ticket {}.", mine;
-				Lock, Poisoned)),
+				// As in `Drop`: returning here would leave ticket `mine` taken and never served,
+				// so every later holder would wait for ever.
+				Err(p)	=> p.into_inner(),
 			};
 		}
 		turn.holder = Some(me);
@@ -201,8 +219,18 @@ impl<
 >
 	Ns<UIDL, UID, ENC, KH, PR, CS>
 {
-	pub fn new(db: Arc<O3db<UIDL, UID, ENC, KH, PR, CS>>, user: UID, space: &str) -> Self {
-		Self { db, user, space: space.to_string() }
+	/// A `space` must be non-empty and hold no `:`, or space `x` with path `v:p` and space `x:v`
+	/// with path `p` would share the key `ns:x:v:v:p`.
+	pub fn new(db: Arc<O3db<UIDL, UID, ENC, KH, PR, CS>>, user: UID, space: &str)
+		-> Outcome<Self>
+	{
+		if space.is_empty() || space.contains(':') {
+			return Err(err!(
+				"The ns space name '{}' is empty or holds a ':', so its keys could be another \
+				space's.", space;
+			Invalid, Input));
+		}
+		Ok(Self { db, user, space: space.to_string() })
 	}
 
 	pub fn db(&self) -> &Arc<O3db<UIDL, UID, ENC, KH, PR, CS>> { &self.db }
@@ -300,7 +328,7 @@ impl<
 	pub fn put_at(&self, path: &str, bytes: &[u8], mtime_ms: u64) -> Outcome<()> {
 		res!(check_path(path, false));
 		let _hold = res!(self.db.ns_lane().hold());
-		self.put_held(path, bytes, mtime_ms, usize::MAX)
+		self.put_held(path, bytes, mtime_ms)
 	}
 
 	/// Puts `bytes` at `path` only if `pred` passes on its current entry (`None` when absent),
@@ -314,7 +342,7 @@ impl<
 		if !pred(now.as_ref()) {
 			return Ok(false);
 		}
-		res!(self.put_held(path, bytes, now_ms(), usize::MAX));
+		res!(self.put_held(path, bytes, now_ms()));
 		Ok(true)
 	}
 
@@ -373,6 +401,7 @@ impl<
 		if !top.is_dir {
 			res!(self.copy_value(from, to));
 			res!(self.link_held(to, top));
+			res!(self.barrier());
 			res!(self.delete_held(from));
 			return Ok(());
 		}
@@ -400,31 +429,40 @@ impl<
 		for (rel, idx) in plan {
 			res!(self.write_index(&Self::join(to, &rel), &idx));
 		}
+		res!(self.barrier());
 		res!(self.delete_tree_held(from));
 		Ok(())
 	}
 
-	#[doc(hidden)]
-	/// A test's crash: `put` that stops after the value and `index_writes` index writes.
-	pub fn put_torn(&self, path: &str, bytes: &[u8], index_writes: usize) -> Outcome<()> {
-		res!(check_path(path, false));
-		let _hold = res!(self.db.ns_lane().hold());
-		self.put_held(path, bytes, now_ms(), index_writes)
+	// Every write so far durable, across every zone: an ack alone means the page cache, and two
+	// zones sync on their own timers, so a power loss could otherwise keep `from`'s later
+	// deletes and lose `to`'s earlier writes, leaving neither.
+	fn barrier(&self) -> Outcome<()> {
+		res!(self.db.api().sync_now(Wait::default()));
+		hooks::ns_trace(NsStep::Barrier);
+		Ok(())
 	}
 
 	// ── Lane-held bodies ─────────────────────────────────────────────────────────────────────
 
-	fn put_held(&self, path: &str, bytes: &[u8], mtime_ms: u64, index_writes: usize)
-		-> Outcome<()>
-	{
-		let writes = res!(self.plan_link(path,
+	fn put_held(&self, path: &str, bytes: &[u8], mtime_ms: u64) -> Outcome<()> {
+		let mut writes = res!(self.plan_link(path,
 			Entry { is_dir: false, size: bytes.len() as u64, mtime_ms }));
 		let resp = res!(self.db.api().store(
 			self.value_key(path), Dat::wrap_dat(bytes.to_vec()), self.user));
 		res!(resp.recv_store_ack());
-		// Top-down: a crash leaves a parent listing a directory whose index is not yet there,
-		// which reads as absent, and the next put through it lists it again.
-		for (dir, idx) in writes.into_iter().rev().take(index_writes) {
+		// Top-down: a process crash leaves a parent listing a directory whose index is not yet
+		// there, which reads as absent, and the next put through it lists it again.
+		writes.reverse();
+		match hooks::ns_tear() {
+			None					=> (),
+			Some(NsTear::Top(n))	=> writes.truncate(n),
+			Some(NsTear::Deep(n))	=> {
+				let lost = writes.len().saturating_sub(n);
+				writes.drain(..lost);
+			},
+		}
+		for (dir, idx) in writes {
 			res!(self.write_index(&dir, &idx));
 		}
 		Ok(())
@@ -441,7 +479,10 @@ impl<
 
 	// The index writes, leaf first, that list `path` as `entry` and make its parents. Planned
 	// before anything is written, so a conflict leaves nothing behind. A dead entry (whose value
-	// or index is absent) is no conflict: it is replaced.
+	// or index is absent) is no conflict: it is replaced. It climbs until a parent already lists
+	// the child as a directory, not merely until a record exists, so a record that reached the
+	// disk while its parent's new entry did not (a power loss can keep them in either order) is
+	// listed again here.
 	fn plan_link(&self, path: &str, entry: Entry) -> Outcome<Vec<(String, Index)>> {
 		let mut writes: Vec<(String, Index)> = Vec::new();
 		let mut child = path.to_string();
@@ -450,9 +491,7 @@ impl<
 		loop {
 			let (dir, name) = split(&child);
 			let (dir, name) = (dir.to_string(), name.to_string());
-			let read = res!(self.read_index(&dir));
-			let existed = read.is_some();
-			let mut idx = match read {
+			let mut idx = match res!(self.read_index(&dir)) {
 				Some(idx)	=> idx,
 				None		=> Index::new(),
 			};
@@ -464,14 +503,14 @@ impl<
 						if old.is_dir { "directory" } else { "value" }, path;
 					Conflict, Path));
 				}
-				// A parent already listed: nothing above changes.
-				if old.is_dir && entry.is_dir && existed {
+				// A directory its parent already lists: nothing above changes.
+				if old.is_dir && entry.is_dir {
 					break;
 				}
 			}
 			idx.insert(name, entry);
 			writes.push((dir.clone(), idx));
-			if existed || dir.is_empty() {
+			if dir.is_empty() {
 				break;
 			}
 			child = dir;
@@ -570,6 +609,7 @@ impl<
 
 	fn remove_key(&self, key: &Dat) -> Outcome<()> {
 		if res!(self.db.api().contains_wait(key, None)) {
+			hooks::ns_trace(NsStep::Delete);
 			let resp = self.db.api().responder();
 			res!(self.db.api().delete_using_responder(key, self.user, None, resp.clone()));
 			res!(resp.recv_delete_ack());

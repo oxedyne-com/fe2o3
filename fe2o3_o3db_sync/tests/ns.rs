@@ -11,6 +11,10 @@
 //! and `rename` of a three-level tree; `orphans` lists a value no index reaches; and a second
 //! `O3db::start` on one store is refused.
 //!
+//! D1z1c: a directory record that reached the disk while its parent's new entry did not (a power
+//! loss reorders the two) is relinked by the next put through it; `rename` makes the copy durable
+//! before it deletes a key of the original; and two spaces cannot share a key.
+//!
 //! Each test opens its own store under `~/.cache/lane-daimond-runner/rnd1z1-db/`.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
@@ -30,10 +34,17 @@ use oxedyne_fe2o3_o3db_sync::{
 		Capped,
 		Ns,
 	},
-	test::setup::{
-		self,
-		Uid,
-		UID_LEN,
+	test::{
+		hooks::{
+			self,
+			NsStep,
+			NsTear,
+		},
+		setup::{
+			self,
+			Uid,
+			UID_LEN,
+		},
 	},
 };
 
@@ -100,7 +111,7 @@ fn ns_round_trip() -> Outcome<()> {
 fn round_trip() -> Outcome<()> {
 	let root = res!(fresh_dir("round_trip"));
 	let db = res!(open(&root, true));
-	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 
 	res!(ns.put("a/b/c.txt", b"hello"));
 	res!(ns.put_at("a/d.txt", b"there!", 1_234));
@@ -175,7 +186,7 @@ fn list_after_reopen() -> Outcome<()> {
 	let root = res!(fresh_dir("reopen"));
 	{
 		let db = res!(open(&root, true));
-		let ns = TestNs::new(db.clone(), Uid::default(), "t");
+		let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 		res!(ns.put("d/one", b"1"));
 		res!(ns.put("d/two", b"22"));
 		res!(ns.put("d/sub/three", b"333"));
@@ -183,7 +194,7 @@ fn list_after_reopen() -> Outcome<()> {
 	}
 	{
 		let db = res!(open(&root, false));
-		let ns = TestNs::new(db.clone(), Uid::default(), "t");
+		let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 		assert_eq!(res!(names(&ns, "d")),
 			vec!["one".to_string(), "sub".to_string(), "two".to_string()]);
 		assert_eq!(res!(ns.get("d/sub/three")), Some(b"333".to_vec()));
@@ -207,7 +218,7 @@ fn four_mib() -> Outcome<()> {
 	let want: Vec<u8> = (0..4 * 1024 * 1024).map(|i: usize| ((i * 31 + 7) % 251) as u8).collect();
 	{
 		let db = res!(open(&root, true));
-		let ns = TestNs::new(db.clone(), Uid::default(), "t");
+		let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 		res!(ns.put("big/blob", &want));
 		match res!(ns.get("big/blob")) {
 			Some(got)	=> assert!(got == want, "4 MiB value came back as {} other bytes", got.len()),
@@ -217,7 +228,7 @@ fn four_mib() -> Outcome<()> {
 	}
 	{
 		let db = res!(open(&root, false));
-		let ns = TestNs::new(db.clone(), Uid::default(), "t");
+		let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 		match res!(ns.get_capped("big/blob", 4 * 1024 * 1024)) {
 			Capped::Whole(got)	=> assert!(got == want, "4 MiB value differs after a reopen"),
 			other				=> return Err(err!(
@@ -237,7 +248,7 @@ fn ns_index_entry_without_value_reads_absent() -> Outcome<()> {
 fn entry_without_value() -> Outcome<()> {
 	let root = res!(fresh_dir("no_value"));
 	let db = res!(open(&root, true));
-	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 	res!(ns.put("d/kept", b"k"));
 	res!(ns.put("d/lost", b"l"));
 	// The value goes, its index entry stays: a crash between `delete`'s two writes, reversed.
@@ -267,7 +278,7 @@ fn fifty_puts() -> Outcome<()> {
 	let mut hands = Vec::with_capacity(RACERS);
 	for i in 0..RACERS {
 		// A second `Ns` over the same handle shares its lane.
-		let ns = TestNs::new(db.clone(), Uid::default(), "t");
+		let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 		hands.push(thread::spawn(move || ns.put(&fmt!("dir/f{:02}", i), &[i as u8; 64])));
 	}
 	for h in hands {
@@ -276,7 +287,7 @@ fn fifty_puts() -> Outcome<()> {
 			Err(_)		=> return Err(err!("A putting thread panicked."; Test, Thread, Panic)),
 		}
 	}
-	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 	let listed = res!(names(&ns, "dir"));
 	if listed.len() != RACERS {
 		return Err(err!(
@@ -298,10 +309,11 @@ fn ns_torn_put_leaves_no_unlisted_directory() -> Outcome<()> {
 fn torn_put() -> Outcome<()> {
 	let root = res!(fresh_dir("torn_put"));
 	let db = res!(open(&root, true));
-	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 	res!(ns.put("a/x", b"x"));
 	// The crash: the value of a/b/c and one of its two index writes are in.
-	res!(ns.put_torn("a/b/c", b"c", 1));
+	hooks::set_ns_tear(NsTear::Top(1));
+	res!(ns.put("a/b/c", b"c"));
 	// No directory exists that its parent does not list.
 	if res!(ns.list("a/b")).is_some() && !res!(names(&ns, "a")).contains(&"b".to_string()) {
 		return Err(err!("A torn put left a/b existing but unlisted in a."; Test, Mismatch));
@@ -313,7 +325,8 @@ fn torn_put() -> Outcome<()> {
 	assert_eq!(res!(names(&ns, "a")), vec!["b".to_string(), "x".to_string()]);
 	assert_eq!(res!(names(&ns, "a/b")), vec!["d".to_string()]);
 	// A dead directory entry does not block a value put at its path.
-	res!(ns.put_torn("e/f/g", b"g", 1));
+	hooks::set_ns_tear(NsTear::Top(1));
+	res!(ns.put("e/f/g", b"g"));
 	res!(ns.put("e/f", b"now a value"));
 	assert_eq!(res!(ns.get("e/f")), Some(b"now a value".to_vec()));
 	res!(db.close());
@@ -330,10 +343,9 @@ fn mutation_in_pred() -> Outcome<()> {
 	let root = res!(fresh_dir("reentrant"));
 	let db = res!(open(&root, true));
 	let (tx, rx) = mpsc::channel();
-	let db2 = db.clone();
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
+	let inner = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 	let _ = thread::spawn(move || {
-		let ns = TestNs::new(db2.clone(), Uid::default(), "t");
-		let inner = TestNs::new(db2, Uid::default(), "t");
 		let mut nested: Option<bool> = None;
 		let outer = ns.put_if("p/q", b"1", |_| {
 			nested = Some(inner.put("p/r", b"2").is_err());
@@ -348,7 +360,7 @@ fn mutation_in_pred() -> Outcome<()> {
 		Err(_)					=> return Err(err!(
 			"A mutation inside a put_if predicate did not return in 20 s."; Test, Timeout)),
 	}
-	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 	assert_eq!(res!(names(&ns, "p")), vec!["q".to_string()]);
 	res!(db.close());
 	Ok(())
@@ -363,7 +375,7 @@ fn ns_delete_counts_live_entries_only() -> Outcome<()> {
 fn delete_live_only() -> Outcome<()> {
 	let root = res!(fresh_dir("delete_live"));
 	let db = res!(open(&root, true));
-	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 	res!(ns.put("d/gone", b"g"));
 	let resp = db.api().responder();
 	res!(db.api().delete_using_responder(&ns.value_key("d/gone"), Uid::default(), None, resp.clone()));
@@ -396,7 +408,7 @@ fn put_if_race() -> Outcome<()> {
 		let gate = Arc::new(Barrier::new(CAS_RACERS));
 		let mut hands = Vec::with_capacity(CAS_RACERS);
 		for i in 0..CAS_RACERS {
-			let ns = TestNs::new(db.clone(), Uid::default(), "t");
+			let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 			let gate = gate.clone();
 			hands.push(thread::spawn(move || {
 				gate.wait();
@@ -418,7 +430,7 @@ fn put_if_race() -> Outcome<()> {
 		}
 	}
 	// delete_if passes or fails on the current entry.
-	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 	assert!(!res!(ns.delete_if("race/r0", |now| now.map(|e| e.size) == Some(1))));
 	assert!(res!(ns.stat("race/r0")).is_some());
 	assert!(res!(ns.delete_if("race/r0", |now| now.map(|e| e.size) == Some(32))));
@@ -436,7 +448,7 @@ fn ns_tree_ops_on_three_levels() -> Outcome<()> {
 fn tree_ops() -> Outcome<()> {
 	let root = res!(fresh_dir("tree_ops"));
 	let db = res!(open(&root, true));
-	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 	for p in ["t/a", "t/u/b", "t/u/v/c", "t/u/v/d", "keep/k"] {
 		res!(ns.put(p, p.as_bytes()));
 	}
@@ -475,12 +487,15 @@ fn ns_orphans_lists_a_value_with_no_index_entry() -> Outcome<()> {
 fn orphans() -> Outcome<()> {
 	let root = res!(fresh_dir("orphans"));
 	let db = res!(open(&root, true));
-	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 	res!(ns.put("o/kept", b"k"));
-	res!(ns.put_torn("o/lost", b"l", 0));		// a value, no entry
-	res!(ns.put_torn("o/p/q", b"q", 1));		// o lists p, p has no record
-	let other = TestNs::new(db.clone(), Uid::default(), "u");
-	res!(other.put_torn("elsewhere", b"e", 0));	// another space's orphan
+	hooks::set_ns_tear(NsTear::Top(0));
+	res!(ns.put("o/lost", b"l"));		// a value, no entry
+	hooks::set_ns_tear(NsTear::Top(1));
+	res!(ns.put("o/p/q", b"q"));		// o lists p, p has no record
+	let other = res!(TestNs::new(db.clone(), Uid::default(), "u"));
+	hooks::set_ns_tear(NsTear::Top(0));
+	res!(other.put("elsewhere", b"e"));	// another space's orphan
 	let found = res!(ns::orphans(&ns, Wait::default()));
 	let mut values = found.values.clone();
 	values.sort();
@@ -506,9 +521,86 @@ fn second_start() -> Outcome<()> {
 			return Err(err!("A second O3db::start on one store was not refused."; Test, Mismatch));
 		},
 	}
-	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
 	res!(ns.put("still/here", b"yes"));
 	assert_eq!(res!(ns.get("still/here")), Some(b"yes".to_vec()));
+	res!(db.close());
+	Ok(())
+}
+
+// ── D1z1c ────────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ns_put_heals_a_directory_record_its_parent_does_not_list() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(heals_unlisted())
+}
+
+fn heals_unlisted() -> Outcome<()> {
+	let root = res!(fresh_dir("heals_unlisted"));
+	let db = res!(open(&root, true));
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
+	res!(ns.put("a/x", b"x"));
+	// The power loss: a/b's new record reached the disk, a's new entry for b did not.
+	hooks::set_ns_tear(NsTear::Deep(1));
+	res!(ns.put("a/b/c", b"c"));
+	assert_eq!(res!(names(&ns, "a")), vec!["x".to_string()]);
+	assert_eq!(res!(names(&ns, "a/b")), vec!["c".to_string()]);
+	// The next put through it lists b in a again, whatever order the disk kept.
+	res!(ns.put("a/b/d", b"d"));
+	assert_eq!(res!(names(&ns, "a")), vec!["b".to_string(), "x".to_string()]);
+	assert_eq!(res!(names(&ns, "a/b")), vec!["c".to_string(), "d".to_string()]);
+	res!(db.close());
+	Ok(())
+}
+
+#[test]
+fn ns_rename_is_durable_before_it_deletes() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(rename_barrier())
+}
+
+fn rename_barrier() -> Outcome<()> {
+	let root = res!(fresh_dir("rename_barrier"));
+	let db = res!(open(&root, true));
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
+	res!(ns.put("r/one", b"1"));
+	res!(ns.put("r/s/two", b"2"));
+	res!(ns.put("v", b"value"));
+	for (from, to) in [("r", "q"), ("v", "w")] {
+		hooks::set_ns_trace();
+		res!(ns.rename(from, to));
+		let steps = hooks::ns_steps();
+		let barrier = steps.iter().position(|s| *s == NsStep::Barrier);
+		let delete = steps.iter().position(|s| *s == NsStep::Delete);
+		match (barrier, delete) {
+			(Some(b), Some(d)) if b < d	=> (),
+			_ => return Err(err!(
+				"rename of '{}' deleted before its copy was durable: {:?}.", from, steps;
+			Test, Mismatch)),
+		}
+	}
+	assert_eq!(res!(names(&ns, "q")), vec!["one".to_string(), "s".to_string()]);
+	assert_eq!(res!(ns.get("w")), Some(b"value".to_vec()));
+	res!(db.close());
+	Ok(())
+}
+
+#[test]
+fn ns_spaces_cannot_share_a_key() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(space_names())
+}
+
+fn space_names() -> Outcome<()> {
+	let root = res!(fresh_dir("space_names"));
+	let db = res!(open(&root, true));
+	// "x" with "v:p" and "x:v" with "p" would both be ns:x:v:v:p, so a ':' is refused, as is "".
+	let x = res!(TestNs::new(db.clone(), Uid::default(), "x"));
+	assert!(TestNs::new(db.clone(), Uid::default(), "x:v").is_err());
+	assert!(TestNs::new(db.clone(), Uid::default(), "").is_err());
+	res!(x.put("v:p", b"x's"));
+	assert_eq!(res!(x.get("v:p")), Some(b"x's".to_vec()));
 	res!(db.close());
 	Ok(())
 }

@@ -735,3 +735,88 @@ pub fn record_bytes_read() -> u64 {
 pub(crate) fn count_record_read(n: usize) {
     RECORD_BYTES_READ.fetch_add(n as u64, Ordering::Relaxed);
 }
+
+// ── The path namespace (`ns`) ────────────────────────────────────────────────────────────────
+//
+// Unlike the switches above these are kept per thread, so the ns tests share one binary, and
+// their setters exist only with the `test-hooks` feature, which the crate's own tests turn on
+// through a dev-dependency on itself: no other crate can tear a put in a normal build.
+
+/// Which of a put's index writes reach the store, for a test that builds what a crash leaves.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NsTear {
+    /// The first `n`, top-down, as a process crash after them leaves it.
+    Top(usize),
+    /// The deepest `n` only, as a power loss that kept the later writes and lost the earlier.
+    Deep(usize),
+}
+
+/// What an ns `rename` does once its copy is written, in order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NsStep {
+    Barrier,    // every write so far is durable
+    Delete,     // a key is deleted
+}
+
+static NS_TEARS:    Mutex<Vec<(thread::ThreadId, NsTear)>> = Mutex::new(Vec::new());
+static NS_TRACING:  AtomicBool = AtomicBool::new(false);  // some thread is tracing
+static NS_STEPS:    Mutex<Vec<(thread::ThreadId, Option<NsStep>)>> = Mutex::new(Vec::new());
+
+/// Tears the next ns put made on this thread: its value is written, then only the index writes
+/// `tear` names.
+#[cfg(feature = "test-hooks")]
+pub fn set_ns_tear(tear: NsTear) {
+    let me = thread::current().id();
+    let mut tears = match NS_TEARS.lock() {
+        Ok(t)   => t,
+        Err(p)  => p.into_inner(),
+    };
+    tears.retain(|(t, _)| *t != me);
+    tears.push((me, tear));
+}
+
+/// The tear set for this thread's next put, taken so that it applies once.
+pub(crate) fn ns_tear() -> Option<NsTear> {
+    let me = thread::current().id();
+    let mut tears = match NS_TEARS.lock() {
+        Ok(t)   => t,
+        Err(p)  => p.into_inner(),
+    };
+    let i = tears.iter().position(|(t, _)| *t == me)?;
+    Some(tears.swap_remove(i).1)
+}
+
+/// Starts recording this thread's ns steps, clearing any it has recorded.
+#[cfg(feature = "test-hooks")]
+pub fn set_ns_trace() {
+    let me = thread::current().id();
+    let mut steps = match NS_STEPS.lock() {
+        Ok(s)   => s,
+        Err(p)  => p.into_inner(),
+    };
+    steps.retain(|(t, _)| *t != me);
+    steps.push((me, None));   // marks this thread as tracing
+    NS_TRACING.store(true, Ordering::Relaxed);
+}
+
+/// This thread's ns steps since `set_ns_trace`.
+#[cfg(feature = "test-hooks")]
+pub fn ns_steps() -> Vec<NsStep> {
+    let me = thread::current().id();
+    match NS_STEPS.lock() {
+        Ok(s)   => s.iter().filter(|(t, _)| *t == me).filter_map(|(_, s)| *s).collect(),
+        Err(_)  => Vec::new(),
+    }
+}
+
+pub(crate) fn ns_trace(step: NsStep) {
+    if !NS_TRACING.load(Ordering::Relaxed) {
+        return;
+    }
+    let me = thread::current().id();
+    if let Ok(mut steps) = NS_STEPS.lock() {
+        if steps.iter().any(|(t, s)| *t == me && s.is_none()) {
+            steps.push((me, Some(step)));
+        }
+    }
+}
