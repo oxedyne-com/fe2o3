@@ -3,17 +3,24 @@
 //!
 //! - **Keys.** A value sits at `ns:{space}:v:{path}`, a directory's index at `ns:{space}:d:{dir}`,
 //!   the root's at `ns:{space}:d:`. A directory exists while its index record does.
-//! - **Order.** `put` writes the value, then the parent's index, then any parent it made, upward.
-//!   `delete` writes the index first, then deletes the value. A crash between the two leaves a
-//!   value with no entry (unlisted, though `get` still reads it) or an entry with no value.
+//! - **Order.** An index record exists only while its parent lists it. `put` writes the value,
+//!   then the index records top-down (a parent it made first), so a crash leaves at worst a
+//!   parent listing a directory whose record is not there yet; that entry reads as absent and the
+//!   next `put` through it writes the record. `delete` drops a value's entry before the value, and
+//!   a directory's record before its entry. `delete_tree` deletes the values, then the records
+//!   deepest first, then the entry. `rename` copies, links the copy top-down, then deletes the
+//!   original as `delete_tree` does.
 //! - **Reads trust the index only so far.** `stat` and `list` ignore an entry whose value (or, for
-//!   a directory, whose index record) is absent.
+//!   a directory, whose index record) is absent, and `put` replaces such a dead entry.
 //! - **One mutation lane.** Every mutation holds the handle's FIFO lane ([`O3db::ns_lane`]) across
 //!   its reads, checks and writes, including the parent index's read-modify-write, so a second
-//!   `Ns` over the same handle cannot interleave with it. Reads take no lane.
+//!   `Ns` over the same handle cannot interleave with it. Reads take no lane. `put_if` and
+//!   `delete_if` run their `pred` under it, so a mutation called from inside `pred` is refused.
+//! - **Orphans.** A crash leaves values (and, from older stores, directory records) that no live
+//!   chain reaches; [`orphans`] finds them by walking the store, for a background sweep only.
 //!
-//! Meant for a single caller thread (the lane makes other threads safe, not fast). Nothing here
-//! scans, and nothing on a request path may.
+//! Meant for a single caller thread (the lane makes other threads safe, not fast). Nothing on a
+//! request path may scan; only [`orphans`] does, from `sweep`.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -38,6 +45,10 @@ use std::{
 		Condvar,
 		Mutex,
 	},
+	thread::{
+		self,
+		ThreadId,
+	},
 	time::{
 		SystemTime,
 		UNIX_EPOCH,
@@ -45,25 +56,41 @@ use std::{
 };
 
 
-/// A FIFO ticket lock: holders are served in the order they asked.
+/// A FIFO ticket lock: holders are served in the order they asked. It is not re-entrant, so a
+/// thread that asks again while holding it is refused rather than left waiting on itself.
 #[derive(Debug, Default)]
 pub struct Lane {
-	turn:	Mutex<(u64, u64)>,	// (next ticket, ticket being served)
+	turn:	Mutex<Turn>,
 	moved:	Condvar,
+}
+
+#[derive(Debug, Default)]
+struct Turn {
+	next:		u64,				// the next ticket to hand out
+	serving:	u64,				// the ticket being served
+	holder:		Option<ThreadId>,	// the thread being served
 }
 
 /// The lane, held until dropped.
 #[derive(Debug)]
-pub struct LaneHold<'a> {
+pub(crate) struct LaneHold<'a> {
 	lane: &'a Lane,
 }
 
 impl Lane {
-	pub fn hold(&self) -> Outcome<LaneHold<'_>> {
+	pub(crate) fn hold(&self) -> Outcome<LaneHold<'_>> {
+		let me = thread::current().id();
 		let mut turn = lock_mutex!(self.turn, "Taking a ticket for the ns mutation lane.");
-		let mine = turn.0;
-		turn.0 = turn.0.wrapping_add(1);
-		while turn.1 != mine {
+		if turn.holder == Some(me) {
+			return Err(err!(
+				"This thread already holds the ns mutation lane, so a mutation called from inside \
+				another (a put_if or delete_if predicate, say) is refused rather than left waiting \
+				on itself.";
+			Lock, Conflict));
+		}
+		let mine = turn.next;
+		turn.next = turn.next.wrapping_add(1);
+		while turn.serving != mine {
 			turn = match self.moved.wait(turn) {
 				Ok(t)	=> t,
 				Err(_)	=> return Err(err!(
@@ -71,6 +98,7 @@ impl Lane {
 				Lock, Poisoned)),
 			};
 		}
+		turn.holder = Some(me);
 		Ok(LaneHold { lane: self })
 	}
 }
@@ -82,7 +110,8 @@ impl Drop for LaneHold<'_> {
 			Ok(t)	=> t,
 			Err(p)	=> p.into_inner(),
 		};
-		turn.1 = turn.1.wrapping_add(1);
+		turn.holder = None;
+		turn.serving = turn.serving.wrapping_add(1);
 		self.lane.moved.notify_all();
 	}
 }
@@ -102,6 +131,16 @@ pub enum Capped {
 	Whole(Vec<u8>),
 	Over(u64),	// the size, over the cap; the value is not read
 }
+
+/// What [`orphans`] found: values and directory index records that no chain of live entries
+/// from the root reaches.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Orphans {
+	pub values:	Vec<String>,	// paths
+	pub dirs:	Vec<String>,	// paths
+}
+
+pub use crate::sweep::ns_orphans as orphans;
 
 type Index = BTreeMap<String, Entry>;
 
@@ -167,6 +206,7 @@ impl<
 	}
 
 	pub fn db(&self) -> &Arc<O3db<UIDL, UID, ENC, KH, PR, CS>> { &self.db }
+	pub fn space(&self) -> &str { &self.space }
 
 	pub fn value_key(&self, path: &str) -> Dat {
 		Dat::Str(fmt!("ns:{}:v:{}", self.space, path))
@@ -260,11 +300,153 @@ impl<
 	pub fn put_at(&self, path: &str, bytes: &[u8], mtime_ms: u64) -> Outcome<()> {
 		res!(check_path(path, false));
 		let _hold = res!(self.db.ns_lane().hold());
+		self.put_held(path, bytes, mtime_ms, usize::MAX)
+	}
 
-		// Plan every index write before the value goes in, so a conflict leaves nothing behind.
+	/// Puts `bytes` at `path` only if `pred` passes on its current entry (`None` when absent),
+	/// all under the lane. Whether it was put.
+	pub fn put_if<F>(&self, path: &str, bytes: &[u8], pred: F) -> Outcome<bool>
+		where F: FnOnce(Option<&Entry>) -> bool
+	{
+		res!(check_path(path, false));
+		let _hold = res!(self.db.ns_lane().hold());
+		let now = res!(self.stat(path));
+		if !pred(now.as_ref()) {
+			return Ok(false);
+		}
+		res!(self.put_held(path, bytes, now_ms(), usize::MAX));
+		Ok(true)
+	}
+
+	/// Deletes the value at `path`, or the empty directory there. Whether an entry was listed.
+	pub fn delete(&self, path: &str) -> Outcome<bool> {
+		res!(check_path(path, false));
+		let _hold = res!(self.db.ns_lane().hold());
+		self.delete_held(path)
+	}
+
+	/// `delete` only if `pred` passes on the current entry (`None` when absent), all under the
+	/// lane. Whether `pred` passed.
+	pub fn delete_if<F>(&self, path: &str, pred: F) -> Outcome<bool>
+		where F: FnOnce(Option<&Entry>) -> bool
+	{
+		res!(check_path(path, false));
+		let _hold = res!(self.db.ns_lane().hold());
+		let now = res!(self.stat(path));
+		if !pred(now.as_ref()) {
+			return Ok(false);
+		}
+		res!(self.delete_held(path));
+		Ok(true)
+	}
+
+	/// Deletes `path` and everything under it, dead entries' remains included: values first, then
+	/// index records deepest first, then the parent's entry, so a crash leaves only dead entries.
+	/// The number of values gone.
+	pub fn delete_tree(&self, path: &str) -> Outcome<usize> {
+		res!(check_path(path, false));
+		let _hold = res!(self.db.ns_lane().hold());
+		self.delete_tree_held(path)
+	}
+
+	/// Moves the value or tree at `from` to `to`, which must be absent and not inside `from`.
+	/// The values are copied, `to` is linked and its index records written top-down, then `from`
+	/// goes as `delete_tree` does. A crash leaves `from` whole, or `to` whole, or both.
+	pub fn rename(&self, from: &str, to: &str) -> Outcome<()> {
+		res!(check_path(from, false));
+		res!(check_path(to, false));
+		if to == from || to.starts_with(&fmt!("{}/", from)) {
+			return Err(err!(
+				"The ns path '{}' cannot be renamed to '{}', which is itself or inside it.", from, to;
+			Invalid, Input, Path));
+		}
+		let _hold = res!(self.db.ns_lane().hold());
+		let top = match res!(self.stat(from)) {
+			Some(e)	=> e,
+			None	=> return Err(err!("The ns path '{}' is absent, so not renamed.", from;
+				Missing, Path)),
+		};
+		if res!(self.stat(to)).is_some() {
+			return Err(err!("The ns path '{}' already exists, so '{}' is not renamed onto it.",
+				to, from; Exists, Path));
+		}
+		if !top.is_dir {
+			res!(self.copy_value(from, to));
+			res!(self.link_held(to, top));
+			res!(self.delete_held(from));
+			return Ok(());
+		}
+		// Live entries only. The values go in unreachable; each index record is planned parent first.
+		let mut plan: Vec<(String, Index)> = Vec::new();
+		let mut todo = vec![String::new()];
+		while let Some(rel) = todo.pop() {
+			let live = match res!(self.list(&Self::join(from, &rel))) {
+				Some(live)	=> live,
+				None		=> Vec::new(),
+			};
+			let mut idx = Index::new();
+			for (name, e) in live {
+				let sub = Self::join(&rel, &name);
+				if e.is_dir {
+					todo.push(sub);
+				} else {
+					res!(self.copy_value(&Self::join(from, &sub), &Self::join(to, &sub)));
+				}
+				idx.insert(name, e);
+			}
+			plan.push((rel, idx));
+		}
+		res!(self.link_held(to, top));
+		for (rel, idx) in plan {
+			res!(self.write_index(&Self::join(to, &rel), &idx));
+		}
+		res!(self.delete_tree_held(from));
+		Ok(())
+	}
+
+	#[doc(hidden)]
+	/// A test's crash: `put` that stops after the value and `index_writes` index writes.
+	pub fn put_torn(&self, path: &str, bytes: &[u8], index_writes: usize) -> Outcome<()> {
+		res!(check_path(path, false));
+		let _hold = res!(self.db.ns_lane().hold());
+		self.put_held(path, bytes, now_ms(), index_writes)
+	}
+
+	// ── Lane-held bodies ─────────────────────────────────────────────────────────────────────
+
+	fn put_held(&self, path: &str, bytes: &[u8], mtime_ms: u64, index_writes: usize)
+		-> Outcome<()>
+	{
+		let writes = res!(self.plan_link(path,
+			Entry { is_dir: false, size: bytes.len() as u64, mtime_ms }));
+		let resp = res!(self.db.api().store(
+			self.value_key(path), Dat::wrap_dat(bytes.to_vec()), self.user));
+		res!(resp.recv_store_ack());
+		// Top-down: a crash leaves a parent listing a directory whose index is not yet there,
+		// which reads as absent, and the next put through it lists it again.
+		for (dir, idx) in writes.into_iter().rev().take(index_writes) {
+			res!(self.write_index(&dir, &idx));
+		}
+		Ok(())
+	}
+
+	// Lists `path` as `entry` in its parent, making parents, top-down.
+	fn link_held(&self, path: &str, entry: Entry) -> Outcome<()> {
+		let writes = res!(self.plan_link(path, entry));
+		for (dir, idx) in writes.into_iter().rev() {
+			res!(self.write_index(&dir, &idx));
+		}
+		Ok(())
+	}
+
+	// The index writes, leaf first, that list `path` as `entry` and make its parents. Planned
+	// before anything is written, so a conflict leaves nothing behind. A dead entry (whose value
+	// or index is absent) is no conflict: it is replaced.
+	fn plan_link(&self, path: &str, entry: Entry) -> Outcome<Vec<(String, Index)>> {
 		let mut writes: Vec<(String, Index)> = Vec::new();
 		let mut child = path.to_string();
-		let mut entry = Entry { is_dir: false, size: bytes.len() as u64, mtime_ms };
+		let mut entry = entry;
+		let mtime_ms = entry.mtime_ms;
 		loop {
 			let (dir, name) = split(&child);
 			let (dir, name) = (dir.to_string(), name.to_string());
@@ -274,14 +456,18 @@ impl<
 				Some(idx)	=> idx,
 				None		=> Index::new(),
 			};
-			match idx.get(&name) {
-				Some(old) if old.is_dir != entry.is_dir => return Err(err!(
-					"The ns path '{}' is a {}, so '{}' cannot be put.", Self::join(&dir, &name),
-					if old.is_dir { "directory" } else { "value" }, path;
-				Conflict, Path)),
+			if let Some(old) = idx.get(&name) {
+				let live = res!(self.db.api().contains_wait(&self.backing_key(&child, old), None));
+				if live && old.is_dir != entry.is_dir {
+					return Err(err!(
+						"The ns path '{}' is a {}, so '{}' cannot be put.", child,
+						if old.is_dir { "directory" } else { "value" }, path;
+					Conflict, Path));
+				}
 				// A parent already listed: nothing above changes.
-				Some(_) if entry.is_dir && existed => break,
-				_ => (),
+				if old.is_dir && entry.is_dir && existed {
+					break;
+				}
 			}
 			idx.insert(name, entry);
 			writes.push((dir.clone(), idx));
@@ -291,29 +477,19 @@ impl<
 			child = dir;
 			entry = Entry { is_dir: true, size: 0, mtime_ms };
 		}
-
-		let resp = res!(self.db.api().store(
-			self.value_key(path), Dat::wrap_dat(bytes.to_vec()), self.user));
-		res!(resp.recv_store_ack());
-		for (dir, idx) in writes {
-			res!(self.write_index(&dir, &idx));
-		}
-		Ok(())
+		Ok(writes)
 	}
 
-	/// Deletes the value at `path`, or the empty directory there. Whether an entry was listed.
-	pub fn delete(&self, path: &str) -> Outcome<bool> {
-		res!(check_path(path, false));
-		let _hold = res!(self.db.ns_lane().hold());
+	fn delete_held(&self, path: &str) -> Outcome<bool> {
 		let (dir, name) = split(path);
 		let mut idx = match res!(self.read_index(dir)) {
 			Some(idx)	=> idx,
 			None		=> Index::new(),
 		};
-		let listed = idx.remove(name);
-		if let Some(e) = listed {
-			if e.is_dir {
-				if let Some(inner) = res!(self.read_index(path)) {
+		match idx.remove(name) {
+			Some(e) if e.is_dir => {
+				// Only live entries count: a dead one (left by a crash) does not keep it.
+				if let Some(inner) = res!(self.list(path)) {
 					if !inner.is_empty() {
 						return Err(err!(
 							"The ns directory '{}' holds {} entries, so it is not deleted.",
@@ -321,25 +497,154 @@ impl<
 						Conflict, Path));
 					}
 				}
-			}
-			res!(self.write_index(dir, &idx));
+				res!(self.remove_key(&self.index_key(path)));
+				res!(self.write_index(dir, &idx));
+				Ok(true)
+			},
+			Some(_) => {
+				res!(self.write_index(dir, &idx));
+				res!(self.remove_key(&self.value_key(path)));
+				Ok(true)
+			},
+			None => {
+				res!(self.remove_key(&self.value_key(path)));
+				Ok(false)
+			},
 		}
-		let key = match listed {
-			Some(e)	=> self.backing_key(path, &e),
-			None	=> self.value_key(path),
+	}
+
+	fn delete_tree_held(&self, path: &str) -> Outcome<usize> {
+		let (values, dirs) = res!(self.tree_keys(path));
+		for key in values.iter().chain(dirs.iter().rev()) {
+			res!(self.remove_key(key));
+		}
+		let (dir, name) = split(path);
+		if let Some(mut idx) = res!(self.read_index(dir)) {
+			if idx.remove(name).is_some() {
+				res!(self.write_index(dir, &idx));
+			}
+		}
+		Ok(values.len())
+	}
+
+	// Every value key and directory index key at and under `path`, dead entries included; the
+	// directories parent first.
+	fn tree_keys(&self, path: &str) -> Outcome<(Vec<Dat>, Vec<Dat>)> {
+		let mut values = vec![self.value_key(path)];
+		let mut dirs = Vec::new();
+		let mut todo = vec![path.to_string()];
+		while let Some(dir) = todo.pop() {
+			let idx = match res!(self.read_index(&dir)) {
+				Some(idx)	=> idx,
+				None		=> continue,
+			};
+			for (name, e) in idx {
+				let sub = Self::join(&dir, &name);
+				if e.is_dir {
+					todo.push(sub);
+				} else {
+					values.push(self.value_key(&sub));
+				}
+			}
+			dirs.push(self.index_key(&dir));
+		}
+		// Only what is there: the count is of values gone.
+		let held = res!(self.db.api().contains_many_wait(&values, None));
+		let values = values.into_iter().enumerate()
+			.filter(|(i, _)| held.get(*i) == Some(&true))
+			.map(|(_, k)| k)
+			.collect();
+		Ok((values, dirs))
+	}
+
+	fn copy_value(&self, from: &str, to: &str) -> Outcome<()> {
+		let bytes = match res!(self.get(from)) {
+			Some(b)	=> b,
+			None	=> return Err(err!("The ns value at '{}' went while being copied.", from;
+				Missing, Path)),
 		};
-		if res!(self.db.api().contains_wait(&key, None)) {
+		let resp = res!(self.db.api().store(self.value_key(to), Dat::wrap_dat(bytes), self.user));
+		res!(resp.recv_store_ack());
+		Ok(())
+	}
+
+	fn remove_key(&self, key: &Dat) -> Outcome<()> {
+		if res!(self.db.api().contains_wait(key, None)) {
 			let resp = self.db.api().responder();
-			res!(self.db.api().delete_using_responder(&key, self.user, None, resp.clone()));
+			res!(self.db.api().delete_using_responder(key, self.user, None, resp.clone()));
 			res!(resp.recv_delete_ack());
 		}
-		Ok(listed.is_some())
+		Ok(())
+	}
+
+	// ── Orphans ──────────────────────────────────────────────────────────────────────────────
+
+	/// Of the keys a walk of the store found, those of this space no live chain reaches, judged
+	/// under the lane so that no put is part way through.
+	pub(crate) fn confirm_orphans(&self, keys: Vec<Dat>) -> Outcome<Orphans> {
+		let vpre = fmt!("ns:{}:v:", self.space);
+		let dpre = fmt!("ns:{}:d:", self.space);
+		let _hold = res!(self.db.ns_lane().hold());
+		let mut seen: BTreeMap<String, Option<Index>> = BTreeMap::new();
+		let mut out = Orphans::default();
+		for key in keys {
+			let s = match &key {
+				Dat::Str(s)	=> s,
+				_			=> continue,
+			};
+			if let Some(path) = s.strip_prefix(&vpre) {
+				if res!(self.db.api().contains_wait(&key, None))
+					&& !res!(self.linked(path, false, &mut seen))
+				{
+					out.values.push(path.to_string());
+				}
+			} else if let Some(dir) = s.strip_prefix(&dpre) {
+				if !dir.is_empty()
+					&& res!(self.db.api().contains_wait(&key, None))
+					&& !res!(self.linked(dir, true, &mut seen))
+				{
+					out.dirs.push(dir.to_string());
+				}
+			}
+		}
+		Ok(out)
+	}
+
+	// Whether every directory from the root down lists the next name, as the right kind.
+	fn linked(&self, path: &str, is_dir: bool, seen: &mut BTreeMap<String, Option<Index>>)
+		-> Outcome<bool>
+	{
+		if check_path(path, false).is_err() {
+			return Ok(false);
+		}
+		let parts: Vec<&str> = path.split('/').collect();
+		let mut dir = String::new();
+		for (i, name) in parts.iter().enumerate() {
+			if !seen.contains_key(&dir) {
+				let idx = res!(self.read_index(&dir));
+				seen.insert(dir.clone(), idx);
+			}
+			let want_dir = i + 1 < parts.len() || is_dir;
+			match seen.get(&dir) {
+				Some(Some(idx)) => match idx.get(*name) {
+					Some(e) if e.is_dir == want_dir	=> (),
+					_								=> return Ok(false),
+				},
+				_ => return Ok(false),
+			}
+			dir = Self::join(&dir, name);
+		}
+		Ok(true)
 	}
 
 	// ── Index records ────────────────────────────────────────────────────────────────────────
 
 	fn join(dir: &str, name: &str) -> String {
-		if dir.is_empty() { name.to_string() } else { fmt!("{}/{}", dir, name) }
+		match (dir.is_empty(), name.is_empty()) {
+			(true, _)		=> name.to_string(),
+			(false, true)	=> dir.to_string(),
+			(false, false)	=> fmt!("{}/{}", dir, name),
+		}
 	}
 
 	// What must be present for an entry to be live: a value, or a directory's index record.

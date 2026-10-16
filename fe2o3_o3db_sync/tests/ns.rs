@@ -5,6 +5,12 @@
 //! is gone, which reads as absent; and 50 puts from 50 threads into one directory, which must
 //! list 50 (without the mutation lane the directory's index read-modify-writes lose entries).
 //!
+//! D1z1b: a put torn after its first index write leaves no directory its parent does not list;
+//! a mutation called from inside a `put_if` predicate returns instead of waiting on itself;
+//! `delete` counts live entries only; racing `put_if`s have exactly one winner; `delete_tree`
+//! and `rename` of a three-level tree; `orphans` lists a value no index reaches; and a second
+//! `O3db::start` on one store is refused.
+//!
 //! Each test opens its own store under `~/.cache/lane-daimond-runner/rnd1z1-db/`.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
@@ -18,7 +24,9 @@ use oxedyne_fe2o3_hash::{
 use oxedyne_fe2o3_o3db_sync::{
 	O3db,
 	data::core::RestSchemesInput,
+	comm::response::Wait,
 	ns::{
+		self,
 		Capped,
 		Ns,
 	},
@@ -31,8 +39,13 @@ use oxedyne_fe2o3_o3db_sync::{
 
 use std::{
 	path::PathBuf,
-	sync::Arc,
+	sync::{
+		Arc,
+		Barrier,
+		mpsc,
+	},
 	thread,
+	time::Duration,
 };
 
 
@@ -51,6 +64,10 @@ fn fresh_dir(name: &str) -> Outcome<PathBuf> {
 }
 
 fn open(db_root: &PathBuf, wipe: bool) -> Outcome<Arc<Db>> {
+	Ok(Arc::new(res!(start(db_root, wipe))))
+}
+
+fn start(db_root: &PathBuf, wipe: bool) -> Outcome<Db> {
 	let schms_input = RestSchemesInput::new(
 		None::<()>,
 		None::<HashScheme>,
@@ -59,7 +76,7 @@ fn open(db_root: &PathBuf, wipe: bool) -> Outcome<Arc<Db>> {
 	);
 	let mut cfg = res!(setup::default_cfg());
 	cfg.zone_overrides = Default::default();
-	Ok(Arc::new(res!(setup::start_db(db_root.clone(), Some(cfg), schms_input, None, false, wipe))))
+	setup::start_db(db_root.clone(), Some(cfg), schms_input, None, false, wipe)
 }
 
 fn wrap(outcome: Outcome<()>) -> Outcome<()> {
@@ -266,6 +283,232 @@ fn fifty_puts() -> Outcome<()> {
 			"{} interleaved puts into one directory list {}.", RACERS, listed.len();
 		Test, Mismatch, Size));
 	}
+	res!(db.close());
+	Ok(())
+}
+
+// ── D1z1b ────────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ns_torn_put_leaves_no_unlisted_directory() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(torn_put())
+}
+
+fn torn_put() -> Outcome<()> {
+	let root = res!(fresh_dir("torn_put"));
+	let db = res!(open(&root, true));
+	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	res!(ns.put("a/x", b"x"));
+	// The crash: the value of a/b/c and one of its two index writes are in.
+	res!(ns.put_torn("a/b/c", b"c", 1));
+	// No directory exists that its parent does not list.
+	if res!(ns.list("a/b")).is_some() && !res!(names(&ns, "a")).contains(&"b".to_string()) {
+		return Err(err!("A torn put left a/b existing but unlisted in a."; Test, Mismatch));
+	}
+	assert_eq!(res!(names(&ns, "a")), vec!["x".to_string()]);
+	assert!(res!(ns.stat("a/b/c")).is_none());
+	// The next put through it heals the chain.
+	res!(ns.put("a/b/d", b"d"));
+	assert_eq!(res!(names(&ns, "a")), vec!["b".to_string(), "x".to_string()]);
+	assert_eq!(res!(names(&ns, "a/b")), vec!["d".to_string()]);
+	// A dead directory entry does not block a value put at its path.
+	res!(ns.put_torn("e/f/g", b"g", 1));
+	res!(ns.put("e/f", b"now a value"));
+	assert_eq!(res!(ns.get("e/f")), Some(b"now a value".to_vec()));
+	res!(db.close());
+	Ok(())
+}
+
+#[test]
+fn ns_mutation_inside_a_predicate_returns() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(mutation_in_pred())
+}
+
+fn mutation_in_pred() -> Outcome<()> {
+	let root = res!(fresh_dir("reentrant"));
+	let db = res!(open(&root, true));
+	let (tx, rx) = mpsc::channel();
+	let db2 = db.clone();
+	let _ = thread::spawn(move || {
+		let ns = TestNs::new(db2.clone(), Uid::default(), "t");
+		let inner = TestNs::new(db2, Uid::default(), "t");
+		let mut nested: Option<bool> = None;
+		let outer = ns.put_if("p/q", b"1", |_| {
+			nested = Some(inner.put("p/r", b"2").is_err());
+			true
+		});
+		let _ = tx.send((outer.is_ok(), nested));
+	});
+	match rx.recv_timeout(Duration::from_secs(20)) {
+		Ok((true, Some(true)))	=> (),
+		Ok(other)				=> return Err(err!(
+			"A mutation inside a put_if predicate gave {:?}, not a refusal.", other; Test, Mismatch)),
+		Err(_)					=> return Err(err!(
+			"A mutation inside a put_if predicate did not return in 20 s."; Test, Timeout)),
+	}
+	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	assert_eq!(res!(names(&ns, "p")), vec!["q".to_string()]);
+	res!(db.close());
+	Ok(())
+}
+
+#[test]
+fn ns_delete_counts_live_entries_only() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(delete_live_only())
+}
+
+fn delete_live_only() -> Outcome<()> {
+	let root = res!(fresh_dir("delete_live"));
+	let db = res!(open(&root, true));
+	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	res!(ns.put("d/gone", b"g"));
+	let resp = db.api().responder();
+	res!(db.api().delete_using_responder(&ns.value_key("d/gone"), Uid::default(), None, resp.clone()));
+	res!(resp.recv_delete_ack());
+	assert!(res!(names(&ns, "d")).is_empty());
+	match ns.delete("d") {
+		Ok(true)	=> (),
+		other		=> return Err(err!(
+			"Deleting a directory with only a dead entry gave {:?}.", other; Test, Mismatch)),
+	}
+	assert!(res!(ns.list("d")).is_none());
+	assert!(res!(names(&ns, "")).is_empty());
+	res!(db.close());
+	Ok(())
+}
+
+const CAS_RACERS: usize = 8;
+const CAS_ROUNDS: usize = 5;
+
+#[test]
+fn ns_racing_put_if_has_one_winner() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(put_if_race())
+}
+
+fn put_if_race() -> Outcome<()> {
+	let root = res!(fresh_dir("put_if_race"));
+	let db = res!(open(&root, true));
+	for round in 0..CAS_ROUNDS {
+		let gate = Arc::new(Barrier::new(CAS_RACERS));
+		let mut hands = Vec::with_capacity(CAS_RACERS);
+		for i in 0..CAS_RACERS {
+			let ns = TestNs::new(db.clone(), Uid::default(), "t");
+			let gate = gate.clone();
+			hands.push(thread::spawn(move || {
+				gate.wait();
+				ns.put_if(&fmt!("race/r{}", round), &[i as u8; 32], |now| now.is_none())
+			}));
+		}
+		let mut wins = 0;
+		for h in hands {
+			match h.join() {
+				Ok(outcome)	=> if res!(outcome) { wins += 1; },
+				Err(_)		=> return Err(err!("A racing thread panicked."; Test, Thread, Panic)),
+			}
+		}
+		if wins != 1 {
+			return Err(err!(
+				"Round {}: {} racing put_if calls on an absent path had {} winners.",
+				round, CAS_RACERS, wins;
+			Test, Mismatch));
+		}
+	}
+	// delete_if passes or fails on the current entry.
+	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	assert!(!res!(ns.delete_if("race/r0", |now| now.map(|e| e.size) == Some(1))));
+	assert!(res!(ns.stat("race/r0")).is_some());
+	assert!(res!(ns.delete_if("race/r0", |now| now.map(|e| e.size) == Some(32))));
+	assert!(res!(ns.stat("race/r0")).is_none());
+	res!(db.close());
+	Ok(())
+}
+
+#[test]
+fn ns_tree_ops_on_three_levels() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(tree_ops())
+}
+
+fn tree_ops() -> Outcome<()> {
+	let root = res!(fresh_dir("tree_ops"));
+	let db = res!(open(&root, true));
+	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	for p in ["t/a", "t/u/b", "t/u/v/c", "t/u/v/d", "keep/k"] {
+		res!(ns.put(p, p.as_bytes()));
+	}
+
+	// rename the tree, then a value.
+	assert!(ns.rename("t", "t/inside").is_err());
+	assert!(ns.rename("t", "keep").is_err());
+	res!(ns.rename("t", "m/n"));
+	assert!(res!(ns.list("t")).is_none());
+	assert_eq!(res!(names(&ns, "")), vec!["keep".to_string(), "m".to_string()]);
+	assert_eq!(res!(names(&ns, "m/n")), vec!["a".to_string(), "u".to_string()]);
+	assert_eq!(res!(names(&ns, "m/n/u/v")), vec!["c".to_string(), "d".to_string()]);
+	assert_eq!(res!(ns.get("m/n/u/v/d")), Some(b"t/u/v/d".to_vec()));
+	assert_eq!(res!(ns.get("t/u/v/d")), None);
+	res!(ns.rename("m/n/u/b", "keep/b2"));
+	assert_eq!(res!(names(&ns, "keep")), vec!["b2".to_string(), "k".to_string()]);
+	assert_eq!(res!(names(&ns, "m/n/u")), vec!["v".to_string()]);
+
+	// delete_tree the rest.
+	assert_eq!(res!(ns.delete_tree("m")), 3);
+	assert!(res!(ns.list("m")).is_none());
+	assert!(res!(ns.list("m/n/u/v")).is_none());
+	assert_eq!(res!(ns.get("m/n/u/v/c")), None);
+	assert_eq!(res!(names(&ns, "")), vec!["keep".to_string()]);
+	assert_eq!(res!(ns::orphans(&ns, Wait::default())), ns::Orphans::default());
+	res!(db.close());
+	Ok(())
+}
+
+#[test]
+fn ns_orphans_lists_a_value_with_no_index_entry() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(orphans())
+}
+
+fn orphans() -> Outcome<()> {
+	let root = res!(fresh_dir("orphans"));
+	let db = res!(open(&root, true));
+	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	res!(ns.put("o/kept", b"k"));
+	res!(ns.put_torn("o/lost", b"l", 0));		// a value, no entry
+	res!(ns.put_torn("o/p/q", b"q", 1));		// o lists p, p has no record
+	let other = TestNs::new(db.clone(), Uid::default(), "u");
+	res!(other.put_torn("elsewhere", b"e", 0));	// another space's orphan
+	let found = res!(ns::orphans(&ns, Wait::default()));
+	let mut values = found.values.clone();
+	values.sort();
+	assert_eq!(values, vec!["o/lost".to_string(), "o/p/q".to_string()]);
+	assert!(found.dirs.is_empty());
+	res!(db.close());
+	Ok(())
+}
+
+#[test]
+fn ns_second_start_on_one_store_is_refused() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(second_start())
+}
+
+fn second_start() -> Outcome<()> {
+	let root = res!(fresh_dir("second_start"));
+	let db = res!(open(&root, true));
+	match start(&root, false) {
+		Err(_)		=> (),
+		Ok(second)	=> {
+			let _ = second.close();
+			return Err(err!("A second O3db::start on one store was not refused."; Test, Mismatch));
+		},
+	}
+	let ns = TestNs::new(db.clone(), Uid::default(), "t");
+	res!(ns.put("still/here", b"yes"));
+	assert_eq!(res!(ns.get("still/here")), Some(b"yes".to_vec()));
 	res!(db.close());
 	Ok(())
 }
