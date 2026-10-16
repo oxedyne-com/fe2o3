@@ -131,6 +131,8 @@ macro_rules! new_type_gen {
 ///
 /// ## Basic enum without fields
 /// ```rust
+/// use oxedyne_fe2o3_core::prelude::*;
+///
 /// #[derive(Clone, Copy, Debug)]
 /// pub enum LogLevel {
 ///     Debug,
@@ -149,18 +151,22 @@ macro_rules! new_type_gen {
 ///
 /// ## Enum with fields
 /// ```rust
-/// #[derive(Debug)]
+/// use oxedyne_fe2o3_core::prelude::*;
+///
+/// #[derive(Clone, Copy, Debug)]
 /// pub enum DatabaseError {
-///     ConnectionFailed(String),
-///     QueryError(i32, String),
+///     ConnectionFailed(&'static str),
+///     QueryError(i32, &'static str),
 ///     Timeout(u64),
 /// }
 ///
 /// new_enum!(DatabaseError; 
-///     ConnectionFailed("connection refused".to_string()),
-///     QueryError(-1, "syntax error".to_string()),
+///     ConnectionFailed("connection refused"),
+///     QueryError(-1, "syntax error"),
 ///     Timeout(30),
 /// );
+///
+/// assert_eq!(DatabaseError::num_of_variants(), 3);
 ///
 /// // Use in error handling.
 /// for error in DatabaseError::variants() {
@@ -170,6 +176,8 @@ macro_rules! new_type_gen {
 ///
 /// ## State machine states
 /// ```rust
+/// use oxedyne_fe2o3_core::prelude::*;
+///
 /// #[derive(Clone, Copy, Debug, PartialEq)]
 /// pub enum ConnectionState {
 ///     Disconnected,
@@ -205,17 +213,19 @@ macro_rules! new_type_gen {
 ///
 /// ## UI Components
 /// ```rust
-/// #[derive(Debug)]
+/// use oxedyne_fe2o3_core::prelude::*;
+///
+/// #[derive(Clone, Copy, Debug)]
 /// pub enum DialogType {
-///     Info(String),
-///     Warning(String, bool),
-///     Error(String, String), // message and technical details
+///     Info(&'static str),
+///     Warning(&'static str, bool),
+///     Error(&'static str, &'static str), // message and technical details
 /// }
 ///
 /// new_enum!(DialogType;
-///     Info("Information".to_string()),
-///     Warning("Warning".to_string(), true),
-///     Error("Error".to_string(), "Stack trace".to_string()),
+///     Info("Information"),
+///     Warning("Warning", true),
+///     Error("Error", "Stack trace"),
 /// );
 ///
 /// // Test rendering of all dialog types.
@@ -224,6 +234,9 @@ macro_rules! new_type_gen {
 ///         println!("Rendering dialog: {:?}", dialog);
 ///     }
 /// }
+///
+/// test_dialog_rendering();
+/// let _any = DialogType::rand();
 /// ```
 ///
 /// # Note
@@ -233,21 +246,23 @@ macro_rules! new_type_gen {
 ///   The duplication ensures fast compile times while providing convenient iteration and 
 ///   random selection functionality.
 /// - The macro generates const methods, allowing use in const contexts
-/// - Fields in variants must implement Copy or provide owned values
+/// - The enum must be `Copy`, and field values must be constant expressions, because
+///   `variants()` is a `const fn` and `rand()` copies a variant out of it
 /// - Useful for exhaustive testing and validation
 /// - Can be combined with other derive macros like Clone, Copy, Debug
 #[macro_export]
 macro_rules! new_enum {
-    ($name:ident; $($variant:ident $(($($field:expr),+))?,)*) => {
+    ($name:ident; $($variant:ident $(($($field:expr),+))?),* $(,)?) => {
         impl $name {
-            const fn variants() -> [$name; 0 $(+ (1 $(+ <[()]>::len(&[$($field),+]))?))*] {
+            // One per variant, whatever its fields.
+            const fn variants() -> [$name; <[&str]>::len(&[$(stringify!($variant)),*])] {
                 [$($name::$variant $(($($field),+))?),*]
             }
             const fn num_of_variants() -> usize {
-                0 $(+ (1 $(+ <[()]>::len(&[$($field),+]))?))*
+                <[&str]>::len(&[$(stringify!($variant)),*])
             }
             pub fn rand() -> Self {
-                let index = ::oxedyne_fe2o3_core::rand::Rand::in_range(0, Self::num_of_variants());
+                let index = $crate::rand::Rand::in_range(0, Self::num_of_variants() - 1); // Inclusive range
                 Self::variants()[index]
             }
         }

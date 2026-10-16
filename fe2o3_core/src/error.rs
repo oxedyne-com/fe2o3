@@ -16,8 +16,14 @@
 //!
 //! ### `ok!` - Basic Error Propagation
 //! ```rust
-//! // Equivalent to the ? operator but with prefix syntax.
-//! let file = ok!(File::create("data.txt"));
+//! use oxedyne_fe2o3_core::prelude::*;
+//!
+//! fn main() -> Outcome<()> {
+//!     // Equivalent to the ? operator but with prefix syntax.
+//!     let dir = ok!(std::env::current_dir());
+//!     assert!(dir.is_absolute());
+//!     Ok(())
+//! }
 //! ```
 //! - Lightweight error propagation using standard `From` trait
 //! - A prefix alias for the `?` operator suffix
@@ -25,8 +31,14 @@
 //!
 //! ### `res!` - Contextual Error Propagation
 //! ```rust
-//! // Adds context and tags to errors.
-//! let file = res!(File::create("data.txt"), IO, File);
+//! use oxedyne_fe2o3_core::prelude::*;
+//!
+//! fn main() -> Outcome<()> {
+//!     // Adds context and tags to errors.
+//!     let dir = res!(std::env::current_dir(), IO, File);
+//!     assert!(dir.is_absolute());
+//!     Ok(())
+//! }
 //! ```
 //! - Short for "result"
 //! - Adds file/line context and error tags
@@ -36,8 +48,18 @@
 //!
 //! ### `catch!` - Panic-Catching Error Propagation
 //! ```rust
-//! // Converts both errors and panics into Outcome
-//! let value = catch!(compute_result(), Numeric, Overflow);
+//! use oxedyne_fe2o3_core::prelude::*;
+//!
+//! fn compute_result() -> Outcome<u8> {
+//!     Ok(res!(u8::try_from(200u32 + 55)))
+//! }
+//!
+//! fn main() -> Outcome<()> {
+//!     // Converts both errors and panics into an Outcome.
+//!     let value = catch!(compute_result(), Numeric, Overflow);
+//!     assert_eq!(value, 255);
+//!     Ok(())
+//! }
 //! ```
 //! - Catches unwinding panics and converts them to errors
 //! - Adds context and tags like `ok!`
@@ -49,12 +71,23 @@
 //! Error tags provide multi-dimensional error classification:
 //!
 //! ```rust
-//! // Multiple tags can be attached
-//! let result = res!(operation(), IO, Network, Timeout);
+//! use oxedyne_fe2o3_core::prelude::*;
 //!
-//! // Tags can be matched efficiently
-//! if err.tags().contains(&ErrTag::Timeout) {
-//!     // Handle timeout case
+//! fn operation() -> Outcome<()> {
+//!     Err(err!("The peer did not answer in time."; Timeout))
+//! }
+//!
+//! fn fetch() -> Outcome<()> {
+//!     // Multiple tags can be attached.
+//!     res!(operation(), IO, Network, Timeout);
+//!     Ok(())
+//! }
+//!
+//! fn main() {
+//!     // Tags can be matched.
+//!     if let Err(e) = fetch() {
+//!         assert!(e.tags().contains(&ErrTag::Timeout));
+//!     }
 //! }
 //! ```
 //!

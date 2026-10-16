@@ -42,19 +42,6 @@ macro_rules! fmt_typ {
 }
 
 #[macro_export]
-/// A three letter alias for wrapping a string in a `Stringer`.
-///
-///```
-/// use oxedyne_fe2o3_core::prelude::*;
-///
-/// let s = str!("The meaning is {}", 42);
-///```
-macro_rules! str {
-    () => (Stringer::from(""));
-    ($($arg:tt)*) => (Stringer::new($($arg)*));
-}
-
-#[macro_export]
 /// Dump of a byte slice to `String`s.
 ///
 /// Convert a byte slice to text values in a vector of `String` lines.  The format string is

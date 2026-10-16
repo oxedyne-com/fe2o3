@@ -3,10 +3,10 @@
 ///
 ///```
 /// use oxedyne_fe2o3_core::prelude::*;
-/// use std::sync::{std::sync::Arc, RwLock};
+/// use std::sync::{Arc, RwLock};
 /// 
 /// fn main() -> Outcome<()> {
-///     let n = std::sync::Arc::new(RwLock::new(42));
+///     let n = Arc::new(RwLock::new(42));
 ///     let n_ul = lock_read!(n);
 ///     assert_eq!(*n_ul, 42);
 ///     Ok(())
@@ -43,10 +43,10 @@ macro_rules! lock_read {
 ///
 ///```
 /// use oxedyne_fe2o3_core::prelude::*;
-/// use std::sync::{std::sync::Arc, RwLock};
+/// use std::sync::{Arc, RwLock};
 /// 
 /// fn main() -> Outcome<()> {
-///     let n = std::sync::Arc::new(RwLock::new(41));
+///     let n = Arc::new(RwLock::new(41));
 ///     let mut n_ul = lock_write!(n);
 ///     *n_ul += 1;
 ///     assert_eq!(*n_ul, 42);

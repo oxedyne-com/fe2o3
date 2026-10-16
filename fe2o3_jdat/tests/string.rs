@@ -26,7 +26,10 @@ use oxedyne_fe2o3_core::{
     test::test_it,
 };
 use oxedyne_fe2o3_num::prelude::*;
-use oxedyne_fe2o3_text::string::Stringer;
+use oxedyne_fe2o3_text::{
+    str,
+    string::Stringer,
+};
 
 use std::collections::BTreeMap;
 

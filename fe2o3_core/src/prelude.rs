@@ -26,7 +26,6 @@ pub use crate::{
     fmt,
     fmt_typ,
     msg,
-    str,
     // Synchronisation macros
     lock_read,
     lock_write,
