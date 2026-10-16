@@ -172,7 +172,9 @@ impl<
                             // newest value is a tombstone has no value, so say so here, once, for
                             // every caller: a deleted key reads as absent, indistinguishable from
                             // one that was never written.  The tombstone is deliberately left
-                            // unencrypted so that it can be recognised without a key.
+                            // unencrypted so that it can be recognised without a key, but one
+                            // found after decryption is absent too: `O3dbCas` and `O3dbStorage`
+                            // wrote theirs through `store`, encrypted, until 2026-10-16.
                             if let Dat::Usr(kind, _) = &dat {
                                 if *kind == id::usr_kind_id_deleted() {
                                     return Ok((None, postgc));
@@ -193,6 +195,8 @@ impl<
                                     this could be due to the use of an encryption scheme \
                                     differing from the one provided ({}).", enc.or_debug(or);
                                     Decode, Bytes)),
+                                Ok((Dat::Usr(kind, _), _)) if kind == id::usr_kind_id_deleted() =>
+                                    return Ok((None, postgc)),
                                 Ok((dat, _)) => return Ok((Some((dat, meta)), postgc)),
                             }
                         },
