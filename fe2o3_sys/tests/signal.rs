@@ -232,7 +232,7 @@ fn helper_that_signals_its_own_group() -> Outcome<()> {
     };
     let leads = env::var(MODE).map(|m| m == "lead").unwrap_or(false);
     // The caller is in the group it signals, so it hears the signal too and must not end by it.
-    res!(on_stop_request(|_| {}));
+    res!(on_stop_request(|| {}));
     until("the stop listener to be installed", || {
         match fs::read_to_string("/proc/self/status") {
             // The mask of caught signals, the fifteenth bit of which is SIGTERM.
