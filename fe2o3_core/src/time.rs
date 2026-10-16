@@ -141,7 +141,7 @@ pub enum ClockSource {
 pub struct Driven {
     path:   PathBuf,
     last:   AtomicU64,  // Highest millisecond value returned
-    sub:    AtomicU64,  // Sub-millisecond tie breaker for now_nanos
+    last_ns:AtomicU64,  // Last now_nanos value returned, u64 until 2554
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -150,12 +150,48 @@ impl Driven {
         Self {
             path:   path.into(),
             last:   AtomicU64::new(0),
-            sub:    AtomicU64::new(0),
+            last_ns:AtomicU64::new(0),
         }
     }
 
     pub fn path(&self) -> &std::path::Path {
         &self.path
+    }
+
+    // Test hook: n calls' worth of ties already handed out in this millisecond.
+    #[cfg(test)]
+    fn preset_ties(&self, ms: u64, n: u64) {
+        self.last_ns.store(ms * 1_000_000 + n, Ordering::SeqCst);
+    }
+
+    /// The file's milliseconds in nanoseconds, or one more than the last value
+    /// handed out if that is higher.  A compare-and-swap loop rather than a
+    /// counter, so no value repeats or steps back across threads however long
+    /// the file is held still.
+    fn next_nanos(&self) -> Outcome<u64> {
+        let ms = res!(self.read_millis());
+        let cand = match ms.checked_mul(1_000_000) {
+            Some(n) => n,
+            None    => return Err(err!(
+                "Driven clock file {:?} holds {} ms, beyond the u64 nanosecond \
+                range (the year 2554).", self.path, ms;
+            Invalid, Input, Overflow)),
+        };
+        let mut prev = self.last_ns.load(Ordering::SeqCst);
+        loop {
+            let next = match prev.checked_add(1) {
+                Some(p1)    => cand.max(p1),
+                None        => return Err(err!(
+                    "Driven clock nanosecond counter is exhausted at {}.", prev;
+                Overflow)),
+            };
+            match self.last_ns.compare_exchange_weak(
+                prev, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_)       => return Ok(next),
+                Err(cur)    => prev = cur,
+            }
+        }
     }
 
     /// Reads the file and clamps the value so that it never goes backwards.
@@ -233,9 +269,10 @@ impl ClockSource {
         }
     }
 
-    /// For `Driven`, the file's milliseconds scaled to nanoseconds plus a
-    /// per-source counter (mod 10^6), so successive calls within one
-    /// millisecond still strictly increase and can order ledger entries.
+    /// For `Driven`, the file's milliseconds scaled to nanoseconds, bumped to
+    /// one past the previous value when the file has not moved, so successive
+    /// calls strictly increase and can order ledger entries.  Over a million
+    /// calls in one file millisecond run ahead of it until the file catches up.
     pub fn now_nanos(&self) -> Outcome<u128> {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -244,9 +281,7 @@ impl ClockSource {
             Self::System    => Ok((crate::wasm::now_ms() * 1_000_000.0) as u128),
             #[cfg(not(target_arch = "wasm32"))]
             Self::Driven(d) => {
-                let ms = res!(d.read_millis());
-                let sub = d.sub.fetch_add(1, Ordering::SeqCst) % 1_000_000;
-                Ok((ms as u128) * 1_000_000 + sub as u128)
+                Ok(res!(d.next_nanos()) as u128)
             }
         }
     }
@@ -295,6 +330,39 @@ mod tests {
         sleep(Duration::from_micros(2000));
         t = res!(t0.split_micros());
         msg!("timer split: {}", t); 
+        Ok(())
+    }
+
+    // Holding the file still past 10^6 calls must neither repeat nor step back.
+    #[test]
+    fn test_driven_nanos_strictly_increase_past_wrap() -> Outcome<()> {
+        let dir = std::env::temp_dir().join(fmt!("fe2o3_clock_wrap_{}", std::process::id()));
+        res!(std::fs::create_dir_all(&dir));
+        let path = dir.join("clock");
+        let ms: u64 = 1_000_000;
+        res!(std::fs::write(&path, ms.to_le_bytes()));
+        let src = ClockSource::Driven(Driven::new(&path));
+        let mut prev = res!(src.now_nanos());
+        if let ClockSource::Driven(d) = &src {
+            d.preset_ties(ms, 999_998);
+        }
+        for i in 0..5 {
+            let t = res!(src.now_nanos());
+            if t <= prev {
+                return Err(err!(
+                    "Call {} after the preset returned {} <= previous {}.", i, t, prev;
+                Test, Order));
+            }
+            prev = t;
+        }
+        // A later file value is still honoured once it passes the ties.
+        res!(std::fs::write(&path, (ms + 1_000).to_le_bytes()));
+        let t = res!(src.now_nanos());
+        if t != (ms as u128 + 1_000) * 1_000_000 {
+            return Err(err!("After advancing 1 s, got {} not {}.", t,
+                (ms as u128 + 1_000) * 1_000_000; Test, Unexpected));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }
