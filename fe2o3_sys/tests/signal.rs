@@ -13,6 +13,7 @@ use oxedyne_fe2o3_core::stop::on_stop_request;
 use oxedyne_fe2o3_sys::signal::{
     still_running,
     to_members,
+    to_group,
     to_own_group,
     tree_of,
     Proc,
@@ -351,4 +352,45 @@ fn a_process_that_has_ended_and_awaits_its_parents_wait_is_not_running() -> Outc
     assert!(still_running(&[seen]).is_empty());
     let _ = child.wait();
     Ok(())
+}
+
+// A shell leading a group of its own, over a `sleep` it started: a signal to the group by the
+// shell's number ends both, which the kernel's own table shows.
+#[test]
+fn a_signal_to_a_group_the_caller_started_ends_its_child_and_grandchild() -> Outcome<()> {
+    let dir = res!(Dir::new("to_group"));
+    let note = dir.file("grandchild");
+    let mut child = res!(io(Command::new("sh")
+        .arg("-c").arg("sleep 30 & echo $! > \"$1\"; wait")
+        .arg("sh").arg(&note)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .spawn(), "start a shell leading its own group"));
+    let _group = Group(child.id() as i32);
+    res!(until("the shell to note its sleep", || {
+        fs::read_to_string(&note).map(|t| t.ends_with('\n')).unwrap_or(false)
+    }));
+    let grandchild: u32 = match fs::read_to_string(&note).ok().and_then(|t| t.trim().parse().ok()) {
+        Some(n) => n,
+        None    => return Err(err!("The shell noted no sleep."; Test, Missing)),
+    };
+    assert_eq!(parent_of(grandchild), Some(child.id()), "the sleep is the shell's own");
+    let seen = match Proc::of(grandchild) {
+        Some(p) => p,
+        None    => return Err(err!("The sleep was not seen."; Test, Missing)),
+    };
+    res!(to_group(child.id(), Signal::Kill));
+    let status = res!(io(child.wait(), "wait on the shell"));
+    assert!(!status.success(), "the shell was killed, not left to finish");
+    res!(until("the sleep beneath the shell to end", || !seen.running()));
+    Ok(())
+}
+
+#[test]
+fn a_signal_to_group_0_1_or_the_callers_own_is_refused() {
+    assert!(to_group(0, Signal::Kill).is_err());
+    assert!(to_group(1, Signal::Kill).is_err());
+    let own = nix::unistd::getpgrp().as_raw() as u32;
+    assert!(to_group(own, Signal::Terminate).is_err());
+    assert!(to_group(u32::MAX, Signal::Terminate).is_err());
 }

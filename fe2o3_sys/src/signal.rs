@@ -1,4 +1,5 @@
-//! Signals to the caller's own process group, to one process, and to a process and all it started.
+//! Signals to the caller's own process group, to a group it started, to one process, and to a
+//! process and all it started.
 //!
 //! A program that runs a child it must end when asked to stop, an editor under `ore edit`, has two
 //! ways to reach it. The child shares the caller's process group where the caller was started as
@@ -29,12 +30,13 @@ use nix::unistd::{
     Pid,
 };
 
-/// A signal that asks a process to end.
+/// A signal that asks a process to end, or with `Kill` ends it where it stands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Signal {
     Hangup,
     Interrupt,
     Terminate,
+    Kill,
 }
 
 impl Signal {
@@ -43,6 +45,7 @@ impl Signal {
             Self::Hangup    => Sig::SIGHUP,
             Self::Interrupt => Sig::SIGINT,
             Self::Terminate => Sig::SIGTERM,
+            Self::Kill      => Sig::SIGKILL,
         }
     }
 }
@@ -65,6 +68,37 @@ pub fn to_own_group(sig: Signal) -> Outcome<bool> {
         Ok(())  => Ok(true),
         Err(e)  => Err(err!(
             "Cannot send {:?} to the caller's own process group: {}.", sig, e;
+            IO, System)),
+    }
+}
+
+/// Sends `sig` to every process in the process group `pgid`, a group the caller started a child
+/// to lead, as with `Command::process_group(0)`, whose group number is then the child's pid.
+///
+/// It refuses group 0, which the kernel reads as the caller's own group, group 1, and the caller's
+/// own group by its number, since a caller that means its own group asks [`to_own_group`].
+pub fn to_group(pgid: u32, sig: Signal) -> Outcome<()> {
+    if pgid <= 1 {
+        return Err(err!(
+            "The process group {} is not one a signal can be sent to: 0 is the caller's own \
+            group and 1 is init's.", pgid;
+            Invalid, Input, Range));
+    }
+    let group = match i32::try_from(pgid) {
+        Ok(g)   => Pid::from_raw(g),
+        Err(_)  => return Err(err!(
+            "The process group {} is not one a signal can be sent to.", pgid;
+            Invalid, Input, Range)),
+    };
+    if group == getpgrp() {
+        return Err(err!(
+            "The process group {} is the caller's own; to_own_group signals it.", pgid;
+            Invalid, Input));
+    }
+    match killpg(group, sig.nix()) {
+        Ok(())  => Ok(()),
+        Err(e)  => Err(err!(
+            "Cannot send {:?} to process group {}: {}.", sig, pgid, e;
             IO, System)),
     }
 }
