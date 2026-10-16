@@ -134,6 +134,26 @@ fn watch_changed_wakes_on_send() -> Outcome<()> {
     Ok(())
 }
 
+/// An abandoned wait (its task ended, or a select or timeout dropped it) must not leave its waker
+/// behind: a Stop cell that is rarely sent would otherwise grow without bound.
+#[test]
+fn watch_abandoned_waits_leave_no_waker() -> Outcome<()> {
+    let (tx, mut rx) = watch(0u8);
+    for _ in 0..16 {
+        let (_woken, waker) = flag();
+        let mut cx = Context::from_waker(&waker);
+        let mut changed = pin!(rx.changed());
+        req!(changed.as_mut().poll(&mut cx).is_pending(), true);
+        // A re-poll with another waker replaces, never adds.
+        let (_woken2, waker2) = flag();
+        let mut cx2 = Context::from_waker(&waker2);
+        req!(changed.as_mut().poll(&mut cx2).is_pending(), true);
+        req!(res!(tx.waiters()), 1);
+    }
+    req!(res!(tx.waiters()), 0);
+    Ok(())
+}
+
 #[test]
 fn watch_closes_when_sender_drops() -> Outcome<()> {
     let (tx, mut rx) = watch(1u8);
