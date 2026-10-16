@@ -327,6 +327,19 @@ impl AgreementScheme {
         Ok(MontgomeryPoint::mul_base_clamped(sk).to_bytes())
     }
 
+    /// The raw X25519 Diffie-Hellman of a secret and a public key (RFC 7748), refusing the all
+    /// zero result. This is the 32 bytes WebCrypto's `deriveBits({ name: 'X25519' }, .., 256)`
+    /// answers, for a format that derives its own key from them (with HKDF, say) rather than
+    /// through [`KeyExchanger::encap`]'s SHA3 transcript. It is the input to a derivation and
+    /// never a key itself.
+    pub fn x25519_agree(sk: &[u8], pk: &[u8])
+        -> Outcome<[u8; Self::X25519_SESSION_KEY_LEN]>
+    {
+        let sk = res!(<[u8; Self::X25519_SK_LEN]>::try_from(sk));
+        let pk = res!(<[u8; Self::X25519_PK_LEN]>::try_from(pk));
+        Self::agree(&sk, &pk)
+    }
+
     /// The raw Diffie-Hellman, refusing the all zero result.
     ///
     /// A public key of small order drives every secret to the same point,
@@ -374,5 +387,37 @@ impl AgreementScheme {
                 key was derived.", other;
             Bug, Mismatch)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap_or(0)).collect()
+    }
+
+    // RFC 7748 §6.1: both ends agree the published shared secret.
+    #[test]
+    fn test_x25519_agree_rfc7748() -> Outcome<()> {
+        let a_sk = unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+        let a_pk = unhex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+        let b_sk = unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+        let b_pk = unhex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+        let k    = unhex("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+        req!(res!(AgreementScheme::x25519_public_of(&a_sk)).to_vec(), a_pk.clone());
+        req!(res!(AgreementScheme::x25519_agree(&a_sk, &b_pk)).to_vec(), k.clone());
+        req!(res!(AgreementScheme::x25519_agree(&b_sk, &a_pk)).to_vec(), k);
+        Ok(())
+    }
+
+    #[test]
+    fn test_x25519_agree_refuses_small_order_and_bad_lengths() -> Outcome<()> {
+        let sk = [9u8; 32];
+        req!(AgreementScheme::x25519_agree(&sk, &[0u8; 32]).is_err(), true);
+        req!(AgreementScheme::x25519_agree(&sk[..31], &[9u8; 32]).is_err(), true);
+        req!(AgreementScheme::x25519_agree(&sk, &[9u8; 33]).is_err(), true);
+        Ok(())
     }
 }
