@@ -2315,11 +2315,14 @@ pub struct WatchPeer {
     // body rather than a 404. `None` sends no header and reads only liveness. Supports
     // `{file:...}`, resolved at start-up.
     pub token:    Option<String>,
-    // Seconds between reminders about this peer alone, down or distressed, in place of
-    // `watch.repeat_secs`. `None` -- the default -- uses the watcher's. A peer whose fault is
-    // known and slow to mend, such as a stale backup, reminds every six hours rather than
-    // texting every fifteen minutes for a fortnight.
-    pub repeat_secs: Option<u64>,
+    // This peer's own reminder schedule, down or distressed, in place of `watch.repeat_secs`.
+    // `None` -- the default -- uses the watcher's.
+    pub repeat_secs: Option<Vec<u64>>,
+    // Whether this watcher tells anyone about this peer. Every watcher detects and records; when
+    // several watch one peer, all but one entry say `"speaks": (false)`, so the operator hears
+    // one voice rather than a chorus. On unless written off, so a peer never goes unheard by
+    // omission.
+    pub speaks:   bool,
 }
 
 /// Watching the other machines in the estate.
@@ -2336,9 +2339,10 @@ pub struct WatchConfig {
     pub interval_secs:  u64,                // seconds between rounds
     pub fail_threshold: u32,                // consecutive failures before a peer is called down
     pub timeout_secs:   u64,                // seconds to wait for a health answer
-    // Seconds between reminders while a peer stays down. An alarm that fires every round is an
-    // alarm that gets silenced, and the text leg costs money per message.
-    pub repeat_secs:    u64,
+    // The reminder schedule while a peer stays down or distressed: the gaps, in seconds, after
+    // the onset message, the last repeating for as long as the episode lasts. Any change of state
+    // starts it again. See `crate::srv::watch` for why it backs off.
+    pub repeat_secs:    Vec<u64>,
     // Seconds between proof-of-life messages; zero switches them off. The alerting path is used
     // rarely by design, and a path used rarely is broken when it is needed -- an expired
     // credential, a rotated key, a changed number, a lapsed verification. This exercises every
@@ -2427,6 +2431,43 @@ impl SmsAlertConfig {
     }
 }
 
+/// A reminder schedule: one count of seconds, a fixed gap, or a list of them, the last of which
+/// repeats. Any unsigned width is read, as a threshold is; anything else, and an empty list, is
+/// refused, so a mistyped cadence is a start-up failure rather than a silent default.
+fn reminder_schedule(d: &Dat, what: &str) -> Outcome<Vec<u64>> {
+    let secs = |d: &Dat| -> Option<u64> {
+        match d {
+            Dat::U64(n)             => Some(*n),
+            Dat::U32(n)             => Some(*n as u64),
+            Dat::U16(n)             => Some(*n as u64),
+            Dat::U8(n)              => Some(*n as u64),
+            Dat::I64(n) if *n >= 0  => Some(*n as u64),
+            Dat::I32(n) if *n >= 0  => Some(*n as u64),
+            _                       => None,
+        }
+    };
+    let items: Vec<&Dat> = match d {
+        Dat::List(l)    => l.iter().collect(),
+        Dat::Vek(v)     => v.iter().collect(),
+        other           => vec![other],
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match secs(item) {
+            Some(n) => out.push(n),
+            None    => return Err(err!(
+                "{} holds {:?}, which is not a count of seconds.", what, item;
+                Configuration, Invalid, Input)),
+        }
+    }
+    if out.is_empty() {
+        return Err(err!(
+            "{} is an empty list. Give at least one gap in seconds.", what;
+            Configuration, Invalid, Missing));
+    }
+    Ok(out)
+}
+
 impl WatchConfig {
     /// Parse a `WatchConfig` from a `DaticleMap`.
     ///
@@ -2444,8 +2485,8 @@ impl WatchConfig {
         if let Some(Dat::U64(n)) = m.get(&dat!("timeout_secs")) {
             out.timeout_secs = *n;
         }
-        if let Some(Dat::U64(n)) = m.get(&dat!("repeat_secs")) {
-            out.repeat_secs = *n;
+        if let Some(d) = m.get(&dat!("repeat_secs")) {
+            out.repeat_secs = res!(reminder_schedule(d, "watch.repeat_secs"));
         }
         if let Some(Dat::U64(n)) = m.get(&dat!("heartbeat_secs")) {
             out.heartbeat_secs = *n;
@@ -2518,23 +2559,15 @@ impl WatchConfig {
                     Some(Dat::Str(s)) if !s.is_empty() => Some(s.clone()),
                     _ => None,
                 };
-                // Any unsigned integer width, as a threshold takes; anything else is refused, so
-                // a mistyped cadence is a start-up failure rather than the watcher's default.
                 let repeat_secs = match pm.get(&dat!("repeat_secs")) {
-                    None                => None,
-                    Some(Dat::U64(n))   => Some(*n),
-                    Some(Dat::U32(n))   => Some(*n as u64),
-                    Some(Dat::U16(n))   => Some(*n as u64),
-                    Some(Dat::U8(n))    => Some(*n as u64),
-                    Some(Dat::I64(n)) if *n >= 0 => Some(*n as u64),
-                    Some(Dat::I32(n)) if *n >= 0 => Some(*n as u64),
-                    Some(other) => return Err(err!(
-                        "watch.peers entry {} ('{}') has repeat_secs {:?}, which is not a \
-                        count of seconds.", i, name, other;
-                        Configuration, Invalid, Input)),
+                    None    => None,
+                    Some(d) => Some(res!(reminder_schedule(d,
+                        &fmt!("watch.peers entry {} ('{}') repeat_secs", i, name)))),
                 };
+                // Absent means true: silence must be written down, never fallen into.
+                let speaks = !matches!(pm.get(&dat!("speaks")), Some(Dat::Bool(false)));
                 out.peers.push(WatchPeer {
-                    name, host, url, plain_ok, distress, clear, token, repeat_secs,
+                    name, host, url, plain_ok, distress, clear, token, repeat_secs, speaks,
                 });
             }
         }
@@ -2568,7 +2601,10 @@ impl Default for WatchConfig {
             // enough that fifty minutes of silence cannot happen again.
             fail_threshold: 3,
             timeout_secs:   10,
-            repeat_secs:    900,
+            // Told at onset, then after an hour, four hours, and daily. A fixed fifteen minutes
+            // sent one inbox 315 near-identical mails in nine days in October 2026, and Gmail
+            // then refused everything the sending host relayed.
+            repeat_secs:    vec![3_600, 14_400, 86_400],
             // Monthly. Often enough that a dead path is caught before it
             // matters, rare enough that the message stays worth reading.
             heartbeat_secs: 2_592_000,
@@ -3828,8 +3864,8 @@ mod tests {
             peer("birch", Some(Dat::U32(3_600))),
         ])));
         assert_eq!(w.peers[0].repeat_secs, None, "absent must leave the watcher's cadence");
-        assert_eq!(w.peers[1].repeat_secs, Some(21_600));
-        assert_eq!(w.peers[2].repeat_secs, Some(3_600));
+        assert_eq!(w.peers[1].repeat_secs, Some(vec![21_600]));
+        assert_eq!(w.peers[2].repeat_secs, Some(vec![3_600]));
 
         let refused = WatchConfig::from_datmap(&watch(vec![peer("karri", Some(dat!("6h")))]));
         let msg = match refused {
@@ -3838,6 +3874,39 @@ mod tests {
         };
         assert!(msg.contains("karri") && msg.contains("repeat_secs"),
             "a cadence that is not seconds must be refused by peer, got: '{}'", msg);
+        Ok(())
+    }
+
+    /// The watcher's reminders back off by default, a schedule may be a list in either list form,
+    /// an empty one is refused, and a peer speaks unless its entry says otherwise.
+    #[test]
+    fn a_reminder_schedule_backs_off_by_default_and_speaking_is_opt_out() -> Outcome<()> {
+        assert_eq!(WatchConfig::default().repeat_secs, vec![3_600, 14_400, 86_400],
+            "the default must back off to daily, not remind on a fixed short gap");
+        let mut quiet = DaticleMap::new();
+        quiet.insert(dat!("name"), dat!("jarrah"));
+        quiet.insert(dat!("url"), dat!("https://example.test/_steel/health"));
+        quiet.insert(dat!("speaks"), Dat::Bool(false));
+        quiet.insert(dat!("repeat_secs"), Dat::List(vec![Dat::U64(600), Dat::U32(7_200)]));
+        let mut loud = DaticleMap::new();
+        loud.insert(dat!("name"), dat!("birch"));
+        loud.insert(dat!("url"), dat!("https://example.test/_steel/health"));
+        let mut m = DaticleMap::new();
+        m.insert(dat!("enabled"), Dat::Bool(true));
+        m.insert(dat!("repeat_secs"), Dat::List(vec![Dat::U64(1_800), Dat::U64(43_200)]));
+        m.insert(dat!("peers"), Dat::List(vec![Dat::Map(quiet), Dat::Map(loud)]));
+        let w = res!(WatchConfig::from_datmap(&m));
+        assert_eq!(w.repeat_secs, vec![1_800, 43_200]);
+        assert_eq!(w.peers[0].repeat_secs, Some(vec![600, 7_200]));
+        assert!(!w.peers[0].speaks, "an entry written silent must stay silent");
+        assert!(w.peers[1].speaks, "an entry that says nothing must speak");
+
+        m.insert(dat!("repeat_secs"), Dat::List(Vec::new()));
+        let msg = match WatchConfig::from_datmap(&m) {
+            Err(e)  => fmt!("{}", e),
+            Ok(_)   => String::new(),
+        };
+        assert!(msg.contains("watch.repeat_secs"), "an empty schedule must be refused, got '{}'", msg);
         Ok(())
     }
 

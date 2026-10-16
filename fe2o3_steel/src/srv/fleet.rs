@@ -384,6 +384,7 @@ mod tests {
                 clear:      BTreeMap::new(),
                 token:      Some(fmt!("secret")),
                 repeat_secs: None,
+                speaks:      true,
             });
         }
         Fleet::new(fmt!("karri"), Some(&cfg))

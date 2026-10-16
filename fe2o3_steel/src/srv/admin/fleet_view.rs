@@ -659,6 +659,7 @@ mod tests {
             clear:      [(fmt!("mem_pct"), 75)].into_iter().collect(),
             token:      token.map(|t| t.to_string()),
             repeat_secs: None,
+            speaks:      true,
         };
         cfg.peers.push(peer("jarrah", "jarrah", Some("the-mesh-token")));
         cfg.peers.push(peer("gateway", "jarrah", None));
@@ -763,6 +764,7 @@ mod tests {
             clear:      clear.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             token:      Some(fmt!("the-mesh-token")),
             repeat_secs: None,
+            speaks:      true,
         };
         cfg.peers.push(entry("jarrah", &[("mem_pct", 90)], &[("mem_pct", 75)]));
         cfg.peers.push(entry("jarrah forge copy",
