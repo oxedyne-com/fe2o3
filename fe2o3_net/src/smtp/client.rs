@@ -294,6 +294,13 @@ impl OutboundClient {
     /// [`Self::deliver`], keeping away from the exchanges `dial` names and noting in it each exchange
     /// it dials. Where every exchange that is left is one `dial` avoids, nothing is dialled and the
     /// failure is transient.
+    ///
+    /// An envelope spanning several domains is one transaction per domain, through
+    /// [`Self::deliver_each`]. It succeeds only when every domain took the message, the queue ids
+    /// joined by "; ". Otherwise the error names each domain that refused it and each that took
+    /// it, and is permanent only when every refusal was. A caller that retries the whole envelope
+    /// after a partial failure sends the domains that took it a second copy, so one that cares
+    /// uses [`Self::deliver_each`] and retries only what failed.
     pub async fn deliver_with(
         &self,
         mail_from:  &str,
@@ -303,29 +310,57 @@ impl OutboundClient {
     )
         -> Outcome<String>
     {
-        if rcpt_to.is_empty() {
-            return Err(err!(
-                "OutboundClient::deliver called with no recipients.";
-                Invalid, Input, Missing));
-        }
+        let each = res!(self.deliver_each(mail_from, rcpt_to, body, dial).await);
+        collapse(each)
+    }
 
-        // Group recipients by domain so each domain delivery is one
-        // SMTP transaction. The MVP only handles the common case of
-        // every recipient sharing one domain.
-        let domain = res!(extract_domain(&rcpt_to[0]));
-        for r in rcpt_to.iter().skip(1) {
-            let other = res!(extract_domain(r));
-            if !other.eq_ignore_ascii_case(&domain) {
-                return Err(err!(
-                    "OutboundClient::deliver: multi-domain delivery is \
-                    not supported in the MVP (got '{}' and '{}').",
-                    domain, other;
-                    Invalid, Input));
+    /// Delivers to each domain of the envelope in turn, one SMTP transaction to that domain's
+    /// exchanges each, in the order the domains first appear in `rcpt_to`. Every domain is tried
+    /// whatever became of the others, so a refusal at one does not stop the message reaching the
+    /// rest. The error is only for an envelope that cannot be sent at all: no recipient, or an
+    /// address without an `@`.
+    pub async fn deliver_each(
+        &self,
+        mail_from:  &str,
+        rcpt_to:    &[String],
+        body:       &[u8],
+        dial:       &Dial,
+    )
+        -> Outcome<Vec<DomainDelivery>>
+    {
+        self.deliver_by_domain(mail_from, rcpt_to, body, SMTP_CLIENT_TIMEOUT, dial, Self::resolve)
+            .await
+    }
+
+    // The per-domain loop, given the lookup, so a fixture can stand in for each domain's exchanges.
+    async fn deliver_by_domain<R, F>(
+        &self,
+        mail_from:  &str,
+        rcpt_to:    &[String],
+        body:       &[u8],
+        deadline:   Duration,
+        dial:       &Dial,
+        resolve:    R,
+    )
+        -> Outcome<Vec<DomainDelivery>>
+        where
+            R:  Fn(String) -> F,
+            F:  std::future::Future<Output = Outcome<Vec<DeliveryTarget>>>,
+    {
+        let groups = res!(by_domain(rcpt_to));
+        let mut out = Vec::with_capacity(groups.len());
+        for (domain, rcpts) in groups {
+            let result = match resolve(domain.clone()).await {
+                Ok(targets) => self.deliver_to_exchanges(
+                    &targets, mail_from, &rcpts, body, deadline, dial).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = &result {
+                warn!("Outbound SMTP: delivery to {} ({}) failed: {}", domain, rcpts.join(", "), e);
             }
+            out.push(DomainDelivery { domain, rcpt_to: rcpts, result });
         }
-
-        let targets = res!(Self::resolve(domain).await);
-        self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body, SMTP_CLIENT_TIMEOUT, dial).await
+        Ok(out)
     }
 
     /// The addresses of the exchanges a message to `rcpt_to` would be dialled at, in preference order,
@@ -957,6 +992,73 @@ fn dot_stuff(body: &[u8]) -> Vec<u8> {
         at_line_start = b == b'\n';
     }
     out
+}
+
+/// What became of one domain's share of a delivery.
+#[derive(Debug)]
+pub struct DomainDelivery {
+    pub domain:     String,             // lowercased
+    pub rcpt_to:    Vec<String>,        // the envelope's recipients in this domain, in its order
+    pub result:     Outcome<String>,    // the accepting exchange's reply, or why none took it
+}
+
+// The recipients grouped by domain, each group in envelope order, the groups in the order their
+// domains first appear.
+fn by_domain(rcpt_to: &[String]) -> Outcome<Vec<(String, Vec<String>)>> {
+    if rcpt_to.is_empty() {
+        return Err(err!(
+            "OutboundClient::deliver called with no recipients.";
+            Invalid, Input, Missing));
+    }
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for r in rcpt_to {
+        let domain = res!(extract_domain(r));
+        match groups.iter_mut().find(|(d, _)| *d == domain) {
+            Some((_, rs))   => rs.push(r.clone()),
+            None            => groups.push((domain, vec![r.clone()])),
+        }
+    }
+    Ok(groups)
+}
+
+// One result for the whole envelope: Ok when every domain took it, else an error naming both the
+// domains that refused and those that took it, permanent only when every refusal was.
+fn collapse(mut each: Vec<DomainDelivery>) -> Outcome<String> {
+    // A lone domain's result is passed on as it was, so its wording and tags are unchanged.
+    if each.len() == 1 {
+        if let Some(d) = each.pop() {
+            return d.result;
+        }
+    }
+    let mut took = Vec::new();
+    let mut qids = Vec::new();
+    let mut refused = Vec::new();
+    let mut permanent = true;
+    for d in &each {
+        match &d.result {
+            Ok(qid) => {
+                took.push(fmt!("{} ({})", d.domain, qid));
+                qids.push(qid.as_str());
+            }
+            Err(e)  => {
+                permanent &= is_permanent(e);
+                refused.push(fmt!("{}: {}", d.domain, e));
+            }
+        }
+    }
+    if refused.is_empty() {
+        return Ok(qids.join("; "));
+    }
+    let took = if took.is_empty() { fmt!("none") } else { took.join(", ") };
+    if permanent {
+        Err(err!("{} of {} domain(s) did not take the message: {}. Delivered to: {}.",
+            refused.len(), each.len(), refused.join("; "), took;
+            IO, Network, Permanent))
+    } else {
+        Err(err!("{} of {} domain(s) did not take the message: {}. Delivered to: {}.",
+            refused.len(), each.len(), refused.join("; "), took;
+            IO, Network))
+    }
 }
 
 /// Lowercased, from the last `@`.
@@ -1673,16 +1775,79 @@ mod tests {
         Ok(())
     }
 
-    /// Delivery is one SMTP transaction per domain, and the MVP does one domain.
-    /// Refusing loudly beats delivering to the first domain and dropping the rest.
+    /// An envelope with no recipient, or an address without an `@`, is refused before anything
+    /// is looked up or dialled.
     #[tokio::test]
-    async fn test_delivery_refuses_a_mixed_domain_envelope_00() -> Outcome<()> {
+    async fn test_delivery_refuses_an_envelope_it_cannot_send_00() -> Outcome<()> {
         let c = res!(client().await);
         req!(true, c.deliver("a@example.com", &[], b"x").await.is_err(),
             "delivery with no recipient was accepted");
-        req!(true, c.deliver("a@example.com",
-            &[fmt!("b@one.example"), fmt!("c@two.example")], b"x").await.is_err(),
-            "delivery accepted two domains in one transaction");
+        req!(true, c.deliver("a@example.com", &[fmt!("nobody")], b"x").await.is_err(),
+            "delivery to an address without an '@' was accepted");
+        Ok(())
+    }
+
+    /// Two domains are two transactions, each to its own exchange with only its own recipients,
+    /// and one domain refusing does not stop the other getting the message. Until 16 Oct 2026 a
+    /// second domain was refused outright, so Steel's alerts could not go to both an operator's
+    /// Gmail and a mailbox on its own server, and Gmail's 550 to the one would have cost the other.
+    #[tokio::test]
+    async fn test_each_domain_is_its_own_transaction_and_one_refusal_spares_the_rest_00()
+        -> Outcome<()>
+    {
+        let c = res!(client().await);
+        let (one, saw_one) = res!(exchange_at(Provider { rcpt_code: 550, ..Provider::exchange() }, 10).await);
+        let (two, saw_two) = res!(exchange_at(Provider::exchange(), 10).await);
+        let resolve = move |d: String| {
+            let t = match d.as_str() {
+                "one.example"   => Some(one.clone()),
+                "two.example"   => Some(two.clone()),
+                _               => None,
+            };
+            async move {
+                match t {
+                    Some(t) => Ok(vec![t]),
+                    None    => Err(err!("No fixture for '{}'.", d; Missing)),
+                }
+            }
+        };
+        let rcpt = [fmt!("b@one.example"), fmt!("c@two.example"), fmt!("d@ONE.example")];
+        let each = res!(c.deliver_by_domain("a@example.com", &rcpt, &body(), WAIT,
+            &Dial::default(), resolve).await);
+
+        req!(2, each.len(), "the envelope was not split into its two domains");
+        req!("one.example", each[0].domain.as_str());
+        req!(vec![fmt!("b@one.example"), fmt!("d@ONE.example")], each[0].rcpt_to.clone());
+        match &each[0].result {
+            Ok(q)   => return Err(err!("one.example refuses with 550, yet answered {}.", q; Test)),
+            Err(e)  => req!(true, is_permanent(e), "a 550 was not read as permanent: {}", e),
+        }
+        req!("two.example", each[1].domain.as_str());
+        match &each[1].result {
+            Ok(q)   => req!(true, q.contains("STANDIN1"), "unexpected reply {}", q),
+            Err(e)  => return Err(err!("two.example was not delivered after one.example \
+                refused: {}", e; Test)),
+        }
+        let l1 = res!(lines_of(&saw_one));
+        let l2 = res!(lines_of(&saw_two));
+        req!(false, l1.iter().any(|l| l.contains("two.example")),
+            "one.example was offered another domain's recipient: {:?}", l1);
+        req!(false, l2.iter().any(|l| l.contains("one.example")),
+            "two.example was offered another domain's recipient: {:?}", l2);
+        req!(true, l2.iter().any(|l| l == "RCPT TO:<c@two.example>"));
+        req!(true, l2.iter().any(|l| l == "."), "the message never reached two.example");
+
+        // The whole envelope fails, naming both what refused and what took it. Its one refusal
+        // was permanent, so the whole is too.
+        let msg = match collapse(each) {
+            Ok(q)   => return Err(err!("a refused domain collapsed to success: {}", q; Test)),
+            Err(e)  => {
+                req!(true, is_permanent(&e), "every refusal was permanent, the whole was not");
+                fmt!("{}", e)
+            }
+        };
+        req!(true, msg.contains("one.example") && msg.contains("Delivered to: two.example"),
+            "the error does not name both domains: {}", msg);
         Ok(())
     }
 

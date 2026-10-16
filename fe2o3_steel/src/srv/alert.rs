@@ -56,6 +56,8 @@ use oxedyne_fe2o3_net::{
     },
     imap::client::Security,
     smtp::client::{
+        Dial,
+        DomainDelivery,
         OutboundClient,
         SubmissionConfig,
     },
@@ -965,21 +967,30 @@ impl Alerter {
             }
         }
         let msg = String::from_utf8_lossy(&msg).into_owned();
-        let queue_id = match &self.submission {
-            Some(cfg) => res!(self.client.submit(
-                cfg,
-                &self.cfg.from,
-                &self.cfg.to,
-                msg.as_bytes(),
-            ).await),
-            None => res!(self.client.deliver(
-                &self.cfg.from,
-                &self.cfg.to,
-                msg.as_bytes(),
-            ).await),
-        };
-        info!("Alert sent ({}): {}", queue_id, event.subject(&self.host));
-        Ok(())
+        let subject = event.subject(&self.host);
+        match &self.submission {
+            Some(cfg) => {
+                let queue_id = res!(self.client.submit(
+                    cfg,
+                    &self.cfg.from,
+                    &self.cfg.to,
+                    msg.as_bytes(),
+                ).await);
+                info!("Alert sent ({}): {}", queue_id, subject);
+                Ok(())
+            }
+            // Straight to each recipient's exchanges, one transaction per domain, so one
+            // domain's refusal does not cost the others the alert.
+            None => {
+                let each = res!(self.client.deliver_each(
+                    &self.cfg.from,
+                    &self.cfg.to,
+                    msg.as_bytes(),
+                    &Dial::default(),
+                ).await);
+                tally_mail(each, &subject)
+            }
+        }
     }
 
     /// Decide whether a failed attempt should raise an alert, and update the
@@ -1109,6 +1120,31 @@ async fn text_one(
     sms.provider.parse(status, &reply.body)
 }
 
+/// Account for one alert's mail, delivered domain by domain: each accepted domain is logged as
+/// sent, and the alert fails when any recipient's domain refused it, naming those recipients and
+/// those that did get it. "Mail failing" so means an address was not told, not that none was.
+fn tally_mail(each: Vec<DomainDelivery>, subject: &str) -> Outcome<()> {
+    let total = each.len();
+    let mut refused = Vec::new();
+    let mut got = Vec::new();
+    for d in each {
+        match d.result {
+            Ok(qid) => {
+                info!("Alert sent to {} ({}): {}", d.rcpt_to.join(", "), qid, subject);
+                got.extend(d.rcpt_to);
+            }
+            Err(e)  => refused.push(fmt!("{}: {}", d.rcpt_to.join(", "), e.plain())),
+        }
+    }
+    if refused.is_empty() {
+        return Ok(());
+    }
+    let got = if got.is_empty() { fmt!("nobody") } else { got.join(", ") };
+    Err(err!("{} of {} mail domain(s) did not take the alert. {}. Delivered to {}.",
+        refused.len(), total, refused.join("; "), got;
+        Network))
+}
+
 /// Account for one alert's texts: each accepted text is logged as sent, and the alert fails
 /// when any number's was refused or not sent, naming each number and the provider's words.
 ///
@@ -1149,6 +1185,34 @@ fn tally_texts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One domain refusing an alert costs only its own recipients: the error names them and the
+    /// address that did get it, and an alert every domain took is no failure at all.
+    #[test]
+    fn test_an_alert_mail_failure_names_who_was_and_was_not_told_00() -> Outcome<()> {
+        let d = |dom: &str, to: &str, result: Outcome<String>| DomainDelivery {
+            domain:     dom.to_string(),
+            rcpt_to:    vec![to.to_string()],
+            result,
+        };
+        let each = vec![
+            d("gmail.com", "op@gmail.com", Err(err!("550 5.7.1 unauthenticated"; Network, Permanent))),
+            d("oxegen.io", "alerts@oxegen.io", Ok(fmt!("250 OK id=1"))),
+        ];
+        let msg = match tally_mail(each, "[steel:test] probe") {
+            Ok(())  => return Err(err!("a refused operator address was not a mail failure"; Test)),
+            Err(e)  => e.plain(),
+        };
+        req!(true, msg.contains("op@gmail.com") && msg.contains("Delivered to alerts@oxegen.io"),
+            "the failure does not say who was and was not told: {}", msg);
+        let each = vec![
+            d("gmail.com", "op@gmail.com", Ok(fmt!("250 a"))),
+            d("oxegen.io", "alerts@oxegen.io", Ok(fmt!("250 b"))),
+        ];
+        let all = tally_mail(each, "[steel:test] probe").is_ok();
+        req!(true, all, "an alert every domain took was counted a failure");
+        Ok(())
+    }
 
     fn mkalerter(threshold: u32, cooldown_secs: u64) -> Alerter {
         let cfg = AlertConfig {
