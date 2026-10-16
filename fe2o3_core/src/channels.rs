@@ -16,6 +16,7 @@ use crate::{
 };
 
 use std::{
+    collections::HashMap,
     fmt::Debug,
     future::Future,
     ops::Deref,
@@ -312,7 +313,8 @@ pub fn watch<T>(init: T) -> (WatchSender<T>, WatchReceiver<T>) {
         value:      init,
         version:    0,
         closed:     false,
-        wakers:     Vec::new(),
+        wakers:     HashMap::new(),
+        next_id:    0,
     }));
     (
         WatchSender { shared: shared.clone() },
@@ -324,7 +326,8 @@ struct WatchState<T> {
     value:      T,
     version:    u64,
     closed:     bool,
-    wakers:     Vec<Waker>,
+    wakers:     HashMap<u64, Waker>, // Keyed by `WatchChanged` id, so a dropped wait removes its own.
+    next_id:    u64,
 }
 
 /// The single writer of a `watch` cell.  Not `Clone`.
@@ -343,7 +346,7 @@ impl<T> WatchSender<T> {
             state.version = state.version.wrapping_add(1);
             std::mem::take(&mut state.wakers)
         };
-        for waker in wakers {
+        for waker in wakers.into_values() {
             waker.wake();
         }
         Ok(())
@@ -351,29 +354,30 @@ impl<T> WatchSender<T> {
 
     /// A new reader that sees the current value as already seen.
     pub fn subscribe(&self) -> WatchReceiver<T> {
-        let seen = match self.shared.read() {
-            Ok(state)   => state.version,
-            Err(p)      => p.into_inner().version,
-        };
+        let seen = lock_read_or_recover!(self.shared,
+            "Watch cell lock poisoned while subscribing; recovering.").version;
         WatchReceiver { shared: self.shared.clone(), seen }
     }
 
     pub fn borrow(&self) -> Outcome<WatchRef<'_, T>> {
         Ok(WatchRef(lock_read!(self.shared, "While borrowing a watch cell.")))
     }
+
+    /// How many `changed` futures are registered to be woken.
+    pub fn waiters(&self) -> Outcome<usize> {
+        Ok(lock_read!(self.shared, "While counting watch cell waiters.").wakers.len())
+    }
 }
 
 impl<T> Drop for WatchSender<T> {
     fn drop(&mut self) {
         let wakers = {
-            let mut state = match self.shared.write() {
-                Ok(state)   => state,
-                Err(p)      => p.into_inner(),
-            };
+            let mut state = lock_write_or_recover!(self.shared,
+                "Watch cell lock poisoned while closing; recovering.");
             state.closed = true;
             std::mem::take(&mut state.wakers)
         };
-        for waker in wakers {
+        for waker in wakers.into_values() {
             waker.wake();
         }
     }
@@ -401,7 +405,7 @@ impl<T> WatchReceiver<T> {
     /// Resolves once a value newer than the last one seen is sent, marking it seen.  A value sent
     /// before the sender dropped is still delivered; after that, it resolves to an error.
     pub fn changed(&mut self) -> WatchChanged<'_, T> {
-        WatchChanged { rx: self }
+        WatchChanged { rx: self, id: None }
     }
 
     /// Whether the sender has dropped.
@@ -421,32 +425,56 @@ impl<'a, T> Deref for WatchRef<'a, T> {
 /// The future returned by `WatchReceiver::changed`.
 pub struct WatchChanged<'a, T> {
     rx: &'a mut WatchReceiver<T>,
+    id: Option<u64>, // Set once registered for waking.
 }
 
 impl<'a, T> Future for WatchChanged<'a, T> {
     type Output = Outcome<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let rx = &mut self.get_mut().rx;
-        let mut state = match rx.shared.write() {
+        let this = self.get_mut();
+        let mut state = match this.rx.shared.write() {
             Ok(state)   => state,
             Err(_)      => return Poll::Ready(Err(err!(
                 "While awaiting a change in a watch cell: lock poisoned.";
             Channel, Lock, Poisoned))),
         };
-        if state.version != rx.seen {
-            rx.seen = state.version;
+        if state.version != this.rx.seen {
+            this.rx.seen = state.version;
+            if let Some(id) = this.id.take() {
+                state.wakers.remove(&id);
+            }
             return Poll::Ready(Ok(()));
         }
         if state.closed {
+            if let Some(id) = this.id.take() {
+                state.wakers.remove(&id);
+            }
             return Poll::Ready(Err(err!(
                 "Watch cell closed: its sender has dropped.";
             Channel, Read, Missing)));
         }
-        if !state.wakers.iter().any(|w| w.will_wake(cx.waker())) {
-            state.wakers.push(cx.waker().clone());
-        }
+        let id = match this.id {
+            Some(id) => id,
+            None => {
+                let id = state.next_id;
+                state.next_id = state.next_id.wrapping_add(1);
+                this.id = Some(id);
+                id
+            },
+        };
+        state.wakers.insert(id, cx.waker().clone());
         Poll::Pending
+    }
+}
+
+impl<'a, T> Drop for WatchChanged<'a, T> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let mut state = lock_write_or_recover!(self.rx.shared,
+                "Watch cell lock poisoned while abandoning a wait; recovering.");
+            state.wakers.remove(&id);
+        }
     }
 }
 
