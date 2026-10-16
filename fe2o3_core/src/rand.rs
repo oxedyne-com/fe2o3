@@ -609,8 +609,11 @@ mod tests {
         msg!("Expected mean: {}, Sample mean: {}", mean, sample_mean);
         msg!("Expected stdev: {}, Sample stdev: {}", stdev, sample_stdev);
         
-        assert!((sample_mean - mean).abs() < 1.0, "Sample mean too far from expected");
-        assert!((sample_stdev - stdev).abs() < 1.0, "Sample stdev too far from expected");
+        // Five standard errors for n = 1000: 15/sqrt(1000) = 0.47 for the mean,
+        // 15/sqrt(2*999) = 0.34 for the stdev.  A bound of 1.0 on the mean was
+        // 2.1 standard errors and failed about one run in thirty.
+        assert!((sample_mean - mean).abs() < 2.4, "Sample mean too far from expected");
+        assert!((sample_stdev - stdev).abs() < 1.7, "Sample stdev too far from expected");
         
         Ok(())
     }
