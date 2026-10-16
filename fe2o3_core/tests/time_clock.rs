@@ -159,3 +159,23 @@ fn test_system_matches_systemtime_06() -> Outcome<()> {
     assert!(ClockSource::from_spec(Some("driven:")).is_err());
     Ok(())
 }
+
+#[test]
+fn test_system_time_follows_the_source_07() -> Outcome<()> {
+    let dir = res!(scratch("systime"));
+    let path = dir.join("clock");
+    res!(put(&path, 1_700_000_000_123));
+    let src = res!(driven(&path));
+    let want = UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123);
+    assert_eq!(res!(src.now_system_time()), want);
+    res!(put(&path, 1_700_000_060_123));
+    let moved = res!(res!(src.now_system_time()).duration_since(want));
+    assert_eq!(moved.as_millis(), 60_000, "a stamp did not follow the file");
+
+    let sys = res!(ClockSource::from_spec(None));
+    let a = res!(res!(sys.now_system_time()).duration_since(UNIX_EPOCH)).as_millis();
+    let b = res!(SystemTime::now().duration_since(UNIX_EPOCH)).as_millis();
+    assert!(a.abs_diff(b) <= 50, "System {} vs SystemTime {}", a, b);
+    let _ = fs::remove_dir_all(&dir);
+    Ok(())
+}
