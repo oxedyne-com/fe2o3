@@ -335,7 +335,8 @@ impl AgreementScheme {
     pub fn x25519_agree(sk: &[u8], pk: &[u8])
         -> Outcome<[u8; Self::X25519_SESSION_KEY_LEN]>
     {
-        let sk = res!(<[u8; Self::X25519_SK_LEN]>::try_from(sk));
+        // The copy of the secret is wiped when it drops, on every path.
+        let sk = zeroize::Zeroizing::new(res!(<[u8; Self::X25519_SK_LEN]>::try_from(sk)));
         let pk = res!(<[u8; Self::X25519_PK_LEN]>::try_from(pk));
         Self::agree(&sk, &pk)
     }
@@ -349,7 +350,13 @@ impl AgreementScheme {
         -> Outcome<[u8; Self::X25519_SESSION_KEY_LEN]>
     {
         let shared = MontgomeryPoint(*pk).mul_clamped(*sk).to_bytes();
-        if shared.iter().all(|b| *b == 0) {
+        // Every byte is folded in and the test is made once, so the time taken does not
+        // tell how many leading bytes were zero.
+        let mut any = 0u8;
+        for b in shared.iter() {
+            any |= *b;
+        }
+        if any == 0 {
             return Err(err!(
                 "The X25519 agreement came to zero, which means the public key it was \
                 made against is of small order and agrees the same thing with every \
