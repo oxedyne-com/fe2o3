@@ -53,7 +53,6 @@ use crate::O3db;
 use crate::base::{
 	cfg::OzoneConfig,
 	constant,
-	id::usr_kind_id_deleted,
 };
 use crate::data::core::RestSchemesInput;
 
@@ -260,15 +259,6 @@ impl<
 		match res!(self.db.api().get_wait(&key, None)) {
 			None => Ok(None),
 			Some((dat, _meta)) => {
-				// A deletion tombstone is stored as
-				// `Dat::Usr(usr_kind_id_deleted(), _)`; `get_wait`
-				// returns it verbatim, so we have to recognise it
-				// here and surface "not present" to the caller.
-				if let Dat::Usr(kind, _) = &dat {
-					if *kind == usr_kind_id_deleted() {
-						return Ok(None);
-					}
-				}
 				let value = res!(Self::extract_value(&dat));
 				Ok(Some(Record {
 					id:		*id,
@@ -280,28 +270,18 @@ impl<
 	}
 
 	fn delete(&self, table: &str, id: &RecordId) -> Outcome<bool> {
-		// Fetch first to determine whether a record was present; the
-		// overwrite below cannot distinguish "overwrote an existing
-		// record" from "wrote a fresh tombstone", and [`Storage::delete`]
-		// promises the former answer.
-		let existed = res!(self.get(table, id)).is_some();
-		if !existed {
+		// Asked of the key index first, since [`Storage::delete`] promises whether a record was
+		// there, which writing a tombstone does not tell.
+		let key = Self::encode_key(table, id);
+		if !res!(self.db.api().contains_wait(&key, None)) {
 			return Ok(false);
 		}
-		// Overwrite the key with a tombstone via the ordinary `store`
-		// path. Going through `store` rather than
-		// `delete_using_responder` means the tombstone flows through
-		// the same encryption and cache pipeline as a regular write,
-		// so subsequent `get` calls see the tombstone on the first
-		// read rather than racing the deletion path's unencrypted
-		// direct-to-disk write.
-		let key = Self::encode_key(table, id);
-		let tombstone = Dat::Usr(
-			usr_kind_id_deleted(),
-			Some(Box::new(Dat::Empty)),
-		);
-		let resp = res!(self.db.api().store(key, tombstone, self.user));
-		res!(Self::drain_store_ack(&resp));
+		// The delete path writes the unencrypted tombstone the index and a scan recognise.
+		// Until 2026-10-16 this went through `store`, which encrypted it on an encrypted store,
+		// so the key read as present and a scan listed it.
+		let resp = self.db.api().responder();
+		res!(self.db.api().delete_using_responder(&key, self.user, None, resp.clone()));
+		res!(resp.recv_delete_ack());
 		Ok(true)
 	}
 

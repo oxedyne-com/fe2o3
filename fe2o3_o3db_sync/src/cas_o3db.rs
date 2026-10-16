@@ -14,9 +14,10 @@
 //!   caller has encrypted before storing. Before 2026-10-08 the value was always
 //!   `Dat::BU8`, whose one-byte length cut a chunk of more than 255 bytes.
 //!
-//! Deletes are tombstones flowing through the ordinary store path, matching
-//! `O3dbStorage`, behind the `dist` feature, so a subsequent `get` sees the
-//! tombstone on its first read rather than racing a direct-to-disk delete. The
+//! Deletes go through `OzoneApi::delete_using_responder`, which writes the one
+//! unencrypted tombstone that the key index and a scan recognise. Until
+//! 2026-10-16 they wrote it with `store`, which encrypts it on an encrypted
+//! store, so `has` called a deleted chunk present and `ids` listed it. The
 //! log-structured engine reclaims the space on compaction.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
@@ -29,7 +30,6 @@ use crate::cas::{
 };
 
 use crate::O3db;
-use crate::base::id::usr_kind_id_deleted;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
@@ -130,21 +130,14 @@ impl<
 		}
 	}
 
-	/// `None` for an absent key or a deletion tombstone.
+	// A deleted key reads as absent from `get_wait`.
 	fn read(&self, id: &ContentId)
 		-> Outcome<Option<Vec<u8>>>
 	{
 		let key = Self::encode_key(id);
 		match res!(self.db.api().get_wait(&key, None)) {
-			None => Ok(None),
-			Some((dat, _meta)) => {
-				if let Dat::Usr(kind, _) = &dat {
-					if *kind == usr_kind_id_deleted() {
-						return Ok(None);
-					}
-				}
-				Ok(Some(res!(Self::extract_bytes(&dat))))
-			}
+			None				=> Ok(None),
+			Some((dat, _meta))	=> Ok(Some(res!(Self::extract_bytes(&dat)))),
 		}
 	}
 }
@@ -186,12 +179,10 @@ impl<
 		if !res!(self.db.api().contains_wait(&key, None)) {
 			return Ok(false);
 		}
-		let tombstone = Dat::Usr(
-			usr_kind_id_deleted(),
-			Some(Box::new(Dat::Empty)),
-		);
-		let resp = res!(self.db.api().store(key, tombstone, self.user));
-		res!(Self::drain_store_ack(&resp));
+		// The delete path, not `store`, whose tombstone would be encrypted on an encrypted store.
+		let resp = self.db.api().responder();
+		res!(self.db.api().delete_using_responder(&key, self.user, None, resp.clone()));
+		res!(resp.recv_delete_ack());
 		Ok(true)
 	}
 

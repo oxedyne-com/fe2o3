@@ -234,8 +234,8 @@ pub trait Database<
     )
         -> Outcome<Option<(Dat, Meta<UIDL, UID>)>>;
 
-    /// Does the key hold a value, a deleted key not?  This default reads the value, and a
-    /// database that can answer from its key index alone overrides it.
+    /// Does the key hold a live value?  A deleted key does not.  This default reads the value,
+    /// and a database that can answer from its key index alone overrides it.
     fn contains(
         &self,
         key:    &Dat,

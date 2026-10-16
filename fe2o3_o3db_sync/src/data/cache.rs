@@ -756,12 +756,11 @@ impl<
 
     /// Whether `k` holds a live value, as far as the index alone can tell, following a key
     /// referral as `get` does.  `tomb` is a tombstone's encoding, which is stored followed by a
-    /// checksum of `csum_len` bytes.  A
-    /// delete writes a tombstone record, which the index holds like any other, but every
-    /// tombstone has that one length, so a record of any other length, or a head, is a value.  A
-    /// record of that length is a tombstone only if its bytes are, which a cached record shows
-    /// and an uncached one does not: that one is `Unsure`, to be read, as `bot_scan`'s
-    /// `drop_deleted` reads it.
+    /// checksum of `csum_len` bytes.  A delete writes a tombstone record, which the index holds
+    /// like any other, but every tombstone has that one length, so a record of any other length,
+    /// or a head, is a value.  A record of that length is a tombstone only if its bytes are,
+    /// which a cached record shows and an uncached one does not: that one is `Unsure`, to be
+    /// read, as `bot_scan`'s `drop_deleted` reads it.
     pub fn presence(&self, k: &[u8], tomb: &[u8], csum_len: usize) -> Presence {
         let tlen = tomb.len() + csum_len;
         match self.map.get(k) {

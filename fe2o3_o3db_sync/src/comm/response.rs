@@ -570,7 +570,8 @@ impl Wait {
 
 /// A stored value as its writer gave it: `None` for the deleted marker, else the value,
 /// decrypted when a scheme is set.  The tombstone is deliberately left unencrypted so that it can
-/// be recognised without a key.
+/// be recognised without a key, but one found after decryption is absent too: `O3dbCas` and
+/// `O3dbStorage` wrote theirs through `store`, encrypted, until 2026-10-16.
 pub(crate) fn decode_stored<ENC: Encrypter>(
     dat:    Dat,
     enc:    &EncrypterDefAlt<EncryptionScheme, ENC>,
@@ -601,6 +602,7 @@ pub(crate) fn decode_stored<ENC: Encrypter>(
             "Could not form a Dat from the value bytes, this could be due to the use of an \
             encryption scheme differing from the one provided ({}).", enc.or_debug(or);
             Decode, Bytes)),
+        Ok((Dat::Usr(kind, _), _)) if kind == id::usr_kind_id_deleted() => Ok(None),
         Ok((dat, _)) => Ok(Some(dat)),
     }
 }
