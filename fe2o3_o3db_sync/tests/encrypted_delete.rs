@@ -6,6 +6,9 @@
 //! answered true for a deleted chunk, a second `delete` answered `Ok(true)` and wrote another
 //! tombstone, and a scan listed the deleted key (OZ-HAVE check, 2026-10-16).
 //!
+//! A tombstone written the old way, through `store`, must still read as absent: `decode_stored`
+//! treats a deleted-kind value found after decryption as no value.
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
@@ -19,6 +22,7 @@ use oxedyne_fe2o3_iop_db::api::ScanOpts;
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_o3db_sync::{
 	O3db,
+	base::id::usr_kind_id_deleted,
 	cas::{
 		Cas,
 		Chunk,
@@ -188,6 +192,52 @@ fn run_storage() -> Outcome<()> {
 			return Err(err!("A delete after a reopen answers Ok(true)."; Test, Mismatch));
 		}
 		res!(check_gone(&db, &key, "ident:", "after a reopen"));
+		res!(db.close());
+	}
+	Ok(())
+}
+
+#[test]
+fn a_tombstone_stored_the_old_way_reads_absent_on_an_encrypted_store() -> Outcome<()> {
+	log_set_level!("warn");
+	let outcome = run_legacy();
+	log_finish_wait!();
+	outcome
+}
+
+fn check_legacy_absent(db: &Db, cas: &TestCas, chunk: &Chunk, key: &Dat, when: &str)
+	-> Outcome<()>
+{
+	if let Some(found) = res!(db.api().get_wait(key, None)) {
+		return Err(err!("get_wait reads {:?} for a tombstone stored through store {}.",
+			found.0, when; Test, Mismatch));
+	}
+	if res!(cas.get(&chunk.id)).is_some() {
+		return Err(err!("O3dbCas::get returns a chunk deleted through store {}.", when;
+			Test, Mismatch));
+	}
+	Ok(())
+}
+
+fn run_legacy() -> Outcome<()> {
+	let db_root = res!(root("test_db_encrypted_delete_legacy"));
+	let chunk = Chunk::new(b"a chunk deleted the old way, through store".to_vec());
+	let key = Dat::Str(fmt!("chunk:{}", chunk.id.to_hex()));
+	{
+		let db = Arc::new(res!(open(&db_root, true)));
+		let cas = TestCas::new(db.clone(), Uid::default());
+		res!(cas.put(&chunk));
+		// The pre-2026-10-16 delete: a tombstone through store, so encrypted.
+		let tomb = Dat::Usr(usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
+		let resp = res!(db.api().store(key.clone(), tomb, Uid::default()));
+		res!(resp.recv_store_ack());
+		res!(check_legacy_absent(&db, &cas, &chunk, &key, "in the session that stored it"));
+		res!(db.close());
+	}
+	{
+		let db = Arc::new(res!(open(&db_root, false)));
+		let cas = TestCas::new(db.clone(), Uid::default());
+		res!(check_legacy_absent(&db, &cas, &chunk, &key, "after a reopen"));
 		res!(db.close());
 	}
 	Ok(())
