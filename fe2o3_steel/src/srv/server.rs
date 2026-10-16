@@ -19,6 +19,7 @@ use crate::{
             run_imap_listener,
             run_smtp_listener,
             AppImapServer,
+            ListenerTally,
         },
         stop,
     },
@@ -33,9 +34,16 @@ use oxedyne_fe2o3_net::{
     dkim::DkimSigner,
     imap::server::ImapServer,
     smtp::client::OutboundClient,
+    tls::{
+        BoundedTlsAcceptor,
+        Handshake,
+    },
 };
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+    prelude::*,
+    file as core_file,
+};
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
@@ -48,7 +56,10 @@ use oxedyne_fe2o3_net::{
 use std::{
     net::SocketAddr,
     sync::{
-        atomic::AtomicUsize,
+        atomic::{
+            AtomicUsize,
+            Ordering,
+        },
         Arc,
     },
     time::Duration,
@@ -60,6 +71,13 @@ use tokio_rustls::TlsAcceptor;
 pub const PERSIST_INTERVAL_SECS: u64 = 60;
 
 pub const DRAIN_SECS: u64 = 5;
+
+// How often the address guard is swept for idle per-IP records, and how long a
+// record may go unseen before an idle sweep may evict it. Ten minutes of silence
+// is comfortably longer than any keep-alive, so a genuinely active address is
+// never forgotten out from under its per-IP cap.
+pub const GUARD_SWEEP_INTERVAL_SECS: u64 = 60;
+pub const GUARD_SWEEP_IDLE_SECS:     u64 = 600;
 
 
 pub struct Server<
@@ -112,10 +130,9 @@ impl<
             dev_mode,
         ));
 
-        // If ACME is enabled, spawn the renewer task. It drives the
-        // initial issuance (if the cache is empty) and then loops with
-        // a 24-hour tick, re-issuing whenever the cached cert is older
-        // than the renewal threshold.
+        // If ACME is enabled, spawn the renewer task. It issues at start if
+        // the cache is empty or due, retries hourly while the cert is due
+        // (a failed issuance does not end it), and checks daily otherwise.
         if let Some(renewer) = loaded.acme_renewer {
             tokio::spawn(async move {
                 if let Err(e) = renewer.run_forever().await {
@@ -303,6 +320,23 @@ impl<
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(loaded.server_config));
 
+        // Bound every TLS handshake -- HTTPS and the mail listeners share one
+        // rustls server config, so they share one bound. `max_tls_handshakes`
+        // caps how many handshakes run at once (the CPU-exhaustion vector on a
+        // single-vCPU box) and `tls_handshake_timeout_ms` deadlines each one so
+        // a drip-fed handshake cannot pin a permit and turn the cap into a
+        // slowloris amplifier. Both zero is the inert default: a bare acceptor.
+        let hs_deadline = if self.context.cfg.tls_handshake_timeout_ms == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(self.context.cfg.tls_handshake_timeout_ms))
+        };
+        let bounded_acceptor = BoundedTlsAcceptor::new(
+            tls_acceptor,
+            self.context.cfg.max_tls_handshakes as usize,
+            hs_deadline,
+        );
+
         // Spawn the mail listeners only when the mail server is enabled. A site that
         // merely sends newsletters wants a DKIM identity and an outbound client, not
         // to bind SMTP-receive, submission and IMAP and become an MX -- so sending is
@@ -311,11 +345,15 @@ impl<
         // for.
         if let Some(mail_cfg) = res!(self.context.cfg.get_mail()) {
             if mail_cfg.enabled {
+                // Counted into the health body's `mail_down`, so a listener that
+                // failed to bind is visible to every watcher, not only in this log.
+                let tally = self.context.admin_state.as_ref().map(|a| a.mail.clone());
                 if let Err(e) = spawn_mail_listeners(
                     &mail_cfg,
                     &self.context.root,
-                    tls_acceptor.clone(),
+                    bounded_acceptor.clone(),
                     &self.context.cfg.server_address,
+                    tally,
                 ).await {
                     error!(err!(e,
                         "Failed to spawn mail listeners.";
@@ -342,9 +380,60 @@ impl<
         let addr_guard = self.context.admin_state.as_ref()
             .map(|a| a.addr_guard.clone());
 
-        // Connections being served right now. Read only by the wind-up
-        // below, so an idle server pays one atomic per connection for it.
+        // The rolling count of connections dropped at admission, surfaced as
+        // `dropped_1m` in the health body. `None` when the admin dashboard is
+        // not configured, in which case nothing reads the counter anyway.
+        let dropped = self.context.admin_state.as_ref()
+            .map(|a| a.dropped.clone());
+
+        // The total-connection ceiling. 0 -- the inert default -- never fires.
+        let max_conn = self.context.cfg.max_conn as usize;
+
+        // A background sweep of the address guard, so a distributed flood cannot
+        // accumulate idle per-address records without bound: each source below the
+        // rate floor never throttles, so nothing else reclaims its `Monitor` log,
+        // and a botnet of such addresses is a memory-exhaustion vector on its own.
+        // The sweep evicts only an idle record with no live connection, so it can
+        // never reset a per-IP concurrency cap out from under a held connection,
+        // and a re-created record starts clean. It runs whenever the guard exists.
+        if let Some(guard) = addr_guard.clone() {
+            tokio::spawn(async move {
+                let idle = Duration::from_secs(GUARD_SWEEP_IDLE_SECS);
+                loop {
+                    tokio::time::sleep(
+                        Duration::from_secs(GUARD_SWEEP_INTERVAL_SECS)).await;
+                    match guard.sweep_idle(idle) {
+                        Ok(n) if n > 0 => debug!(
+                            "addr guard swept {} idle record(s).", n),
+                        Ok(_)  => (),
+                        Err(e) => warn!("addr guard sweep failed: {}", e),
+                    }
+                }
+            });
+        }
+
+        // Connections being served right now. Read by the wind-up below and as
+        // the total-connection ceiling above, so an idle server pays one atomic
+        // per connection for it.
         let inflight = Arc::new(AtomicUsize::new(0));
+
+        // The loopback plain-HTTP listener, beside the admin one above but serving every vhost,
+        // and counted in `inflight` so a stop waits for its connections as for the TLS port's.
+        let loopback_port = self.context.cfg.loopback_http_port;
+        if loopback_port != 0 {
+            let ctx_for_loopback = self.context.clone();
+            let inflight_loopback = inflight.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ctx_for_loopback.run_loopback_http(
+                    loopback_port,
+                    inflight_loopback,
+                ).await {
+                    error!(err!(e,
+                        "Loopback HTTP listener exited.";
+                        Init, Network));
+                }
+            });
+        }
 
         loop {
             // Two ways out of a wait that used to have none. Both arms are
@@ -364,7 +453,7 @@ impl<
                 }
             };
 
-            // Address-guard check runs before the TLS handshake so that a
+            // Address-guard *rate* check runs before the TLS handshake so that a
             // blacklisted attacker costs the server only a TCP SYN/ACK.
             // Absent admin state (unusual -- only happens when the admin
             // dashboard is not configured) the guard is skipped entirely.
@@ -374,6 +463,7 @@ impl<
                         debug!("addr guard dropped TCP from {}: {:?}",
                             src_addr, decision);
                         drop(stream);
+                        if let Some(d) = &dropped { d.incr(); }
                         continue;
                     }
                     Ok(_) => (),
@@ -383,6 +473,40 @@ impl<
                 }
             }
 
+            // Total-connection ceiling. The accept loop is the sole incrementer
+            // and `InFlight::begin` below runs before the next accept, so the
+            // read here cannot overshoot the cap. A distributed flood now hits a
+            // hard limit instead of spawning unbounded tasks.
+            if max_conn != 0 && inflight.load(Ordering::Relaxed) >= max_conn {
+                debug!("total-connection cap {} reached; dropping TCP from {}.",
+                    max_conn, src_addr);
+                drop(stream);
+                if let Some(d) = &dropped { d.incr(); }
+                continue;
+            }
+
+            // Per-IP *concurrency* permit, orthogonal to the rate check above.
+            // `None` means the address is already at its concurrency cap: drop
+            // the connection. The permit is moved into the serving task so it
+            // lives exactly as long as the connection and decrements on drop.
+            let conn_permit = match addr_guard.as_ref() {
+                Some(guard) => match guard.acquire(&src_addr.ip()) {
+                    Ok(Some(permit)) => Some(permit),
+                    Ok(None) => {
+                        debug!("per-IP concurrency cap reached; dropping TCP from {}.",
+                            src_addr);
+                        drop(stream);
+                        if let Some(d) = &dropped { d.incr(); }
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("addr guard acquire error for {}: {}", src_addr, e);
+                        None
+                    }
+                },
+                None => None,
+            };
+
             // ── Per-connection processing ────────────────────────
             //
             // Spawn immediately so the accept loop is never blocked
@@ -391,7 +515,8 @@ impl<
             // this, a single hung peek() or TLS accept() would
             // prevent all new connections from being accepted.
             let context_clone = self.context.clone();
-            let tls_acceptor_conn = tls_acceptor.clone();
+            let bounded_conn = bounded_acceptor.clone();
+            let dropped_conn = dropped.clone();
             // Counted from here until the task ends, so that a stop can
             // wait for whatever is mid-response rather than cutting it
             // off. Taken before the spawn: taking it inside would leave a
@@ -400,13 +525,31 @@ impl<
             let counted = stop::InFlight::begin(&inflight);
             tokio::spawn(async move {
                 let _counted = counted;
-                // Peek at first bytes to detect TLS handshake.
-                // Non-TLS requests receive a 308 to redirect to HTTPS.
+                // Held for the life of the connection; decrements the per-IP
+                // concurrency count when this task ends, however it ends.
+                let _conn_permit = conn_permit;
+                // Peek at first bytes to detect TLS handshake, deadlined to the
+                // same bound as the handshake so a client that opens a TLS port
+                // and never speaks cannot pin the task and its per-IP slot.
                 let mut peek_buf = [0u8; 5];
-                match stream.peek(&mut peek_buf).await {
+                let peeked = match bounded_conn.deadline() {
+                    Some(d) => match tokio::time::timeout(
+                        d, stream.peek(&mut peek_buf)).await
+                    {
+                        Ok(r)  => r,
+                        Err(_) => {
+                            debug!("peek from {} did not arrive within the \
+                                handshake deadline; dropping.", src_addr);
+                            if let Some(dc) = &dropped_conn { dc.incr(); }
+                            return;
+                        }
+                    },
+                    None => stream.peek(&mut peek_buf).await,
+                };
+                match peeked {
                     Ok(n) if n >= 5 && peek_buf[0] == 0x16 && peek_buf[1] == 0x03 => {
-                        match tls_acceptor_conn.accept(stream).await {
-                            Ok(tls_stream) => {
+                        match bounded_conn.accept(stream).await {
+                            Handshake::Ok(tls_stream) => {
                                 // Extract SNI now, before we hand
                                 // ownership of the stream to the handler.
                                 let sni = tls_stream.get_ref().1.server_name()
@@ -417,6 +560,7 @@ impl<
                                             tls_stream,
                                             sni,
                                             src_addr,
+                                            false,
                                         ).await {
                                             error!(err!(e,
                                                 "Error handling HTTPS connection.";
@@ -425,7 +569,19 @@ impl<
                                     }
                                 }
                             }
-                            Err(e) => {
+                            Handshake::TimedOut => {
+                                debug!("TLS handshake from {} exceeded the \
+                                    deadline; dropping.", src_addr);
+                                if let Some(dc) = &dropped_conn { dc.incr(); }
+                            }
+                            // Scanners, old clients and clients that hang up end
+                            // a handshake all day on a public port. Below ERROR,
+                            // so they do not bury the faults that are ours.
+                            Handshake::PeerFailed(e) => {
+                                debug!("TLS handshake from {} ended by the \
+                                    peer: {}", src_addr, e);
+                            }
+                            Handshake::Failed(e) => {
                                 error!(err!(e,
                                     "TLS handshake aborted.";
                                     IO, Network, Init));
@@ -491,13 +647,25 @@ impl<
 async fn spawn_mail_listeners(
     cfg:            &MailConfig,
     root:           &oxedyne_fe2o3_core::path::NormPathBuf,
-    tls_acceptor:   TlsAcceptor,
+    tls_acceptor:   BoundedTlsAcceptor,
     bind_address:   &str,
+    tally:          Option<Arc<ListenerTally>>,
 )
     -> Outcome<()>
 {
     use oxedyne_fe2o3_core::path::NormalPath;
     use std::path::{Path, PathBuf};
+
+    // Every listener asked for is counted before anything below can fail, so a
+    // set-up that dies before binding shows each of them as down rather than
+    // showing no mail server at all.
+    if let Some(t) = &tally {
+        for port in [cfg.smtp_port, cfg.submission_port, cfg.imap_port] {
+            if port != 0 {
+                t.want();
+            }
+        }
+    }
 
     // Resolve paths under the app root.
     let resolve = |rel: &str| -> PathBuf {
@@ -575,8 +743,9 @@ async fn spawn_mail_listeners(
     if cfg.smtp_port != 0 {
         let addr = SocketAddr::new(bind_ip, cfg.smtp_port);
         let server = recv_server.clone();
+        let tally = tally.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_smtp_listener(addr, server).await {
+            if let Err(e) = run_smtp_listener(addr, server, tally).await {
                 error!(err!(e, "SMTP receive listener exited."; IO, Network));
             }
         });
@@ -585,8 +754,9 @@ async fn spawn_mail_listeners(
     if cfg.submission_port != 0 {
         let addr = SocketAddr::new(bind_ip, cfg.submission_port);
         let server = sub_server.clone();
+        let tally = tally.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_smtp_listener(addr, server).await {
+            if let Err(e) = run_smtp_listener(addr, server, tally).await {
                 error!(err!(e, "SMTP submission listener exited."; IO, Network));
             }
         });
@@ -600,8 +770,9 @@ async fn spawn_mail_listeners(
             hostname: hostname.clone(),
         };
         let acceptor = tls_acceptor.clone();
+        let tally = tally.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_imap_listener(addr, acceptor, server).await {
+            if let Err(e) = run_imap_listener(addr, acceptor, server, tally).await {
                 error!(err!(e, "IMAP listener exited."; IO, Network));
             }
         });
@@ -652,6 +823,8 @@ pub fn load_dkim_signers(
             cfg.dkim_selector.clone()
         };
         let bytes = if path.exists() {
+            // Tighten a key that predates `save_secret` before reading it.
+            res!(core_file::restrict_secret(&path));
             match std::fs::read(&path) {
                 Ok(b) => b,
                 Err(e) => return Err(err!(e,
@@ -662,9 +835,14 @@ pub fn load_dkim_signers(
             info!("DKIM: no key at {:?}, generating a fresh ed25519 pair.", path);
             let s = res!(DkimSigner::generate(domain.clone(), selector.clone()));
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                // Key directory: 0700, not the default create mode, and the
+                // error propagates rather than being swallowed -- a failure
+                // here means the save below fails too, but at a less specific
+                // error site.
+                res!(core_file::create_secret_dir(parent));
             }
-            if let Err(e) = std::fs::write(&path, s.pkcs8_bytes()) {
+            // Key material: 0600 whatever the umask, not the default create mode.
+            if let Err(e) = core_file::save_secret(&path, s.pkcs8_bytes()) {
                 return Err(err!(e,
                     "Writing DKIM key {:?}.", path;
                     IO, File, Write));

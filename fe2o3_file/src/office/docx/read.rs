@@ -230,13 +230,44 @@ impl<'a> Read<'a> {
 	fn body(&mut self, body: &Elem) -> Vec<Block> {
 		let mut out = Vec::new();
 		let mut items: Vec<Item> = Vec::new();
-		for kid in body.elems() {
+		let kids: Vec<&Elem> = body.elems().collect();
+		// A caption paragraph next to a table is the table's, and is read into it rather than beside
+		// it. Word puts a table's caption above it and this crate's writer puts it below, so both
+		// sides are looked at; the one above wins when a table has two.
+		let mut taken = vec![false; kids.len()];
+		let mut caps: Vec<Option<usize>> = vec![None; kids.len()];	// a table's caption paragraph
+		for (i, kid) in kids.iter().enumerate() {
+			if kid.name.qname != "w:tbl" {
+				continue;
+			}
+			let above = i.checked_sub(1).filter(|&j| !taken[j] && self.is_caption(kids[j]));
+			let below = || (i + 1..kids.len())
+				// The empty paragraph a writer leaves after a table is spacing, and is looked past.
+				.find(|&j| !(kids[j].name.qname == "w:p" && kids[j].all("w:t").is_empty()))
+				.filter(|&j| self.is_caption(kids[j]));
+			if let Some(j) = above.or_else(below) {
+				taken[j] = true;
+				caps[i] = Some(j);
+			}
+		}
+		for (i, kid) in kids.iter().enumerate() {
+			if taken[i] {
+				continue;
+			}
 			match kid.name.qname.as_str() {
 				// The section properties say what the page is, which is layout and not prose.
 				"w:sectPr"	=> {}
 				"w:tbl"	=> {
 					flush(&mut out, &mut items);
-					if let Some(table) = self.table(kid) {
+					let caption = match caps[i] {
+						Some(j)	=> {
+							let mut content = Vec::new();
+							self.inlines(kids[j], &mut content, Fmt::default());
+							coalesce(content)
+						}
+						None		=> Vec::new(),
+					};
+					if let Some(table) = self.table(kid, caption) {
 						out.push(table);
 					}
 				}
@@ -309,7 +340,8 @@ impl<'a> Read<'a> {
 					let text = oxedyne_fe2o3_text::doc::text_of(&content);
 					return vec![Block::Code { lang: None, text }];
 				}
-				Kind::Plain	=> {}
+				// A caption away from any table is read as the paragraph it is.
+				Kind::Plain | Kind::Caption	=> {}
 			}
 		}
 		vec![Block::Para(content)]
@@ -525,10 +557,21 @@ impl<'a> Read<'a> {
 		link.attr("w:anchor").map(|a| fmt!("#{}", a))
 	}
 
-	fn table(&mut self, tbl: &Elem) -> Option<Block> {
+	/// Is this a paragraph wearing a caption style?
+	fn is_caption(&self, at: &Elem) -> bool {
+		if at.name.qname != "w:p" || at.all("w:t").is_empty() {
+			return false;
+		}
+		let style = at.find(&["w:pPr", "w:pStyle"]).and_then(|e| e.attr("w:val")).unwrap_or("");
+		self.kind_of(style) == Kind::Caption
+	}
+
+	fn table(&mut self, tbl: &Elem, caption: Vec<Inline>) -> Option<Block> {
 		let mut rows = Vec::new();
 		let mut head = None;
-		for (i, tr) in tbl.children("w:tr").into_iter().enumerate() {
+		let trs = tbl.children("w:tr");
+		let side = row_heads(tbl, &trs);
+		for (i, tr) in trs.into_iter().enumerate() {
 			let mut cells = Vec::new();
 			for tc in tr.children("w:tc") {
 				let mut content = Vec::new();
@@ -539,7 +582,7 @@ impl<'a> Read<'a> {
 					self.inlines(p, &mut content, Fmt::default());
 				}
 				// A cell holds a phrase, not a document: see `Cell`'s own note on why.
-				cells.push(Cell(coalesce(content)));
+				cells.push(Cell::new(coalesce(content)));
 			}
 			// A header row is one the table SAYS repeats, or a first row whose every cell is bold.
 			// Both are signals a writer actually emits; guessing from anything less would put a row of
@@ -547,7 +590,16 @@ impl<'a> Read<'a> {
 			let is_head = i == 0 && (tr.find(&["w:trPr", "w:tblHeader"]).is_some() || all_bold(tr));
 			match is_head {
 				true	=> head = Some(Row(cells)),
-				false	=> rows.push(Row(cells)),
+				false	=> {
+					// A header row's cells head their columns by being in it, so only a body row's
+					// first cell is ever flagged as heading its row.
+					if side {
+						if let Some(first) = cells.first_mut() {
+							first.header = true;
+						}
+					}
+					rows.push(Row(cells));
+				}
 			}
 		}
 		if head.is_none() && rows.is_empty() {
@@ -558,7 +610,7 @@ impl<'a> Read<'a> {
 		// the first row that says anything decides. A table whose cells disagree has no column
 		// alignment to report.
 		let cols = (0..n).map(|i| self.align_of(tbl, i)).collect();
-		Some(Block::Table { head, rows, cols })
+		Some(Block::Table { head, rows, cols, caption })
 	}
 
 	/// The alignment of a column, from the first cell in it that names one.
@@ -586,7 +638,8 @@ impl<'a> Read<'a> {
 enum Kind {
 	Plain,
 	Quote,
-	Code,	// a listing
+	Code,		// a listing
+	Caption,	// a table's, when it stands next to one
 }
 
 impl Kind {
@@ -602,6 +655,9 @@ impl Kind {
 			"source code" | "sourcecode" | "html preformatted" | "htmlpreformatted"
 			| "preformatted text" | "preformattedtext" | "code" | "plain text"
 			| "plaintext" | "macro text"			=> Self::Code,
+			// Word's built-in name and id. LibreOffice's `Table` category is based on it, and is
+			// reached through the style's parent.
+			"caption"						=> Self::Caption,
 			_						=> Self::Plain,
 		}
 	}
@@ -644,9 +700,42 @@ fn mono(e: Option<&Elem>) -> bool {
 		| "cascadia mono" | "sf mono" | "jetbrains mono" | "fira code" | "source code pro")
 }
 
-/// Whether every run in a row is bold, which is one of the two signals that says a header row.
-fn all_bold(tr: &Elem) -> bool {
-	let runs = tr.all("w:r");
+/// Do the first cells of a table's rows head those rows?
+///
+/// Two signals say so, as two say a header row: the table's look naming its first column, which is
+/// what Word's "First Column" box sets, or every body row opening with a cell whose every run is bold,
+/// which is how this crate's writer sets a cell that heads its row. A single bold cell is emphasis,
+/// not a header, so the second signal is asked of the whole column.
+fn row_heads(tbl: &Elem, trs: &[&Elem]) -> bool {
+	if let Some(look) = tbl.find(&["w:tblPr", "w:tblLook"]) {
+		match look.attr("w:firstColumn") {
+			Some(v)	=> return !matches!(v, "0" | "false" | "off"),
+			None	=> {
+				// The older form packs the flags into a hexadecimal mask; 0x0080 is the first column.
+				if let Some(mask) = look.attr("w:val").and_then(|v| u16::from_str_radix(v, 16).ok()) {
+					if mask & 0x0080 != 0 {
+						return true;
+					}
+				}
+			}
+		}
+	}
+	// The first row is left out when it is the header row, which is bold for its own reason.
+	let skip = match trs.first() {
+		Some(tr) if tr.find(&["w:trPr", "w:tblHeader"]).is_some() || all_bold(tr) => 1,
+		_ => 0,
+	};
+	let body = &trs[skip.min(trs.len())..];
+	!body.is_empty() && body.iter().all(|tr| match tr.children("w:tc").first() {
+		Some(tc)	=> all_bold(tc),
+		None		=> false,
+	})
+}
+
+/// Whether every run in an element is bold, which is one of the two signals that says a header row,
+/// or, asked of a column's first cells, a header column.
+fn all_bold(at: &Elem) -> bool {
+	let runs = at.all("w:r");
 	!runs.is_empty() && runs.iter().all(|r| {
 		// A run holding no text says nothing either way, so it does not veto.
 		r.all("w:t").is_empty() || r.find(&["w:rPr", "w:b"]).is_some()

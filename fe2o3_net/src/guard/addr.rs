@@ -14,6 +14,8 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+use crate::addr::client_key;
+
 use oxedyne_fe2o3_core::{
     prelude::*,
     map::MapMut,
@@ -30,9 +32,17 @@ use std::{
     fmt::Debug,
     net::{
         IpAddr,
+        Ipv4Addr,
         SocketAddr,
     },
-    sync::RwLock,
+    sync::{
+        Arc,
+        RwLock,
+        atomic::{
+            AtomicUsize,
+            Ordering,
+        },
+    },
     time::{
         Duration,
         SystemTime,
@@ -87,12 +97,24 @@ pub struct AddressLog<
     const N: usize,
     D: Clone + Debug + Default,
 > {
-    pub ip:             Option<IpAddr>,     // held so a snapshot need not reverse a shard key
+    pub ip:             Option<IpAddr>,     // the client key, held so a snapshot need not reverse a shard key
     pub state:          AddressState<N>,
     pub throttle_cnt:   u16,                // throttling episodes so far
     pub first_seen:     SystemTime,
     pub last_seen:      SystemTime,
     pub total_reqs:     u64,
+    // Live connections from this address right now, held behind an `Arc` so a
+    // `ConnPermit` handed to a spawned task can decrement it on drop without
+    // re-acquiring the shard lock, and so an eviction of the log cannot strand
+    // an in-flight permit. This is a *concurrency* gauge, orthogonal to the
+    // *rate* window above.
+    pub conns:          Arc<AtomicUsize>,
+    // When this address last crossed into an offending state (throttled or auto-
+    // blacklisted), so a decay can relax it after a quiet spell. `None` once it
+    // has decayed or if it has never offended. Distinct from `last_seen`, which a
+    // still-active address refreshes on every request: the whole point is to
+    // relax an address that is *alive but no longer offending*.
+    pub offended_at:    Option<SystemTime>,
     pub data:           D,                  // caller-supplied extension payload
 }
 
@@ -111,6 +133,8 @@ impl<
             first_seen:     now,
             last_seen:      now,
             total_reqs:     0,
+            conns:          Arc::new(AtomicUsize::new(0)),
+            offended_at:    None,
             data:           D::default(),
         }
     }
@@ -159,6 +183,26 @@ pub struct GuardSnapshot {
     pub entries:    Vec<GuardEntry>,    // capped by the caller
 }
 
+/// An RAII grant of one concurrent connection from an address.
+///
+/// Returned by [`AddressGuard::acquire`] and held for the lifetime of the
+/// connection it admits, typically moved into the task that serves it. The two
+/// counters it holds -- the per-address one and the guard-wide one -- both fall
+/// in `Drop`, so a task that panics is not counted against its address for ever
+/// after, and neither counter needs the shard lock to be released.
+#[derive(Debug)]
+pub struct ConnPermit {
+    per_ip: Arc<AtomicUsize>,
+    total:  Arc<AtomicUsize>,
+}
+
+impl Drop for ConnPermit {
+    fn drop(&mut self) {
+        self.per_ip.fetch_sub(1, Ordering::AcqRel);
+        self.total.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Generic per-address guard.
 #[derive(Debug)]
 pub struct AddressGuard<
@@ -169,13 +213,27 @@ pub struct AddressGuard<
     const N: usize, // Request timer ring length.
     D: Clone + Debug + Default,
 > {
-    // Per-address logs, keyed by a hash of the IP octets.
+    // Per-client logs, keyed by a hash of the client key (the IPv6 /64, not the full address).
     pub amap:           ShardMap<C, S, AddressLog<N, D>, M, H>,
     pub arps_max:       u64,         // maximum average requests per second in Monitor
     pub tint_min:       Duration,    // minimum interval between requests in Throttle
     pub tsunset_base:   Duration,    // base throttle cooldown
     pub tsunset_spread: Duration,    // jitter ceiling on it, to spread the expiries
     pub blist_cnt:      u16,         // throttling episodes before blacklisting
+    // Maximum concurrent connections from any one address; 0 disables the cap,
+    // which is the inert default. A concurrency bound orthogonal to the rate
+    // window, closing the slow-hold shape a rate limiter alone cannot see.
+    pub conn_max:       usize,
+    // Live connections across every address right now, a guard-wide gauge kept
+    // in step by `acquire` and `ConnPermit::drop`. Read for a health body.
+    pub live_total:     Arc<AtomicUsize>,
+    // How long an alive-but-quiet record keeps its throttle history before it
+    // decays: an address past this long with no fresh offence has its throttle
+    // count reset and an auto-blacklist or throttle relaxed to Monitor. 0
+    // disables the decay, which is the inert default -- but a running process
+    // then never forgets a one-off burst, so a shared NAT address that was heavy
+    // once stays near the blacklist threshold until a restart.
+    pub decay_after:    Duration,
 }
 
 impl<
@@ -188,8 +246,11 @@ impl<
 >
     AddressGuard<C, M, H, S, N, D>
 {
+    // Every key goes through here, so a client is one bucket whichever of its addresses it
+    // uses: an IPv6 client holds a whole /64, and the keying in `client_key` is what makes a
+    // blacklist, a throttle and a concurrency cap hold against it.
     fn ip_bytes(addr: &IpAddr) -> Vec<u8> {
-        match addr {
+        match client_key(addr) {
             IpAddr::V4(a) => a.octets().to_vec(),
             IpAddr::V6(a) => a.octets().to_vec(),
         }
@@ -215,6 +276,72 @@ impl<
         Ok(decision)
     }
 
+    /// Claim one concurrent connection slot for an address.
+    ///
+    /// Returns `Some(permit)` when the address is under its concurrency cap, and
+    /// `None` when it is at or over it -- the caller then drops the connection.
+    /// The permit decrements both the per-address and the guard-wide live count
+    /// when it is dropped, so it must be held for exactly as long as the
+    /// connection lives, which is what moving it into the serving task achieves.
+    ///
+    /// Orthogonal to [`Self::check`]: `check` is the *rate* limit run before the
+    /// handshake, `acquire` is the *concurrency* limit that bounds how many
+    /// connections one address may hold open at once. A distributed flood is
+    /// caught by the rate window; a slow-hold from a single source is caught
+    /// here. A `conn_max` of 0 never refuses, only counts.
+    pub fn acquire(&self, addr: &IpAddr) -> Outcome<Option<ConnPermit>> {
+        let key = self.amap.key(&Self::ip_bytes(addr));
+        let locked_map = res!(self.amap.get_shard_using_hash(&key));
+        let counter = {
+            let mut unlocked_map = lock_write!(locked_map);
+            match unlocked_map.get(&key).map(|log| log.conns.clone()) {
+                Some(c) => c,
+                None => {
+                    let mut log = AddressLog::<N, D>::default();
+                    log.ip = Some(client_key(addr));
+                    let c = log.conns.clone();
+                    unlocked_map.insert(key, log);
+                    c
+                },
+            }
+        };
+        // The increment is speculative and rolled back on refusal, so a rejected
+        // connection leaves the count exactly where it was.
+        let now = counter.fetch_add(1, Ordering::AcqRel) + 1;
+        if self.conn_max != 0 && now > self.conn_max {
+            counter.fetch_sub(1, Ordering::AcqRel);
+            return Ok(None);
+        }
+        self.live_total.fetch_add(1, Ordering::AcqRel);
+        Ok(Some(ConnPermit {
+            per_ip: counter,
+            total:  self.live_total.clone(),
+        }))
+    }
+
+    /// Live connections across every address right now.
+    pub fn live_conns(&self) -> usize {
+        self.live_total.load(Ordering::Acquire)
+    }
+
+    /// Prove in-process that the guard's state machine is armed, without any
+    /// external probe that a live guard would itself blacklist.
+    ///
+    /// Blacklists a documentation address (TEST-NET-1, `192.0.2.1`, RFC 5737),
+    /// confirms it is then blocked, releases it, and confirms it is allowed
+    /// again. A `true` result is what a health body reports as `guard_selftest`.
+    /// Leaves one monitor entry for that reserved address behind, which is inert.
+    pub fn self_test(&self) -> bool {
+        let ip: IpAddr = Ipv4Addr::new(192, 0, 2, 1).into();
+        if self.blacklist(&ip).is_err() {
+            return false;
+        }
+        let blocked = matches!(self.check(&ip), Ok(d) if d.should_drop());
+        let _ = self.unblock(&ip);
+        let allowed = matches!(self.check(&ip), Ok(GuardDecision::Allow));
+        blocked && allowed
+    }
+
     /// `extra` runs while the shard write lock is still held, so a caller can
     /// compose its own check on top of the generic rate limit without a second
     /// acquisition. Its boolean argument says whether this call created the log.
@@ -236,7 +363,7 @@ impl<
         // run the caller's extra hook and return.
         if unlocked_map.get(&key).is_none() {
             let mut log = AddressLog::<N, D>::default();
-            log.ip          = Some(*addr);
+            log.ip          = Some(client_key(addr));
             log.first_seen  = now;
             log.last_seen   = now;
             log.total_reqs  = 1;
@@ -278,6 +405,30 @@ impl<
     )
         -> GuardDecision
     {
+        // Decay first: an address that has served the decay window with no fresh
+        // offence has its throttle history forgiven and an auto-blacklist or
+        // throttle relaxed to Monitor, so a one-off burst does not hold a shared
+        // NAT address near the blacklist threshold for the life of the process.
+        // A manual blacklist and a whitelist are operator decisions and never
+        // decay. This runs on a live request, so it relaxes an alive-but-quiet
+        // record, which the idle sweep (that evicts a *dead* record) does not.
+        if !self.decay_after.is_zero() {
+            let quiet_enough = log.offended_at
+                .and_then(|t| t.elapsed().ok())
+                .map(|since| since >= self.decay_after)
+                .unwrap_or(false);
+            if quiet_enough {
+                let auto_black = matches!(log.state,
+                    AddressState::Blacklist { reason: BlacklistReason::AutoRateLimit, .. });
+                let throttled = matches!(log.state, AddressState::Throttle { .. });
+                if auto_black || throttled {
+                    log.state = AddressState::Monitor(RingTimer::default());
+                }
+                log.throttle_cnt = 0;
+                log.offended_at = None;
+            }
+        }
+
         // Sunset expired throttled addresses back to Monitor before this step.
         if let AddressState::Throttle{ start, sunset: cool, .. } = &log.state {
             if let Ok(elapsed) = start.elapsed() {
@@ -298,6 +449,7 @@ impl<
                             reason: BlacklistReason::AutoRateLimit,
                         };
                         log.throttle_cnt = next_cnt;
+                        log.offended_at = Some(SystemTime::now());
                         return GuardDecision::Blocked(BlacklistReason::AutoRateLimit);
                     }
                     log.state = AddressState::Throttle {
@@ -307,6 +459,7 @@ impl<
                         sunset,
                     };
                     log.throttle_cnt = next_cnt;
+                    log.offended_at = Some(SystemTime::now());
                     return GuardDecision::Throttled;
                 }
                 GuardDecision::Allow
@@ -348,7 +501,7 @@ impl<
             Some(log) => log.state = AddressState::Whitelist,
             None => {
                 let mut log = AddressLog::<N, D>::default();
-                log.ip    = Some(*addr);
+                log.ip    = Some(client_key(addr));
                 log.state = AddressState::Whitelist;
                 unlocked_map.insert(key, log);
             }
@@ -370,7 +523,7 @@ impl<
             Some(log) => log.state = bl,
             None => {
                 let mut log = AddressLog::<N, D>::default();
-                log.ip    = Some(*addr);
+                log.ip    = Some(client_key(addr));
                 log.state = bl;
                 unlocked_map.insert(key, log);
             }
@@ -454,6 +607,43 @@ impl<
         }
         Ok(snap)
     }
+
+    /// Evict idle `Monitor` records, returning how many were dropped.
+    ///
+    /// A distributed flood is a great many addresses each making one request
+    /// below the rate floor: every one mints a `Monitor` log that is never
+    /// throttled and so, without this, is never reclaimed -- the memory-
+    /// exhaustion shape the rate window cannot itself close. This drops a record
+    /// only when all three hold: it is in `Monitor` (a transient rate-watching
+    /// state, not an operator `Whitelist` nor an active `Throttle`/`Blacklist`
+    /// carrying a security decision that must outlive it until its own sunset);
+    /// it has no live connection (`conns == 0`, so eviction can never reset a
+    /// per-IP concurrency cap out from under a connection still holding a
+    /// `ConnPermit`); and it has not been seen within `idle`. A re-created record
+    /// starts clean, which for a `Monitor` address reaches the identical
+    /// decision, so nothing is lost by forgetting it.
+    pub fn sweep_idle(&self, idle: Duration) -> Outcome<usize> {
+        let now = SystemTime::now();
+        let mut evicted = 0usize;
+        for i in 0..self.amap.n {
+            if let Some(locked_map) = self.amap.shards[i].as_ref() {
+                let mut unlocked = lock_write!(locked_map);
+                unlocked.retain(|_k, log| {
+                    let stale = now.duration_since(log.last_seen)
+                        .map(|age| age > idle)
+                        .unwrap_or(false);
+                    let quiet = log.conns.load(Ordering::Acquire) == 0;
+                    let transient = matches!(log.state, AddressState::Monitor(_));
+                    let drop_it = stale && quiet && transient;
+                    if drop_it {
+                        evicted += 1;
+                    }
+                    !drop_it
+                });
+            }
+        }
+        Ok(evicted)
+    }
 }
 
 #[cfg(test)]
@@ -496,7 +686,16 @@ mod tests {
             tsunset_base:   Duration::from_millis(50),
             tsunset_spread: Duration::ZERO,
             blist_cnt,
+            conn_max:       0,
+            live_total:     Arc::new(AtomicUsize::new(0)),
+            decay_after:    Duration::ZERO,
         }
+    }
+
+    fn make_conn_guard(conn_max: usize) -> TestGuard {
+        let mut g = make_guard(1_000_000, 1_000);
+        g.conn_max = conn_max;
+        g
     }
 
     #[test]
@@ -544,6 +743,153 @@ mod tests {
     }
 
     #[test]
+    fn concurrency_admits_up_to_the_cap_and_refuses_beyond() {
+        let guard = make_conn_guard(3);
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 1, 1).into();
+        // Three admitted, held live.
+        let p1 = guard.acquire(&addr).expect("acquire 1");
+        let p2 = guard.acquire(&addr).expect("acquire 2");
+        let p3 = guard.acquire(&addr).expect("acquire 3");
+        assert!(p1.is_some() && p2.is_some() && p3.is_some(),
+            "the first N connections must be admitted");
+        assert_eq!(guard.live_conns(), 3);
+        // The N+1th is refused while the first three are still held.
+        let p4 = guard.acquire(&addr).expect("acquire 4");
+        assert!(p4.is_none(), "the N+1th connection must be refused");
+        assert_eq!(guard.live_conns(), 3, "a refusal must not count");
+    }
+
+    #[test]
+    fn concurrency_releases_on_drop() {
+        let guard = make_conn_guard(2);
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 1, 2).into();
+        let p1 = guard.acquire(&addr).expect("acquire 1");
+        {
+            let p2 = guard.acquire(&addr).expect("acquire 2");
+            assert!(p2.is_some());
+            // At the cap with p1 and p2 held: a third is refused, and the refusal
+            // does not count.
+            assert!(guard.acquire(&addr).expect("acquire 3").is_none(),
+                "at the cap, a third is refused");
+            assert_eq!(guard.live_conns(), 2);
+        }
+        // p2 dropped at the end of the block: a slot is free again.
+        assert_eq!(guard.live_conns(), 1, "dropping a permit must free its slot");
+        let p4 = guard.acquire(&addr).expect("acquire 4");
+        assert!(p4.is_some(), "a released slot must be reusable");
+        // p1 and p4 held.
+        assert_eq!(guard.live_conns(), 2);
+        drop(p1);
+        // Only p4 remains.
+        assert_eq!(guard.live_conns(), 1);
+    }
+
+    #[test]
+    fn concurrency_is_isolated_per_address() {
+        let guard = make_conn_guard(1);
+        let a: IpAddr = Ipv4Addr::new(10, 0, 1, 3).into();
+        let b: IpAddr = Ipv4Addr::new(10, 0, 1, 4).into();
+        let _pa = guard.acquire(&a).expect("acquire a").expect("a admitted");
+        // a is at its cap, but b is unaffected.
+        assert!(guard.acquire(&a).expect("acquire a2").is_none(),
+            "a's second connection is refused");
+        assert!(guard.acquire(&b).expect("acquire b").is_some(),
+            "a second address must be unaffected by the first's cap");
+    }
+
+    #[test]
+    fn a_zero_cap_never_refuses_but_still_counts() {
+        let guard = make_conn_guard(0);
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 1, 5).into();
+        let mut held = Vec::new();
+        for _ in 0..100 {
+            held.push(guard.acquire(&addr).expect("acquire").expect("admitted"));
+        }
+        assert_eq!(guard.live_conns(), 100);
+        held.clear();
+        assert_eq!(guard.live_conns(), 0);
+    }
+
+    #[test]
+    fn self_test_reports_armed() {
+        let guard = make_guard(100, 5);
+        assert!(guard.self_test(), "a constructed guard must report armed");
+    }
+
+    #[test]
+    fn throttle_history_decays_after_a_quiet_window() {
+        // A high rate ceiling so the decayed record does not immediately re-offend
+        // on the very check that relaxes it; the decay is what is under test.
+        let mut guard = make_guard(1_000_000, 3);
+        guard.decay_after = Duration::from_millis(20);
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 4, 1).into();
+
+        // Plant a record auto-blacklisted well in the past, with no fresh offence:
+        // an address that was heavy once and has since gone quiet.
+        let old = SystemTime::now()
+            .checked_sub(Duration::from_millis(200))
+            .expect("time before now");
+        guard.update_log(&addr, |log, _new| {
+            log.state = AddressState::Blacklist {
+                since:  old,
+                reason: BlacklistReason::AutoRateLimit,
+            };
+            log.throttle_cnt = 3;
+            log.offended_at = Some(old);
+            Ok(())
+        }).expect("plant blacklisted record");
+
+        // The next check sees the quiet window has elapsed: the auto-blacklist is
+        // relaxed and the throttle history forgiven, so the address is allowed.
+        let decision = guard.check(&addr).expect("check");
+        assert_eq!(decision, GuardDecision::Allow,
+            "a quiet auto-blacklisted address must decay back to allowed");
+
+        // A manual blacklist is an operator decision and must NOT decay.
+        let banned: IpAddr = Ipv4Addr::new(10, 0, 4, 2).into();
+        guard.update_log(&banned, |log, _new| {
+            log.state = AddressState::Blacklist {
+                since:  old,
+                reason: BlacklistReason::Manual,
+            };
+            log.offended_at = Some(old);
+            Ok(())
+        }).expect("plant manual blacklist");
+        assert!(matches!(guard.check(&banned), Ok(d) if d.should_drop()),
+            "a manual blacklist must survive the decay window");
+    }
+
+    #[test]
+    fn sweep_evicts_idle_monitor_records_but_spares_live_and_blacklisted() {
+        let guard = make_conn_guard(4);
+        let idle: IpAddr = Ipv4Addr::new(10, 0, 2, 1).into();
+        let live: IpAddr = Ipv4Addr::new(10, 0, 2, 2).into();
+        let banned: IpAddr = Ipv4Addr::new(10, 0, 2, 3).into();
+
+        // An idle Monitor record: acquired then released, so conns == 0.
+        drop(guard.acquire(&idle).expect("acquire idle"));
+        // A live record still holding a connection.
+        let _held = guard.acquire(&live).expect("acquire live").expect("admitted");
+        // A blacklisted record, which carries a security decision.
+        guard.blacklist(&banned).expect("blacklist");
+
+        // Everything is younger than an hour, so an hour-idle sweep evicts nothing.
+        assert_eq!(guard.sweep_idle(Duration::from_secs(3600)).expect("sweep"), 0,
+            "a sweep must spare records seen within the idle window");
+
+        // A zero idle window makes every past-seen record stale: the idle Monitor
+        // one goes, the live one is spared (conns > 0), the blacklisted one is
+        // spared (not Monitor).
+        let evicted = guard.sweep_idle(Duration::ZERO).expect("sweep");
+        assert_eq!(evicted, 1, "only the idle Monitor record must be evicted");
+        // The live cap is intact: its slot was never reset by an eviction.
+        assert_eq!(guard.live_conns(), 1);
+        // The blacklist survived the sweep.
+        assert!(matches!(guard.check(&banned), Ok(d) if d.should_drop()),
+            "a blacklisted address must not be forgotten by an idle sweep");
+    }
+
+    #[test]
     fn snapshot_reports_per_address_entries() {
         let guard = make_guard(100, 5);
         let a: IpAddr = Ipv4Addr::new(10, 0, 0, 5).into();
@@ -555,5 +901,62 @@ mod tests {
         assert_eq!(snap.entries.len(), 2);
         assert!(snap.entries.iter().any(|e| e.ip == a));
         assert!(snap.entries.iter().any(|e| e.ip == b));
+    }
+
+    #[test]
+    fn ipv6_addresses_in_one_slash_64_share_a_bucket() {
+        let guard = make_guard(100, 5);
+        let a: IpAddr = "2001:db8:1:2::1".parse().expect("a");
+        let b: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().expect("b");
+        guard.check(&a).expect("a");
+        guard.check(&b).expect("b");
+        let counts = guard.counts().expect("counts");
+        assert_eq!(counts.total, 1, "two addresses of one /64 were counted as two clients");
+    }
+
+    #[test]
+    fn ipv6_addresses_in_different_slash_64s_have_their_own_buckets() {
+        let guard = make_guard(100, 5);
+        let a: IpAddr = "2001:db8:1:2::1".parse().expect("a");
+        let b: IpAddr = "2001:db8:1:3::1".parse().expect("b");
+        guard.check(&a).expect("a");
+        guard.check(&b).expect("b");
+        let counts = guard.counts().expect("counts");
+        assert_eq!(counts.total, 2, "two /64s shared one bucket");
+    }
+
+    #[test]
+    fn a_blacklist_on_one_ipv6_address_holds_for_the_rest_of_its_slash_64() {
+        let guard = make_guard(100, 5);
+        let a: IpAddr = "2001:db8:1:2::1".parse().expect("a");
+        let b: IpAddr = "2001:db8:1:2:dead:beef:0:1".parse().expect("b");
+        guard.blacklist(&a).expect("blacklist");
+        match guard.check(&b).expect("check") {
+            GuardDecision::Blocked(BlacklistReason::Manual) => (),
+            other => panic!("a neighbour in the /64 got past the blacklist: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn an_ipv4_mapped_address_shares_a_bucket_with_its_ipv4() {
+        let guard = make_guard(100, 5);
+        let v4: IpAddr = Ipv4Addr::new(203, 0, 113, 7).into();
+        let mapped: IpAddr = "::ffff:203.0.113.7".parse().expect("mapped");
+        guard.check(&v4).expect("v4");
+        guard.check(&mapped).expect("mapped");
+        let counts = guard.counts().expect("counts");
+        assert_eq!(counts.total, 1, "one client over two families was counted twice");
+    }
+
+    #[test]
+    fn a_slash_64_holds_its_concurrency_cap_whatever_the_address() {
+        let guard = make_conn_guard(2);
+        let mut permits = Vec::new();
+        for n in 1..=4u16 {
+            let ip: IpAddr = format!("2001:db8:1:2::{:x}", n).parse().expect("ip");
+            permits.push(guard.acquire(&ip).expect("acquire"));
+        }
+        let admitted = permits.iter().filter(|p| p.is_some()).count();
+        assert_eq!(admitted, 2, "a /64 took {} connections against a cap of 2", admitted);
     }
 }

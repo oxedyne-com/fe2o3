@@ -573,25 +573,10 @@ pub fn ensure_compatibility(app_root: &Path) -> Outcome<()> {
         }
     }
 
-    // Create minimal missing files if needed
-    let index_path = app_root.join("www/public/index.html");
-    if !index_path.exists() {
-        warn!("No index.html found in www/public/. Creating minimal placeholder.");
-        let minimal_html = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Steel Server</title>
-</head>
-<body>
-    <h1>Welcome</h1>
-    <p>Steel server is running. Please add your content to www/public/</p>
-</body>
-</html>"#;
-        res!(fs::write(&index_path, minimal_html));
-        info!("Created minimal index.html");
-    }
+    // No page is written here. A webroot without an index answers `/` with a 404, which is the
+    // truth; a placeholder would put a page the operator never wrote into a site that serves its
+    // pages some other way (a handler on `/*`, say), and a new app already has the starter page
+    // `setup` writes.
 
     Ok(())
 }

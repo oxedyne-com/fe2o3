@@ -17,6 +17,7 @@ use super::record::{
 	Record,
 	RecordDigest,
 	RecordId,
+	content_hash,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -39,9 +40,9 @@ pub trait Storage {
 	fn delete(&self, table: &str, id: &RecordId) -> Outcome<bool>;
 
 	/// Used by the IBLT anti-entropy layer to build a symmetric-difference
-	/// sketch against a peer's view of the same table. The `content` hash
-	/// on each digest must be deterministic: two peers that hold the same
-	/// record bytes must produce the same `content`.
+	/// sketch against a peer's view of the same table. The `content` on each
+	/// digest must be [`content_hash`] of the record's value, so that two peers
+	/// holding the same bytes agree and any other bytes differ.
 	fn digests(&self, table: &str) -> Outcome<Vec<RecordDigest>>;
 }
 
@@ -109,29 +110,4 @@ impl Storage for MemoryStorage {
 		out.sort_by(|a, b| a.id.as_bytes().cmp(b.id.as_bytes()));
 		Ok(out)
 	}
-}
-
-
-/// The deterministic 256-bit hash behind [`RecordDigest::content`].
-///
-/// This is *not* a cryptographic hash -- it is splitmix64-based and intended
-/// only for test adapters. Production storage backends should use a proper
-/// hash (SHA-3, BLAKE3) that is resistant to adversarial collisions.
-fn content_hash(bytes: &[u8]) -> [u8; 32] {
-	let mut state: u64 = 0x9E3779B97F4A7C15;
-	for chunk in bytes.chunks(8) {
-		let mut buf = [0u8; 8];
-		buf[..chunk.len()].copy_from_slice(chunk);
-		let word = u64::from_le_bytes(buf);
-		state = state.wrapping_add(word);
-		state = (state ^ (state >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-		state = (state ^ (state >> 27)).wrapping_mul(0x94D049BB133111EB);
-		state ^= state >> 31;
-	}
-	let mut out = [0u8; 32];
-	for i in 0..4 {
-		let limb = state.wrapping_mul(0x9E3779B97F4A7C15 ^ (i as u64));
-		out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
-	}
-	out
 }

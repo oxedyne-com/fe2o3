@@ -1,0 +1,28 @@
+;; U2 warning cases: each document follows a `%%` line. Typst compiles it and its warnings -- message,
+;; line, column and hints -- are what Austenite's evaluation must report.
+%%
+#import heading as heading
+%%
+#import heading
+%%
+#import list: item as item
+%%
+#import list: item as entry
+%%
+#let f() = { [a]; return 1 }
+#f()
+%%
+#let f() = { [a]; return }
+#f()
+%%
+#let f() = { [a]; if true { return 1 } }
+#f()
+%%
+#let f() = { [a]; for i in (1, 2) { return 1 } }
+#f()
+%%
+#let f() = { [a] + { return 2 } }
+#f()
+%%
+#let f() = { return 1 }
+#f()

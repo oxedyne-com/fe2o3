@@ -4,12 +4,7 @@ use cap::Cap;
 #[global_allocator]
 static ALLOCATOR: Cap<alloc::System> = Cap::new(alloc::System, usize::max_value());
 
-use oxedyne_fe2o3_sand::treemap::{
-    ByteKey,
-    TreeMap,
-};
-use oxedyne_fe2o3_core::{debug};
-use oxedyne_fe2o3_core::data::{Stack};
+use oxedyne_fe2o3_core::prelude::*;
 
 use criterion::{
     criterion_group,
@@ -24,11 +19,6 @@ use std::collections::{
     HashMap,
 };
 
-use rand::Rng;
-use rand::distributions::{
-    Distribution,
-    Uniform,
-};
 
 fn create_keys(n: usize, len: usize) -> Vec<Vec<u8>> {
     let mut result = Vec::new();
@@ -76,29 +66,15 @@ fn btreemap_reads<'a>(input: (&'a Vec<Vec<u8>>, &'a Vec<u8>), map: BTreeMap<Vec<
     }
 }
 
-fn treemap_insertions<'a>(input: (&'a Vec<Vec<u8>>, &'a Vec<u8>)) -> (TreeMap<Stack<&'a Vec<u8>>>, usize) {
-    let (keys, data) = input;
-    let mem = ALLOCATOR.allocated();
-    let mut map = TreeMap::new();
-    for key in keys {
-        map.insert_data(ByteKey::new(key.clone()), data);
-    }
-    (map, ALLOCATOR.allocated() - mem)
-}
-
-fn treemap_reads<'a>(input: (&'a Vec<Vec<u8>>, &'a Vec<u8>), map: TreeMap<Stack<&'a Vec<u8>>>) {
-    let (keys, _) = input;
-    for key in keys {
-        map.get_data_ref(ByteKey::new(key.clone()));
-    }
-}
-
 fn bench_map_insertions(c: &mut Criterion) {
     // Set the limit to 500 [MiB].
     debug!("*********************************************");
     debug!("*         BENCHMARK MAP INSERTIONS          *");
     debug!("*********************************************");
-    ALLOCATOR.set_limit(500 * 1024 * 1024).unwrap();
+    if let Err(e) = ALLOCATOR.set_limit(500 * 1024 * 1024) {
+        error!(err!("Could not cap the allocator at 500 MiB: {:?}", e; Configuration));
+        return;
+    }
     debug!("Currently allocated: {} [B]", ALLOCATOR.allocated());
     static N: usize = 1000;
     let mut group = c.benchmark_group("Maps");
@@ -113,8 +89,6 @@ fn bench_map_insertions(c: &mut Criterion) {
         debug!("std::collections::HashMap memory: {} [KB]", mem/1024);
         let (btreemap, mem) = btreemap_insertions((&keys, &data));
         debug!("std::collections::BTreeMap memory: {} [KB]", mem/1024);
-        let (treemap, mem) = treemap_insertions((&keys, &data));
-        debug!("fe2o3::treemap::TreeMap memory: {} [KB]", mem/1024);
 
         group.throughput(Throughput::Bytes(*len as u64));
         group.bench_with_input(
@@ -131,13 +105,6 @@ fn bench_map_insertions(c: &mut Criterion) {
                 b.iter(|| btreemap_insertions((&keys, &data)));
             }
         );
-        group.bench_with_input(
-            BenchmarkId::new("fe2o3::treemap::TreeMap", len),
-            &(&keys, &data),
-            |b, (keys, data)| {
-                b.iter(|| treemap_insertions((&keys, &data)));
-            }
-        );
     }
     group.finish();
 }
@@ -147,7 +114,10 @@ fn bench_map_retrievals(c: &mut Criterion) {
     debug!("*********************************************");
     debug!("*         BENCHMARK MAP RETRIEVALS          *");
     debug!("*********************************************");
-    ALLOCATOR.set_limit(500 * 1024 * 1024).unwrap();
+    if let Err(e) = ALLOCATOR.set_limit(500 * 1024 * 1024) {
+        error!(err!("Could not cap the allocator at 500 MiB: {:?}", e; Configuration));
+        return;
+    }
     debug!("Currently allocated: {} [B]", ALLOCATOR.allocated());
     static N: usize = 1000;
     let mut group = c.benchmark_group("Maps");
@@ -162,8 +132,6 @@ fn bench_map_retrievals(c: &mut Criterion) {
         debug!("std::collections::HashMap memory: {} [KB]", mem/1024);
         let (mut btreemap, mem) = btreemap_insertions((&keys, &data));
         debug!("std::collections::BTreeMap memory: {} [KB]", mem/1024);
-        let (mut treemap, mem) = treemap_insertions((&keys, &data));
-        debug!("fe2o3::treemap::TreeMap memory: {} [KB]", mem/1024);
 
         group.throughput(Throughput::Bytes(*len as u64));
         group.bench_with_input(
@@ -188,19 +156,6 @@ fn bench_map_retrievals(c: &mut Criterion) {
                         std::mem::replace(
                             &mut btreemap,
                             BTreeMap::new(),
-                        ),
-                ));
-            }
-        );
-        group.bench_with_input(
-            BenchmarkId::new("fe2o3::treemap::TreeMap", len),
-            &(&keys, &data),
-            |b, (keys, data)| {
-                b.iter(|| treemap_reads(
-                        (&keys, &data),
-                        std::mem::replace(
-                            &mut treemap,
-                            TreeMap::new(),
                         ),
                 ));
             }

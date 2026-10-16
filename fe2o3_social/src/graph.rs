@@ -1114,7 +1114,7 @@ mod tests {
         
         // Basic validation - check edge count is reasonable for population size.
         let edge_count = graph.edge_count();
-        let expected_population = config.population;
+        let expected_population = config.population as usize;
         
         // Social networks typically have edge counts much higher than node counts
         // For our test config, we expect at least some edges per node
@@ -1178,7 +1178,7 @@ mod tests {
         Ok(())
     }
     
-    fn test_config(n: usize) -> NetworkConfig {
+    fn test_config(n: u32) -> NetworkConfig {
         // Create a unique test file path for this population size
         let test_path = format!("/tmp/test_social_graph_{}.mmap", n);
         

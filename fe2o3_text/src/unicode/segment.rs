@@ -123,6 +123,32 @@ pub fn graphemes(s: &str) -> Vec<&str> {
 	out
 }
 
+/// The length in bytes of the grapheme cluster starting at byte `at`, which must be a cluster
+/// boundary, or zero at the end of the string. Only the cluster itself is read, so stepping through
+/// a long text a cluster at a time stays linear, where [`next_grapheme`] segments the whole string on
+/// every call. A position inside a character reads as the end.
+pub fn grapheme_len_at(s: &str, at: usize) -> usize {
+	let rest = match s.get(at..) {
+		Some(r)	=> r,
+		None	=> return 0,
+	};
+	let mut chs: Vec<Ch> = Vec::new();
+	for (byte, c) in rest.char_indices() {
+		chs.push(Ch {
+			byte,
+			gcb:	G::of(c),
+			wb:		W::of(c),
+			incb:	conjunct_break(c),
+			pict:	is_extended_pictographic(c),
+		});
+		let i = chs.len() - 1;
+		if i > 0 && grapheme_break(&chs, i) {
+			return byte;
+		}
+	}
+	rest.len()
+}
+
 /// Returns the byte offset of the grapheme cluster boundary at or after `from`, which is the
 /// string length once there is nothing left. This is where a cursor moving right should land.
 pub fn next_grapheme(s: &str, from: usize) -> usize {

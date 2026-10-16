@@ -537,7 +537,7 @@ fn count_data_states(
             for (_start, dstat) in fstat.data_map() {
                 match dstat {
                     DataState::Cur => ncur += 1,
-                    DataState::Old => nold += 1,
+                    DataState::Old(_) => nold += 1,
                 }
             }
         }

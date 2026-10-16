@@ -478,6 +478,33 @@ fn check_field(
 		return check_address_map(v, id, kind.label());
 	}
 
+	// A list of strings is held to the same string rule each, and omitted rather than carried empty,
+	// since an empty list and an absent one say the same and would give one tree two addresses.
+	if field.typ == FieldType::Strs {
+		return match v {
+			Dat::List(list) if !list.is_empty() => {
+				for item in list {
+					match item {
+						Dat::Str(s) => res!(check_str_at(s, id, kind.label(), key)),
+						d => return Err(err!(
+							"Node {} ({}): SPEC.md §3 rule 1: field '{}' is a list of str, but \
+							carries a {:?} in it.", id, kind.label(), key, d.kind();
+						Invalid, Input)),
+					}
+				}
+				Ok(())
+			},
+			Dat::List(_) => Err(err!(
+				"Node {} ({}): SPEC.md §3 rule 4: field '{}' is an empty list, which must be \
+				omitted rather than carried empty.", id, kind.label(), key;
+			Invalid, Input)),
+			d => Err(err!(
+				"Node {} ({}): SPEC.md §3 rule 1: field '{}' is declared a list of str by the \
+				schema, but carries a {:?}.", id, kind.label(), key, d.kind();
+			Invalid, Input)),
+		};
+	}
+
 	let ok = match (field.typ, v) {
 		(FieldType::Str,	Dat::Str(_))	=> true,
 		(FieldType::U8,	Dat::U8(_))	=> true,
@@ -511,6 +538,7 @@ fn type_name(typ: FieldType) -> &'static str {
 		FieldType::Hash32	=> "b32",
 		FieldType::Address	=> "address",
 		FieldType::Nodes	=> "a non-empty list of nodes",
+		FieldType::Strs	=> "a non-empty list of str",
 	}
 }
 
@@ -1440,7 +1468,7 @@ mod tests {
 			("lang",	Dat::Str("en".to_string())),
 			(KEY_CHILDREN, Dat::List(vec![
 				Dat::Usr(
-					UsrKindId::new(20, Some("table"), None),
+					UsrKindId::new(40, Some("table"), None),
 					Some(Box::new(map(vec![
 						(KEY_FALLBACK, Dat::List(vec![
 							node(NodeKind::Para, map(vec![
@@ -1467,7 +1495,7 @@ mod tests {
 			("lang",	Dat::Str("en".to_string())),
 			(KEY_CHILDREN, Dat::List(vec![
 				Dat::Usr(
-					UsrKindId::new(20, Some("table"), None),
+					UsrKindId::new(40, Some("table"), None),
 					Some(Box::new(map(vec![
 						("rows",	field),
 						(KEY_FALLBACK, Dat::List(vec![
@@ -1496,7 +1524,7 @@ mod tests {
 			("lang",	Dat::Str("en".to_string())),
 			(KEY_CHILDREN, Dat::List(vec![
 				Dat::Usr(
-					UsrKindId::new(20, Some("table"), None),
+					UsrKindId::new(40, Some("table"), None),
 					Some(Box::new(map(vec![
 						("rows",	field),
 						(KEY_FALLBACK, Dat::List(vec![

@@ -257,6 +257,14 @@ impl<
                                     .saturating_sub(constant::ADDR_THROTTLE_SUNSET_SECS_MIN)
                             ),
             blist_cnt:      constant::THROTTLE_COUNT_BEFORE_BLACKLIST,
+            // SHIELD does not (yet) cap per-address connection concurrency: its
+            // UDP wire protocol has no long-held connection to bound. The field
+            // is inert here, matching the pre-feature behaviour.
+            conn_max:       0,
+            live_total:     std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            // SHIELD keeps the pre-feature behaviour: no time-based decay of the
+            // throttle history, so this is inert.
+            decay_after:    Duration::ZERO,
         });
 
         let ugrd_map_init = BTreeMap::<

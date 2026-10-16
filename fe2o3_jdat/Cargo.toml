@@ -18,10 +18,23 @@ num-bigint = "0.3"
 num-traits = "0.2"
 rand_core = { version = "0.6.3", features = ["std"] }
 
+[features]
+# The libtest benches (`#![feature(test)]`), which build only on nightly:
+# `cargo +nightly bench -p oxedyne_fe2o3_jdat --features nightly`.
+nightly = []
+
 [dev-dependencies]
 oxedyne_fe2o3_hash 				= { path = "../fe2o3_hash" }
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
 
+# The independent RFC 8259 reader `Dat::decode_json_strict` is held to in tests/json_strict.rs.
+# Tests only; the crate itself reads JSON with its own code.
+serde_json = "1"
+
 num-bigint = "0.3"
 syn = "1.0"
 quote = "1.0"
+
+[[bench]]
+name = "bytes"
+required-features = ["nightly"]

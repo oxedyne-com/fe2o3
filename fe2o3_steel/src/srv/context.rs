@@ -10,6 +10,10 @@ use crate::srv::{
         WsRoute,
     },
     id,
+    tiles::{
+        TileService,
+        TileSource,
+    },
 };
 
 use oxedyne_fe2o3_core::{
@@ -29,6 +33,7 @@ use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 use oxedyne_fe2o3_net::{
     http::{
+        fields::HeaderName,
         handler::WebHandler,
         msg::HttpMessage,
     },
@@ -86,6 +91,10 @@ pub struct VhostRuntime<
     pub ws_routes:      Vec<WsRoute>,
     pub term_manager:   Option<Arc<crate::srv::ws::term::TerminalManager>>,
     pub uses_sessions:  bool,
+    pub permissions_policy: Option<String>, // replaces the default Permissions-Policy header when set
+    pub tiles:          Option<Arc<TileService<TileSource>>>,
+    pub access_log:     bool,   // `false` keeps this vhost's requests out of the log and the recorder
+    pub response_headers: Vec<(HeaderName, String)>, // set on every response, replacing that name
 }
 
 impl<
@@ -136,8 +145,9 @@ pub type VhostDbs<const UIDL: usize, UID, DB> =
 
 #[derive(Clone, Debug)]
 pub struct VhostDbSpec {
-    pub vhost_key:  String,
-    pub db_dir:     std::path::PathBuf,
+    pub vhost_key:      String,
+    pub db_dir:         std::path::PathBuf,
+    pub sync_on_write:  bool,   // the vhost's `db_sync_on_write`
 }
 
 pub struct ServerContext<
@@ -312,8 +322,9 @@ impl<
 }
 
 pub fn new_db(
-    db_root: &Path,
-    enc_key: &[u8],
+    db_root:        &Path,
+    enc_key:        &[u8],
+    sync_on_write:  bool,
 )
     -> Outcome<O3db<
         { id::UID_LEN },
@@ -324,28 +335,6 @@ pub fn new_db(
         ChecksumScheme,
     >>
 {
-    // Start from the library's own production configuration and state only what a Steel server
-    // deliberately wants different.  This was previously a full struct literal, and it carried
-    // the values from `o3db_sync`'s *test* setup -- a 1.5 KB chunking threshold and a 64-byte
-    // chunk size -- so every Steel store split any value past 1.5 KB into 64-byte pieces.  An
-    // exhaustive literal is what let that happen and what kept it: it has to restate every field,
-    // so a wrong one is invisible among the right ones, and a field added upstream cannot reach a
-    // caller who has already spelled them all out.  Naming only the deviations makes each one a
-    // decision, and everything else tracks the library.
-    let cfg = OzoneConfig {
-        // A Steel server may hold several stores, so it takes a tenth of the library's cache.
-        cache_size_limit_bytes:         100_000_000,
-        // One writer per zone: the server's stores are small and write-light.
-        num_wbots_per_zone:             1,
-        // Zone state is reported more often than the library default, so the dashboard's view of
-        // a store is near-live rather than five seconds stale.
-        zone_state_update_secs:         1,
-        // No per-zone size caps: a Steel store grows with the application that owns it.
-        zone_overrides:                 BTreeMap::new(),
-        // Everything else -- the chunking above all -- is the library's own production default.
-        ..Default::default()
-    };
-
     let aes_gcm = res!(EncryptionScheme::new_aes_256_gcm_with_key(enc_key));
     let crc32 = ChecksumScheme::new_crc32();
     let schms_input = RestSchemesInput::new(
@@ -356,10 +345,38 @@ pub fn new_db(
     );
     O3db::new(
         &db_root,
-        Some(cfg),
+        Some(db_config(sync_on_write)),
         schms_input,
         id::Uid::default(),
     )
+}
+
+/// The Ozone configuration Steel opens a vhost's store with, fsyncing every write where the vhost
+/// set `db_sync_on_write`.
+pub fn db_config(sync_on_write: bool) -> OzoneConfig {
+    // Start from the library's own production configuration and state only what a Steel server
+    // deliberately wants different.  This was previously a full struct literal, and it carried
+    // the values from `o3db_sync`'s *test* setup -- a 1.5 KB chunking threshold and a 64-byte
+    // chunk size -- so every Steel store split any value past 1.5 KB into 64-byte pieces.  An
+    // exhaustive literal is what let that happen and what kept it: it has to restate every field,
+    // so a wrong one is invisible among the right ones, and a field added upstream cannot reach a
+    // caller who has already spelled them all out.  Naming only the deviations makes each one a
+    // decision, and everything else tracks the library.
+    OzoneConfig {
+        // A Steel server may hold several stores, so it takes a tenth of the library's cache.
+        cache_size_limit_bytes:         100_000_000,
+        // One writer per zone: the server's stores are small and write-light.
+        num_wbots_per_zone:             1,
+        // Zone state is reported more often than the library default, so the dashboard's view of
+        // a store is near-live rather than five seconds stale.
+        zone_state_update_secs:         1,
+        // No per-zone size caps: a Steel store grows with the application that owns it.
+        zone_overrides:                 BTreeMap::new(),
+        // The vhost's choice; the library's interval sync otherwise.
+        sync_on_write,
+        // Everything else -- the chunking above all -- is the library's own production default.
+        ..Default::default()
+    }
 }
 
 pub fn no_db()

@@ -24,6 +24,10 @@
 //! and printed rather than silently accepted -- see [`record_and_diff`] and [`BaselineOutcome`].
 
 pub mod trio;
+#[path = "../support/typst_command.rs"]
+mod typst_command;
+
+use typst_command::typst_command;
 
 use oxedyne_fe2o3_austenite::emit::pearl::PearlDoc;
 use oxedyne_fe2o3_core::prelude::*;
@@ -63,14 +67,17 @@ pub struct CorpusRoot {
 /// accept, so for the Typst-oracle compile ONLY, [`run_typst`] builds a harness-local mirror
 /// ([`prepare_patched_template_mirror`]) with just those four tokens swapped in a scratch copy of
 /// `template.typ` -- the owner's committed file (usr-a4's, mid-reconciliation as of this unit) is never
-/// touched, and austenite still renders the real one. `oxeweb-overview` compiles cleanly against the
-/// patched mirror. `oxeweb-techspec` does not: its own `utils.typ` (shared with `oxeweb-overview` by
-/// symlink, but only actually *called* from a TechSpec chapter) defines `cat()`/`tup()` helpers using
-/// `bracket.l.double`/`angle.l.double`, a *removed* modifier in 0.15.1 with no glyph-identical
-/// replacement found by this unit -- a second, separate incompatibility, discovered but deliberately
-/// left unpatched rather than guessed at (see this unit's own report). [`compare_root`] downgrades that
-/// remaining failure to a recorded note, as before. Any incompatibility here is pre-existing in a
-/// template/helper tree this crate does not own, not an Austenite regression.
+/// touched, and austenite still renders the real one. Both `oxeweb-overview` and `oxeweb-techspec`
+/// compile cleanly against the patched mirror. `oxeweb-techspec`'s own `utils.typ` (shared with
+/// `oxeweb-overview` by symlink, but only actually *called* from a TechSpec chapter) defines `cat()`/
+/// `tup()` helpers using `bracket.l.double`/`angle.l.double`; an earlier `typst` reported those as a
+/// *second*, separate removed-modifier incompatibility, which this unit left unpatched rather than guess
+/// at a glyph-identical replacement (see this unit's own report). **Re-checked 2026-09-23 against the
+/// installed 0.15.1: it no longer reproduces** -- `typst compile` and `typst query` both run clean through
+/// the patched mirror, so the heading/figure order-zip in [`compare_root`] now runs for this root too, not
+/// just its PDF-hash self-pin (`tests/oracle/expected.json`'s note). Any incompatibility here would be
+/// pre-existing in a template/helper tree this crate does not own, not an Austenite regression; **re-check
+/// rather than quote this paragraph**, since a re-installed `typst` could move either way.
 pub fn corpus() -> Vec<CorpusRoot> {
 	vec![
 		// TODO(austenite-doc): re-add this root once its "Coming from Typst" chapter is locked. It is
@@ -253,6 +260,73 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own markup-builtins fixture -- the block-position `#pagebreak()`, `#lorem(n)` and
+			// `#v(<abs len>)` builtins the reader now sets rather than skipping. Two pages (the forced break)
+			// and two headings (the anchor order-match); reverting the recognition collapses it to one page and
+			// drops the `#lorem` paragraphs, moving the pinned hash. See the fixture file for the full shape.
+			name:				"builtins-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/builtins_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
+		CorpusRoot {
+			// This crate's own scalar `#let` value-binding fixture (reader-completeness item 2) -- the
+			// regression root for `#let name = <literal>` (a string, an integer or a length) substituting at a
+			// bare `#name` reference, in both a heading title and running prose. Two headings reference a
+			// string scalar and a numeric one; reverting the substitution renders the raw `#name` token instead
+			// of its value, moving both the set text and the pinned hash. See the fixture file for the full
+			// shape and why it needs no symbol-modifier patch.
+			name:				"let-value-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/let_value_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
+		CorpusRoot {
+			// This crate's own term-dict-inside-a-content-fn fixture (reader-completeness item 4) -- the
+			// regression root for a term-dictionary lookup nested in a `#let name(params) = [ ... ]`
+			// content-fn body, keyed on the fn's own parameter: `#let cite-term(w) = [Learn about #t(w).]`,
+			// called as `#cite-term("website")`, must resolve against the caller's argument, not the literal
+			// parameter name. Two calls with different arguments must render two different resolved values
+			// (proving the substitution is genuine), alongside a direct, non-fn-body `#t(...)` reference
+			// proving that path is unchanged. Reverting the fix collapses both calls to the same "w" fallback
+			// text and moves the pinned hash. See the fixture and its sibling `terms.typ` for the full shape.
+			name:				"term-dict-fn-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/term_dict_fn_fixture/root.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
+		CorpusRoot {
+			// This crate's own inline mid-prose content-fn fixture (reader-completeness item 3) -- the
+			// regression root for a content-fn CALL used within a running paragraph (`see #term("website") for
+			// details`) or a bare content binding wedged into prose (`#brand`), splicing its argument-substituted
+			// body into the sentence with the words before AND after it kept. Before the fix, an own-line
+			// reference expanded but a mid-prose one was refused (its arguments dropped) or leaked its raw
+			// `#name`. Two `#term(...)` calls with different arguments must render two different italic words,
+			// proving the argument substitution is genuine, and a `#brand` reference must expand in both running
+			// prose and a heading title. Reverting the fix drops the calls' set text and moves the pinned hash.
+			// See the fixture file for the full shape and why it needs no symbol-modifier patch.
+			name:				"inline-content-fn-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/inline_content_fn_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
+		CorpusRoot {
+			// This crate's own styled-box content-fn fixture -- the silent-content-loss SEV's regression root. A
+			// content function whose body is wrapped in a styled `box(...)`/`rect(...)`/`block(...)` (`#let
+			// stamp(s) = box(fill: .., outset: .., radius: ..)[*v: #s*]`), called BOTH inline and own-line, must
+			// SET its inner text rather than dropping it silently: before the fix the definition was captured by
+			// neither the furniture nor the content reader, so the call rendered an empty gap with a clean
+			// compile. The reader now keeps the inner content and records the box styling it cannot draw as a
+			// visible skip. The engines part on the box styling (typst draws it, austenite sets the text plain),
+			// so this root is not pinned in expected.json -- it bootstraps and guards the RENDERED TEXT and page
+			// shape; the render-level non-vacuous proof that the text is present and the styling flagged lives in
+			// `content_bindings.rs`. Self-contained, so it needs no symbol-modifier patch.
+			name:				"box-content-fn-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/box_content_fn_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 
@@ -263,13 +337,56 @@ pub fn corpus() -> Vec<CorpusRoot> {
 /// Where the harness writes every rendered artefact and the baseline file -- never `/tmp` (tmpfs,
 /// charged to the session's memory cgroup: see `~/usr/CLAUDE.md`'s cargo-target-dir warning, the same
 /// hazard for any large written output) and never the crate's own `tests/` tree, so a run leaves no
-/// diff for git to see. Fixed rather than keyed by `RC_SLOT`, on the coordinator's direction, since the
-/// fleet's build lanes serialise on one shared box and the harness is meant to be found again by name.
+/// diff for git to see.
+///
+/// Keyed by the checkout, not fixed fleet-wide. A single literal path (`~/.cache/austenite-qc-rc5`) was
+/// tried first, on the direction that the fleet's build lanes serialise on one shared box and the harness
+/// is meant to be found again by name -- but the fleet routinely holds a dozen-plus worktrees of this
+/// crate at once, each its own lane, and every one of them shared this same directory. Two lanes compiling
+/// the same corpus root concurrently wrote and read the SAME `<root>-ledger.json` (see [`run_austenite`]'s
+/// own doc comment) and the same `baseline.json`, so one lane's run could score against another lane's
+/// half-written or differently-versioned files -- a harness race, not engine nondeterminism, caught the
+/// hard way when a ledger dump read back in plain identity order (the bug an m1-ledger-order unit had just
+/// fixed) although the fix had already landed: the binary was right, the shared cache was not.
+///
+/// The key is an FNV-1a hash (the same mixing [`AnchorId::address`](oxedyne_fe2o3_austenite::ledger::AnchorId::address)
+/// uses, not a security hash -- collision odds only matter against how many worktrees this box ever holds
+/// at once) of `CARGO_MANIFEST_DIR`'s canonicalised path -- the crate's own directory inside its checkout
+/// -- so every worktree gets its own directory, and two runs of the SAME checkout still land in the SAME
+/// place: a later run's baseline still finds the earlier run's cache. `AUSTENITE_QC_DIR`, when set,
+/// overrides the derived path outright, for a caller that wants one explicitly (a CI job pinning a stable
+/// location, say).
+///
+/// `expected.json` is untouched by any of this: [`expected_baseline`] reads it straight from the crate's
+/// own `tests/oracle/` tree, never through `qc_dir`, so it stays the one shared, committed, authoritative
+/// pin every checkout reads the identical copy of. Only `baseline.json` -- the mutable cache
+/// [`record_and_diff`] bootstraps and grows, authoritative solely for a root `expected.json` does not pin
+/// -- moves per checkout; the tradeoff is that an unpinned root's bootstrap is no longer shared across
+/// lanes, which is the correct side to be wrong on.
 pub fn qc_dir() -> Outcome<PathBuf> {
-	let home = res!(std::env::var("HOME"));
-	let dir = Path::new(&home).join(".cache").join("austenite-qc-rc5");
+	if let Ok(over) = std::env::var("AUSTENITE_QC_DIR") {
+		let dir = PathBuf::from(over);
+		res!(std::fs::create_dir_all(&dir));
+		return Ok(dir);
+	}
+	let home			= res!(std::env::var("HOME"));
+	let manifest_dir	= res!(std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")));
+	let key				= fnv1a_hex(manifest_dir.to_string_lossy().as_bytes());
+	let dir				= Path::new(&home).join(".cache").join("austenite-qc").join(key);
 	res!(std::fs::create_dir_all(&dir));
 	Ok(dir)
+}
+
+/// A stable, dependency-free 64-bit hash of a byte string, hex-encoded -- the same FNV-1a mixing
+/// [`AnchorId::address`](oxedyne_fe2o3_austenite::ledger::AnchorId::address) uses, reused here for
+/// [`qc_dir`]'s per-checkout key rather than pulling in a hashing crate for one small string.
+fn fnv1a_hex(bytes: &[u8]) -> String {
+	let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+	for b in bytes {
+		h ^= *b as u64;
+		h = h.wrapping_mul(0x0000_0100_0000_01b3);
+	}
+	fmt!("{:016x}", h)
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -363,21 +480,28 @@ struct AusOutput {
 /// the page count from its stdout status line and the anchor table from the `--ledger-out` JSON this
 /// unit adds to `src/bin/austenite.rs`.
 ///
-/// The render output dir is keyed by `RC_SLOT` (env, defaulting to `"solo"` outside the fleet) AND this
-/// process's own PID, not by `root.name` alone: `qc_dir()` is one fixed, shared path across every
-/// concurrent lane (see its own doc comment), so two lanes compiling the same corpus root at once used to
-/// render into and sha256 the SAME `document.pdf` -- one lane's hash check could read the other's
-/// half-written or differently-versioned file, a harness race a Fable audit root-caused as the source of
-/// "one run differs, a re-run passes" false reds, not engine nondeterminism. `baseline.json` and
-/// `expected.json` stay unkeyed and shared -- they are read-only pins, not a render target.
+/// The render output dir AND the `--ledger-out` path are keyed by `RC_SLOT` (env, defaulting to `"solo"`
+/// outside the fleet) AND this process's own PID, not by `root.name` alone. `qc_dir()` is now per checkout
+/// (see its own doc comment), which closes the cross-worktree half of this race, but two runs of the SAME
+/// checkout -- two `cargo test` invocations in one worktree, or a `--test-threads` future this harness
+/// does not use today -- would still collide on an unkeyed `<root>-ledger.json` or `document.pdf` exactly
+/// as they once did fleet-wide: one run's hash check or ledger read could land on the other's half-written
+/// or differently-versioned file, a harness race a Fable audit root-caused as the source of "one run
+/// differs, a re-run passes" false reds and of a ledger dump that read back in identity order although the
+/// fix that orders it by document position had already landed -- the binary was right, the shared file was
+/// not. `baseline.json` and `expected.json` stay unkeyed within `work_dir` -- they are read-only-or-append
+/// pins, not a render target, so two runs merging into the same baseline is the point, not a race.
 fn run_austenite(root: &CorpusRoot, work_dir: &Path) -> Outcome<AusOutput> {
-	let slot			= std::env::var("RC_SLOT").unwrap_or_else(|_| "solo".to_string());
-	let pid				= std::process::id();
-	let out_dir			= work_dir.join(fmt!("{}-austenite-out-{}-{}", root.name, slot, pid));
-	let ledger_json_path	= work_dir.join(fmt!("{}-ledger.json", root.name));
+	let slot				= std::env::var("RC_SLOT").unwrap_or_else(|_| "solo".to_string());
+	let pid					= std::process::id();
+	let out_dir				= work_dir.join(fmt!("{}-austenite-out-{}-{}", root.name, slot, pid));
+	let ledger_json_path	= work_dir.join(fmt!("{}-ledger-{}-{}.json", root.name, slot, pid));
 	let bin				= env!("CARGO_BIN_EXE_austenite");
 
+	// The curated reader, by name: since FIRE-2 a plain `austenite` compiles through the evaluator, which
+	// keeps no curated ledger and writes no Pearl document.
 	let output = match Command::new(bin)
+		.arg("--engine").arg("curated")
 		.arg("--ledger-out").arg(&ledger_json_path)
 		.arg("--pearl")
 		.arg(root.path)
@@ -605,7 +729,7 @@ fn run_typst(root: &CorpusRoot, work_dir: &Path) -> Outcome<TypstOutput> {
 	res!(std::fs::write(&dump_path, &dump_src));
 	let _cleanup = RemoveOnDrop(dump_path.clone());
 
-	let mut query = Command::new("typst");
+	let mut query = typst_command("typst", Some("3G"), work_dir);
 	query.arg("query").arg(&dump_path).arg("<oracle-dump>").arg("--field").arg("value").arg("--one");
 	if let Some(r) = root.typst_root { query.arg("--root").arg(r); }
 	let qout = match query.output() {
@@ -624,7 +748,7 @@ fn run_typst(root: &CorpusRoot, work_dir: &Path) -> Outcome<TypstOutput> {
 	// the same unchanged root text), not the dump copy, so the trailing invisible `#metadata` call (it
 	// draws no ink and opens no page of its own) cannot be blamed for a count that turns out to disagree.
 	let pdf_path = work_dir.join(fmt!("{}-typst.pdf", root.name));
-	let mut compile = Command::new("typst");
+	let mut compile = typst_command("typst", Some("3G"), work_dir);
 	compile.arg("compile").arg(&compile_root).arg(&pdf_path);
 	if let Some(r) = root.typst_root { compile.arg("--root").arg(r); }
 	let cout = match compile.output() {
@@ -767,9 +891,10 @@ pub fn compare_root(root: &CorpusRoot, work_dir: &Path) -> Outcome<RootReport> {
 	let ausout = res!(run_austenite(root, work_dir));
 	let pdf_sha256 = res!(sha256_of_file(&ausout.pdf_path));
 
-	// F2 runs regardless of whether the Typst oracle is even available for this root (e.g.
-	// `oxeweb-techspec`'s known incompatibility, see `corpus`) -- it checks Austenite against itself, not
-	// against Typst, so it is folded straight into `mismatches` ahead of the Typst-side checks below.
+	// F2 runs regardless of whether the Typst oracle is even available for this root (see `corpus`'s doc
+	// comment for the one incompatibility found and its 2026-09-23 re-check) -- it checks Austenite
+	// against itself, not against Typst, so it is folded straight into `mismatches` ahead of the
+	// Typst-side checks below.
 	let mut mismatches: Vec<String>	= ausout.pearl_mismatches.iter()
 		.map(|m| fmt!("prl-vs-svg: {}", m))
 		.collect();
@@ -1263,7 +1388,7 @@ pub fn baseline_path(work_dir: &Path) -> PathBuf {
 /// A missing or malformed `expected.json` is a hard error, not a swallowed `None`: the tracked reference
 /// is authoritative, so a broken file must fail the run loudly rather than silently reverting a pinned
 /// root to the always-pass bootstrap it exists to forbid.
-fn expected_baseline() -> Outcome<Baseline> {
+pub fn expected_baseline() -> Outcome<Baseline> {
 	let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("oracle").join("expected.json");
 	Baseline::read_from_file(&path)
 }

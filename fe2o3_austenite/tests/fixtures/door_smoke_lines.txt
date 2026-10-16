@@ -1,0 +1,5 @@
+skeleton ok - -:0:0
+missing_font error missing_font /main.typ:1:17
+missing_import error missing_file /main.typ:2:9
+missing_image error missing_file /main.typ:3:8
+empty_main error internal /main.typ:1:1

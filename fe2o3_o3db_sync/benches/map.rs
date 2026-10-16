@@ -10,9 +10,6 @@
 extern crate test;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_crypto::{
-    hash::HashScheme,
-};
 
 use test::Bencher;
 
@@ -38,7 +35,7 @@ fn gen_key() -> Vec<u8> {
 //      Create maps
 //-----------------------------------------------------------------------------------------------//
 #[bench]
-fn bench_create_u32_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_create_u32_hashmap(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box({
             let mut map: HashMap<u32, Vec<u8>> = HashMap::new();
@@ -48,7 +45,7 @@ fn bench_create_u32_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_create_u64_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_create_u64_hashmap(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box({
             let mut map: HashMap<u64, Vec<u8>> = HashMap::new();
@@ -58,7 +55,7 @@ fn bench_create_u64_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_create_u128_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_create_u128_hashmap(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box({
             let mut map: HashMap<u128, Vec<u8>> = HashMap::new();
@@ -68,7 +65,7 @@ fn bench_create_u128_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_create_vecu8_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_create_vecu8_hashmap(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box({
             let mut map: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
@@ -78,7 +75,7 @@ fn bench_create_vecu8_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_create_u32_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_create_u32_btreemap(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box({
             let mut map: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
@@ -88,7 +85,7 @@ fn bench_create_u32_btreemap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_create_u64_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_create_u64_btreemap(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box({
             let mut map: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
@@ -98,7 +95,7 @@ fn bench_create_u64_btreemap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_create_u128_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_create_u128_btreemap(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box({
             let mut map: BTreeMap<u128, Vec<u8>> = BTreeMap::new();
@@ -108,7 +105,7 @@ fn bench_create_u128_btreemap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_create_vecu8_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_create_vecu8_btreemap(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box({
             let mut map: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
@@ -122,7 +119,7 @@ fn bench_create_vecu8_btreemap(b: &mut Bencher) -> Result<()> {
 //-----------------------------------------------------------------------------------------------//
 
 #[bench]
-fn bench_insert_u32_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_insert_u32_hashmap(b: &mut Bencher) -> Outcome<()> {
     let mut map: HashMap<u32, Vec<u8>> = HashMap::new();
     b.iter(|| {
         let key = gen_key();
@@ -135,7 +132,7 @@ fn bench_insert_u32_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_insert_u64_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_insert_u64_hashmap(b: &mut Bencher) -> Outcome<()> {
     let mut map: HashMap<u64, Vec<u8>> = HashMap::new();
     b.iter(|| {
         let key = gen_key();
@@ -148,7 +145,7 @@ fn bench_insert_u64_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_insert_u128_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_insert_u128_hashmap(b: &mut Bencher) -> Outcome<()> {
     let mut map: HashMap<u128, Vec<u8>> = HashMap::new();
     b.iter(|| {
         let key = gen_key();
@@ -161,7 +158,7 @@ fn bench_insert_u128_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_insert_vecu8_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_insert_vecu8_hashmap(b: &mut Bencher) -> Outcome<()> {
     let mut map: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
     b.iter(|| {
         let key = gen_key();
@@ -174,7 +171,7 @@ fn bench_insert_vecu8_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_insert_u32_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_insert_u32_btreemap(b: &mut Bencher) -> Outcome<()> {
     let mut map: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     b.iter(|| {
         let key = gen_key();
@@ -187,7 +184,7 @@ fn bench_insert_u32_btreemap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_insert_u64_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_insert_u64_btreemap(b: &mut Bencher) -> Outcome<()> {
     let mut map: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
     b.iter(|| {
         let key = gen_key();
@@ -200,7 +197,7 @@ fn bench_insert_u64_btreemap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_insert_u128_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_insert_u128_btreemap(b: &mut Bencher) -> Outcome<()> {
     let mut map: BTreeMap<u128, Vec<u8>> = BTreeMap::new();
     b.iter(|| {
         let key = gen_key();
@@ -213,7 +210,7 @@ fn bench_insert_u128_btreemap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_insert_vecu8_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_insert_vecu8_btreemap(b: &mut Bencher) -> Outcome<()> {
     let mut map: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
     b.iter(|| {
         let key = gen_key();
@@ -230,7 +227,7 @@ fn bench_insert_vecu8_btreemap(b: &mut Bencher) -> Result<()> {
 //-----------------------------------------------------------------------------------------------//
 
 #[bench]
-fn bench_get_u32_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_get_u32_hashmap(b: &mut Bencher) -> Outcome<()> {
     let val = gen_val();
     let mut map: HashMap<u32, Vec<u8>> = HashMap::new();
     map.insert(42u32, val);
@@ -243,7 +240,7 @@ fn bench_get_u32_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_get_u64_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_get_u64_hashmap(b: &mut Bencher) -> Outcome<()> {
     let val = gen_val();
     let mut map: HashMap<u64, Vec<u8>> = HashMap::new();
     map.insert(42u64, val);
@@ -256,7 +253,7 @@ fn bench_get_u64_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_get_u128_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_get_u128_hashmap(b: &mut Bencher) -> Outcome<()> {
     let val = gen_val();
     let mut map: HashMap<u128, Vec<u8>> = HashMap::new();
     map.insert(42u128, val);
@@ -269,7 +266,7 @@ fn bench_get_u128_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_get_vecu8_hashmap(b: &mut Bencher) -> Result<()> {
+fn bench_get_vecu8_hashmap(b: &mut Bencher) -> Outcome<()> {
     let key = gen_key();
     let val = gen_val();
     let mut map: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
@@ -283,7 +280,7 @@ fn bench_get_vecu8_hashmap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_get_u32_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_get_u32_btreemap(b: &mut Bencher) -> Outcome<()> {
     let val = gen_val();
     let mut map: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     map.insert(42u32, val);
@@ -296,7 +293,7 @@ fn bench_get_u32_btreemap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_get_u64_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_get_u64_btreemap(b: &mut Bencher) -> Outcome<()> {
     let val = gen_val();
     let mut map: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
     map.insert(42u64, val);
@@ -309,7 +306,7 @@ fn bench_get_u64_btreemap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_get_u128_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_get_u128_btreemap(b: &mut Bencher) -> Outcome<()> {
     let val = gen_val();
     let mut map: BTreeMap<u128, Vec<u8>> = BTreeMap::new();
     map.insert(42u128, val);
@@ -322,7 +319,7 @@ fn bench_get_u128_btreemap(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_get_vecu8_btreemap(b: &mut Bencher) -> Result<()> {
+fn bench_get_vecu8_btreemap(b: &mut Bencher) -> Outcome<()> {
     let key = gen_key();
     let val = gen_val();
     let mut map: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();

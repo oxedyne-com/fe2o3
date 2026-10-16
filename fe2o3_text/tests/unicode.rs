@@ -711,3 +711,78 @@ fn bidi_basics() -> Outcome<()> {
 
 	Ok(())
 }
+
+/// Stepping a cluster at a time with `grapheme_len_at`, which reads only the cluster in hand, lands on
+/// exactly the boundaries of the conformance file.
+#[test]
+fn grapheme_len_at_walks_the_conformance_boundaries() -> Outcome<()> {
+
+	let text = res!(data("GraphemeBreakTest.txt"));
+	let mut tally = Tally::new("GraphemeBreakTest by grapheme_len_at");
+
+	for (n, line) in text.lines().enumerate() {
+		if line.starts_with('#') || line.trim().is_empty() {
+			continue;
+		}
+		let (s, want)	= res!(break_case(line));
+		let mut got		= vec![0];
+		let mut at		= 0;
+		while at < s.len() {
+			let len = segment::grapheme_len_at(&s, at);
+			if len == 0 {
+				break;
+			}
+			at += len;
+			got.push(at);
+		}
+		tally.case(n + 1, got == want, fmt!("{:?}: got {:?}, expected {:?}", s, got, want));
+	}
+
+	tally.finish()
+}
+
+/// The UTR #25 classes, on the examples the `unicode-math-class` crate Typst reads documents.
+#[test]
+fn math_classes_match_the_report() -> Outcome<()> {
+	use oxedyne_fe2o3_text::unicode::math::{class, MathClass};
+	let cases = [
+		('0', Some(MathClass::Normal)), ('a', Some(MathClass::Alphabetic)), ('𝔸', Some(MathClass::Alphabetic)),
+		('+', Some(MathClass::Vary)), ('×', Some(MathClass::Binary)), ('(', Some(MathClass::Opening)),
+		(')', Some(MathClass::Closing)), (',', Some(MathClass::Punctuation)), ('|', Some(MathClass::Fence)),
+		('=', Some(MathClass::Relation)), ('∑', Some(MathClass::Large)), ('😃', None),
+	];
+	for (c, want) in cases {
+		if class(c) != want {
+			return Err(err!("{:?}: class {:?}, expected {:?}", c, class(c), want; Test));
+		}
+	}
+	Ok(())
+}
+
+/// XID_Start and XID_Continue: letters of several scripts, a combining mark only continuing, and the
+/// ASCII fast path agreeing with the table.
+#[test]
+fn xid_classes() -> Outcome<()> {
+	use oxedyne_fe2o3_text::unicode::property::{is_xid_continue, is_xid_start, Binary};
+	for c in ['a', 'Z', 'é', 'λ', 'ж', '中', 'ア', '한'] {
+		if !is_xid_start(c) || !is_xid_continue(c) {
+			return Err(err!("{:?} should start and continue an identifier", c; Test));
+		}
+	}
+	for c in ['\u{301}', '1', '_', '\u{200D}'] {
+		if is_xid_start(c) {
+			return Err(err!("{:?} should not start an identifier", c; Test));
+		}
+	}
+	for c in ['\u{301}', '1', '_'] {
+		if !is_xid_continue(c) {
+			return Err(err!("{:?} should continue an identifier", c; Test));
+		}
+	}
+	for c in (0u8..128).map(char::from) {
+		if is_xid_start(c) != Binary::XID_START.contains(c) || is_xid_continue(c) != Binary::XID_CONTINUE.contains(c) {
+			return Err(err!("ASCII {:?} disagrees with the table", c; Test));
+		}
+	}
+	Ok(())
+}

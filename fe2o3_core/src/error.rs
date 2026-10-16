@@ -16,8 +16,14 @@
 //!
 //! ### `ok!` - Basic Error Propagation
 //! ```rust
-//! // Equivalent to the ? operator but with prefix syntax.
-//! let file = ok!(File::create("data.txt"));
+//! use oxedyne_fe2o3_core::prelude::*;
+//!
+//! fn main() -> Outcome<()> {
+//!     // Equivalent to the ? operator but with prefix syntax.
+//!     let dir = ok!(std::env::current_dir());
+//!     assert!(dir.is_absolute());
+//!     Ok(())
+//! }
 //! ```
 //! - Lightweight error propagation using standard `From` trait
 //! - A prefix alias for the `?` operator suffix
@@ -25,8 +31,14 @@
 //!
 //! ### `res!` - Contextual Error Propagation
 //! ```rust
-//! // Adds context and tags to errors.
-//! let file = res!(File::create("data.txt"), IO, File);
+//! use oxedyne_fe2o3_core::prelude::*;
+//!
+//! fn main() -> Outcome<()> {
+//!     // Adds context and tags to errors.
+//!     let dir = res!(std::env::current_dir(), IO, File);
+//!     assert!(dir.is_absolute());
+//!     Ok(())
+//! }
 //! ```
 //! - Short for "result"
 //! - Adds file/line context and error tags
@@ -36,8 +48,18 @@
 //!
 //! ### `catch!` - Panic-Catching Error Propagation
 //! ```rust
-//! // Converts both errors and panics into Outcome
-//! let value = catch!(compute_result(), Numeric, Overflow);
+//! use oxedyne_fe2o3_core::prelude::*;
+//!
+//! fn compute_result() -> Outcome<u8> {
+//!     Ok(res!(u8::try_from(200u32 + 55)))
+//! }
+//!
+//! fn main() -> Outcome<()> {
+//!     // Converts both errors and panics into an Outcome.
+//!     let value = catch!(compute_result(), Numeric, Overflow);
+//!     assert_eq!(value, 255);
+//!     Ok(())
+//! }
 //! ```
 //! - Catches unwinding panics and converts them to errors
 //! - Adds context and tags like `ok!`
@@ -49,12 +71,23 @@
 //! Error tags provide multi-dimensional error classification:
 //!
 //! ```rust
-//! // Multiple tags can be attached
-//! let result = res!(operation(), IO, Network, Timeout);
+//! use oxedyne_fe2o3_core::prelude::*;
 //!
-//! // Tags can be matched efficiently
-//! if err.tags().contains(&ErrTag::Timeout) {
-//!     // Handle timeout case
+//! fn operation() -> Outcome<()> {
+//!     Err(err!("The peer did not answer in time."; Timeout))
+//! }
+//!
+//! fn fetch() -> Outcome<()> {
+//!     // Multiple tags can be attached.
+//!     res!(operation(), IO, Network, Timeout);
+//!     Ok(())
+//! }
+//!
+//! fn main() {
+//!     // Tags can be matched.
+//!     if let Err(e) = fetch() {
+//!         assert!(e.tags().contains(&ErrTag::Timeout));
+//!     }
 //! }
 //! ```
 //!
@@ -124,6 +157,7 @@ pub enum ErrTag {
     Exists,
     Fatal,
     File,
+    Font, // A typeface or font-family resolution failure specifically, distinct from a general Missing/Input.
     Format,
     Identifier,
     Index,
@@ -168,6 +202,7 @@ pub enum ErrTag {
     Wire,
     Write,
     Unauthorised,
+    Unconfirmed, // An effect that may well have happened, whose confirmation did not come: not a failure.
     Underflow,
     Unexpected,
     Unimplemented,
@@ -229,20 +264,59 @@ pub enum Error<T: GenTag> {
 
 impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
 
+    /// Every tag the error carries, its own and those of each error it wraps, outermost first. A
+    /// `res!` frame adds no tags of its own, so reading the outer frame alone loses the tags the fault
+    /// was raised with.
     pub fn tags(&self) -> Vec<T> {
+        let mut out = Vec::new();
+        self.gather_tags(&mut out);
+        out
+    }
+
+    fn gather_tags(&self, out: &mut Vec<T>) {
         match self {
             Error::Local(ErrMsg { tags: t, ..}) |
-            Error::Other(ErrMsg { tags: t, ..}) => t.to_vec(),
-            Error::Upstream(_, ErrMsg { tags: t, ..}) => t.to_vec(),
-            Error::Collection(boxerrs) => {
-                let mut t = Vec::new();
-                for e in boxerrs {
-                    for tag in (*e).tags() {
-                        t.push(tag.clone())
+            Error::Other(ErrMsg { tags: t, ..}) => out.extend(t.iter().cloned()),
+            Error::Upstream(arc_e, ErrMsg { tags: t, ..}) => {
+                out.extend(t.iter().cloned());
+                // A foreign cause may itself wrap one of ours, so the walk goes on through it.
+                let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(arc_e.as_ref());
+                while let Some(c) = cause {
+                    if let Some(e) = c.downcast_ref::<Error<T>>() {
+                        e.gather_tags(out);
+                        break;
                     }
+                    cause = c.source();
                 }
-                t
             },
+            Error::Collection(boxerrs) => {
+                for e in boxerrs {
+                    e.gather_tags(out);
+                }
+            },
+        }
+    }
+
+    /// The first cause of type `C` in the error's chain, outermost first: how a caller reads back a
+    /// typed fact the fault was raised with, such as the source site it is charged to.
+    pub fn find_cause<C: std::error::Error + 'static>(&self) -> Option<&C> {
+        match self {
+            Error::Local(_) | Error::Other(_) => None,
+            Error::Upstream(arc_e, _) => {
+                let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(arc_e.as_ref());
+                while let Some(c) = cause {
+                    if let Some(found) = c.downcast_ref::<C>() {
+                        return Some(found);
+                    }
+                    // One of ours may be a collection, which has no single source to follow.
+                    if let Some(e) = c.downcast_ref::<Error<T>>() {
+                        return e.find_cause::<C>();
+                    }
+                    cause = c.source();
+                }
+                None
+            },
+            Error::Collection(boxerrs) => boxerrs.iter().find_map(|e| e.find_cause::<C>()),
         }
     }
 
@@ -784,6 +858,108 @@ mod tests {
             Ok(_) => (),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_tags_are_gathered_through_every_wrapping_frame() -> Outcome<()> {
+        fn inner() -> Outcome<()> {
+            Err(err!("The store is at its cap."; Excessive, LimitReached))
+        }
+        fn middle() -> Outcome<()> {
+            res!(inner());	// A frame with no tags of its own.
+            Ok(())
+        }
+        fn outer() -> Outcome<()> {
+            res!(middle(), IO);
+            Ok(())
+        }
+        let e = match outer() {
+            Ok(()) => return Err(err!("The error was supposed to propagate."; Bug)),
+            Err(e) => e,
+        };
+        let tags = e.tags();
+        assert_eq!(tags, vec![ErrTag::IO, ErrTag::Excessive, ErrTag::LimitReached], "outermost first");
+        Ok(())
+    }
+
+    #[test]
+    fn test_tags_pass_through_a_foreign_error_that_wraps_one_of_ours() -> Outcome<()> {
+        // Somebody else's error type, whose source is one of ours.
+        #[derive(Debug)]
+        struct Foreign(Error<ErrTag>);
+        impl fmt::Display for Foreign {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0.plain())
+            }
+        }
+        impl std::error::Error for Foreign {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let fault = err!("A chunk took the body past its limit."; Input, TooBig);
+        let e = err!(Foreign(fault), "The answer could not be read."; IO);
+        let e = Error::Upstream(Arc::new(e), ErrMsg { tags: &[], msg: errmsg!() });
+        assert_eq!(e.tags(), vec![ErrTag::IO, ErrTag::Input, ErrTag::TooBig],
+            "the walk goes on through the foreign frame to the error it wraps");
+        Ok(())
+    }
+
+    // Somebody else's error type that wraps one of ours, as a typed source-site frame does.
+    #[derive(Debug)]
+    struct Site {
+        line:   usize,
+        inner:  Error<ErrTag>,
+    }
+
+    impl fmt::Display for Site {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.inner.plain())
+        }
+    }
+
+    impl std::error::Error for Site {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.inner)
+        }
+    }
+
+    fn propagated(e: Error<ErrTag>) -> Error<ErrTag> {
+        fn pass(e: Error<ErrTag>) -> Outcome<()> {
+            res!(Err::<(), Error<ErrTag>>(e));
+            Ok(())
+        }
+        match pass(e) {
+            Ok(()) => err!("The error was supposed to propagate."; Bug),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn test_a_typed_cause_is_found_and_tags_pass_through_it() -> Outcome<()> {
+        let fault = err!("The chapter could not be read."; File, Read);
+        let sited = err!(Site { line: 4, inner: fault }, "Assembly stopped."; Input);
+        let e = propagated(propagated(sited));
+
+        assert_eq!(e.find_cause::<Site>().map(|s| s.line), Some(4), "the site, three frames down");
+        assert!(e.find_cause::<io::Error>().is_none(), "no cause of a type the chain does not hold");
+        assert_eq!(e.tags(), vec![ErrTag::Input, ErrTag::File, ErrTag::Read],
+            "the walk goes on through a foreign frame to the error it wraps");
+
+        let gone = io::Error::new(io::ErrorKind::NotFound, "no such file");
+        let e = propagated(err!(gone, "Could not read the chapter."; File, Read));
+        assert_eq!(e.find_cause::<io::Error>().map(|io| io.kind()), Some(io::ErrorKind::NotFound));
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_collection_gathers_and_searches_every_member() -> Outcome<()> {
+        let a = propagated(err!("First."; Input));
+        let b = propagated(err!(Site { line: 9, inner: err!("Second."; Missing) }, "Wrapped."; File));
+        let e = Error::Collection(vec![Box::new(a), Box::new(b)]);
+        assert_eq!(e.tags(), vec![ErrTag::Input, ErrTag::File, ErrTag::Missing]);
+        assert_eq!(e.find_cause::<Site>().map(|s| s.line), Some(9));
         Ok(())
     }
 }

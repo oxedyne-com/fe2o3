@@ -8,14 +8,18 @@
 //!   a single table, which the anti-entropy loop needs for its digest
 //!   round. `{hex_id}` is the lowercase-hex encoding of the 32-byte
 //!   [`RecordId`].
-//! - Value: `Dat::BU8(record.value)`. The record's table and id are
+//! - Value: `Dat::BU64(record.value)`. The record's table and id are
 //!   recoverable from the key, so the stored value payload carries only
-//!   the application-opaque bytes.
+//!   the application-opaque bytes. The width matters: a `Dat::BU8` writes
+//!   its length in one byte, so a value of 256 bytes or more was stored
+//!   with its length cut modulo 256 and read back truncated (300 bytes
+//!   came back as 44). Reads still accept every width.
 //!
 //! Reads block on the responder channel through the synchronous
-//! [`OzoneApi::get_wait`] wrapper. Writes and deletes block on the
-//! responder for the `Chunks` and `KeyExists` messages the store path
-//! emits, surfacing any error along the way as an [`Outcome`] error.
+//! [`OzoneApi::get_wait`] wrapper. Writes and deletes block on
+//! `Responder::recv_store_ack`, which waits for each record to be
+//! written and then durable, surfacing any error along the way as an
+//! [`Outcome`] error.
 //!
 //! # Performance notes
 //!
@@ -27,27 +31,30 @@
 //!   bottleneck for large ones. A scan v2 that returns values is the
 //!   planned optimisation; the [`Storage`] trait does not need to
 //!   change to adopt it.
-//! - The content hash is the splitmix64-based 32-byte hash used by
-//!   [`MemoryStorage`](super::storage::MemoryStorage) so that a mixed
-//!   cluster (in-memory peer + O3db-backed peer) converges. A
-//!   cryptographic replacement can slot in without touching the trait.
+//! - The content hash is [`content_hash`], the SHA3-256 protocol hash
+//!   that [`MemoryStorage`](super::storage::MemoryStorage) uses too, so
+//!   that a mixed cluster (in-memory peer + O3db-backed peer) converges.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+use super::config::DistOzoneConfig;
+use super::engine::DistOzone;
 use super::record::{
 	Record,
 	RecordDigest,
 	RecordId,
+	content_hash,
 };
+use super::resolve::Resolver;
 use super::storage::Storage;
 
 use crate::O3db;
 use crate::base::{
+	cfg::OzoneConfig,
 	constant,
-	id::usr_kind_id_deleted,
 };
-use crate::comm::msg::OzoneMsg;
+use crate::data::core::RestSchemesInput;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
@@ -61,7 +68,10 @@ use oxedyne_fe2o3_jdat::{
 	id::NumIdDat,
 };
 
-use std::sync::Arc;
+use std::{
+	path::PathBuf,
+	sync::Arc,
+};
 
 
 /// Storage adapter persisting records in a local [`O3db`] instance.
@@ -80,6 +90,7 @@ pub struct O3dbStorage<
 > {
 	db:		Arc<O3db<UIDL, UID, ENC, KH, PR, CS>>,
 	user:	UID,
+	closed:	bool,	// Set once a close has been tried, so that the drop does not try again.
 }
 
 impl<
@@ -97,7 +108,37 @@ impl<
 	/// authorship beyond this. Applications that need finer-grained
 	/// multi-user bookkeeping should layer that above the adapter.
 	pub fn new(db: Arc<O3db<UIDL, UID, ENC, KH, PR, CS>>, user: UID) -> Self {
-		Self { db, user }
+		Self { db, user, closed: false }
+	}
+
+	/// The database this adapter writes to, for a caller that also reads it directly.
+	/// A clone of this `Arc` keeps [`Self::close`] from shutting the database down.
+	pub fn db(&self) -> &Arc<O3db<UIDL, UID, ENC, KH, PR, CS>> {
+		&self.db
+	}
+
+	/// Shuts the database down, returning once every bot has stopped and what was acknowledged
+	/// is on disk.
+	///
+	/// The adapter must hold the only reference to the database. Another holder would be left
+	/// with a handle to a stopped database, so while one remains this returns an error naming
+	/// how many, and the database stays open under them. [`Arc::get_mut`] makes the check and
+	/// the claim in one step, so no holder can slip in between.
+	///
+	/// An adapter dropped without a close shuts the database down itself, waiting at most
+	/// `USER_REQUEST_TIMEOUT` for the bots, and logs a failure rather than return it.
+	pub fn close(mut self) -> Outcome<()> {
+		let others = (Arc::strong_count(&self.db) + Arc::weak_count(&self.db)).saturating_sub(1);
+		match Arc::get_mut(&mut self.db) {
+			Some(db)	=> {
+				self.closed = true;
+				db.close()
+			},
+			None		=> Err(err!(
+				"Cannot close the O3db behind this storage: {} other reference(s) to it \
+				are still held; drop them first.", others;
+				Invalid, Input, Unexpected)),
+		}
 	}
 
 	/// Composite key format: `"{table}:{hex_id}"`.
@@ -143,37 +184,20 @@ impl<
 		Ok(RecordId::from_bytes(arr))
 	}
 
-	/// Drains the two-message acknowledgement a successful store emits:
-	/// `Chunks(_)` then `KeyExists(_)`.
+	/// Waits for the store's acknowledgement: its record count, each record written and
+	/// then durable.  Whether the key existed is not needed here.
 	fn drain_store_ack(
 		resp:	&crate::comm::response::Responder<UIDL, UID, ENC, KH>,
 	)
 		-> Outcome<()>
 	{
-		match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-			OzoneMsg::Chunks(_) => {},
-			OzoneMsg::Error(e) => return Err(err!(e,
-				"O3dbStorage: store ack failed at Chunks phase.";
-				IO, Write)),
-			other => return Err(err!(
-				"O3dbStorage: unexpected message at Chunks phase: {:?}.", other;
-				Unexpected, Channel)),
-		}
-		match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-			OzoneMsg::KeyExists(_) => Ok(()),
-			OzoneMsg::Error(e) => Err(err!(e,
-				"O3dbStorage: store ack failed at KeyExists phase.";
-				IO, Write)),
-			other => Err(err!(
-				"O3dbStorage: unexpected message at KeyExists phase: {:?}.",
-				other;
-				Unexpected, Channel)),
-		}
+		res!(resp.recv_store_ack());
+		Ok(())
 	}
 
-	/// Accepts the whole unsigned-bytes family: the store path always writes
-	/// `Dat::BU8`, but the other widths show up where a caller had
-	/// pre-existing data under a different width.
+	/// Accepts the whole unsigned-bytes family: the store path writes `Dat::BU64`,
+	/// but the other widths show up where a caller had pre-existing data under a
+	/// different width.
 	fn extract_value(dat: &Dat) -> Outcome<Vec<u8>> {
 		match dat {
 			Dat::BU8(b)	 | Dat::BU16(b) | Dat::BU32(b) | Dat::BU64(b) =>
@@ -194,11 +218,38 @@ impl<
 	PR:		Hasher + 'static,
 	CS:		Checksummer + 'static,
 >
+	Drop for O3dbStorage<UIDL, UID, ENC, KH, PR, CS>
+{
+	// Stops the bots of a database whose adapter went out of scope without a close, as an error
+	// path or an unwinding panic does, so that they do not run on over the files for ever.  A
+	// database another holder shares is theirs to close.  This neither panics nor waits past
+	// the bound, so a bot that will not stop is logged and left.
+	fn drop(&mut self) {
+		if self.closed || Arc::strong_count(&self.db) != 1 {
+			return;
+		}
+		if let Err(e) = self.db.close_within(constant::USER_REQUEST_TIMEOUT) {
+			error!(sync_log::stream(), err!(e,
+				"The storage was dropped without a close, and the database behind it did not \
+				shut down cleanly.";
+				IO, Thread));
+		}
+	}
+}
+
+impl<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL> + 'static,
+	ENC:	Encrypter + 'static,
+	KH:		Hasher + 'static,
+	PR:		Hasher + 'static,
+	CS:		Checksummer + 'static,
+>
 	Storage for O3dbStorage<UIDL, UID, ENC, KH, PR, CS>
 {
 	fn put(&self, record: &Record) -> Outcome<()> {
 		let key = Self::encode_key(&record.table, &record.id);
-		let value = Dat::BU8(record.value.clone());
+		let value = Dat::BU64(record.value.clone());
 		let resp = res!(self.db.api().store(key, value, self.user));
 		Self::drain_store_ack(&resp)
 	}
@@ -208,15 +259,6 @@ impl<
 		match res!(self.db.api().get_wait(&key, None)) {
 			None => Ok(None),
 			Some((dat, _meta)) => {
-				// A deletion tombstone is stored as
-				// `Dat::Usr(usr_kind_id_deleted(), _)`; `get_wait`
-				// returns it verbatim, so we have to recognise it
-				// here and surface "not present" to the caller.
-				if let Dat::Usr(kind, _) = &dat {
-					if *kind == usr_kind_id_deleted() {
-						return Ok(None);
-					}
-				}
 				let value = res!(Self::extract_value(&dat));
 				Ok(Some(Record {
 					id:		*id,
@@ -228,28 +270,18 @@ impl<
 	}
 
 	fn delete(&self, table: &str, id: &RecordId) -> Outcome<bool> {
-		// Fetch first to determine whether a record was present; the
-		// overwrite below cannot distinguish "overwrote an existing
-		// record" from "wrote a fresh tombstone", and [`Storage::delete`]
-		// promises the former answer.
-		let existed = res!(self.get(table, id)).is_some();
-		if !existed {
+		// Asked of the key index first, since [`Storage::delete`] promises whether a record was
+		// there, which writing a tombstone does not tell.
+		let key = Self::encode_key(table, id);
+		if !res!(self.db.api().contains_wait(&key, None)) {
 			return Ok(false);
 		}
-		// Overwrite the key with a tombstone via the ordinary `store`
-		// path. Going through `store` rather than
-		// `delete_using_responder` means the tombstone flows through
-		// the same encryption and cache pipeline as a regular write,
-		// so subsequent `get` calls see the tombstone on the first
-		// read rather than racing the deletion path's unencrypted
-		// direct-to-disk write.
-		let key = Self::encode_key(table, id);
-		let tombstone = Dat::Usr(
-			usr_kind_id_deleted(),
-			Some(Box::new(Dat::Empty)),
-		);
-		let resp = res!(self.db.api().store(key, tombstone, self.user));
-		res!(Self::drain_store_ack(&resp));
+		// The delete path writes the unencrypted tombstone the index and a scan recognise.
+		// Until 2026-10-16 this went through `store`, which encrypted it on an encrypted store,
+		// so the key read as present and a scan listed it.
+		let resp = self.db.api().responder();
+		res!(self.db.api().delete_using_responder(&key, self.user, None, resp.clone()));
+		res!(resp.recv_delete_ack());
 		Ok(true)
 	}
 
@@ -275,27 +307,56 @@ impl<
 }
 
 
-/// A splitmix64-widened 32-byte hash, matching the one
-/// [`MemoryStorage`](super::storage::MemoryStorage) uses so that a mixed
-/// cluster of in-memory and O3db-backed peers does not disagree on digests.
-/// Not cryptographic; see the module doc comment.
-fn content_hash(bytes: &[u8]) -> [u8; 32] {
-	let mut state: u64 = 0x9E3779B97F4A7C15;
-	for chunk in bytes.chunks(8) {
-		let mut buf = [0u8; 8];
-		buf[..chunk.len()].copy_from_slice(chunk);
-		let word = u64::from_le_bytes(buf);
-		state = state.wrapping_add(word);
-		state = (state ^ (state >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-		state = (state ^ (state >> 27)).wrapping_mul(0x94D049BB133111EB);
-		state ^= state >> 31;
+impl<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL> + 'static,
+	ENC:	Encrypter + 'static,
+	KH:		Hasher + 'static,
+	PR:		Hasher + 'static,
+	CS:		Checksummer + 'static,
+	R:		Resolver,
+>
+	DistOzone<O3dbStorage<UIDL, UID, ENC, KH, PR, CS>, R>
+{
+	/// Opens the Ozone database at `db_root` and runs a distributed engine over it. This was
+	/// first sketched as `O3db::new_distributed`.
+	///
+	/// The database is created if the root is new and reopened, with its data, if not. A
+	/// configuration already saved in the root wins over `ozone_cfg`, which is read only for a
+	/// root without one. Garbage collection is on. `uid` is both the database's user template
+	/// and the identity that stamps every write the engine makes. Pair with [`Self::close`]; an
+	/// engine dropped without one still stops the database, but only logs a failure to.
+	pub fn over_o3db(
+		db_root:	PathBuf,
+		ozone_cfg:	Option<OzoneConfig>,
+		dist_cfg:	DistOzoneConfig,
+		schemes:	RestSchemesInput<ENC, KH, PR, CS>,
+		uid:		UID,
+		resolver:	R,
+	)
+		-> Outcome<Self>
+	{
+		let mut db = res!(O3db::new(db_root, ozone_cfg, schemes, uid));
+		res!(db.start("dist"));
+		let gc = match db.updated_api() {
+			Ok(api)		=> api.activate_gc(true),
+			Err(e)		=> Err(e),
+		};
+		if let Err(e) = gc {
+			// The bots are running, so stop them before reporting the fault.
+			let _ = db.shutdown();
+			return Err(e);
+		}
+		let storage = O3dbStorage::new(Arc::new(db), uid);
+		Self::with_resolver(dist_cfg, storage, resolver)
 	}
-	let mut out = [0u8; 32];
-	for i in 0..4 {
-		let limb = state.wrapping_mul(0x9E3779B97F4A7C15 ^ (i as u64));
-		out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+
+	/// Shuts down the database the engine was opened over by [`Self::over_o3db`]. Fails, leaving
+	/// the database open, while anything else still holds a reference to it; see
+	/// [`O3dbStorage::close`].
+	pub fn close(self) -> Outcome<()> {
+		self.into_storage().close()
 	}
-	out
 }
 
 

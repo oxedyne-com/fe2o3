@@ -334,53 +334,68 @@ fn angle(ux: f64, uy: f64, vx: f64, vy: f64) -> f64 {
 /// above a `<path>` is the caller's format, not this crate's. An empty path writes an empty string.
 pub fn write_path_data(path: &Path) -> String {
 	let mut out = String::new();
-	for seg in path.segs() {
-		if !out.is_empty() {
-			out.push(' ');
-		}
-		match *seg {
-			Seg::MoveTo(p) => {
-				out.push('M');
-				point(&mut out, p);
-			},
-			Seg::LineTo(p) => {
-				out.push('L');
-				point(&mut out, p);
-			},
-			Seg::QuadTo(c, p) => {
-				out.push('Q');
-				point(&mut out, c);
-				out.push(' ');
-				point(&mut out, p);
-			},
-			Seg::CubicTo(c0, c1, p) => {
-				out.push('C');
-				point(&mut out, c0);
-				out.push(' ');
-				point(&mut out, c1);
-				out.push(' ');
-				point(&mut out, p);
-			},
-			Seg::Close => out.push('Z'),
-		}
-	}
+	write_path_data_into(&mut out, path);
 	out
 }
 
-/// Appends a point as `x,y`, each coordinate in its shortest exact form.
-fn point(out: &mut String, p: Pt) {
-	out.push_str(&num(p.x));
-	out.push(',');
-	out.push_str(&num(p.y));
+/// As [`write_path_data`], appending to `out` -- a `String`, or any other [`std::fmt::Write`] -- with no
+/// allocation of its own, so a caller writing many paths into one document formats every number straight
+/// into the document.
+pub fn write_path_data_into<W: std::fmt::Write>(out: &mut W, path: &Path) {
+	let mut first = true;
+	for seg in path.segs() {
+		if !first {
+			push(out, " ");
+		}
+		first = false;
+		match *seg {
+			Seg::MoveTo(p) => {
+				push(out, "M");
+				point(out, p);
+			},
+			Seg::LineTo(p) => {
+				push(out, "L");
+				point(out, p);
+			},
+			Seg::QuadTo(c, p) => {
+				push(out, "Q");
+				point(out, c);
+				push(out, " ");
+				point(out, p);
+			},
+			Seg::CubicTo(c0, c1, p) => {
+				push(out, "C");
+				point(out, c0);
+				push(out, " ");
+				point(out, c1);
+				push(out, " ");
+				point(out, p);
+			},
+			Seg::Close => push(out, "Z"),
+		}
+	}
 }
 
-/// One coordinate, in the shortest decimal that reads back to the same `f32`.
+// A `String` cannot refuse a write, and another sink's refusal is its own to report, so the result is
+// dropped here rather than threaded through every segment.
+fn push<W: std::fmt::Write>(out: &mut W, s: &str) {
+	let _ = out.write_str(s);
+}
+
+/// Appends a point as `x,y`, each coordinate in its shortest exact form.
+fn point<W: std::fmt::Write>(out: &mut W, p: Pt) {
+	num(out, p.x);
+	push(out, ",");
+	num(out, p.y);
+}
+
+/// Appends one coordinate, in the shortest decimal that reads back to the same `f32`.
 ///
 /// Rust's own float formatting already gives the shortest round-tripping form -- `10` for `10.0`,
 /// `0.15` for a fifth and a bit -- so a whole coordinate carries no trailing `.0` and the data stays
-/// terse, exactly as a drawing program would write it.
-fn num(v: f32) -> String {
-	fmt!("{}", v)
+/// terse, exactly as a drawing program would write it. It formats on the stack, so nothing is allocated.
+fn num<W: std::fmt::Write>(out: &mut W, v: f32) {
+	let _ = write!(out, "{}", v);
 }
 
 /// Renders the SVG presentation attributes for a fill and a stroke, as one attribute string.
@@ -417,15 +432,15 @@ pub fn presentation(fill: Option<Rgba>, stroke: Option<(Rgba, &Stroke)>) -> Stri
 		if !c.is_opaque() {
 			at.push(fmt!("stroke-opacity=\"{}\"", opacity(c)));
 		}
-		at.push(fmt!("stroke-width=\"{}\"", num(pen.width)));
+		at.push(fmt!("stroke-width=\"{}\"", pen.width));
 		at.push(fmt!("stroke-linecap=\"{}\"", cap(pen.cap)));
 		at.push(fmt!("stroke-linejoin=\"{}\"", join(pen.join)));
-		at.push(fmt!("stroke-miterlimit=\"{}\"", num(pen.miter_limit)));
+		at.push(fmt!("stroke-miterlimit=\"{}\"", pen.miter_limit));
 		if let Some(d) = &pen.dash {
-			let lens: Vec<String> = d.pattern.iter().map(|v| num(*v)).collect();
+			let lens: Vec<String> = d.pattern.iter().map(|v| fmt!("{}", v)).collect();
 			at.push(fmt!("stroke-dasharray=\"{}\"", lens.join(",")));
 			if d.offset != 0.0 {
-				at.push(fmt!("stroke-dashoffset=\"{}\"", num(d.offset)));
+				at.push(fmt!("stroke-dashoffset=\"{}\"", d.offset));
 			}
 		}
 	}
@@ -879,6 +894,58 @@ mod tests {
 		pb.close();
 		let p = res!(pb.finish());
 		assert_eq!(write_path_data(&p), "M1,2 L3,4 Q5,6 7,8 C9,10 11,12 13,14 Z");
+		Ok(())
+	}
+
+	#[test]
+	fn test_writing_into_a_buffer_matches_a_string_per_number_27a() -> Outcome<()> {
+		// The in-place writer against the writer it replaced, which formatted each coordinate into a
+		// `String` of its own: byte for byte over thousands of paths of assorted coordinates, whole,
+		// fractional, negative, tiny and huge, each appended after text already in the buffer.
+		fn old(path: &Path) -> String {
+			let n = |v: f32| fmt!("{}", v);
+			let mut out = String::new();
+			for seg in path.segs() {
+				if !out.is_empty() {
+					out.push(' ');
+				}
+				match *seg {
+					Seg::MoveTo(p)			=> out.push_str(&fmt!("M{},{}", n(p.x), n(p.y))),
+					Seg::LineTo(p)			=> out.push_str(&fmt!("L{},{}", n(p.x), n(p.y))),
+					Seg::QuadTo(c, p)		=> out.push_str(&fmt!("Q{},{} {},{}", n(c.x), n(c.y), n(p.x), n(p.y))),
+					Seg::CubicTo(a, b, p)	=> out.push_str(&fmt!("C{},{} {},{} {},{}",
+						n(a.x), n(a.y), n(b.x), n(b.y), n(p.x), n(p.y))),
+					Seg::Close				=> out.push('Z'),
+				}
+			}
+			out
+		}
+		let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+		let mut coord = move || -> f32 {
+			state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			let r = (state >> 33) as u32;
+			match r % 4 {
+				0 => ((r >> 2) % 2000) as f32 - 1000.0,						// whole
+				1 => ((r >> 2) % 200_000) as f32 / 64.0 - 1500.0,			// font units at a size
+				2 => f32::from_bits(0x3000_0000 + (r >> 4)) * if r & 8 == 0 { 1.0 } else { -1.0 },	// tiny to two
+				_ => (r >> 2) as f32 * 1.0e-3,
+			}
+		};
+		let mut buf = String::from("<path d=\"");
+		for _ in 0..4000 {
+			let mut pb = PathBuilder::new();
+			pb.move_to(Pt::new(coord(), coord()));
+			pb.line_to(Pt::new(coord(), coord()));
+			pb.quad_to(Pt::new(coord(), coord()), Pt::new(coord(), coord()));
+			pb.cubic_to(Pt::new(coord(), coord()), Pt::new(coord(), coord()), Pt::new(coord(), coord()));
+			pb.close();
+			let p = res!(pb.finish());
+			let want = old(&p);
+			assert_eq!(write_path_data(&p), want);
+			let at = buf.len();
+			write_path_data_into(&mut buf, &p);
+			assert_eq!(&buf[at..], want.as_str(), "appending after text changed the data");
+		}
 		Ok(())
 	}
 

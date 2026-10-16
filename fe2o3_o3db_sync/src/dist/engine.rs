@@ -43,6 +43,7 @@ use super::consensus::{
 use super::hotstuff::{
 	replica::Command as HsCommand,
 	types::{
+		BlockHash,
 		NewView,
 		Proposal,
 		Vote,
@@ -53,8 +54,17 @@ use super::placement::Placement;
 use super::record::{
 	Record,
 	RecordId,
+	content_hash,
+};
+use super::resolve::{
+	LastVersionWins,
+	ResolveCtx,
+	Resolver,
+	StorageView,
+	Verdict,
 };
 use super::storage::Storage;
+use super::codec::MAX_ENVELOPE_BYTES;
 use super::transport::{
 	Envelope,
 	MsgKind,
@@ -73,22 +83,77 @@ use crate::kademlia::id::{
 };
 use crate::oam::config::OamConfig;
 
-use std::collections::HashMap;
+use std::collections::{
+	HashMap,
+	HashSet,
+	hash_map::Entry,
+};
 use std::sync::{
 	Mutex,
+	MutexGuard,
 	atomic::{
 		AtomicU64,
 		Ordering,
 	},
 };
+use std::time::{
+	SystemTime,
+	UNIX_EPOCH,
+};
 
 
 // Fixed key and value lengths for the anti-entropy IBLT sketches. The key is a
-// 32-byte RecordId and the value is the 32-byte content hash produced by
-// Storage::digests. Matching lengths across peers is mandatory for IBLT
-// subtraction; callers cannot override.
-const ANTI_ENTROPY_KEY_LEN:		usize = ID_LEN;
-const ANTI_ENTROPY_VALUE_LEN:	usize = 32;
+// 32-byte RecordId followed by the 32-byte content hash produced by
+// Storage::digests, and the value is empty. A record held at other bytes is
+// therefore another key: it decodes as one entry on each side, and a value
+// difference counts twice against the sketch's capacity. Matching lengths
+// across peers is mandatory for IBLT subtraction (a peer on the older shape,
+// the id as the key and the hash as the value, is refused with a Mismatch);
+// callers cannot override.
+const ANTI_ENTROPY_KEY_LEN:		usize = ID_LEN + 32;
+const ANTI_ENTROPY_VALUE_LEN:	usize = 0;
+
+
+// An anti-entropy reply or push is paged so that no envelope passes the codec's bound. A page
+// takes records in id order while their estimated encoding fits ANTI_ENTROPY_PAGE_BYTES, which
+// leaves a quarter of the bound for the envelope, the requested ids and the estimate's error.
+// The first record that can cross is always taken, so every exchange moves at least one. A
+// record that cannot cross an envelope alone is never sent.
+const ANTI_ENTROPY_PAGE_BYTES:	usize = MAX_ENVELOPE_BYTES / 4 * 3;
+const ANTI_ENTROPY_ALONE_BYTES:	usize = MAX_ENVELOPE_BYTES - 1024 * 1024;
+const RECORD_FRAME_BYTES:		usize = 256;	// over-estimates the id, table name and framing
+
+// What a page does with the next record.
+enum Fit {
+	Take,
+	Never,	// too long to cross an envelope at all
+	Full,	// the page is full, so this record and the rest wait for the next exchange
+}
+
+struct Page {
+	used:	usize,
+	taken:	usize,
+}
+
+impl Page {
+
+	fn new() -> Self {
+		Self { used: 0, taken: 0 }
+	}
+
+	fn fit(&mut self, record: &Record) -> Fit {
+		let size = record.value.len() + record.table.len() + RECORD_FRAME_BYTES;
+		if size > ANTI_ENTROPY_ALONE_BYTES {
+			return Fit::Never;
+		}
+		if self.taken > 0 && self.used + size > ANTI_ENTROPY_PAGE_BYTES {
+			return Fit::Full;
+		}
+		self.used += size;
+		self.taken += 1;
+		Fit::Take
+	}
+}
 
 
 // Choosing more than one peer protects against a single straggler; choosing
@@ -97,17 +162,24 @@ const ANTI_ENTROPY_VALUE_LEN:	usize = 32;
 pub const DEFAULT_READ_FANOUT: usize = 3;
 
 
-pub struct DistOzone<S: Storage> {
+pub struct DistOzone<S: Storage, R: Resolver = LastVersionWins> {
 	cfg:			DistOzoneConfig,
 	placement:		Placement,
 	peer_set:		PeerSet,
 	storage:		S,
+	resolver:		R,
+	// Held for one record's read, resolve and write, never across an envelope, a
+	// sketch build, a bulk read or the caller's own post-write work.
+	write:			Mutex<()>,
 	next_rid:		AtomicU64,
 	pending_gets:	Mutex<HashMap<RequestId, PendingGet>>,
 	read_fanout:	usize,
 	// An entry is created lazily on the first message, and kept after Decide so
 	// duplicate late messages are silently absorbed.
 	cohorts:		Mutex<HashMap<(String, RecordId), CohortInstance>>,
+	// Where the next paged bulk reply from a peer resumes, for each table. Set by a bulk
+	// reply that stopped short, and cleared by the exchange that finishes the table.
+	resume:			Mutex<HashMap<(String, NodeId), RecordId>>,
 }
 
 /// The in-flight state of a remote read.
@@ -122,10 +194,22 @@ struct PendingGet {
 	resolved_empty:		bool,
 }
 
-impl<S: Storage> DistOzone<S> {
+impl<S: Storage> DistOzone<S, LastVersionWins> {
+	pub fn new(cfg: DistOzoneConfig, storage: S) -> Outcome<Self> {
+		Self::with_resolver(cfg, storage, LastVersionWins)
+	}
+}
+
+impl<S: Storage, R: Resolver> DistOzone<S, R> {
 	/// The bootstrap peer list is filtered to exclude the local peer, and the
 	/// placement service's threshold is precomputed.
-	pub fn new(cfg: DistOzoneConfig, storage: S) -> Outcome<Self> {
+	pub fn with_resolver(
+		cfg:		DistOzoneConfig,
+		storage:	S,
+		resolver:	R,
+	)
+		-> Outcome<Self>
+	{
 		let placement = Placement::new(cfg.local_peer_id, cfg.oam);
 		let peer_set = PeerSet::from_bootstrap(
 			&cfg.local_peer_id,
@@ -136,10 +220,13 @@ impl<S: Storage> DistOzone<S> {
 			placement,
 			peer_set,
 			storage,
+			resolver,
+			write:			Mutex::new(()),
 			next_rid:		AtomicU64::new(1),
 			pending_gets:	Mutex::new(HashMap::new()),
 			read_fanout:	DEFAULT_READ_FANOUT,
 			cohorts:		Mutex::new(HashMap::new()),
+			resume:			Mutex::new(HashMap::new()),
 		})
 	}
 
@@ -163,6 +250,16 @@ impl<S: Storage> DistOzone<S> {
 
 	pub fn storage(&self) -> &S {
 		&self.storage
+	}
+
+	/// Gives up the engine and hands back the storage it owns, which is the only way to
+	/// close a storage that holds a resource, such as a database.
+	pub fn into_storage(self) -> S {
+		self.storage
+	}
+
+	pub fn resolver(&self) -> &R {
+		&self.resolver
 	}
 
 	/// Ignores the local peer; true if the peer was new.
@@ -195,9 +292,17 @@ impl<S: Storage> DistOzone<S> {
 		}
 	}
 
-	/// On an eventual table the record is persisted locally if the local
-	/// peer is a holder and a [`MsgKind::ReplicatePut`] envelope is emitted
-	/// for every remote holder.
+	/// [`put_at`](Self::put_at) at the wall-clock time.
+	pub fn put(&self, record: Record) -> Outcome<PutOutcome> {
+		self.put_at(record, res!(wall_ms()))
+	}
+
+	/// On an eventual table, a holder offers the record to the resolver. On
+	/// [`Verdict::Take`] the resolver's bytes are stored and a
+	/// [`MsgKind::ReplicatePut`] envelope carrying them is emitted for every
+	/// remote holder. A `Keep`, `Defer` or `Refuse` stores and sends nothing, and
+	/// is returned in [`PutOutcome::verdict`]. A peer that is not a holder
+	/// forwards the record as given.
 	///
 	/// On a cohort-backed table the put enters a HotStuff round. If the
 	/// local peer is the cohort's initial leader the engine opens a
@@ -207,35 +312,115 @@ impl<S: Storage> DistOzone<S> {
 	/// cases [`PutOutcome::consensus_pending`] is set; the caller learns
 	/// when consensus completes through
 	/// [`InboundOutcome::completed_consensus_put`].
-	pub fn put(&self, record: Record) -> Outcome<PutOutcome> {
+	pub fn put_at(&self, record: Record, now_ms: u64) -> Outcome<PutOutcome> {
 		let tc = res!(self.table_or_err(&record.table));
 		match tc.consistency {
-			Consistency::Eventual => self.put_eventual(record),
+			Consistency::Eventual =>
+				self.put_eventual(&ResolveCtx::at(now_ms), record),
 			Consistency::Cohort { lambda } =>
 				self.put_cohort(record, lambda),
 		}
 	}
 
-	fn put_eventual(&self, record: Record) -> Outcome<PutOutcome> {
+	fn put_eventual(
+		&self,
+		ctx:	&ResolveCtx,
+		record:	Record,
+	)
+		-> Outcome<PutOutcome>
+	{
 		let decision = self.placement.decide(&record.id, &self.peer_set);
-		let local_persisted = decision.local_is_holder;
-		if local_persisted {
-			res!(self.storage.put(&record));
-		}
+		let verdict = res!(self.apply(ctx, &record));
+		// What the remote holders are sent: the stored bytes after a Take, the
+		// input where this peer is not a holder, and nothing otherwise.
+		let (local_persisted, send) = match &verdict {
+			None						=> (false, Some(record)),
+			Some(Verdict::Take(bytes))	=> {
+				let stored = Record::new(record.id, record.table, bytes.clone());
+				(true, Some(stored))
+			},
+			Some(_)						=> (false, None),
+		};
 
 		let mut outbound = Vec::with_capacity(decision.remote_holders.len());
-		for peer in decision.remote_holders {
-			outbound.push(Envelope::new(
-				self.cfg.local_peer_id,
-				*peer,
-				MsgKind::ReplicatePut { record: record.clone() },
-			));
+		if let Some(rec) = send {
+			for peer in decision.remote_holders {
+				outbound.push(Envelope::new(
+					self.cfg.local_peer_id,
+					*peer,
+					MsgKind::ReplicatePut { record: rec.clone() },
+				));
+			}
 		}
 		Ok(PutOutcome {
 			local_persisted,
 			outbound,
 			consensus_pending:	None,
+			verdict,
 		})
+	}
+
+	// The write lock, recovered if a panic poisoned it. It guards `()`, so a
+	// poison carries no torn state: a panic in a resolver has written nothing,
+	// and one in the storage is the storage's own lock to answer for. Failing
+	// every later write instead would stop this peer converging until restart.
+	// Not lock_mutex_or_recover!, which logs, and dist does not.
+	fn write_lock(&self) -> MutexGuard<'_, ()> {
+		match self.write.lock() {
+			Ok(guard)		=> guard,
+			Err(poisoned)	=> poisoned.into_inner(),
+		}
+	}
+
+	// The one path by which a record reaches storage from an eventual table.
+	// None means the local peer is not a holder, so the resolver was not called.
+	// A Take of the bytes already held is a Keep: nothing is written, so two
+	// peers that agree do not echo the record to each other. A cohort table is
+	// an Err whoever sent the record: consensus is its only verdict, so a peer
+	// cannot overwrite a decided value by the eventual path.
+	fn apply(
+		&self,
+		ctx:	&ResolveCtx,
+		record:	&Record,
+	)
+		-> Outcome<Option<Verdict>>
+	{
+		let tc = res!(self.table_or_err(&record.table));
+		if !matches!(tc.consistency, Consistency::Eventual) {
+			return Err(err!(
+				"Table '{}' is a cohort table, which takes writes only through consensus, \
+				not as an eventual record.", record.table;
+				Invalid, Input, Mismatch));
+		}
+		if !self.placement.i_am_holder(&record.id) {
+			return Ok(None);
+		}
+		// One record at a time, so the read, the resolve and the write are atomic.
+		// The resolver's view takes only the storage's own lock, for one read.
+		let _guard = self.write_lock();
+		let held = res!(self.storage.get(&record.table, &record.id)).map(|r| r.value);
+		let verdict = res!(self.resolver.resolve(
+			ctx,
+			&StorageView(&self.storage),
+			&record.table,
+			&record.id,
+			held.as_deref(),
+			&record.value,
+		));
+		match verdict {
+			Verdict::Take(bytes) => {
+				if held.as_deref() == Some(bytes.as_slice()) {
+					return Ok(Some(Verdict::Keep));
+				}
+				res!(self.storage.put(&Record::new(
+					record.id,
+					record.table.clone(),
+					bytes.clone(),
+				)));
+				Ok(Some(Verdict::Take(bytes)))
+			},
+			other => Ok(Some(other)),
+		}
 	}
 
 	fn put_cohort(&self, record: Record, lambda: u64) -> Outcome<PutOutcome> {
@@ -249,12 +434,15 @@ impl<S: Storage> DistOzone<S> {
 			lambda,
 		));
 		if sel.local_is_leader {
-			// Drive the round locally.
-			let outbound = res!(self.leader_open_round(sel, record));
+			// Drive the round locally. PutOutcome has no persisted list, so a
+			// Decide reached inside this call is not reported.
+			let mut persisted = Vec::new();
+			let outbound = res!(self.leader_open_round(sel, record, &mut persisted));
 			Ok(PutOutcome {
 				local_persisted:	false,
 				outbound,
 				consensus_pending:	Some((table, id)),
+				verdict:			None,
 			})
 		} else {
 			// Forward to the leader.
@@ -267,14 +455,16 @@ impl<S: Storage> DistOzone<S> {
 				local_persisted:	false,
 				outbound:			vec![env],
 				consensus_pending:	Some((table, id)),
+				verdict:			None,
 			})
 		}
 	}
 
 	fn leader_open_round(
 		&self,
-		sel:	cohort::Cohort,
-		record:	Record,
+		sel:		cohort::Cohort,
+		record:		Record,
+		persisted:	&mut Vec<(String, RecordId)>,
 	)
 		-> Outcome<Vec<Envelope>>
 	{
@@ -285,33 +475,31 @@ impl<S: Storage> DistOzone<S> {
 
 		let lambda = sel.members.len() as u64;
 		let mut cohorts = lock_mutex!(self.cohorts);
-		let instance = match cohorts.get_mut(&(table.clone(), id)) {
-			Some(i) => i,
-			None => {
-				let fresh = res!(CohortInstance::new(
-					sel,
-					&self.cfg.local_peer_id,
-					lambda,
-				));
-				cohorts.insert((table.clone(), id), fresh);
-				cohorts.get_mut(&(table.clone(), id)).expect("just inserted")
-			},
+		let instance = match cohorts.entry((table.clone(), id)) {
+			Entry::Occupied(e)	=> e.into_mut(),
+			Entry::Vacant(v)	=> v.insert(res!(CohortInstance::new(
+				sel,
+				&self.cfg.local_peer_id,
+				lambda,
+			))),
 		};
 		if instance.has_decided() {
 			return Ok(Vec::new());
 		}
 		let cmds = res!(instance.replica.propose(block, block_hash));
-		let outbound = res!(self.translate_commands(&table, &id, instance, cmds));
+		let outbound = res!(self.translate_commands(&table, &id, instance, cmds, persisted));
 		Ok(outbound)
 	}
 
-	/// Applies the local side effects -- persistence on Decide -- as it goes.
+	/// Applies the local side effects -- persistence on Decide -- as it goes, and
+	/// lists each decided record in `persisted`.
 	fn translate_commands(
 		&self,
 		table:		&str,
 		id:			&RecordId,
 		instance:	&mut CohortInstance,
 		cmds:		Vec<HsCommand>,
+		persisted:	&mut Vec<(String, RecordId)>,
 	)
 		-> Outcome<Vec<Envelope>>
 	{
@@ -343,7 +531,7 @@ impl<S: Storage> DistOzone<S> {
 					// that is also a voter correctly emit its own SendVote.
 					let local_cmds = res!(instance.replica.on_proposal(proposal));
 					let more = res!(self.translate_commands(
-						table, id, instance, local_cmds,
+						table, id, instance, local_cmds, persisted,
 					));
 					out.extend(more);
 				},
@@ -362,7 +550,7 @@ impl<S: Storage> DistOzone<S> {
 					if target == self.cfg.local_peer_id {
 						let local_cmds = res!(instance.replica.on_vote(vote));
 						let more = res!(self.translate_commands(
-							table, id, instance, local_cmds,
+							table, id, instance, local_cmds, persisted,
 						));
 						out.extend(more);
 					} else {
@@ -389,7 +577,7 @@ impl<S: Storage> DistOzone<S> {
 					if target == self.cfg.local_peer_id {
 						let local_cmds = res!(instance.replica.on_new_view(new_view));
 						let more = res!(self.translate_commands(
-							table, id, instance, local_cmds,
+							table, id, instance, local_cmds, persisted,
 						));
 						out.extend(more);
 					} else {
@@ -416,17 +604,48 @@ impl<S: Storage> DistOzone<S> {
 							Bug, Invalid, Mismatch));
 					}
 					let hash = consensus::block_hash(&block);
-					res!(instance.mark_decided(hash));
-					res!(self.storage.put(&record));
+					res!(self.store_decided(instance, hash, &record));
+					persisted.push((record.table, record.id));
 				},
 			}
 		}
 		Ok(out)
 	}
 
+	// Stores a decided record, then marks the instance decided, so a failed store
+	// never leaves the instance decided with no record. A second Decide on another
+	// block is refused before anything is stored. The replica is inert once it has
+	// emitted a Decide, so a failed store holds the record in the instance for
+	// cohort_timeout to store again. Consensus is the verdict on a cohort table, so
+	// there is no resolver; the write lock keeps a resolver's cross-table read from
+	// seeing this store half way.
+	fn store_decided(
+		&self,
+		instance:	&mut CohortInstance,
+		hash:		BlockHash,
+		record:		&Record,
+	)
+		-> Outcome<()>
+	{
+		res!(instance.check_decide(hash));
+		let stored = {
+			let _guard = self.write_lock();
+			self.storage.put(record)
+		};
+		if let Err(e) = stored {
+			instance.unstored = Some((hash, record.clone()));
+			return Err(e);
+		}
+		instance.unstored = None;
+		instance.mark_decided(hash)
+	}
+
 	/// The caller owns the timer; on expiry it calls this and dispatches the
 	/// returned envelopes. Empty if the instance is absent -- already decided,
-	/// or never created.
+	/// or never created. An instance whose decided record failed to store is
+	/// stored again here, and the call is an `Err` while the store still fails,
+	/// so the caller keeps its timer until `completed_consensus_put` is reported
+	/// or this call succeeds.
 	pub fn cohort_timeout(
 		&self,
 		table:	&str,
@@ -439,11 +658,17 @@ impl<S: Storage> DistOzone<S> {
 			Some(i) => i,
 			None => return Ok(Vec::new()),
 		};
+		if let Some((hash, record)) = instance.unstored.take() {
+			res!(self.store_decided(instance, hash, &record));
+			return Ok(Vec::new());
+		}
 		if instance.has_decided() {
 			return Ok(Vec::new());
 		}
 		let cmds = res!(instance.replica.on_timeout());
-		self.translate_commands(table, id, instance, cmds)
+		// The return type has no persisted list, so a Decide reached here is not reported.
+		let mut persisted = Vec::new();
+		self.translate_commands(table, id, instance, cmds, &mut persisted)
 	}
 
 	/// Reads from local storage if the local peer is a holder; otherwise
@@ -498,7 +723,23 @@ impl<S: Storage> DistOzone<S> {
 		Ok(GetOutcome::Remote { request_id, outbound })
 	}
 
+	/// [`handle_envelope_at`](Self::handle_envelope_at) at the wall-clock time.
 	pub fn handle_envelope(&self, env: Envelope) -> Outcome<InboundOutcome> {
+		self.handle_envelope_at(env, res!(wall_ms()))
+	}
+
+	/// Every record in an envelope gets exactly one result: stored (listed in
+	/// [`InboundOutcome::persisted`]), kept (listed nowhere), deferred, refused,
+	/// or failed. A record this peer does not hold is dropped silently. One
+	/// record's result never stops the rest of the envelope being applied.
+	pub fn handle_envelope_at(
+		&self,
+		env:	Envelope,
+		now_ms:	u64,
+	)
+		-> Outcome<InboundOutcome>
+	{
+		let ctx = ResolveCtx::at(now_ms);
 		if env.to != self.cfg.local_peer_id {
 			// An envelope addressed to somebody else; ignore. This is mostly
 			// a belt-and-braces guard: the transport adapter should not
@@ -519,8 +760,9 @@ impl<S: Storage> DistOzone<S> {
 						"ReplicatePut for unknown table '{}'.", record.table;
 						Invalid, Input, Missing));
 				}
-				res!(self.storage.put(&record));
-				Ok(InboundOutcome::empty())
+				let mut out = InboundOutcome::empty();
+				out.note(&record.table, record.id, self.apply(&ctx, &record));
+				Ok(out)
 			}
 			MsgKind::GetRequest { request_id, table, id } => {
 				if self.cfg.table(&table).is_none() {
@@ -535,9 +777,8 @@ impl<S: Storage> DistOzone<S> {
 					MsgKind::GetResponse { request_id, record },
 				);
 				Ok(InboundOutcome {
-					outbound:					vec![reply],
-					completed_get:				None,
-					completed_consensus_put:	None,
+					outbound:	vec![reply],
+					..InboundOutcome::empty()
 				})
 			}
 			MsgKind::GetResponse { request_id, record } => {
@@ -564,21 +805,20 @@ impl<S: Storage> DistOzone<S> {
 					slot.first_response.is_some() || slot.outstanding == 0
 				};
 				Ok(InboundOutcome {
-					outbound:					Vec::new(),
-					completed_get:				if completed { Some(request_id) } else { None },
-					completed_consensus_put:	None,
+					completed_get:	if completed { Some(request_id) } else { None },
+					..InboundOutcome::empty()
 				})
 			}
-			MsgKind::AntiEntropyDigest { table, sketch } => {
-				self.handle_anti_entropy_digest(env.from, table, sketch)
+			MsgKind::AntiEntropyDigest { table, sketch, after } => {
+				self.handle_anti_entropy_digest(env.from, table, sketch, after)
 			}
-			MsgKind::AntiEntropyReply { table, records, requested_ids, bulk } => {
+			MsgKind::AntiEntropyReply { table, records, requested_ids, bulk, after, next } => {
 				self.handle_anti_entropy_reply(
-					env.from, table, records, requested_ids, bulk,
+					&ctx, env.from, table, records, requested_ids, bulk, after, next,
 				)
 			}
 			MsgKind::AntiEntropyPush { table, records } => {
-				self.handle_anti_entropy_push(table, records)
+				self.handle_anti_entropy_push(&ctx, table, records)
 			}
 			MsgKind::CohortSubmit { record } => {
 				self.handle_cohort_submit(record)
@@ -638,12 +878,17 @@ impl<S: Storage> DistOzone<S> {
 		}
 		let iblt = res!(self.build_table_iblt(tc));
 		let sketch = iblt.to_bytes();
+		let after = {
+			let resume = lock_mutex!(self.resume);
+			resume.get(&(table.to_string(), target)).copied()
+		};
 		Ok(Envelope::new(
 			self.cfg.local_peer_id,
 			target,
 			MsgKind::AntiEntropyDigest {
 				table:	table.to_string(),
 				sketch,
+				after,
 			},
 		))
 	}
@@ -661,16 +906,42 @@ impl<S: Storage> DistOzone<S> {
 		let mut iblt = res!(Iblt::new(cfg));
 		let digests = res!(self.storage.digests(&tc.name));
 		for d in digests {
-			res!(iblt.insert(d.id.as_bytes(), &d.content));
+			let mut key = [0u8; ANTI_ENTROPY_KEY_LEN];
+			key[..ID_LEN].copy_from_slice(d.id.as_bytes());
+			key[ID_LEN..].copy_from_slice(&d.content);
+			res!(iblt.insert(&key, &[]));
 		}
 		Ok(iblt)
 	}
 
+	// The record id leads each sketch key. A key of any other length did not come from
+	// this shape of sketch.
+	fn anti_entropy_id(key: &[u8]) -> Outcome<RecordId> {
+		if key.len() != ANTI_ENTROPY_KEY_LEN {
+			return Err(err!(
+				"anti-entropy sketch key is {} bytes, not {}.",
+				key.len(), ANTI_ENTROPY_KEY_LEN;
+				Invalid, Input, Mismatch));
+		}
+		RecordId::from_slice(&key[..ID_LEN])
+	}
+
 	/// Decodes the symmetric difference against the local sketch and returns an
-	/// [`AntiEntropyReply`][ar] envelope carrying records the sender lacks and
-	/// a list of record identifiers the recipient lacks. On sketch overload it
-	/// falls back to a bulk reply of every record the recipient holds for the
-	/// table.
+	/// [`AntiEntropyReply`][ar] envelope carrying the records the sender lacks or
+	/// holds at other bytes, and the identifiers of the records the recipient lacks or
+	/// holds at other bytes. A value difference at one id is a key on each side, so
+	/// it is both sent and asked for. On sketch overload it falls back to a bulk reply
+	/// of the records the recipient holds for the table after `after`, which the sender
+	/// answers with a push of what that bulk lacks or holds at other bytes.
+	///
+	/// The reply is paged to [`ANTI_ENTROPY_PAGE_BYTES`], in id order after `after`,
+	/// and names where it stopped in `next`. The dialler sends `next` back as `after`,
+	/// so the next page begins past every record this one carried, whether or not the
+	/// dialler's resolver took it, and a run of records it keeps refusing cannot hold
+	/// up the records behind them. The page that reaches the end of the difference has
+	/// no `next`, which clears the cursor, and the following exchange starts again from
+	/// the first id, so a refused or deferred record is offered again each lap. The ids
+	/// the reply asks for are held to the same range, `after` up to `next`.
 	///
 	/// [ar]: MsgKind::AntiEntropyReply
 	fn handle_anti_entropy_digest(
@@ -678,6 +949,7 @@ impl<S: Storage> DistOzone<S> {
 		from:		NodeId,
 		table:		String,
 		sketch:		Vec<u8>,
+		after:		Option<RecordId>,
 	)
 		-> Outcome<InboundOutcome>
 	{
@@ -695,47 +967,100 @@ impl<S: Storage> DistOzone<S> {
 			value_len:	ANTI_ENTROPY_VALUE_LEN,
 			seed:		tc.iblt_seed(),
 		};
-		let their_iblt = res!(Iblt::from_bytes(&sketch));
-		if their_iblt.config() != expected_cfg {
+		// A sketch is a peer's word for its own sizes, so its header is compared with the
+		// expected shape before the table the header describes is built.
+		let their_cfg = res!(Iblt::config_in(&sketch));
+		if their_cfg != expected_cfg {
 			return Err(err!(
 				"anti-entropy sketch config mismatch for table '{}'.",
 				table;
 				Invalid, Input, Mismatch));
 		}
+		let their_iblt = res!(Iblt::from_bytes(&sketch));
 		let mut mine = res!(self.build_table_iblt(tc));
 		res!(mine.subtract(&their_iblt));
 		let decode = res!(mine.decode());
-		let (records_for_sender, requested_ids, bulk) = match decode {
+		let (records_for_sender, requested_ids, bulk, next) = match decode {
 			DecodeOutcome::Complete { inserted, deleted } => {
 				// `inserted` = keys in mine not in theirs -> records I
 				// should send. `deleted` = keys in theirs not in mine ->
-				// ids I should request.
-				let mut records_for_sender = Vec::with_capacity(inserted.len());
-				for (key_bytes, _value_hash) in inserted {
-					let rid = res!(RecordId::from_slice(&key_bytes));
-					if let Some(r) = res!(self.storage.get(&table, &rid)) {
-						records_for_sender.push(r);
+				// ids I should request. A key is an id and a content hash,
+				// so an id held at other bytes on each side is in both lists.
+				let mut ids = Vec::with_capacity(inserted.len());
+				for (key_bytes, _value) in inserted {
+					let rid = res!(Self::anti_entropy_id(&key_bytes));
+					if after.map_or(true, |a| rid > a) {
+						ids.push(rid);
 					}
 				}
-				let mut requested_ids = Vec::with_capacity(deleted.len());
-				for (key_bytes, _value_hash) in deleted {
-					requested_ids.push(res!(RecordId::from_slice(&key_bytes)));
+				ids.sort();
+				ids.dedup();
+				let mut page = Page::new();
+				let mut records_for_sender = Vec::with_capacity(ids.len());
+				let mut last = None;
+				let mut next = None;
+				for rid in ids {
+					if let Some(r) = res!(self.storage.get(&table, &rid)) {
+						match page.fit(&r) {
+							Fit::Take	=> {
+								records_for_sender.push(r);
+								last = Some(rid);
+							},
+							Fit::Never	=> {},
+							Fit::Full	=> {
+								next = last;
+								break;
+							},
+						}
+					}
 				}
-				(records_for_sender, requested_ids, false)
+				// A sketch built by hand can name one id under several
+				// contents, so each id is requested once. Only the ids in
+				// the range of this page are asked for, so that the
+				// dialler's push, which has a page of its own, resumes in
+				// step with the cursor.
+				let mut asked = HashSet::with_capacity(deleted.len());
+				let mut requested_ids = Vec::with_capacity(deleted.len());
+				for (key_bytes, _value) in deleted {
+					let rid = res!(Self::anti_entropy_id(&key_bytes));
+					if after.map_or(false, |a| rid <= a) || next.map_or(false, |n| rid > n) {
+						continue;
+					}
+					if asked.insert(rid) {
+						requested_ids.push(rid);
+					}
+				}
+				(records_for_sender, requested_ids, false, next)
 			}
 			DecodeOutcome::Incomplete { .. } => {
-				// Sketch overloaded. Fall back to bulk: send everything I
-				// have for this table; the sender absorbs what it lacks.
-				// This is simple and correct; a later optimisation can
-				// teach the sender to retry with a larger sketch.
-				let digests = res!(self.storage.digests(&table));
-				let mut records = Vec::with_capacity(digests.len());
+				// Sketch overloaded. Fall back to bulk: send the next page of
+				// what I have for this table, in id order after `after`; the
+				// sender absorbs what it lacks and asks again from `next`.
+				let mut digests = res!(self.storage.digests(&table));
+				digests.sort_by(|a, b| a.id.cmp(&b.id));
+				let mut page = Page::new();
+				let mut records = Vec::new();
+				let mut last = None;
+				let mut next = None;
 				for d in digests {
+					if after.map_or(false, |a| d.id <= a) {
+						continue;
+					}
 					if let Some(r) = res!(self.storage.get(&table, &d.id)) {
-						records.push(r);
+						match page.fit(&r) {
+							Fit::Take	=> {
+								records.push(r);
+								last = Some(d.id);
+							},
+							Fit::Never	=> {},
+							Fit::Full	=> {
+								next = last;
+								break;
+							},
+						}
 					}
 				}
-				(records, Vec::new(), true)
+				(records, Vec::new(), true, next)
 			}
 		};
 		let reply = Envelope::new(
@@ -746,66 +1071,162 @@ impl<S: Storage> DistOzone<S> {
 				records:		records_for_sender,
 				requested_ids,
 				bulk,
+				after,
+				next,
 			},
 		);
 		Ok(InboundOutcome {
-			outbound:					vec![reply],
-			completed_get:				None,
-			completed_consensus_put:	None,
+			outbound:	vec![reply],
+			..InboundOutcome::empty()
 		})
 	}
 
 	/// Applies the records the recipient was missing, and builds an
-	/// [`AntiEntropyPush`][ap] envelope for any records requested in return.
+	/// [`AntiEntropyPush`][ap] envelope for any records requested in return. The
+	/// push is built from storage after the reply is applied, so the other peer is
+	/// offered the resolved value, except at an id where it already holds the bytes
+	/// the reply carried. A bulk reply names no ids, and is answered with every local
+	/// record in its page, the ids after `after` up to `next`, that the sender's page
+	/// lacks or holds at other bytes.
+	///
+	/// The push is paged to [`ANTI_ENTROPY_PAGE_BYTES`] like the reply. What a page
+	/// leaves out is asked for again. A reply that stopped short, or a push that did,
+	/// sets where the next digest to that peer resumes, past every record this
+	/// exchange carried whatever the other resolver made of it; the exchange that
+	/// finishes the difference clears it, and the next lap begins at the first id.
 	///
 	/// [ap]: MsgKind::AntiEntropyPush
 	fn handle_anti_entropy_reply(
 		&self,
+		ctx:			&ResolveCtx,
 		from:			NodeId,
 		table:			String,
 		records:		Vec<Record>,
-		requested_ids:	Vec<RecordId>,
-		_bulk:			bool,
+		mut requested_ids:	Vec<RecordId>,
+		bulk:			bool,
+		after:			Option<RecordId>,
+		next:			Option<RecordId>,
 	)
 		-> Outcome<InboundOutcome>
 	{
 		res!(self.table_or_err(&table));
 
-		// Apply every record the peer sent us, re-checking placement so a
-		// stale-N sender cannot push a record to a peer that has since
-		// stopped considering itself a holder.
+		// Offer every record the peer sent us to the resolver. The apply step
+		// re-checks placement, so a stale-N sender cannot push a record to a peer
+		// that has since stopped considering itself a holder.
+		// A record repeated in the reply is applied once. The id and content hash of each
+		// is kept, to find what a bulk page lacks and to leave unechoed what the peer
+		// already holds.
+		let mut out = InboundOutcome::empty();
+		let mut seen = HashSet::with_capacity(records.len());
+		let mut theirs = HashMap::new();
 		for record in records {
 			if record.table != table {
 				continue;
 			}
-			if self.placement.i_am_holder(&record.id) {
-				res!(self.storage.put(&record));
+			let hash = content_hash(&record.value);
+			if !seen.insert((record.id, hash)) {
+				continue;
 			}
+			theirs.insert(record.id, hash);
+			out.note(&record.table, record.id, self.apply(ctx, &record));
 		}
 
-		// Build a push for every requested id we actually have.
+		// Build a push for every requested id we actually have, each once, in id order. A
+		// failed read is skipped and not listed, since `failed` is for received records and a
+		// read fault here is this peer's own; it cannot lose the results above, and the
+		// peer asks again next round. An id whose stored bytes are those the peer just
+		// sent is not sent back.
+		requested_ids.sort();
+		let mut page = Page::new();
 		let mut to_push = Vec::with_capacity(requested_ids.len());
+		let mut pushed = HashSet::with_capacity(requested_ids.len());
+		// The next digest resumes where the sender's page stopped, or earlier where this
+		// peer's own push did.
+		let mut resume = next;
+		let mut sent = None;
 		for rid in requested_ids {
-			if let Some(r) = res!(self.storage.get(&table, &rid)) {
-				to_push.push(r);
+			if !pushed.insert(rid) {
+				continue;
+			}
+			match self.storage.get(&table, &rid) {
+				Ok(Some(r))			=> {
+					if theirs.get(&rid) == Some(&content_hash(&r.value)) {
+						continue;
+					}
+					match page.fit(&r) {
+						Fit::Take	=> {
+							to_push.push(r);
+							sent = Some(rid);
+						},
+						Fit::Never	=> {},
+						Fit::Full	=> {
+							resume = sent.or(after);
+							break;
+						},
+					}
+				},
+				Ok(None) | Err(_)	=> {},
 			}
 		}
-		if to_push.is_empty() {
-			return Ok(InboundOutcome::empty());
+		// The sender's bulk page holds its records in (after, next], so what it lacks, or
+		// holds at other bytes after the apply above, is what this peer holds in that range.
+		// A failed listing is skipped like a failed read, and the page is asked for again.
+		if bulk {
+			match self.storage.digests(&table) {
+				Ok(mut digests) => {
+					digests.sort_by(|a, b| a.id.cmp(&b.id));
+					let mut last = None;
+					for d in digests {
+						if after.map_or(false, |a| d.id <= a) {
+							continue;
+						}
+						if next.map_or(false, |n| d.id > n) {
+							break;
+						}
+						if theirs.get(&d.id) == Some(&d.content) || !pushed.insert(d.id) {
+							continue;
+						}
+						match self.storage.get(&table, &d.id) {
+							Ok(Some(r))			=> match page.fit(&r) {
+								Fit::Take	=> {
+									to_push.push(r);
+									last = Some(d.id);
+								},
+								Fit::Never	=> {},
+								Fit::Full	=> {
+									// Ask for the sender's records again from the last id sent.
+									resume = last.or(after);
+									break;
+								},
+							},
+							Ok(None) | Err(_)	=> {},
+						}
+					}
+				},
+				Err(_) => resume = after,
+			}
 		}
-		let push = Envelope::new(
-			self.cfg.local_peer_id,
-			from,
-			MsgKind::AntiEntropyPush {
-				table,
-				records:	to_push,
-			},
-		);
-		Ok(InboundOutcome {
-			outbound:					vec![push],
-			completed_get:				None,
-			completed_consensus_put:	None,
-		})
+		// Only a peer this one dials is remembered, so a stranger cannot grow the map.
+		if self.peer_set.contains(&from) {
+			let mut cursors = lock_mutex!(self.resume);
+			let key = (table.clone(), from);
+			match resume {
+				Some(id)	=> { cursors.insert(key, id); },
+				None		=> { cursors.remove(&key); },
+			}
+		}
+		if !to_push.is_empty() {
+			out.outbound.push(Envelope::new(
+				self.cfg.local_peer_id,
+				from,
+				MsgKind::AntiEntropyPush {
+					table,
+					records:	to_push,
+				},
+			));
+		}
+		Ok(out)
 	}
 
 	/// Opens a HotStuff round if the local peer is the initial leader for the
@@ -837,11 +1258,12 @@ impl<S: Storage> DistOzone<S> {
 			// Not our job -- drop silently.
 			return Ok(InboundOutcome::empty());
 		}
-		let outbound = res!(self.leader_open_round(sel, record));
+		let mut persisted = Vec::new();
+		let outbound = res!(self.leader_open_round(sel, record, &mut persisted));
 		Ok(InboundOutcome {
 			outbound,
-			completed_get:				None,
-			completed_consensus_put:	None,
+			persisted,
+			..InboundOutcome::empty()
 		})
 	}
 
@@ -884,25 +1306,21 @@ impl<S: Storage> DistOzone<S> {
 			return Ok(InboundOutcome::empty());
 		}
 		let mut cohorts = lock_mutex!(self.cohorts);
-		let key = (table.clone(), id);
-		let instance = match cohorts.get_mut(&key) {
-			Some(i) => i,
-			None => {
-				let fresh = res!(CohortInstance::new(
-					sel,
-					&self.cfg.local_peer_id,
-					lambda,
-				));
-				cohorts.insert(key.clone(), fresh);
-				cohorts.get_mut(&key).expect("just inserted")
-			},
+		let instance = match cohorts.entry((table.clone(), id)) {
+			Entry::Occupied(e)	=> e.into_mut(),
+			Entry::Vacant(v)	=> v.insert(res!(CohortInstance::new(
+				sel,
+				&self.cfg.local_peer_id,
+				lambda,
+			))),
 		};
 		if instance.has_decided() {
 			return Ok(InboundOutcome::empty());
 		}
 		let before_decided = instance.has_decided();
+		let mut persisted = Vec::new();
 		let cmds = res!(instance.replica.on_proposal(proposal));
-		let outbound = res!(self.translate_commands(&table, &id, instance, cmds));
+		let outbound = res!(self.translate_commands(&table, &id, instance, cmds, &mut persisted));
 		let completed_consensus_put = if !before_decided && instance.has_decided() {
 			Some((table, id))
 		} else {
@@ -910,8 +1328,9 @@ impl<S: Storage> DistOzone<S> {
 		};
 		Ok(InboundOutcome {
 			outbound,
-			completed_get:				None,
 			completed_consensus_put,
+			persisted,
+			..InboundOutcome::empty()
 		})
 	}
 
@@ -942,8 +1361,9 @@ impl<S: Storage> DistOzone<S> {
 			return Ok(InboundOutcome::empty());
 		}
 		let before_decided = instance.has_decided();
+		let mut persisted = Vec::new();
 		let cmds = res!(instance.replica.on_vote(vote));
-		let outbound = res!(self.translate_commands(&table, &id, instance, cmds));
+		let outbound = res!(self.translate_commands(&table, &id, instance, cmds, &mut persisted));
 		let completed_consensus_put = if !before_decided && instance.has_decided() {
 			Some((table, id))
 		} else {
@@ -951,8 +1371,9 @@ impl<S: Storage> DistOzone<S> {
 		};
 		Ok(InboundOutcome {
 			outbound,
-			completed_get:				None,
 			completed_consensus_put,
+			persisted,
+			..InboundOutcome::empty()
 		})
 	}
 
@@ -973,33 +1394,34 @@ impl<S: Storage> DistOzone<S> {
 		if instance.has_decided() {
 			return Ok(InboundOutcome::empty());
 		}
+		let mut persisted = Vec::new();
 		let cmds = res!(instance.replica.on_new_view(new_view));
-		let outbound = res!(self.translate_commands(&table, &id, instance, cmds));
+		let outbound = res!(self.translate_commands(&table, &id, instance, cmds, &mut persisted));
 		Ok(InboundOutcome {
 			outbound,
-			completed_get:				None,
-			completed_consensus_put:	None,
+			persisted,
+			..InboundOutcome::empty()
 		})
 	}
 
-	/// Each record is placement-checked before persistence.
+	/// Each record is placement-checked, then offered to the resolver.
 	fn handle_anti_entropy_push(
 		&self,
+		ctx:		&ResolveCtx,
 		table:		String,
 		records:	Vec<Record>,
 	)
 		-> Outcome<InboundOutcome>
 	{
 		res!(self.table_or_err(&table));
+		let mut out = InboundOutcome::empty();
 		for record in records {
 			if record.table != table {
 				continue;
 			}
-			if self.placement.i_am_holder(&record.id) {
-				res!(self.storage.put(&record));
-			}
+			out.note(&record.table, record.id, self.apply(ctx, &record));
 		}
-		Ok(InboundOutcome::empty())
+		Ok(out)
 	}
 }
 
@@ -1013,6 +1435,8 @@ pub struct PutOutcome {
 	pub outbound:			Vec<Envelope>,
 	// Set when the put entered a HotStuff consensus round.
 	pub consensus_pending:	Option<(String, RecordId)>,
+	// None when the local peer is not a holder, or on a cohort table.
+	pub verdict:			Option<Verdict>,
 }
 
 
@@ -1041,6 +1465,13 @@ pub struct InboundOutcome {
 	// Set when this envelope drove a cohort round to Decide and the record was
 	// persisted locally.
 	pub completed_consensus_put:	Option<(String, RecordId)>,
+	// Per-record results of an envelope. A record is in at most one list, and a
+	// Keep, or a record this peer does not hold, is in none. The engine does not
+	// log: the caller logs refused and failed, with the envelope's sender.
+	pub persisted:	Vec<(String, RecordId)>,					// stored on a Take, or a cohort Decide
+	pub deferred:	Vec<(String, RecordId)>,					// not stored; anti-entropy offers it again
+	pub refused:	Vec<(String, RecordId, String)>,			// not stored; the resolver's reason
+	pub failed:		Vec<(String, RecordId, Error<ErrTag>)>,		// resolve or store returned Err
 }
 
 impl InboundOutcome {
@@ -1049,8 +1480,36 @@ impl InboundOutcome {
 			outbound:					Vec::new(),
 			completed_get:				None,
 			completed_consensus_put:	None,
+			persisted:					Vec::new(),
+			deferred:					Vec::new(),
+			refused:					Vec::new(),
+			failed:						Vec::new(),
 		}
 	}
+
+	// Files one record's result in exactly one list, or none.
+	fn note(
+		&mut self,
+		table:	&str,
+		id:		RecordId,
+		result:	Outcome<Option<Verdict>>,
+	) {
+		match result {
+			Ok(None)						=> {},
+			Ok(Some(Verdict::Take(_)))		=> self.persisted.push((table.to_string(), id)),
+			Ok(Some(Verdict::Keep))			=> {},
+			Ok(Some(Verdict::Defer))		=> self.deferred.push((table.to_string(), id)),
+			Ok(Some(Verdict::Refuse(why)))	=> self.refused.push((table.to_string(), id, why)),
+			Err(e)							=> self.failed.push((table.to_string(), id, e)),
+		}
+	}
+}
+
+
+// The wall clock behind put and handle_envelope.
+fn wall_ms() -> Outcome<u64> {
+	let since = res!(SystemTime::now().duration_since(UNIX_EPOCH));
+	Ok(since.as_millis() as u64)
 }
 
 

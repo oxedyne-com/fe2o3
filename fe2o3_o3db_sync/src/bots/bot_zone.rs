@@ -1,12 +1,17 @@
 use crate::{
     prelude::*,
     base::{
+        cfg::ZoneConfig,
         constant,
         index::ZoneInd,
     },
+    data::cache::PinnedHeads,
     bots::{
         base::bot_deps::*,
-        worker::bot::WorkerType,
+        worker::{
+            bot::WorkerType,
+            bot_file::GcControl,
+        },
     },
     comm::{
         channels::{
@@ -26,6 +31,7 @@ use crate::{
         },
         zdir::ZoneDir,
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_core::{
@@ -40,6 +46,7 @@ use std::{
         self,
         File,
     },
+    io::ErrorKind,
     sync::Arc,
     time::Instant,
 };
@@ -54,6 +61,7 @@ pub struct Resource {
 #[derive(Clone, Debug, Default)]
 pub struct ZoneState {
     pub caches: Vec<Resource>,
+    pub heads:  Vec<PinnedHeads>, // per cache, as last reported with its size
     pub files:  Vec<Resource>,
 }
 
@@ -144,8 +152,10 @@ impl<
                     match self.broadcast(OzoneMsg::Channels(self.chans().clone(), resp2.clone())) {
                         Err(e) => self.error(e),
                         Ok(zwbots) => {
+                            // Channels are handed out at start-up, to bots that may only just
+                            // have been scheduled, so this is held to the control deadline.
                             for _ in 0..zwbots.total_bot_count() {
-                                match resp2.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
+                                match resp2.recv_timeout(constant::CONTROL_REQUEST_TIMEOUT) {
                                     Err(e) => self.error(e),
                                     Ok(OzoneMsg::ChannelsReceived(_)) => (),
                                     m => self.error(err!(
@@ -165,6 +175,21 @@ impl<
                         Ok(_) => (),
                     }
                 },
+                OzoneMsg::GcControl(GcControl::Compact, resp) => {
+                    // Each file bot answers the caller itself with its own report, so the zone
+                    // bot owes the caller nothing but the failure to pass the order on.
+                    let sent = if hooks::compact_fails() {
+                        Err(err!("{}: Test hook: the compaction order cannot be passed to the file \
+                            bots.", self.ozid(); Test, Channel, Write))
+                    } else {
+                        self.fwd_msg_to_pool(&WorkerType::File,
+                            OzoneMsg::GcControl(GcControl::Compact, resp.clone()))
+                    };
+                    if let Err(e) = sent {
+                        self.error(e.clone());
+                        self.respond(Err(e), &resp);
+                    }
+                },
                 OzoneMsg::GcControl(gc_ctrl, resp) => {
                     let result = match self.fwd_msg_to_pool(&WorkerType::File,
                         OzoneMsg::GcControl(gc_ctrl, Responder::none(Some(self.ozid()))),
@@ -177,38 +202,19 @@ impl<
                 OzoneMsg::GetZoneDir(resp) => {
                     self.respond(Ok(OzoneMsg::ZoneDir(*self.zind(), self.zdir().clone())), &resp);
                 },
-                OzoneMsg::ZoneInit(zdir, zcfg) => {
-                    // Zone configuration.
-                    self.zone_state_mut().caches = vec![Resource::default(); zcfg.ncbots];
-                    self.zone_state_mut().files = vec![Resource::default(); zcfg.nfbots];
-                    let msg = OzoneMsg::SetCacheSizeLimit(zcfg.cache_size_lim);
-                    match self.fwd_msg_to_pool(&WorkerType::Cache, msg) {
-                        Err(e) => self.error(e),
-                        Ok(_) => (),
+                OzoneMsg::ZoneInit(zdir, zcfg, resp) => {
+                    // The database is not ready until every zone says this, and a zone that
+                    // failed says why, because the caller of `O3db::start` is waiting on it.
+                    let result = self.init_zone(zdir, zcfg);
+                    match &result {
+                        Err(e) => self.error(e.clone()),
+                        Ok(()) => info!(sync_log::stream(), "{}: Zone {} init complete",
+                            self.ozid(), self.zind),
                     }
-                    // Survey zone files.
-                    self.zdir = zdir.clone();
-                    match self.broadcast(OzoneMsg::ZoneDir(*self.zind(), zdir)) {
-                        Err(e) => self.error(e),
-                        Ok(_) => (),
-                    }
-                    match self.survey_files() {
-                        Ok(shards) => {
-                            //let n_w = self.cfg().num_wbots_per_zone;
-                            //let result = self.init_writer_live_files(n_w);
-                            //self.result(&result);
-
-                            if zcfg.init_load_caches {
-                                let result = self.init_caches(shards);
-                                self.result(&result);
-                            }
-                        },
-                        Err(e) => self.result(&Err(e)),
-                    }
-                    info!(sync_log::stream(), "{}: Zone {} init complete", self.ozid(), self.zind);
+                    self.respond(result.map(|()| OzoneMsg::Ok), &resp);
                 },
                 // WORK
-                OzoneMsg::CacheSize(b, size, ancillary_size) => {
+                OzoneMsg::CacheSize(b, size, ancillary_size, pins) => {
                     if b+1 > self.zone_state().caches.len() {
                         self.error(err!(
                             "{}: The BotPoolInd for a cache size update, {}, exceeds the \
@@ -223,6 +229,9 @@ impl<
                                     ancillary_size,
                                     time,
                                 };
+                                if let Some(h) = self.zone_state_mut().heads.get_mut(b) {
+                                    *h = pins;
+                                }
                             },
                         }
                     }
@@ -270,27 +279,38 @@ impl<
                     // are then not contiguous, which nothing depends on: a zone's files
                     // are found by reading the directory.
                     let mut fnum = self.fnum;
-                    let mut claimed = false;
+                    let mut claim = None;
                     // Bounded so that a directory in a state nobody expected stops the
                     // bot rather than spinning it.
                     for _ in 0..constant::LIVE_FILE_CLAIM_LIMIT {
                         fnum += 1;
                         match self.zdir().claim(fnum) {
-                            Ok(true) => { claimed = true; break; },
+                            Ok(true) => { claim = Some(Ok(fnum)); break; },
                             Ok(false) => (),
-                            Err(e) => { self.error(e); break; },
+                            Err(e) => { claim = Some(Err(e)); break; },
                         }
                     }
-                    if claimed {
-                        self.fnum = fnum;
-                        self.respond(Ok(OzoneMsg::UseLiveFile(self.fnum)), &resp);
-                    } else {
-                        self.error(err!(
+                    let result = match claim {
+                        Some(Ok(fnum)) => {
+                            self.fnum = fnum;
+                            Ok(OzoneMsg::UseLiveFile(fnum))
+                        },
+                        Some(Err(e)) => Err(err!(e,
+                            "{}: No live file could be claimed in zone {:?}.",
+                            self.ozid(), self.zdir();
+                        IO, File, Create)),
+                        None => Err(err!(
                             "{}: No live file number could be claimed in zone {:?} within {} \
                             attempts from {}; every number tried was already taken.",
                             self.ozid(), self.zdir(), constant::LIVE_FILE_CLAIM_LIMIT, self.fnum;
-                        IO, File, Create, Excessive));
+                        IO, File, Create, Excessive)),
+                    };
+                    // The writer asking is waiting on this, and so is the caller whose write
+                    // needed the new file, so a failure is answered rather than only logged.
+                    if let Err(e) = &result {
+                        self.error(e.clone());
                     }
+                    self.respond(result, &resp);
                 },
                 OzoneMsg::ShardFileSize(b, size) => {
                     if b+1 > self.zone_state().files.len() {
@@ -517,10 +537,44 @@ impl<
 //    }
 
 
+    /// Configures the zone, surveys its files, gives each writer a live file and loads the caches.
+    fn init_zone(
+        &mut self,
+        zdir:   ZoneDir,
+        zcfg:   ZoneConfig,
+    )
+        -> Outcome<()>
+    {
+        self.zone_state_mut().caches = vec![Resource::default(); zcfg.ncbots];
+        self.zone_state_mut().heads = vec![PinnedHeads::default(); zcfg.ncbots];
+        self.zone_state_mut().files = vec![Resource::default(); zcfg.nfbots];
+        res!(self.fwd_msg_to_pool(&WorkerType::Cache, OzoneMsg::SetCacheSizeLimit(zcfg.cache_size_lim)));
+        self.zdir = zdir.clone();
+        res!(self.broadcast(OzoneMsg::ZoneDir(*self.zind(), zdir)));
+        let t0 = Instant::now();
+        let shards = res!(self.survey_files());
+        let surveyed = t0.elapsed();
+        let nfiles: usize = shards.iter().map(|s| s.map().len()).sum();
+        // Replay always runs.  `init_caches` returns only once every file has been walked, so
+        // the stamp floor is raised past every stamp on disk before the zone answers, and the
+        // database is not ready (`bring_up`) until every zone has.
+        let (by_index, by_data) = res!(self.init_caches(shards));
+        // Every record on disk is now queued to the caches, behind which this arrives, so a
+        // chunk tombstone that superseded nothing there shadows nothing.
+        res!(self.fwd_msg_to_pool(&WorkerType::Cache, OzoneMsg::ReplayDone));
+        let floor = crate::api::stamp_floor();
+        info!(sync_log::stream(), "{}: Zone {}: {} files surveyed in {} ms, {} replayed from their \
+            index and {} from their data queued in a further {} ms, stamp floor {}.{:09} s.",
+            self.ozid(), self.zind, nfiles, surveyed.as_millis(), by_index, by_data,
+            t0.elapsed().saturating_sub(surveyed).as_millis(),
+            floor / 1_000_000_000, floor % 1_000_000_000);
+        Ok(())
+    }
+
     /// Survey the existing data and index files and send the file state maps to the zone file bots.
     pub fn survey_files(&mut self) -> Outcome<Vec<FileStateMap>> {
     
-        info!(sync_log::stream(), "{}: Surveying {} files...", self.ozid(), self.zind());
+        info!(sync_log::stream(), "{}: Surveying the files of zone {}...", self.ozid(), self.zind());
     
         let mut shards = Vec::new();
         let nf = self.cfg().num_fbots_per_zone();
@@ -624,6 +678,34 @@ impl<
             }
         }
     
+        // An index standing without its data file, with records in it, is not replayed here and
+        // is kept out of the zone's file states and size.  The data file is gone either because a
+        // collection deleting the pair was interrupted, the index outliving it (builds before
+        // 2026-10-11 removed the data first, and a filesystem that does not order two unlinks can
+        // do the same), or because it was lost.  Which one only the whole store can tell, so
+        // `lone_index::settle` judges it once every zone has replayed, and either completes the
+        // delete or refuses the open (QA r2 F4).  Its number is still in use until then: a live
+        // file must never be given it, or the old index would name the new file's records.  An
+        // empty index names no record, and a rollover abandoned with nothing written can leave one.
+        for shard in &mut shards {
+            let lone: Vec<FileNum> = shard.map().iter()
+                .filter(|(_, st)| matches!(st.present(), Present::Solo(FileType::Index))
+                    && st.get_index_file_size() > 0)
+                .map(|(fnum, _)| *fnum)
+                .collect();
+            for fnum in lone {
+                if let Some(st) = shard.map_mut().remove(&fnum) {
+                    dir_size = dir_size.saturating_sub(st.get_index_file_size());
+                }
+                if fnum > max_data_fnum {
+                    max_data_fnum = fnum;
+                }
+                info!(sync_log::stream(), "{}: Zone {}: index file {} stands without its data \
+                    file and is not replayed; the start judges it once every zone is up.",
+                    self.ozid(), self.zind(), fnum);
+            }
+        }
+
         // Sort incomplete files by number descending.
         incomplete_files.sort_by(|a, b| b.0.cmp(&a.0));
 
@@ -639,47 +721,45 @@ impl<
         self.fnum = max_data_fnum;
 
         // Initialise WriterBot live files.
-        let result = self.init_writer_live_files(&incomplete_files);
-        self.result(&result);
+        res!(self.init_writer_live_files(&incomplete_files));
 
         // 9. Set the directory size for the zone.
         self.size = dir_size;
+        info!(sync_log::stream(), "{}: Surveyed {} files in zone {}.", self.ozid(),
+            shards.iter().map(|s| s.map().len()).sum::<usize>(), self.zind());
 
         Ok(shards)
     }
 
-    /// Assigns live files to WriterBots, re-using discovered incomplete files before creating
-    /// new ones, and leaves the zone live file counter above every number assigned.
+    /// Hands each discovered incomplete file to a WriterBot.  A writer left without one opens
+    /// its first live file, claimed through `NextLiveFile`, at its first write, so a start that
+    /// writes nothing creates no file and a store opened only to be read is left as it was.
     fn init_writer_live_files(
         &mut self,
         incomplete_files: &[(FileNum, usize)],
     )
         -> Outcome<()>
     {
-        let n_w = self.cfg().num_wbots_per_zone as usize;
+        let n_w = (self.cfg().num_wbots_per_zone as usize).min(incomplete_files.len());
         let wbots = res!(self.get_zwbots())[&WorkerType::Writer].clone();
     
-        trace!(sync_log::stream(), "{}: Assigning live files to {} writer bots.", self.ozid(), n_w);
+        trace!(sync_log::stream(), "{}: Assigning {} incomplete files to writer bots.",
+            self.ozid(), n_w);
     
         let resp = Responder::new(Some(self.ozid()));
         for i in 0..n_w {
-            let fnum = if i < incomplete_files.len() {
-                // Use existing incomplete file.  Its number is at or below the counter,
-                // which was seeded with the highest file number on disk, so the counter
-                // needs no adjustment.
-                incomplete_files[i].0
-            } else {
-                // There are not enough existing incomplete files to assign to wbots, create new
-                // file number.
-                self.fnum += 1;
-                self.fnum
-            };
-
+            // Its number is at or below the counter, which was seeded with the highest file
+            // number on disk, so the counter needs no adjustment.
+            let fnum = incomplete_files[i].0;
             let wbot = res!(wbots.get_bot(i));
             res!(wbot.send(OzoneMsg::NewLiveFile(Some(fnum), resp.clone())));
         }
+        if n_w == 0 {
+            return Ok(());
+        }
 
-        let (_, msgs) = res!(resp.recv_number(n_w, constant::BOT_REQUEST_WAIT));
+        // Start-up work, held to the control deadline: see constant::CONTROL_REQUEST_TIMEOUT.
+        let (_, msgs) = res!(resp.recv_number(n_w, constant::CONTROL_REQUEST_WAIT));
         for msg in msgs {
             match msg {
                 OzoneMsg::Error(e) => return Err(err!(e,
@@ -698,10 +778,22 @@ impl<
     pub fn read_files(&mut self) -> Outcome<BTreeMap<String, FileEntry>> {
         let mut map = BTreeMap::new();
         let list = res!(fs::read_dir(self.zdir().dir.clone()));
+        let mut paths = Vec::new();
         for item in list {
             let item = res!(item);
-            let path = item.path();
-            let file = res!(File::open(&path));
+            paths.push(item.path());
+        }
+        hooks::list_delay();
+        for path in paths {
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                // A collection renamed it away or deleted it since the directory was read, so it
+                // is not on the disk any more and has no length to give.
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) => return Err(err!(e,
+                    "{}: Cannot open {:?} listing the files of {:?}.", self.ozid(), path, self.zind();
+                    IO, File, Read)),
+            };
             let metadata = res!(file.metadata());
             let ftyp = metadata.file_type();
             let typ = if ftyp.is_dir() {
@@ -713,7 +805,6 @@ impl<
             };
             let elapsed = res!(metadata.modified()).elapsed();
             let mods = res!(elapsed).as_secs();
-            //let mods = res!(res!(metadata.modified()).elapsed()).as_secs();
             let size = metadata.len();
             let name = match path.file_name() {
                 Some(s) => match s.to_os_string().into_string() {
@@ -733,16 +824,16 @@ impl<
         &mut self,
         shards: Vec<FileStateMap>,
     )
-        -> Outcome<()>
+        -> Outcome<(usize, usize)>
     {
         // 1. Prepare to make a bunch of requests to InitGarbageBots.
         let resp = Responder::new(Some(self.ozid()));
         let mut bot_requests = 0;
+        let mut by_data = 0; // files replayed from the data file alone
 
         for mut shard in shards {
 
             // 2. Loop through all previously surveyed files and check their status.
-            let mut missing_data_files: Option<Vec<u32>> = None;
             for (fnum, fstate) in shard.map_mut() {
                 match fstate.present() {
                     Present::Pair => {
@@ -801,30 +892,20 @@ impl<
                                 Channel, Write));
                         } else {
                             bot_requests += 1;
+                            by_data += 1;
                         }
                     },
-                    Present::Solo(FileType::Index) => {
-                        // An index file without a data file is bad, it means data has been lost.
-                        // Keep a track of all such instances and warn the user.
-                        match missing_data_files {
-                            None => missing_data_files = Some(vec![*fnum]),
-                            Some(ref mut missing) => missing.push(*fnum),
-                        }
-                    },
-                }
-            }
-            // 3. Warn the user of missing data files.
-            if let Some(missing) = missing_data_files {
-                for fnum in missing {
-                    warn!(sync_log::stream(), "{:?}: Data file {} is missing, suggesting loss of data.",
-                        self.ozid(), fnum);
+                    // Only an empty one reaches here (`survey_files`), naming no record.
+                    Present::Solo(FileType::Index) => (),
                 }
             }
         }
 
-        // 4. Wait for and collect all request responses.
+        // 4. Wait for and collect all request responses.  Loading one large file under a busy
+        //    disk can take longer than a bot request is allowed, and this is start-up work that
+        //    nothing is waiting to be served behind, so it is held to the control deadline.
         for _ in 0..bot_requests {
-            match resp.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
+            match resp.recv_timeout(constant::CONTROL_REQUEST_TIMEOUT) {
                 Err(e) => return Err(err!(e,
                     "While collecting cache initialisation request responses.";
                     IO, Channel, Read)),
@@ -835,6 +916,6 @@ impl<
             }
         }
 
-        Ok(())
+        Ok((bot_requests - by_data, by_data))
     }
 }

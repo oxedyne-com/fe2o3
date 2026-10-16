@@ -18,15 +18,60 @@ use oxedyne_fe2o3_net::{
         SmtpMode,
         SmtpServer,
     },
+    tls::{
+        BoundedTlsAcceptor,
+        Handshake,
+    },
 };
 
 use std::{
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{
+            AtomicU32,
+            Ordering,
+        },
+    },
 };
 
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
+
+
+/// How many mail listeners bound, against how many the configuration asked for,
+/// surfaced in the health body as `mail_down`.
+///
+/// Counted up front from the configuration, before anything that can fail, so a
+/// set-up that dies before it binds anything still shows every listener as down
+/// rather than showing no mail server at all.
+#[derive(Debug, Default)]
+pub struct ListenerTally {
+    wanted: AtomicU32,
+    bound:  AtomicU32,
+}
+
+impl ListenerTally {
+    pub fn new_shared() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn want(&self) {
+        self.wanted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn bound(&self) {
+        self.bound.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Listeners asked for and not bound, or `None` when none were asked for.
+    pub fn down(&self) -> Option<u32> {
+        let wanted = self.wanted.load(Ordering::Relaxed);
+        if wanted == 0 {
+            return None;
+        }
+        Some(wanted.saturating_sub(self.bound.load(Ordering::Relaxed)))
+    }
+}
 
 
 /// Runs the accept loop forever. An error on an individual accept is logged and
@@ -34,6 +79,7 @@ use tokio_rustls::TlsAcceptor;
 pub async fn run_smtp_listener(
     addr:   SocketAddr,
     server: SmtpServer<AppMailHandler, PasswdFileUserStore>,
+    tally:  Option<Arc<ListenerTally>>,
 )
     -> Outcome<()>
 {
@@ -43,6 +89,9 @@ pub async fn run_smtp_listener(
             "Binding SMTP listener on {}.", addr;
             IO, Network, Init)),
     };
+    if let Some(t) = &tally {
+        t.bound();
+    }
     info!("SMTP {:?} listening on {} (mode={:?})",
         server.mode, addr, server.mode);
     loop {
@@ -69,11 +118,12 @@ pub async fn run_smtp_listener(
 /// entering the IMAP state machine.
 pub async fn run_imap_listener(
     addr:           SocketAddr,
-    tls_acceptor:   TlsAcceptor,
+    tls_acceptor:   BoundedTlsAcceptor,
     server:         ImapServer<
         oxedyne_fe2o3_mail::maildir::MaildirStore,
         PasswdFileUserStore,
     >,
+    tally:          Option<Arc<ListenerTally>>,
 )
     -> Outcome<()>
 {
@@ -83,6 +133,9 @@ pub async fn run_imap_listener(
             "Binding IMAP listener on {}.", addr;
             IO, Network, Init)),
     };
+    if let Some(t) = &tally {
+        t.bound();
+    }
     info!("IMAP listening on {}", addr);
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -99,8 +152,16 @@ pub async fn run_imap_listener(
         let server = server.clone();
         tokio::spawn(async move {
             let tls = match acceptor.accept(stream).await {
-                Ok(t) => t,
-                Err(e) => {
+                Handshake::Ok(t) => t,
+                Handshake::TimedOut => {
+                    warn!("IMAP TLS handshake from {} timed out.", peer);
+                    return;
+                }
+                Handshake::PeerFailed(e) => {
+                    debug!("IMAP TLS handshake from {} ended by the peer: {}", peer, e);
+                    return;
+                }
+                Handshake::Failed(e) => {
                     warn!("IMAP TLS handshake from {} failed: {}", peer, e);
                     return;
                 }
@@ -126,7 +187,7 @@ pub type AppImapServer = ImapServer<
 pub fn build_smtp_servers(
     handler:        AppMailHandler,
     users:          PasswdFileUserStore,
-    tls_acceptor:   Option<TlsAcceptor>,
+    tls_acceptor:   Option<BoundedTlsAcceptor>,
     hostname:       Arc<String>,
 )
     -> (AppSmtpServer, AppSmtpServer)
@@ -146,4 +207,24 @@ pub fn build_smtp_servers(
         mode:           SmtpMode::Submission,
     };
     (receive, submission)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listener_tally_reports_only_what_was_asked_for() {
+        let t = ListenerTally::default();
+        assert_eq!(t.down(), None, "a host with no mail server reports no mail field");
+        t.want();
+        t.want();
+        t.want();
+        t.bound();
+        t.bound();
+        assert_eq!(t.down(), Some(1), "three asked for, two bound");
+        t.bound();
+        assert_eq!(t.down(), Some(0));
+    }
 }

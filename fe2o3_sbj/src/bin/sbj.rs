@@ -35,6 +35,7 @@ use oxedyne_fe2o3_sbj::{
 	},
 	validate,
 	SCHEMA_DOC,
+	SCHEMA_DOC_1,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -376,7 +377,7 @@ fn compile(args: &Args) -> Outcome<()> {
 		None => return Err(err!(
 			"sbj compile needs somewhere to write the document."; Bug, Missing)),
 	};
-	sign_and_write(args, &tree, &out, "Compiled")
+	sign_and_write(args, &tree, SCHEMA_DOC, &out, "Compiled")
 }
 
 /// Imports a Markdown file: read the prose, map it to the node vocabulary, and compile the tree.
@@ -410,7 +411,7 @@ fn import(args: &Args) -> Outcome<()> {
 		Some(out) => out.clone(),
 		None => args.input.with_extension("sbj"),
 	};
-	sign_and_write(args, &tree, &out, "Imported")
+	sign_and_write(args, &tree, SCHEMA_DOC_1, &out, "Imported")
 }
 
 /// The form an imported source is written in.
@@ -476,6 +477,7 @@ fn stem(path: &Path) -> String {
 fn sign_and_write(
 	args:	&Args,
 	tree:	&Dat,
+	schema:	&str,
 	out:	&Path,
 	verb:	&str,
 )
@@ -489,9 +491,9 @@ fn sign_and_write(
 	};
 
 	let buf = if args.index {
-		res!(doc::write_with_index(tree, SCHEMA_DOC, &signer, time))
+		res!(doc::write_with_index(tree, schema, &signer, time))
 	} else {
-		res!(doc::write(tree, SCHEMA_DOC, &signer, time))
+		res!(doc::write(tree, schema, &signer, time))
 	};
 
 	// It must read back the way a reader would, or it is not a document, it is a file.

@@ -46,6 +46,7 @@
 
 use crate::pixmap::{
 	Pixmap,
+	Tone,
 	MAX_PIXELS,
 };
 
@@ -1877,6 +1878,12 @@ fn quant_of(r: &Reader, c: &Comp) -> Outcome<[u16; DCTSIZE2]> {
 
 /// The pixels come out opaque: JPEG carries no alpha channel.
 pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
+	let (pm, _) = res!(decode_toned(buf));
+	Ok(pm)
+}
+
+/// Decodes as [`decode`] does, and says whether the frame held one component, grey, or colour.
+pub fn decode_toned(buf: &[u8]) -> Outcome<(Pixmap, Tone)> {
 	let mut r = res!(parse(buf));
 	let mut frame = match r.frame.take() {
 		Some(f) => f,
@@ -1931,7 +1938,8 @@ pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
 			rescale(&plane, w, h)
 		});
 	}
-	colourise(&chans, w, h, space, r.adobe.is_some())
+	let tone = if space == Space::Grey { Tone::Grey } else { Tone::Colour };
+	Ok((res!(colourise(&chans, w, h, space, r.adobe.is_some())), tone))
 }
 
 /// Decodes a JPEG at an eighth of its size, from the DC coefficient of each block alone.
@@ -2623,6 +2631,17 @@ mod tests {
 			assert_eq!(back.height(), h, "the height of a {} by {} round trip", w, h);
 			let (pw, ph) = res!(dimensions(&buf));
 			assert_eq!((pw, ph), (w, h), "the probe's size for {} by {}", w, h);
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_one_component_frame_decodes_with_a_grey_tone() -> Outcome<()> {
+		let pm = res!(sample(16, 8));
+		for (grey, tone) in [(true, Tone::Grey), (false, Tone::Colour)] {
+			let opts = Options { quality: 90, chroma: Chroma::Full, grey };
+			let (_, got) = res!(decode_toned(&res!(encode_with(&pm, &opts))));
+			assert_eq!(got, tone, "grey {}", grey);
 		}
 		Ok(())
 	}

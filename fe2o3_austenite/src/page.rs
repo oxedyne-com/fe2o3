@@ -8,21 +8,24 @@
 use crate::font::ShapedText;
 use crate::ir::{
 	Dims,
+	DrawOp,
 	Graphic,
 	Sp,
+	Transform,
 };
 
 use std::sync::Arc;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_geom::rect::AbsSize;
+use oxedyne_fe2o3_graphics::path::Path;
 
 /// A page's physical geometry: its trim size and four margins. A book binds along one edge, so the
 /// inside (binding) and outside (fore-edge) margins differ, and the two alternate between recto and
 /// verso -- a mirror. The driver lays every page at the recto split (`content_left` = inside); a verso
 /// page is the same frame shifted by [`mirror_shift`](Self::mirror_shift), which is why the geometry
 /// keeps both margins rather than one left edge.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageGeometry {
 	pub width:	Sp,
 	pub height:	Sp,
@@ -30,17 +33,50 @@ pub struct PageGeometry {
 	pub outside:	Sp,	// the fore-edge margin, opposite the binding
 	pub top:	Sp,
 	pub bottom:	Sp,
+	pub swap:	Swap,	// which physical pages exchange `inside` and `outside` (Typst's two-sided margins)
+}
+
+/// Which pages of a two-sided layout exchange their left and right margins, by physical page number.
+/// Typst's `binding: left` swaps even pages (the first page is right as it stands); `binding: right`
+/// swaps odd ones. A one-sided layout swaps none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Swap {
+	#[default]
+	None,
+	Even,
+	Odd,
+}
+
+impl Swap {
+	/// Does the page with this one-based physical number exchange its side margins?
+	pub fn applies(self, number: u32) -> bool {
+		match self {
+			Swap::None	=> false,
+			Swap::Even	=> number % 2 == 0,
+			Swap::Odd	=> number % 2 == 1,
+		}
+	}
 }
 
 impl PageGeometry {
 	/// A uniform margin on all four sides -- the demos' geometry, and single-file `ingot`.
 	pub fn new(width: Sp, height: Sp, margin: Sp) -> Self {
-		Self { width, height, inside: margin, outside: margin, top: margin, bottom: margin }
+		Self { width, height, inside: margin, outside: margin, top: margin, bottom: margin, swap: Swap::None }
 	}
 
-	/// A book geometry with mirror margins: `inside` binds, `outside` is the fore-edge.
+	/// A book geometry with mirror margins: `inside` binds, `outside` is the fore-edge, and an even page
+	/// takes them exchanged (Typst's `binding: left`).
 	pub fn with_margins(width: Sp, height: Sp, inside: Sp, outside: Sp, top: Sp, bottom: Sp) -> Self {
-		Self { width, height, inside, outside, top, bottom }
+		Self { width, height, inside, outside, top, bottom, swap: Swap::Even }
+	}
+
+	/// The geometry physical page `number` takes: the side margins exchanged when the layout is two-sided
+	/// and the binding puts this page's spine on the other side.
+	pub fn for_page(&self, number: u32) -> PageGeometry {
+		if !self.swap.applies(number) {
+			return *self;
+		}
+		PageGeometry { inside: self.outside, outside: self.inside, ..*self }
 	}
 
 	/// A4 portrait, 595.276 by 841.890 points, with a two-centimetre margin (56.9 points).
@@ -79,6 +115,7 @@ impl PageGeometry {
 			outside:	self.width - col_left - col_w,
 			top:		self.top,
 			bottom:		self.bottom,
+			swap:		self.swap,
 		}
 	}
 
@@ -105,6 +142,26 @@ pub enum PlacedKind {
 	Reserved,
 	Text(ShapedText),
 	Graphic(Arc<Graphic>),	// a figure's baked paths, drawn at this box's position
+	// Opens a group: every item up to the matching `GroupEnd` is drawn under the group's transform and
+	// clip. The items are placed at page positions as if untransformed; the transform acts about this
+	// item's position, and the clip path is in the frame whose origin that position is.
+	Group(Arc<Group>),
+	GroupEnd,
+}
+
+/// What a group does to the items it encloses.
+#[derive(Clone, Debug)]
+pub struct Group {
+	pub transform:	Transform,		// about the group's origin, points, y down
+	pub clip:		Option<Path>,	// relative to the group's origin, before the transform
+}
+
+impl Group {
+	/// The whole map a writer applies to page coordinates: the transform moved to act about `(x, y)`.
+	pub fn page_transform(&self, x: Sp, y: Sp) -> Transform {
+		let (ox, oy) = (x.to_pt(), y.to_pt());
+		Transform::translate(ox, oy).then(&self.transform.then(&Transform::translate(-ox, -oy)))
+	}
 }
 
 /// Which of a page's three vertical regions a placed item belongs to. A float insertion reflows one region
@@ -176,6 +233,16 @@ impl Frame {
 		}
 	}
 
+	/// As [`Frame::shift_region`], for the items from index `from` on only: a column float shifts the material
+	/// of its own column -- everything placed since the column opened -- and not the columns beside it.
+	pub fn shift_region_from(&mut self, from: usize, by: Sp, region: Region) {
+		for item in self.placed.iter_mut().skip(from) {
+			if item.region == region {
+				item.y = item.y + by;
+			}
+		}
+	}
+
 	/// Reclaims every item from index `from` to the end for `region`. A float's material is placed through
 	/// the ordinary helpers, which stamp it `Body`; the caller records the frame length before placing the
 	/// float and calls this after, so exactly the float's own items join its band and the body items already
@@ -212,4 +279,24 @@ impl Page {
 	/// The split point clamped to the current frame, so `placed[..body_len()]` is always in bounds even
 	/// after the verso mirror shift has moved items around (it never adds or removes any).
 	pub fn body_len(&self) -> usize { self.body_len.min(self.frame.placed.len()) }
+
+	/// The bytes the page holds of its own: the page, its placed items, each text run's glyphs and string,
+	/// and each graphic's list of drawing operations. What an operation or a group shares by `Arc` beyond
+	/// that, a font or an image's pixels, is held by the session's caches as well and is not counted, so
+	/// this is the cost of keeping the page, not of everything it reaches.
+	pub fn heap_bytes(&self) -> usize {
+		let mut n = std::mem::size_of::<Page>() + self.frame.placed.capacity() * std::mem::size_of::<Placed>();
+		for p in &self.frame.placed {
+			n += match &p.kind {
+				PlacedKind::Text(t)		=> t.heap_bytes(),
+				PlacedKind::Graphic(g)	=> std::mem::size_of::<Graphic>()
+					+ g.ops.capacity() * std::mem::size_of::<DrawOp>(),
+				PlacedKind::Group(_)	=> std::mem::size_of::<Group>(),
+				PlacedKind::Rule
+				| PlacedKind::Reserved
+				| PlacedKind::GroupEnd	=> 0,
+			};
+		}
+		n
+	}
 }

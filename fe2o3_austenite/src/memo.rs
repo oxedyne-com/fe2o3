@@ -13,13 +13,14 @@
 //!   placed glyph runs, rules and graphics -- so an unedited page reuses its rendered SVG body and only
 //!   the furniture (the running head and folio, which differ page to page) is drawn fresh.
 //!
-//! Both keys are 64-bit FNV-1a fingerprints of the content that determines the output. A fingerprint
-//! can in principle collide; at 64 bits over a single document the probability is negligible, which is
+//! Both keys are 128-bit [`Fingerprint`]s of the content that determines the output. A fingerprint
+//! can in principle collide; at 128 bits over a single document the probability is negligible, which is
 //! the same footing every incremental compiler (Typst.ts included) rests a content cache on.
 //!
 //! **Residency and the memo's contract.** The memo holds authored nodes and rendered SVG, so it costs
-//! roughly the memory of one document copy. A two-generation sweep ([`Memo::sweep`]) drops any entry not
-//! touched in the last two compiles, bounding that to ~2x rather than growing without limit. The memo is
+//! roughly the memory of one document copy. A two-generation sweep ([`Memo::sweep`], the
+//! [`GenMap`](oxedyne_fe2o3_data::gen_map::GenMap) both caches are held in) drops any entry not touched in
+//! the last two compiles, bounding that to ~2x rather than growing without limit. The memo is
 //! valid only while the document's fonts, faces, page geometry and theme are unchanged -- those are
 //! folded into a single global fingerprint the caller supplies once per compile ([`Memo::begin`]); a
 //! change to any of them belongs in a fresh [`Memo`], not this one.
@@ -27,58 +28,15 @@
 use crate::doc::{
 	Heading,
 	Segment,
+	Answer,
 };
 use crate::ir::Node;
+use crate::ir::Sp;
 use crate::ledger::AnchorId;
 
-use std::collections::HashMap;
-
-/// A 64-bit FNV-1a accumulator. The whole memo keys on this: it is fast, allocation-free, and stable
-/// run to run, which is all a content fingerprint needs. It is not a cryptographic hash and makes no
-/// claim to be one.
-#[derive(Clone, Copy)]
-pub struct Fnv {
-	state:	u64,
-}
-
-impl Fnv {
-	const OFFSET:	u64	= 0xcbf29ce484222325;
-	const PRIME:	u64	= 0x00000100000001b3;
-
-	pub fn new() -> Self {
-		Self { state: Self::OFFSET }
-	}
-
-	pub fn write(&mut self, bytes: &[u8]) {
-		for b in bytes {
-			self.state ^= *b as u64;
-			self.state = self.state.wrapping_mul(Self::PRIME);
-		}
-	}
-
-	pub fn write_u8(&mut self, v: u8)	{ self.write(&[v]); }
-	pub fn write_u32(&mut self, v: u32)	{ self.write(&v.to_le_bytes()); }
-	pub fn write_u64(&mut self, v: u64)	{ self.write(&v.to_le_bytes()); }
-	pub fn write_i32(&mut self, v: i32)	{ self.write(&v.to_le_bytes()); }
-	pub fn write_usize(&mut self, v: usize)	{ self.write(&(v as u64).to_le_bytes()); }
-	pub fn write_bool(&mut self, v: bool)	{ self.write_u8(v as u8); }
-
-	/// Hashes an `f32` by its bit pattern, so a coordinate hashes exactly and reproducibly. Positions
-	/// and advances are never `NaN`, so the several bit patterns of `NaN` are not a concern here.
-	pub fn write_f32(&mut self, v: f32)	{ self.write(&v.to_bits().to_le_bytes()); }
-
-	/// Hashes a string length-prefixed, so "ab"+"c" and "a"+"bc" do not collide.
-	pub fn write_str(&mut self, s: &str) {
-		self.write_u64(s.len() as u64);
-		self.write(s.as_bytes());
-	}
-
-	pub fn finish(self) -> u64 { self.state }
-}
-
-impl Default for Fnv {
-	fn default() -> Self { Self::new() }
-}
+use oxedyne_fe2o3_data::gen_map::GenMap;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 /// The scalar authoring counters at a block boundary: the state a block enters under (its key) and the
 /// state it leaves (its value, restored on a cache hit). These are exactly the counters a block bakes
@@ -99,13 +57,14 @@ pub struct BlockState {
 	pub fig_no:			u32,
 	pub heads_len:		u32,
 	pub index_no:		u32,
+	pub weak_gap:		Option<Sp>,	// a weak `#v` standing in place of the next block's spacing
 }
 
 impl BlockState {
 	/// Folds the entering state into a key hasher. `heads_len` and `index_no` are in here because a
 	/// heading's and an index marker's anchor identity is keyed off them; a block whose position among
 	/// the headings has shifted must not hit.
-	pub fn hash_into(&self, h: &mut Fnv) {
+	pub fn hash_into(&self, h: &mut Fingerprinter) {
 		h.write_bool(self.first);
 		h.write_bool(self.prev_para);
 		h.write_bool(self.pending_banner);
@@ -118,6 +77,8 @@ impl BlockState {
 		h.write_u32(self.fig_no);
 		h.write_u32(self.heads_len);
 		h.write_u32(self.index_no);
+		h.write_bool(self.weak_gap.is_some());
+		h.write_i32(self.weak_gap.map_or(0, |sp| sp.raw()));
 	}
 }
 
@@ -136,7 +97,9 @@ pub struct BlockEntry {
 	pub seen_add:		Vec<String>,
 	pub counters_set:	Vec<(String, u32)>,
 	pub exit:			BlockState,
-	last_gen:			u64,	// the generation this entry was last touched, for the two-generation sweep
+	// The answers the block gave, each by its ask's place in the block's own asks (`doc::asks_of`), given
+	// again on every hit at the sites of the block served.
+	pub answers:		Vec<(usize, Answer)>,
 }
 
 impl BlockEntry {
@@ -150,24 +113,23 @@ impl BlockEntry {
 		seen_add:		Vec<String>,
 		counters_set:	Vec<(String, u32)>,
 		exit:			BlockState,
+		answers:		Vec<(usize, Answer)>,
 	)
 		-> Self
 	{
-		Self { consume, nodes, heads, index_occ, claim_occ, seen_add, counters_set, exit, last_gen: 0 }
+		Self { consume, nodes, heads, index_occ, claim_occ, seen_add, counters_set, exit, answers }
 	}
 }
 
 /// One cached page-emit result: the SVG of the page's body frame, split into the visible glyph and
-/// graphic ink and the invisible selectable text layer's tspans, plus whether the body left any text
-/// behind (so the furniture's tspans take their leading interword space exactly as a single-pass render
-/// would). The furniture -- running head and folio -- is never cached, since its folio differs page to
+/// graphic ink and the invisible selectable text layer, kept open (its interword space and open line)
+/// so the furniture carries on from it exactly as a single-pass render would. The furniture -- running head and folio -- is never cached, since its folio differs page to
 /// page; it is drawn fresh and concatenated onto the cached body, byte for byte as one pass produces.
 #[derive(Clone)]
 pub struct PageEntry {
 	pub body_ink:		String,
-	pub body_tspans:	String,
-	pub seen_text:		bool,
-	last_gen:			u64,
+	pub body_tsel:		crate::emit::svg::TselLayer,	// the body's selectable layer, open for the furniture
+	pub body_defs:		crate::emit::svg::GlyphDefs,	// the body's glyph outlines, for the page's `<defs>`
 }
 
 /// The document's incremental memo: the block-authoring and page-emit caches, the global fingerprint
@@ -175,10 +137,9 @@ pub struct PageEntry {
 /// two-generation sweep reads, and the hit/miss tallies the gate measures.
 #[derive(Default)]
 pub struct Memo {
-	blocks:		HashMap<u64, BlockEntry>,
-	pages:		HashMap<u64, PageEntry>,
-	global_fp:	u64,	// fonts+faces+geometry+theme+refs+bib fingerprint; folded into every key
-	gen:		u64,
+	blocks:		GenMap<Fingerprint, BlockEntry>,	// unbounded: the entries state no size
+	pages:		GenMap<Fingerprint, PageEntry>,
+	global_fp:	Fingerprint,	// fonts+faces+geometry+theme+refs+bib fingerprint; folded into every key
 	pub block_hits:		u64,
 	pub block_misses:	u64,
 	pub page_hits:		u64,
@@ -188,24 +149,25 @@ pub struct Memo {
 impl Memo {
 	pub fn new() -> Self { Self::default() }
 
-	/// Opens a compile generation: steps the generation counter (so this compile's touches are
+	/// Opens a compile generation: steps both caches' generation (so this compile's touches are
 	/// distinguishable from the last), resets the hit/miss tallies, and installs the configuration
 	/// fingerprint. A fingerprint that differs from the one the cached entries were built under clears
 	/// both caches, since every key was scoped to the old configuration.
-	pub fn begin(&mut self, global_fp: u64) {
-		if self.global_fp != global_fp && (!self.blocks.is_empty() || !self.pages.is_empty()) {
+	pub fn begin(&mut self, global_fp: Fingerprint) {
+		if self.global_fp != global_fp {
 			self.blocks.clear();
 			self.pages.clear();
 		}
 		self.global_fp	= global_fp;
-		self.gen		= self.gen.wrapping_add(1);
+		self.blocks.begin();
+		self.pages.begin();
 		self.block_hits		= 0;
 		self.block_misses	= 0;
 		self.page_hits		= 0;
 		self.page_misses	= 0;
 	}
 
-	pub fn global_fp(&self) -> u64 { self.global_fp }
+	pub fn global_fp(&self) -> Fingerprint { self.global_fp }
 
 	/// The number of page-emit entries currently held. The changed-only delta path renders through
 	/// [`crate::emit::svg::render_page`], which never touches this cache, so a wasm delta instance keeps
@@ -222,9 +184,8 @@ impl Memo {
 	/// caches hold at most the working sets of the last two compiles -- roughly twice the live document,
 	/// never an unbounded accumulation of stale edits.
 	pub fn sweep(&mut self) {
-		let gen = self.gen;
-		self.blocks.retain(|_, e| gen.wrapping_sub(e.last_gen) < 2);
-		self.pages.retain(|_, e| gen.wrapping_sub(e.last_gen) < 2);
+		self.blocks.sweep();
+		self.pages.sweep();
 	}
 
 	// --- block authoring cache ---------------------------------------------------------------------
@@ -232,30 +193,33 @@ impl Memo {
 	/// Looks a block up, returning a clone of its cached result and marking it touched this generation.
 	/// The clone releases the borrow so the caller can splice the nodes into the authoring state; a
 	/// paragraph's node clone is far cheaper than re-shaping and re-breaking it.
-	pub fn block_lookup(&mut self, key: u64) -> Option<BlockEntry> {
-		let gen = self.gen;
-		match self.blocks.get_mut(&key) {
-			Some(e)	=> { e.last_gen = gen; self.block_hits += 1; Some(e.clone()) },
+	pub fn block_lookup(&mut self, key: Fingerprint) -> Option<BlockEntry> {
+		match self.blocks.get(&key) {
+			Some(e)	=> { self.block_hits += 1; Some(e.clone()) },
 			None	=> { self.block_misses += 1; None },
 		}
 	}
 
-	pub fn block_store(&mut self, key: u64, mut entry: BlockEntry) {
-		entry.last_gen = self.gen;
-		self.blocks.insert(key, entry);
+	pub fn block_store(&mut self, key: Fingerprint, entry: BlockEntry) {
+		self.blocks.insert(key, entry, 0);
 	}
 
 	// --- page emit cache ---------------------------------------------------------------------------
 
-	pub fn page_lookup(&mut self, key: u64) -> Option<PageEntry> {
-		let gen = self.gen;
-		match self.pages.get_mut(&key) {
-			Some(e)	=> { e.last_gen = gen; self.page_hits += 1; Some(e.clone()) },
+	pub fn page_lookup(&mut self, key: Fingerprint) -> Option<PageEntry> {
+		match self.pages.get(&key) {
+			Some(e)	=> { self.page_hits += 1; Some(e.clone()) },
 			None	=> { self.page_misses += 1; None },
 		}
 	}
 
-	pub fn page_store(&mut self, key: u64, body_ink: String, body_tspans: String, seen_text: bool) {
-		self.pages.insert(key, PageEntry { body_ink, body_tspans, seen_text, last_gen: self.gen });
+	pub fn page_store(
+		&mut self,
+		key:			Fingerprint,
+		body_ink:		String,
+		body_tsel:		crate::emit::svg::TselLayer,
+		body_defs:		crate::emit::svg::GlyphDefs,
+	) {
+		self.pages.insert(key, PageEntry { body_ink, body_tsel, body_defs }, 0);
 	}
 }

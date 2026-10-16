@@ -13,6 +13,7 @@
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::hash::sha3_256;
 use crate::kademlia::id::{
 	ID_LEN,
 	NodeId,
@@ -96,6 +97,14 @@ impl Record {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecordDigest {
 	pub id:			RecordId,
-	// Caller-supplied, so distributed Ozone is tied to no particular hash.
-	pub content:	[u8; 32],	// detects divergent copies at the same id
+	pub content:	[u8; 32],	// content_hash of the value; detects divergent copies at the same id
+}
+
+
+/// The protocol hash behind [`RecordDigest::content`]: SHA3-256 of the value's length as a
+/// big-endian `u64`, then the value. Every [`Storage`](super::storage::Storage) must digest
+/// with this function, since peers compare the digests to decide what to repair. It is fixed
+/// with the protocol, because Oxegen's public `root_digest` is built on it.
+pub fn content_hash(value: &[u8]) -> [u8; 32] {
+	sha3_256(&[&(value.len() as u64).to_be_bytes(), value])
 }

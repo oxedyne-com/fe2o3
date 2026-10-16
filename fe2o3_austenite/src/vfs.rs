@@ -6,12 +6,23 @@
 //! map before the same assembler runs. Every library file read routes through this module, so the
 //! assembler is written once and reads either source without a `#cfg` at each call.
 //!
+//! A path under a package's root, `@preview/cetz:0.3.4/src/lib.typ`, is served by the package layer
+//! ([`crate::eval::package`]) from what the host supplied, in memory or on disc, and never from the source
+//! map or the project's filesystem, so a package's files and a project's cannot shadow one another.
+//!
 //! The contract that keeps a native build byte-for-byte what it was: with no map installed -- the native
 //! default -- a read is exactly the `std::fs` call it replaced, and every predicate (`exists`, `is_file`,
-//! `canonicalize`) falls through to the real filesystem unchanged. A map is installed only by the wasm
-//! surface ([`crate::wasm`]), and only there does a read resolve from injected bytes. The global mirrors
-//! the crate's other assembly-time singletons -- the image base directory and the term dictionary --
-//! since the reader sets one file at a time and threads no source map of its own.
+//! `canonicalize`) falls through to the real filesystem unchanged. A map is installed only by the compile
+//! surface ([`crate::door`], which the wasm surface wraps), and only there does a read resolve from
+//! injected bytes. The door seals its map ([`install_sealed`]), so nothing the project does not hold reads
+//! from the host. The global mirrors the crate's other assembly-time singletons -- the image base
+//! directory and the term dictionary -- since the reader sets one file at a time and threads no source map
+//! of its own.
+
+use crate::eval::package::{
+	self,
+	PackageSpec,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -27,19 +38,37 @@ use std::sync::RwLock;
 // The injected source map. `None` on the native default path, where every read and predicate falls
 // through to `std::fs`; `Some` once the wasm surface installs a document's files, under which reads
 // resolve from the map and the real filesystem is never touched.
-static SOURCES: RwLock<Option<HashMap<PathBuf, Vec<u8>>>> = RwLock::new(None);
+static SOURCES: RwLock<Option<Sources>> = RwLock::new(None);
+
+// The map, and whether it is the whole world. A sealed map answers for every path: one it does not hold is
+// absent, whatever the real filesystem has there. An unsealed one falls through to it.
+struct Sources {
+	files:	HashMap<PathBuf, Vec<u8>>,
+	sealed:	bool,
+}
 
 /// Installs an injected source map, so every subsequent read resolves from `files` rather than the real
 /// filesystem. Keys are normalised on install and again on lookup, so a `dir.join("../x")` and a direct
 /// `x` resolve alike. The wasm compile surface calls this before it runs the assembler and clears it
 /// after, so one process can compile many documents in turn.
 pub fn install(files: HashMap<PathBuf, Vec<u8>>) -> Outcome<()> {
+	set_sources(files, false)
+}
+
+/// As [`install`], with the map sealed: a path it does not hold is absent, never read from the real
+/// filesystem. The native door installs this way, so a project sees only the files it was given, as it does
+/// in the browser, where there is no other filesystem to fall through to.
+pub fn install_sealed(files: HashMap<PathBuf, Vec<u8>>) -> Outcome<()> {
+	set_sources(files, true)
+}
+
+fn set_sources(files: HashMap<PathBuf, Vec<u8>>, sealed: bool) -> Outcome<()> {
 	let mut norm: HashMap<PathBuf, Vec<u8>> = HashMap::with_capacity(files.len());
 	for (k, v) in files {
 		norm.insert(normalise(&k), v);
 	}
 	let mut guard = lock_write!(SOURCES, "While installing the source map");
-	*guard = Some(norm);
+	*guard = Some(Sources { files: norm, sealed });
 	Ok(())
 }
 
@@ -62,11 +91,16 @@ pub fn is_installed() -> bool {
 /// Reads a file's bytes: from the installed source map where one holds the path, else from the real
 /// filesystem. With no map installed this is exactly [`std::fs::read`], so a native compile is unchanged.
 pub fn read(path: &Path) -> io::Result<Vec<u8>> {
+	if let Some(r) = package::read(path) {
+		return r;
+	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
-			Some(map) => match map.get(&normalise(path)) {
-				Some(bytes)	=> Ok(bytes.clone()),
-				None		=> native_read(path),
+			Some(map) => match map.files.get(&normalise(path)) {
+				Some(bytes)			=> Ok(bytes.clone()),
+				None if map.sealed	=> Err(io::Error::new(
+					io::ErrorKind::NotFound, fmt!("{:?} is not in the project.", path))),
+				None				=> native_read(path),
 			},
 			None => native_read(path),
 		},
@@ -84,16 +118,26 @@ pub fn read_to_string(path: &Path) -> io::Result<String> {
 	}
 }
 
+/// Did a [`read_to_string`] fail because the file is not valid UTF-8 text, rather than because it could not
+/// be read at all? The remedy differs -- re-save the file, not supply it -- so a caller tags the two apart.
+pub fn is_not_utf8(e: &io::Error) -> bool {
+	e.kind() == io::ErrorKind::InvalidData
+		&& e.get_ref().map_or(false, |inner| inner.is::<std::string::FromUtf8Error>())
+}
+
 /// Writes a file's bytes: into the installed source map where one is present (so a later read in the same
 /// compile sees it), else to the real filesystem. With no map installed this is exactly [`std::fs::write`].
 pub fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
+	if PackageSpec::of_path(path).is_some() {
+		return Err(io::Error::new(io::ErrorKind::PermissionDenied, fmt!("{:?} is in a package, which is read-only.", path)));
+	}
 	if is_installed() {
 		let mut guard = match SOURCES.write() {
 			Ok(g)	=> g,
 			Err(_)	=> return Err(io::Error::new(io::ErrorKind::Other, "the source map lock is poisoned")),
 		};
 		if let Some(map) = guard.as_mut() {
-			map.insert(normalise(path), contents.to_vec());
+			map.files.insert(normalise(path), contents.to_vec());
 		}
 		Ok(())
 	} else {
@@ -104,9 +148,12 @@ pub fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// Does a path resolve to a file? A map lookup where one is installed, falling through to the real
 /// filesystem; exactly [`Path::exists`] on the native default path.
 pub fn exists(path: &Path) -> bool {
+	if let (Some(file), Some(dir)) = (package::is_file(path), package::is_dir(path)) {
+		return file || dir;
+	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
-			Some(map)	=> map.contains_key(&normalise(path)) || native_exists(path),
+			Some(map)	=> map.files.contains_key(&normalise(path)) || (!map.sealed && native_exists(path)),
 			None		=> native_exists(path),
 		},
 		Err(_) => native_exists(path),
@@ -116,19 +163,71 @@ pub fn exists(path: &Path) -> bool {
 /// Is a path a readable file? For the injected map a key is a file, so this matches [`exists`] there;
 /// exactly [`Path::is_file`] on the native default path.
 pub fn is_file(path: &Path) -> bool {
+	if let Some(file) = package::is_file(path) {
+		return file;
+	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
-			Some(map)	=> map.contains_key(&normalise(path)) || native_is_file(path),
+			Some(map)	=> map.files.contains_key(&normalise(path)) || (!map.sealed && native_is_file(path)),
 			None		=> native_is_file(path),
 		},
 		Err(_) => native_is_file(path),
 	}
 }
 
+/// Is a path a directory? A package path asks the package it lies in; under an installed map a directory is
+/// any proper prefix of a key, or a real directory; exactly [`Path::is_dir`] on the native default path.
+pub fn is_dir(path: &Path) -> bool {
+	if let Some(dir) = package::is_dir(path) {
+		return dir;
+	}
+	match SOURCES.read() {
+		Ok(guard) => match guard.as_ref() {
+			Some(map) => {
+				let root = normalise(path);
+				map.files.keys().any(|k| k.starts_with(&root) && k != &root) || (!map.sealed && native_is_dir(path))
+			},
+			None => native_is_dir(path),
+		},
+		Err(_) => native_is_dir(path),
+	}
+}
+
+/// Every file beneath `dir`, at any depth, in a stable (sorted) order: the injected map's keys under that
+/// directory where a map is installed, together with whatever the real filesystem holds there. A directory
+/// that does not exist lists nothing, so a caller scanning an optional directory needs no existence check.
+pub fn list_files(dir: &Path) -> Vec<PathBuf> {
+	if let Some(files) = package::list(dir) {
+		return files;
+	}
+	let root = normalise(dir);
+	let mut out: Vec<PathBuf> = Vec::new();
+	let mut sealed = false;
+	if let Ok(guard) = SOURCES.read() {
+		if let Some(map) = guard.as_ref() {
+			sealed = map.sealed;
+			for k in map.files.keys() {
+				if k.starts_with(&root) && k != &root {
+					out.push(k.clone());
+				}
+			}
+		}
+	}
+	if !sealed {
+		native_list(dir, &mut out, LIST_DEPTH);
+	}
+	out.sort();
+	out.dedup();
+	out
+}
+
 /// Resolves a path to an absolute, canonical form. Under an installed map there is no filesystem to walk,
 /// so the path is normalised lexically (`.` and `..` folded); exactly [`std::fs::canonicalize`] on the
 /// native default path.
 pub fn canonicalize(path: &Path) -> io::Result<PathBuf> {
+	if PackageSpec::of_path(path).is_some() {
+		return Ok(normalise(path));
+	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
 			Some(_)	=> Ok(normalise(path)),
@@ -203,6 +302,42 @@ fn native_is_file(path: &Path) -> bool {
 fn native_is_file(_path: &Path) -> bool {
 	false
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_is_dir(path: &Path) -> bool {
+	path.is_dir()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_is_dir(_path: &Path) -> bool {
+	false
+}
+
+// How deep [`list_files`] descends: deep enough for any font tree, shallow enough that a symlink cycle
+// ends rather than recursing without bound.
+const LIST_DEPTH: u32 = 8;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_list(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
+	if depth == 0 {
+		return;
+	}
+	let entries = match std::fs::read_dir(dir) {
+		Ok(e)	=> e,
+		Err(_)	=> return,
+	};
+	for entry in entries.flatten() {
+		let path = entry.path();
+		if path.is_dir() {
+			native_list(&path, out, depth - 1);
+		} else if path.is_file() {
+			out.push(path);
+		}
+	}
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_list(_dir: &Path, _out: &mut Vec<PathBuf>, _depth: u32) {}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn native_canonicalize(path: &Path) -> io::Result<PathBuf> {

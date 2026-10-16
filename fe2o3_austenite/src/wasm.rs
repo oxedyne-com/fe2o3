@@ -1,189 +1,382 @@
-//! The wasm-bindgen compile surface, shaped to Daimond's existing Typst-wasm contract so the app can
-//! swap the Typst compiler for Austenite without rewiring its callers.
+//! The wasm-bindgen compile surface, shaped to Daimond's Typst-wasm contract so the app can swap the Typst
+//! compiler for Austenite without rewiring its callers.
 //!
-//! A [`DaimondTypst`] is a long-lived compiler instance: it builds the embedded Libertinus reading set
-//! once and holds it across compiles, and it keeps the last compile's ledger so a section-rail query can
-//! read heading pages back without recompiling. Nothing here touches a filesystem, a font service or a
-//! package registry: every source, asset and font a document needs is injected as bytes and read back
-//! through [`crate::vfs`], the same seam the native assembler reads the real filesystem through. This is
-//! the wasm equivalent of Typst's dummy-access model -- a path not injected simply does not resolve.
+//! This file is JavaScript interop and nothing else: a project object becomes a [`door::Project`], a
+//! [`door::Instance`] answers, and the answer becomes a JavaScript value. Every compile, strict decision,
+//! position and query lives in [`crate::door`], where a native test drives it. Nothing here touches a
+//! filesystem, a font service or a package registry: every source, asset and font a document needs is
+//! injected as bytes, and a package is supplied by the host with `supplyPackage`.
 //!
-//! Every method resolves; none rejects or throws. A failure returns `{ error: "<file>:<line>: <message>" }`
-//! (the engine's own message where a site is not localised to a line), never a bare access-denied line and
-//! never a JavaScript exception, so a caller composes its diagnostics from a value it always receives.
+//! Every method resolves; none rejects or throws. A failure returns `{ error: "<file>:<line>:<col>:
+//! <message>", diagnostics, skipped, needs }`, `0:0` where the cause could not be traced to a source
+//! line, so a caller composes its diagnostics from a value it always receives. Columns are 1-based
+//! UTF-16 code units. A project carrying `strict: true` turns a result that was not set as written into
+//! such a failure, so a partial PDF never reads as success.
 //!
-//! One capability is deliberately out of this lane and documented as a gap rather than stubbed: a recompile
-//! is from scratch -- the instance is shaped to hold an incremental block cache, but this lane does not
-//! build one. The per-page SVG does carry a transparent selectable-text layer -- a `.tsel` twin of the
-//! glyph outlines, emitted by [`crate::emit::svg`] -- which is what [`DaimondTypst::compile_project_vector`]
-//! returns and the section rail selects over.
+//! **The font pack.** The browser build (`--no-default-features --features wasm`) embeds no fonts. The host
+//! supplies the font pack, the twelve files of the crate's `fonts/` directory (`fonts::Embedded::BOOK`, each
+//! named by `Embedded::file`), in the project's `fonts` as `[[name, bytes], ...]`, as it supplies any font. A
+//! compile that reaches a pack family it was not given fails with a `missing_font` error and `needs` naming
+//! `font:Libertinus Serif`, `font:New Computer Modern Math` or `font:DejaVu Sans Mono`. The first such
+//! failure may name one family only, since an equation that cannot be set ends the compile before the text
+//! asks, so a host answers any `font:` need by supplying the whole pack. A native build embeds the pack
+//! (feature `embed-fonts`, on by default) and never asks.
+//!
+//! **The size profile.** The browser build uses the workspace profile `wasm-release` (`release` with
+//! `opt-level = "s"`, `lto` and one codegen unit), then `wasm-opt -O`; the native `release` profile is left
+//! for speed. `"z"` saves another 0.6 MB raw but compiles 58% slower, `"s"` within 2% of `release`.
+//! wasm-pack 0.13 cannot name a profile (it adds `--release`, which cargo refuses beside `--profile`), so the
+//! module is built in three steps, from the workspace root:
+//!
+//! ```text
+//! cargo build -p oxedyne_fe2o3_austenite --lib --target wasm32-unknown-unknown --profile wasm-release \
+//!     --no-default-features --features wasm
+//! wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/wasm-release/oxedyne_fe2o3_austenite.wasm
+//! wasm-opt -O pkg/oxedyne_fe2o3_austenite_bg.wasm -o pkg/oxedyne_fe2o3_austenite_bg.wasm
+//! ```
+//!
+//! `wasm-bindgen` must be the version in `Cargo.lock`. Without fonts or plugins this gives 6.12 MB, 2.82 MB
+//! gzipped, against 8.59 MB, 3.40 MB at plain `release` without `wasm-opt` (12 October 2026).
+//!
+//! **Holding only the pages on screen.** `compileProjectDelta` keeps the laid-out pages of the compile it
+//! answered (their frames, not their SVG), and `renderPage` draws any one of them on request, byte for byte
+//! as the delta would have sent it. A consumer therefore holds the SVG of only the pages it shows: it sends
+//! `known` as the ids it still holds and `want: [from, to]` as the span of `order` it shows, and the delta
+//! sends the SVG of the changed pages inside that span alone, with the whole `order` as ever. A page that
+//! scrolls into view and is not held is fetched with `renderPage(id)`. Beside `order` the delta sends `sizes`,
+//! one `[w, h]` a page in the same order and in the units of the page's SVG `viewBox` (whole points), window
+//! or none, so a page not yet fetched is laid out at its true size from the first frame. The kept pages are replaced by the
+//! next successful delta and by nothing else, so a failed compile leaves the last good pages drawable.
+//!
+//! **Plugins.** To run WebAssembly plugins, give the recipe above `--features wasm,plugin`. `plugin` is a
+//! default feature for the native build, so only `--no-default-features` keeps it out. Measured on 2026-10-12
+//! (`wasm-pack` release profile, gzip -9, no fonts), the module is 7.53 MB raw and 3.25 MB gzipped without it and 9.07 MB and 3.69 MB with it. A package
+//! that carries a plugin's `.wasm` needs that file supplied with the package's others, as bytes.
 
-use crate::book;
-use crate::compile;
-use crate::delta;
-use crate::doc::Heading;
-use crate::emit::{
+use crate::caches::Counters;
+use crate::compile::{
 	self,
-	svg,
+	Diagnostic,
+	Report,
 };
-use crate::fonts;
-use crate::lang;
-use crate::ledger::Ledger;
-use crate::memo::Memo;
-use crate::page::Frame;
-use crate::vfs;
+use crate::delta::{
+	Changed,
+	Head,
+	PageAt,
+	PageMiss,
+	Window,
+};
+use crate::door::{
+	self,
+	Failure,
+	Instance,
+	Made,
+	Project,
+	Row,
+};
+use crate::eval::package;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_jdat::prelude::*;
-use oxedyne_fe2o3_font::set::FontSet;
-use oxedyne_fe2o3_graphics::pdf::PdfPage;
-
-use std::collections::HashMap;
-use std::path::{
-	Path,
-	PathBuf,
-};
-use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-/// A long-lived Austenite compiler for the browser: the embedded reading set built once, and the last
-/// compile's resolved ledger and heading table kept for [`DaimondTypst::query_project`].
+/// A long-lived Austenite compiler for the browser: the embedded faces parsed once, and the last good
+/// compile's introspector kept for [`DaimondTypst::query_project`].
 #[wasm_bindgen]
 pub struct DaimondTypst {
-	// The embedded Libertinus reading set, built once and reused so a compile does not re-parse the five
-	// faces each call. `None` only if the embedded bytes failed to parse -- which does not happen in
-	// practice; a compile then reports it rather than the constructor throwing.
-	fonts:			Option<Arc<FontSet>>,
-	// The last compile's ledger and heading table, so a section-rail query reads heading pages back without
-	// recompiling. Replaced by each successful compile's own values.
-	last_ledger:	Option<Ledger>,
-	last_heads:		Vec<Heading>,
-	// A strictly monotonic compile tick for the changed-only delta (see `compile_project_delta`). The one
-	// piece of delta state this instance keeps: NOT the prior id set, which lives with the consumer and is
-	// supplied on each compile -- only a counter, so a consumer can discard a stale async return by version.
-	// Zero until the first delta.
-	version:		u32,
-	// The incremental block-authoring memo, retained across delta compiles so an unedited block splices its
-	// previously authored nodes back rather than re-shaping and re-breaking its paragraphs -- the whole point
-	// of the swap (see `compile_project_delta`). Only the BLOCK-authoring layer fills here: the delta renders
-	// each changed page through `svg::render_page` (not the page-emit memo), so the page-SVG cache stays empty
-	// and the heap holds the working set of blocks, never the rendered document (the consumer holds that). The
-	// non-delta `compileProject`/`compileProjectVector` paths pass no memo, so their bytes are untouched.
-	memo:			Memo,
+	inst:	Instance,
 }
 
 #[wasm_bindgen]
 impl DaimondTypst {
-	/// Builds a compiler instance, parsing the embedded reading set once. Infallible by contract -- a font
-	/// that will not parse leaves the set unbuilt and is reported at compile time, never thrown here.
+	/// Builds a compiler instance, parsing the embedded faces once. Infallible by contract: a face that
+	/// will not parse is reported at compile time, never thrown here.
 	#[wasm_bindgen(constructor)]
 	pub fn new() -> DaimondTypst {
-		DaimondTypst {
-			fonts:			fonts::libertinus().ok().map(Arc::new),
-			last_ledger:	None,
-			last_heads:		Vec::new(),
-			version:		0,
-			memo:			Memo::new(),
-		}
+		DaimondTypst { inst: Instance::new() }
 	}
 
-	/// Compiles a project to a single PDF: `{ pdf: Uint8Array }` on success, `{ error: String }` otherwise.
-	/// `project` is `{ main, sources: [[path, text], ...], assets: [[path, bytes], ...], fonts: [[path,
-	/// bytes], ...] }`; every entry is injected into the source map and nothing outside it is read.
+	/// Compiles a project to a single PDF: `{ pdf: Uint8Array, pages, diagnostics: [{ file, line, col,
+	/// message, severity, kind, hint }], skipped: string | null, needs: string[] }` on success, `{ error,
+	/// diagnostics, skipped, needs }` otherwise. `project` is `{ main, sources: [[path, text], ...],
+	/// assets: [[path, bytes], ...], fonts: [[name, bytes], ...], strict?: bool }`; every entry is
+	/// injected into the source map and nothing outside it is read. `diagnostics` lists every site not
+	/// set as written, and `skipped` the constructs passed over among them. Under `strict` an error, a
+	/// warning of a refusing kind, zero pages or a main that sets no content is returned as `{ error }`
+	/// instead of a PDF; a `lint` or `limit` warning, or a document still moving after the fifth pass,
+	/// stands beside the PDF. `needs` lists the packages an import asked for that were not supplied. A
+	/// success also carries `counters`, as [`Self::set_cache_budget`] describes.
 	#[wasm_bindgen(js_name = compileProject)]
 	pub fn compile_project(&mut self, project: &JsValue) -> JsValue {
-		match self.run(project, Mode::Pdf) {
-			Ok(Product::Pdf(bytes))	=> ok_pdf(bytes),
-			Ok(Product::Svg(_))		=> err_obj("internal: a PDF compile returned SVG"),
-			Err(msg)				=> err_obj(&msg),
+		match self.inst.compile_pdf(&project_of(project)) {
+			Ok(made)	=> ok_pdf(&made),
+			Err(fail)	=> err_obj(&fail),
 		}
 	}
 
-	/// The fast live-view path: compiles a project to Austenite's per-page SVG (already glyph outlines),
-	/// `{ svg: string[] }` on success or `{ error }` otherwise. Cheaper than [`Self::compile_project`] --
-	/// no PDF object graph, no cross-page stream -- so a watch loop can call it per keystroke.
+	/// The fast live-view path: compiles a project to per-page SVG (already glyph outlines), `{ svg:
+	/// string[], pages, diagnostics, skipped, needs }` on success or `{ error, diagnostics, skipped, needs
+	/// }` otherwise, `strict` as for [`Self::compile_project`]. A success also carries `counters`.
 	#[wasm_bindgen(js_name = compileProjectVector)]
 	pub fn compile_project_vector(&mut self, project: &JsValue) -> JsValue {
-		match self.run(project, Mode::Svg) {
-			Ok(Product::Svg(pages))	=> ok_svg(pages),
-			Ok(Product::Pdf(_))		=> err_obj("internal: an SVG compile returned PDF"),
-			Err(msg)				=> err_obj(&msg),
+		match self.inst.compile_svg(&project_of(project)) {
+			Ok(made)	=> ok_svg(&made),
+			Err(fail)	=> err_obj(&fail),
 		}
 	}
 
 	/// The live-view path Daimond consumes: compiles a project to a changed-only page delta, returning
-	/// `{ version, order: string[], changed: [{ id, svg }], reset }` on success or `{ error }` otherwise.
-	/// The project carries `known: string[]` -- the ids the consumer still holds in its own SVG cache -- and
-	/// only the pages whose id is not among them carry their SVG in `changed`; the rest the consumer serves
-	/// from that cache. The compiler keeps no cache state of its own, so a consumer that has cleared its
-	/// cache (a document close or switch) sends `known: []` and gets a full resend (`reset: true`) rather
-	/// than a blank preview against a cache that no longer holds anything. The memory-frugal successor to
-	/// [`Self::compile_project_vector`] -- see [`crate::delta`] for the shape and the residency contract.
-	/// Ids are opaque decimal strings, since a JavaScript number cannot hold every 64-bit hash exactly.
-	/// The return also carries a `diagnostics: [{ file, line, col, message }]` array and, when non-empty, a
-	/// terse `skipped` summary line: every construct the reader refused, each at its real source span, so a
-	/// caller composes a `file:line:col` diagnostic exactly as the native `--explain` does rather than seeing
-	/// the bare `<main>:0:` a swallowed refusal used to collapse to. These are additive -- the success fields
-	/// `{ version, order, changed, reset }` are unchanged -- and `diagnostics` is empty on a clean compile.
+	/// `{ version, order: string[], sizes: [w, h][], changed: [{ id, svg }], reset, pages, diagnostics,
+	/// skipped, needs }` on success or `{ error, diagnostics, skipped, needs }` otherwise, `strict` as for
+	/// [`Self::compile_project`]. The project carries `known: string[]`, the ids the consumer still holds
+	/// in its own SVG cache; only the pages whose id is not among them carry their SVG in `changed`. A
+	/// consumer that has cleared its cache sends `known: []` and gets a full resend (`reset: true`). The
+	/// `version` is this instance's tick, stepped by each delta and left where it was by a refusal. See
+	/// [`crate::delta`] for the shape. Ids are opaque decimal strings, since a JavaScript number cannot
+	/// hold every 64-bit hash exactly. A success also carries `counters`.
+	///
+	/// The project may carry `want: [from, to]`, whole numbers, the span `order.slice(from, to)` the consumer
+	/// shows: then `changed` carries only the changed pages inside it, and the consumer fetches any other
+	/// with [`Self::render_page`] when it comes into view. With no `want`, or one that is not two whole
+	/// numbers in order, every changed page is sent, as before `want` existed.
 	#[wasm_bindgen(js_name = compileProjectDelta)]
 	pub fn compile_project_delta(&mut self, project: &JsValue) -> JsValue {
-		match self.run_delta(project) {
-			Ok(out)		=> ok_delta(&out),
-			Err(msg)	=> err_obj(&msg),
+		match self.inst.compile_delta_into(&project_of(project), JsChanged::default()) {
+			Ok(made)	=> ok_delta(&made),
+			Err(fail)	=> err_obj(&fail),
 		}
 	}
 
-	/// Compiles a single source string to PDF, wrapping it as the project's `/main.typ`. The convenience
-	/// entry for a one-file document with no injected assets or fonts.
+	/// One page of the last delta, drawn from the pages it kept: `{ id, index, version, svg }`, the SVG
+	/// byte for byte what the delta sends for that id. `page` is an id from `order` (a decimal string) or an
+	/// index into `order` (a whole number from 0). The answer is `{ error, code, version }` when there is no
+	/// such page: `code` is `"uncompiled"` before any delta, `"gone"` for an id the last delta's `order`
+	/// does not hold, `"range"` for an index past its end, and `"input"` for a `page` of another kind;
+	/// `version` is the last delta's, `0` before any. A fault in drawing gives `{ error, code: "internal",
+	/// diagnostics, skipped, needs }`.
+	#[wasm_bindgen(js_name = renderPage)]
+	pub fn render_page(&self, page: &JsValue) -> JsValue {
+		let version = self.inst.kept().map(|k| k.version()).unwrap_or(0);
+		let at = if let Some(s) = page.as_string() {
+			s.parse::<u64>().ok().map(PageAt::Id)
+		} else {
+			match page.as_f64() {
+				Some(n) if n >= 0.0 && n.fract() == 0.0 && n <= 9_007_199_254_740_991.0	=> Some(PageAt::Index(n as usize)),
+				_																		=> None,
+			}
+		};
+		let obj = js_sys::Object::new();
+		let miss = |obj: &js_sys::Object, code: &str, message: &str| {
+			set(obj, "error", &JsValue::from_str(message));
+			set(obj, "code", &JsValue::from_str(code));
+			set(obj, "version", &JsValue::from_f64(version as f64));
+		};
+		let at = match at {
+			Some(a)	=> a,
+			None	=> {
+				miss(&obj, "input", "a page is an id from order, as a decimal string, or an index into order from 0");
+				return obj.into();
+			},
+		};
+		match self.inst.page(at) {
+			Ok(Ok((id, index, svg)))	=> {
+				set(&obj, "id", &JsValue::from_str(&fmt!("{}", id)));
+				set(&obj, "index", &JsValue::from_f64(index as f64));
+				set(&obj, "version", &JsValue::from_f64(version as f64));
+				set(&obj, "svg", &JsValue::from_str(&svg));
+			},
+			Ok(Err(m))					=> miss(&obj, m.code(), match m {
+				PageMiss::Uncompiled	=> "no delta has been compiled",
+				PageMiss::Gone			=> "the last delta has no page with that id",
+				PageMiss::Range			=> "the index is past the last page of the last delta",
+			}),
+			Err(fail)					=> {
+				let out = err_obj(&fail);
+				let _ = js_sys::Reflect::set(&out, &JsValue::from_str("code"), &JsValue::from_str("internal"));
+				return out;
+			},
+		}
+		obj.into()
+	}
+
+	/// The font families a compile of `project` can set by name, as a sorted `string[]`: the embedded
+	/// families and the family each face of each `project.fonts` file declares, one per face of a
+	/// collection. The list is read from the font book `font:` resolves against, so a family is listed
+	/// exactly when a compile finds it. `project` is optional.
+	#[wasm_bindgen(js_name = fontFamilies)]
+	pub fn font_families(&self, project: &JsValue) -> JsValue {
+		let p = if project.is_undefined() || project.is_null() { None } else { Some(project_of(project)) };
+		let arr = js_sys::Array::new();
+		for f in &self.inst.font_families(p.as_ref()) {
+			arr.push(&JsValue::from_str(f));
+		}
+		arr.into()
+	}
+
+	/// The engine's identity, `{ engine: "austenite", version, git, typst }`: the crate version, the commit
+	/// it was built from (`<12 hex>`, `-dirty` when built from uncommitted changes, or `unknown`) and the
+	/// Typst version the evaluator follows.
+	#[wasm_bindgen(js_name = engineInfo)]
+	pub fn engine_info(&self) -> JsValue {
+		let obj = js_sys::Object::new();
+		set(&obj, "engine", &JsValue::from_str("austenite"));
+		set(&obj, "version", &JsValue::from_str(compile::engine_version()));
+		set(&obj, "git", &JsValue::from_str(compile::engine_git_hash()));
+		set(&obj, "typst", &JsValue::from_str(&package::version_text(package::TYPST_VERSION)));
+		obj.into()
+	}
+
+	/// Sets the loop iterations a compile may spend for each layout pass, the host's bound on a compile it
+	/// cannot stop: a whole number, or `null` for no bound, by which the host declares it can stop a
+	/// compile itself. A new instance holds 10,000,000. Returns `{ loopBudget }`, the budget now in force,
+	/// a number or `null`, or `{ error }` and no change for any other value. A project is document data
+	/// and cannot set it.
+	#[wasm_bindgen(js_name = setLoopBudget)]
+	pub fn set_loop_budget(&mut self, budget: &JsValue) -> JsValue {
+		let obj = js_sys::Object::new();
+		let parsed = if budget.is_null() {
+			Some(None)
+		} else {
+			match budget.as_f64() {
+				Some(n) if n >= 0.0 && n.fract() == 0.0 && n <= 9_007_199_254_740_991.0	=> Some(Some(n as u64)),
+				_																		=> None,
+			}
+		};
+		match parsed {
+			Some(b)	=> {
+				self.inst.set_loop_budget(b);
+				set(&obj, "loopBudget", &match b {
+					Some(n)	=> JsValue::from_f64(n as f64),
+					None	=> JsValue::NULL,
+				});
+			},
+			None	=> set(&obj, "error", &JsValue::from_str("the loop budget is a whole number of iterations, or null")),
+		}
+		obj.into()
+	}
+
+	/// Sets the bytes each cache of the session may hold: `{ shapes, pars, ledger }`, each a whole number
+	/// of bytes or left out to stand. A new instance holds 32 MiB of shaped runs and 16 MiB of paragraphs,
+	/// and the ledger's is set with the ledger. The shaped-run cache at its budget evicts its least recently used
+	/// result, and a cache swept by generation refuses a new entry and loses none, so a lower budget slows a
+	/// compile and changes nothing it makes. Returns `{ cacheBudget: { shapes,
+	/// pars, ledger } }`, the budgets now in force, or `{ error }` and no change, naming the first field
+	/// that is not a whole number of bytes. A project is document data and cannot set it.
+	///
+	/// A successful compile carries `counters: { replayed, relaid, parHits, parMisses, shapes: { entries,
+	/// bytes, budget, hits, misses, evictions } }`: the pages replayed from the ledger and laid again, the
+	/// paragraph cache's hits and misses, and the shaped-run cache as the compile left it (its hits,
+	/// misses and evictions are cumulative over the session's book). The page and paragraph counts are zero
+	/// until those caches exist.
+	#[wasm_bindgen(js_name = setCacheBudget)]
+	pub fn set_cache_budget(&mut self, budgets: &JsValue) -> JsValue {
+		let obj = js_sys::Object::new();
+		let field = |name: &str| -> Option<f64> {
+			let v = js_sys::Reflect::get(budgets, &JsValue::from_str(name)).unwrap_or(JsValue::UNDEFINED);
+			if v.is_undefined() {
+				None
+			} else {
+				Some(v.as_f64().unwrap_or(f64::NAN))
+			}
+		};
+		match self.inst.cache_budget().with(field("shapes"), field("pars"), field("ledger")) {
+			Ok(b)	=> {
+				self.inst.set_cache_budget(b);
+				let now = js_sys::Object::new();
+				set(&now, "shapes",	&JsValue::from_f64(b.shapes as f64));
+				set(&now, "pars",	&JsValue::from_f64(b.pars as f64));
+				set(&now, "ledger",	&JsValue::from_f64(b.ledger as f64));
+				set(&obj, "cacheBudget", &now);
+			},
+			Err(e)	=> set(&obj, "error", &JsValue::from_str(&fmt!("{}", e))),
+		}
+		obj.into()
+	}
+
+	/// Compiles a single source string to PDF, wrapping it as the project's `/main.typ`.
 	#[wasm_bindgen]
 	pub fn compile(&mut self, source: &str) -> JsValue {
-		self.compile_project(&single_source_project(source))
+		match self.inst.compile_pdf(&Project::single(source)) {
+			Ok(made)	=> ok_pdf(&made),
+			Err(fail)	=> err_obj(&fail),
+		}
 	}
 
-	/// The section rail's query: heading rows from the last compile's ledger as a JSON array of
-	/// `{ kind, label, title, level, page }`, or `null` when nothing has compiled yet or the selector is
-	/// one this lane does not resolve. The consumer degrades on `null`.
-	///
-	/// This is a heading/anchor query only, not full Typst `query` semantics: a selector naming headings
-	/// (the section rail's use) returns heading rows; any other selector returns `null` so the caller falls
-	/// back rather than receiving a wrong answer.
+	/// What a Typst selector finds in the last good compile, as a JSON array of rows `{ kind, label, page,
+	/// value }`, a heading's also `title` and `level`. `selector` is evaluated as Typst code, as `typst
+	/// query` evaluates it. `field` names the field each row's `value` carries, `value` when empty. `page`
+	/// is 1-based; a heading's `title` is its plain text. `null` when nothing has compiled, the last
+	/// compile failed, the selector does not evaluate, or a field cannot be written as Typst writes it.
 	#[wasm_bindgen(js_name = queryProject)]
-	pub fn query_project(&self, selector: &str, _field: &str) -> JsValue {
-		let ledger = match &self.last_ledger {
-			Some(l)	=> l,
-			None	=> return JsValue::NULL,
-		};
-		let sel = selector.to_lowercase();
-		if !(sel.contains("head") || sel.contains("outline") || sel.is_empty()) {
-			return JsValue::NULL;
-		}
-		let mut rows: Vec<Dat> = Vec::new();
-		for h in &self.last_heads {
-			let page = match ledger.page_of(&h.id) {
-				Some(p)	=> p,
-				None	=> continue,
-			};
-			rows.push(omapdat!{
-				"kind"	=> dat!("heading"),
-				"label"	=> dat!(h.id.key.clone()),
-				"title"	=> dat!(h.title.clone()),
-				"level"	=> dat!(h.level as u32),
-				"page"	=> dat!(page),
-			});
-		}
-		let json = match Dat::List(rows).json() {
-			Ok(s)	=> s,
-			Err(_)	=> return JsValue::NULL,
-		};
-		match js_sys::JSON::parse(&json) {
-			Ok(v)	=> v,
-			Err(_)	=> JsValue::NULL,
+	pub fn query_project(&self, selector: &str, field: &str) -> JsValue {
+		match self.inst.query(selector, field) {
+			Some(rows)	=> rows_js(&rows),
+			None		=> JsValue::NULL,
 		}
 	}
 
-	/// The compiler's current wasm linear-memory size, in megabytes -- a heap-usage proxy for the app's
+	/// Hands a package to the engine: `spec` is `@namespace/name:version` and `files` is `[[path,
+	/// bytes | string], ...]`, paths relative to the package. Returns `{ spec, files }`, the count of
+	/// files held, or `{ error }`. A version is immutable: other files for one already supplied are an
+	/// error until it is withdrawn. Archives are not read: the host unpacks them.
+	#[wasm_bindgen(js_name = supplyPackage)]
+	pub fn supply_package(&mut self, spec: &str, files: &JsValue) -> JsValue {
+		let mut held: Vec<(String, Vec<u8>)> = Vec::new();
+		if let Ok(arr) = files.clone().dyn_into::<js_sys::Array>() {
+			for entry in arr.iter() {
+				if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
+					if let Some(path) = pair.get(0).as_string() {
+						let v = pair.get(1);
+						let bytes = match v.as_string() {
+							Some(text)	=> Some(text.into_bytes()),
+							None		=> to_bytes(&v),
+						};
+						if let Some(b) = bytes {
+							held.push((path, b));
+						}
+					}
+				}
+			}
+		}
+		let obj = js_sys::Object::new();
+		match door::supply_package(spec, held) {
+			Ok(n)	=> {
+				set(&obj, "spec", &JsValue::from_str(spec));
+				set(&obj, "files", &JsValue::from_f64(n as f64));
+			},
+			Err(e)	=> set(&obj, "error", &JsValue::from_str(&e.plain())),
+		}
+		obj.into()
+	}
+
+	/// The packages supplied, as a `string[]` of `@namespace/name:version`.
+	#[wasm_bindgen]
+	pub fn packages(&self) -> JsValue {
+		let arr = js_sys::Array::new();
+		if let Ok(list) = door::packages() {
+			for s in &list {
+				arr.push(&JsValue::from_str(s));
+			}
+		}
+		arr.into()
+	}
+
+	/// Withdraws a supplied package: `{ spec, withdrawn }`, false when none was held, or `{ error }`.
+	#[wasm_bindgen(js_name = withdrawPackage)]
+	pub fn withdraw_package(&mut self, spec: &str) -> JsValue {
+		let obj = js_sys::Object::new();
+		match door::withdraw_package(spec) {
+			Ok(b)	=> {
+				set(&obj, "spec", &JsValue::from_str(spec));
+				set(&obj, "withdrawn", &JsValue::from_bool(b));
+			},
+			Err(e)	=> set(&obj, "error", &JsValue::from_str(&e.plain())),
+		}
+		obj.into()
+	}
+
+	/// The compiler's current wasm linear-memory size, in megabytes: a heap-usage proxy for the app's
 	/// memory gauge.
 	#[wasm_bindgen(js_name = heapMB)]
 	pub fn heap_mb(&self) -> f64 {
@@ -198,245 +391,58 @@ impl Default for DaimondTypst {
 	}
 }
 
-/// Which artefact a run produces.
-#[derive(Clone, Copy)]
-enum Mode {
-	Pdf,
-	Svg,
-}
-
-/// A run's product, matching the mode it was asked for.
-enum Product {
-	Pdf(Vec<u8>),
-	Svg(Vec<String>),
-}
-
-/// Runs a compile closure under [`std::panic::catch_unwind`], turning a panic into an ordinary error rather
-/// than letting it escape as a wasm trap. A trap unwinds no Rust state and leaves the instance's shadow
-/// stack unrestored, so a single panicked compile would corrupt the [`DaimondTypst`] instance until the page
-/// reloaded; catching it here keeps the instance usable and surfaces an `{ error }` object instead. The
-/// engine's own cycle and depth caps mean a well-formed document never panics -- this is the net for the
-/// unforeseen. (Under a `panic = "abort"` build the abort still traps; the guard is effective wherever
-/// unwinding is enabled, and is harmless otherwise.)
-fn catch_compile<T, F>(f: F, main: &str) -> Outcome<T>
-where
-	F: FnOnce() -> Outcome<T>,
-{
-	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-		Ok(outcome)	=> outcome,
-		Err(_)		=> Err(err!(
-			"The compiler panicked while assembling {:?}; the document was not produced.", main; Bug)),
-	}
-}
-
-impl DaimondTypst {
-	/// Runs a compile and clears the source map before returning either way, so one instance compiles many
-	/// documents in turn without a stale file leaking between them. Composes the engine's message with the
-	/// main file for the app's `file:line: message` diagnostic.
-	fn run(&mut self, project: &JsValue, mode: Mode) -> Result<Product, String> {
-		let main = string_field(project, "main").unwrap_or_else(|| "/main.typ".to_string());
-		let outcome = catch_compile(|| self.run_inner(project, &main, mode), &main);
-		let _ = vfs::clear();
-		match outcome {
-			Ok(p)	=> Ok(p),
-			Err(e)	=> Err(fmt!("{}:0: {}", main, e)),
-		}
-	}
-
-	/// Clears the source map before returning either way, as [`Self::run`] does, and steps the compile tick:
-	/// computes the changed-only delta of this compile against the consumer's supplied `known` ids. The
-	/// compiler retains no prior id set; only the rendered SVG of a newly-changed page is built, carried
-	/// into the delta, and dropped.
-	fn run_delta(&mut self, project: &JsValue) -> Result<DeltaOut, String> {
-		let main = string_field(project, "main").unwrap_or_else(|| "/main.typ".to_string());
-		let outcome = catch_compile(|| self.run_delta_inner(project, &main), &main);
-		let _ = vfs::clear();
-		match outcome {
-			Ok(out)	=> Ok(out),
-			Err(e)	=> Err(fmt!("{}:0: {}", main, e)),
-		}
-	}
-
-	fn run_delta_inner(&mut self, project: &JsValue, main: &str) -> Outcome<DeltaOut> {
-		// The consumer owns the SVG cache, so it -- not this instance -- is the authority on which page ids
-		// are already held. It supplies them as `known`; a page whose id is not among them is resent. Holding
-		// the prior set here would blank the preview whenever the consumer cleared its cache (a document
-		// close or switch) while this singleton compiler lived on: the delta would report nothing changed
-		// against a cache holding nothing. So `reset` is `known.is_empty()` by construction -- true exactly
-		// when the consumer has nothing to reuse, and a cleared cache recovers with a full resend.
-		let known						= parse_known(project);
-		// The delta path passes the persistent block-authoring memo, so an unedited block splices its cached
-		// nodes rather than re-authoring: the incremental recompile the swap exists for. The refusal table and
-		// skip line are carried out here (not discarded) for the diagnostics field.
-		let (rendered, refusals, skip)	= res!(self.assemble_and_run(project, main, true));
-		// Close the memo generation now the authoring pass is done, dropping block entries untouched for two
-		// compiles. `author_and_run_memo` opened it with `Memo::begin`; the page-emit cache is never touched on
-		// this path (the delta renders through `svg::render_page`), so nothing but blocks is swept, and the
-		// retained heap is the working set of blocks -- never the rendered page SVG.
-		self.memo.sweep();
-		// Read each refused site's line and column from the source it was tagged with, still in the source map
-		// here (the caller clears it after this returns), so a diagnostic carries a real `file:line:col`.
-		let diagnostics	= diagnostics_from_refusals(&refusals);
-		let d			= res!(delta::compute(&rendered.out.pages, &known, self.version));
-		// The version is the one piece of delta state this instance keeps: a strictly monotonic tick, so a
-		// consumer that dispatches compiles without awaiting each can discard a stale async return by its
-		// version. It is deliberately not consumer-supplied -- two compiles dispatched before either returned
-		// would carry the same supplied version and could not be ordered -- and a cache clear does not
-		// disturb it, since recovery is driven by an empty `known`, not by the counter.
-		self.version	= d.version;
-		Ok(DeltaOut { delta: d, diagnostics, skip })
-	}
-
-	/// Assembles, authors, runs, decorates and mirror-shifts a project through the shared pipeline -- the
-	/// same code the native binary drives, so the two surfaces cannot drift -- and keeps the resolved ledger
-	/// and heading table for a later section-rail query. The lone-file path takes this instance's once-built
-	/// reading set rather than rebuilding it; the base directory for `/assets/...` figures is set inside
-	/// `assemble`. It returns the refusal table and terse skip line for the delta path's diagnostics; the
-	/// caller clears the source map (through [`Self::run`] or [`Self::run_delta`]) once it has the result.
-	///
-	/// `use_memo` threads this instance's persistent block-authoring memo through the authoring stage (the
-	/// delta path), so an unedited block reuses its cached layout across recompiles; the non-memo paths pass
-	/// `false` and stay byte-identical to the native production compile.
-	fn assemble_and_run(&mut self, project: &JsValue, main: &str, use_memo: bool)
-		-> Outcome<(compile::Rendered, lang::Refusals, Option<String>)>
-	{
-		let fonts = match &self.fonts {
-			Some(f)	=> f.clone(),
-			None	=> return Err(err!("The embedded font set could not be built."; Init, Missing)),
-		};
-
-		let main_path = PathBuf::from(main);
-		// Every source, asset and font becomes a source-map entry; the main path names the root among them.
-		let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
-		read_text_pairs(project, "sources", &mut files);
-		read_byte_pairs(project, "assets", &mut files);
-		// A font is installed at the path the consumer named AND at the location the lone-file face resolver
-		// reads, so a face the document names resolves whatever path the consumer chose (see `read_font_pairs`).
-		read_font_pairs(project, &main_path, &mut files);
-		if !files.contains_key(&main_path) {
-			return Err(err!("The project has no source for its main file {:?}.", main; Input, Missing));
-		}
-		res!(vfs::install(files));
-
-		let (assembled, refusals, skip)	= res!(compile::assemble(&main_path, || Ok(fonts.clone())));
-		let rendered = if use_memo {
-			res!(compile::author_and_run_memo(assembled, Some(&mut self.memo)))
-		} else {
-			res!(compile::author_and_run(assembled))
-		};
-
-		// Keep the resolved ledger and heading table for a later section-rail query.
-		self.last_ledger	= Some(rendered.out.ledger.clone());
-		self.last_heads		= rendered.heads.clone();
-		Ok((rendered, refusals, skip))
-	}
-
-	fn run_inner(&mut self, project: &JsValue, main: &str, mode: Mode) -> Outcome<Product> {
-		let (rendered, _refusals, _skip)	= res!(self.assemble_and_run(project, main, false));
-		let compile::Rendered { mut out, heads, geom: _ } = rendered;
-
-		match mode {
-			Mode::Svg => {
-				let mut pages: Vec<String> = Vec::with_capacity(out.pages.len());
-				for page in &out.pages {
-					pages.push(res!(svg::render_page(page)));
-				}
-				Ok(Product::Svg(pages))
-			},
-			Mode::Pdf => {
-				// Sequential emit: wasm has no threads, so the binary's parallel chunking becomes a
-				// page-at-a-time write into an in-memory buffer, freeing each frame after its page is folded in.
-				let mut buf: Vec<u8> = Vec::new();
-				let outline = compile::build_outline(&heads, &out.ledger);
-				let mut pdf = res!(emit::pdf::open_document_with_outline(&mut buf, out.pages.len(), outline));
-				for page in &mut out.pages {
-					let built: PdfPage = res!(emit::pdf::render_page(page));
-					res!(emit::pdf::write_built_page(&mut pdf, &built));
-					page.frame = Frame::new();
-				}
-				res!(pdf.finish());
-				Ok(Product::Pdf(buf))
-			},
-		}
-	}
-}
-
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ JS INTEROP                                                                 │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// A single-source project object `{ main: "/main.typ", sources: [["/main.typ", source]] }`.
-fn single_source_project(source: &str) -> JsValue {
-	let obj		= js_sys::Object::new();
-	let _		= js_sys::Reflect::set(&obj, &JsValue::from_str("main"), &JsValue::from_str("/main.typ"));
-	let sources	= js_sys::Array::new();
-	let pair	= js_sys::Array::new();
-	pair.push(&JsValue::from_str("/main.typ"));
-	pair.push(&JsValue::from_str(source));
-	sources.push(&pair);
-	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("sources"), &sources);
-	obj.into()
-}
-
-/// Reads a `[[path, text], ...]` field into the source map, each text UTF-8 encoded.
-fn read_text_pairs(project: &JsValue, key: &str, out: &mut HashMap<PathBuf, Vec<u8>>) {
-	let arr = match array_field(project, key) {
-		Some(a)	=> a,
-		None	=> return,
+/// Reads a project object into the door's own type; a field that is absent or of the wrong shape is empty.
+fn project_of(v: &JsValue) -> Project {
+	// Only the fields a project has are read: its loop budget is the host's, set on the instance.
+	let mut p = Project {
+		main:		string_field(v, "main").unwrap_or_default(),
+		strict:		bool_field(v, "strict"),
+		known:		parse_known(v),
+		want:		parse_want(v),
+		..Project::default()
 	};
-	for entry in arr.iter() {
-		if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
-			if let (Some(path), Some(text)) = (pair.get(0).as_string(), pair.get(1).as_string()) {
-				out.insert(PathBuf::from(path), text.into_bytes());
-			}
-		}
+	for (path, text) in text_pairs(v, "sources") {
+		p.sources.push((path, text));
 	}
+	p.assets	= byte_pairs(v, "assets");
+	p.fonts		= byte_pairs(v, "fonts");
+	p
 }
 
-/// Reads a `[[path, bytes], ...]` field into the source map, each value a `Uint8Array` or `ArrayBuffer`.
-fn read_byte_pairs(project: &JsValue, key: &str, out: &mut HashMap<PathBuf, Vec<u8>>) {
-	let arr = match array_field(project, key) {
-		Some(a)	=> a,
-		None	=> return,
-	};
-	for entry in arr.iter() {
-		if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
-			if let Some(path) = pair.get(0).as_string() {
-				if let Some(bytes) = to_bytes(&pair.get(1)) {
-					out.insert(PathBuf::from(path), bytes);
+/// A `[[path, text], ...]` field.
+fn text_pairs(project: &JsValue, key: &str) -> Vec<(String, String)> {
+	let mut out = Vec::new();
+	if let Some(arr) = array_field(project, key) {
+		for entry in arr.iter() {
+			if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
+				if let (Some(path), Some(text)) = (pair.get(0).as_string(), pair.get(1).as_string()) {
+					out.push((path, text));
 				}
 			}
 		}
 	}
+	out
 }
 
-/// Reads the project's `fonts: [[path, bytes], ...]` into the source map, each installed at the path the
-/// consumer named AND -- so the lone-file face resolver discovers it whatever path was chosen -- at the
-/// resolver's own `<root>/assets/fonts/<basename>` location (see [`book::project_font_path`]). Without the
-/// second placement an injected font is present in the map but invisible to the resolver, which reads only
-/// its own directory: a face the document names would silently fall back to the reading role. The consumer
-/// still names a usable face by its `<Family>-<Variant>.{ttf,otf}` basename and declares that family as a
-/// heading face; this makes such a font resolve regardless of the path it was injected under.
-fn read_font_pairs(project: &JsValue, main_path: &Path, out: &mut HashMap<PathBuf, Vec<u8>>) {
-	let arr = match array_field(project, "fonts") {
-		Some(a)	=> a,
-		None	=> return,
-	};
-	for entry in arr.iter() {
-		if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
-			if let Some(path) = pair.get(0).as_string() {
-				if let Some(bytes) = to_bytes(&pair.get(1)) {
-					let given = PathBuf::from(path);
-					if let Some(routed) = book::project_font_path(main_path, &given) {
-						if routed != given {
-							out.insert(routed, bytes.clone());
-						}
+/// A `[[path, bytes], ...]` field, each value a `Uint8Array` or `ArrayBuffer`.
+fn byte_pairs(project: &JsValue, key: &str) -> Vec<(String, Vec<u8>)> {
+	let mut out = Vec::new();
+	if let Some(arr) = array_field(project, key) {
+		for entry in arr.iter() {
+			if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
+				if let Some(path) = pair.get(0).as_string() {
+					if let Some(bytes) = to_bytes(&pair.get(1)) {
+						out.push((path, bytes));
 					}
-					out.insert(given, bytes);
 				}
 			}
 		}
 	}
+	out
 }
 
 /// The bytes of a `Uint8Array` or an `ArrayBuffer`, or `None` for anything else.
@@ -455,6 +461,14 @@ fn string_field(obj: &JsValue, key: &str) -> Option<String> {
 	js_sys::Reflect::get(obj, &JsValue::from_str(key)).ok().and_then(|v| v.as_string())
 }
 
+/// A boolean field of a JS object, false when it is absent or not `true`.
+fn bool_field(obj: &JsValue, key: &str) -> bool {
+	match js_sys::Reflect::get(obj, &JsValue::from_str(key)) {
+		Ok(v)	=> v.as_bool().unwrap_or(false),
+		Err(_)	=> false,
+	}
+}
+
 /// An array-valued field of a JS object, or `None` when it is absent or not an array.
 fn array_field(obj: &JsValue, key: &str) -> Option<js_sys::Array> {
 	js_sys::Reflect::get(obj, &JsValue::from_str(key)).ok().and_then(|v| v.dyn_into::<js_sys::Array>().ok())
@@ -462,127 +476,213 @@ fn array_field(obj: &JsValue, key: &str) -> Option<js_sys::Array> {
 
 /// The consumer's currently-cached page ids, read from the project's `known: string[]` field and parsed
 /// from decimal (the shape [`ok_delta`] emits them in). An absent field, or an entry that is not a decimal
-/// string, is skipped; an empty result forces a full reset -- the safe direction, a resend over a blank.
+/// string, is skipped; an empty result forces a full reset, a resend over a blank.
 fn parse_known(project: &JsValue) -> Vec<u64> {
-	let arr = match array_field(project, "known") {
-		Some(a)	=> a,
-		None	=> return Vec::new(),
-	};
-	let mut ids = Vec::with_capacity(arr.length() as usize);
-	for entry in arr.iter() {
-		if let Some(s) = entry.as_string() {
-			if let Ok(id) = s.parse::<u64>() {
-				ids.push(id);
+	let mut ids = Vec::new();
+	if let Some(arr) = array_field(project, "known") {
+		for entry in arr.iter() {
+			if let Some(s) = entry.as_string() {
+				if let Ok(id) = s.parse::<u64>() {
+					ids.push(id);
+				}
 			}
 		}
 	}
 	ids
 }
 
-/// `{ pdf: Uint8Array }`.
-fn ok_pdf(bytes: Vec<u8>) -> JsValue {
-	let obj = js_sys::Object::new();
-	let arr = js_sys::Uint8Array::from(bytes.as_slice());
-	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("pdf"), &arr);
-	obj.into()
+/// The span of `order` the consumer shows, from the project's `want: [from, to]`: two whole numbers,
+/// `from` not past `to`. Anything else is no window, and every changed page is sent.
+fn parse_want(project: &JsValue) -> Option<Window> {
+	let arr = match array_field(project, "want") {
+		Some(a) if a.length() == 2	=> a,
+		_							=> return None,
+	};
+	let whole = |v: JsValue| match v.as_f64() {
+		Some(n) if n >= 0.0 && n.fract() == 0.0 && n <= 9_007_199_254_740_991.0	=> Some(n as usize),
+		_																		=> None,
+	};
+	match (whole(arr.get(0)), whole(arr.get(1))) {
+		(Some(from), Some(to)) if from <= to	=> Some(Window { from, to }),
+		_										=> None,
+	}
 }
 
-/// `{ svg: string[] }`.
-fn ok_svg(pages: Vec<String>) -> JsValue {
-	let obj = js_sys::Object::new();
+/// Sets one property; a failed set on a fresh plain object cannot happen, so it is not reported.
+fn set(obj: &js_sys::Object, key: &str, val: &JsValue) {
+	let _ = js_sys::Reflect::set(obj, &JsValue::from_str(key), val);
+}
+
+fn strings_js(list: &[String]) -> js_sys::Array {
 	let arr = js_sys::Array::new();
-	for s in &pages {
+	for s in list {
 		arr.push(&JsValue::from_str(s));
 	}
-	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("svg"), &arr);
+	arr
+}
+
+/// Sets `pages`, `diagnostics`, `skipped` (string or `null`) and `needs`, the fields every compile result
+/// carries.
+fn set_report(obj: &js_sys::Object, rep: &Report, needs: &[String]) {
+	set(obj, "pages", &JsValue::from_f64(rep.pages as f64));
+	set(obj, "diagnostics", &diagnostics_array(&rep.diagnostics));
+	set(obj, "skipped", &opt_str(rep.skipped.as_deref()));
+	set(obj, "needs", &strings_js(needs));
+}
+
+/// Sets `counters`, what the session's caches did in the compile.
+fn set_counters(obj: &js_sys::Object, c: &Counters) {
+	let shapes = js_sys::Object::new();
+	set(&shapes, "entries",		&JsValue::from_f64(c.shapes.entries as f64));
+	set(&shapes, "bytes",		&JsValue::from_f64(c.shapes.bytes as f64));
+	set(&shapes, "budget",		&JsValue::from_f64(c.shapes.budget as f64));
+	set(&shapes, "hits",		&JsValue::from_f64(c.shapes.hits as f64));
+	set(&shapes, "misses",		&JsValue::from_f64(c.shapes.misses as f64));
+	set(&shapes, "evictions",	&JsValue::from_f64(c.shapes.evictions as f64));
+	let out = js_sys::Object::new();
+	set(&out, "replayed",	&JsValue::from_f64(c.replayed as f64));
+	set(&out, "relaid",		&JsValue::from_f64(c.relaid as f64));
+	set(&out, "parHits",	&JsValue::from_f64(c.par_hits as f64));
+	set(&out, "parMisses",	&JsValue::from_f64(c.par_misses as f64));
+	set(&out, "shapes",		&shapes);
+	set(obj, "counters", &out);
+}
+
+fn opt_str(s: Option<&str>) -> JsValue {
+	match s {
+		Some(s)	=> JsValue::from_str(s),
+		None	=> JsValue::NULL,
+	}
+}
+
+fn diagnostics_array(diags: &[Diagnostic]) -> js_sys::Array {
+	let arr = js_sys::Array::new();
+	for d in diags {
+		let entry = js_sys::Object::new();
+		set(&entry, "file",		&JsValue::from_str(&d.file));
+		set(&entry, "line",		&JsValue::from_f64(d.line as f64));
+		set(&entry, "col",		&JsValue::from_f64(d.col as f64));
+		set(&entry, "message",	&JsValue::from_str(&d.message));
+		set(&entry, "severity",	&JsValue::from_str(d.severity.as_str()));
+		set(&entry, "kind",		&JsValue::from_str(d.kind.as_str()));
+		set(&entry, "hint",		&opt_str(d.hint.as_deref()));
+		arr.push(&entry);
+	}
+	arr
+}
+
+/// `{ pdf: Uint8Array, pages, diagnostics, skipped, needs, counters }`. The array is allocated at its final
+/// length and the chunks are copied in one by one, so the file never exists twice in the wasm heap.
+fn ok_pdf(made: &Made<crate::emit::sinks::Chunks>) -> JsValue {
+	let obj = js_sys::Object::new();
+	let pdf = js_sys::Uint8Array::new_with_length(made.product.len() as u32);
+	let mut at = 0u32;
+	for chunk in made.product.chunks() {
+		let end = at + chunk.len() as u32;
+		pdf.subarray(at, end).copy_from(chunk);
+		at = end;
+	}
+	set(&obj, "pdf", &pdf);
+	set_report(&obj, &made.report, &made.needs);
+	set_counters(&obj, &made.counters);
 	obj.into()
 }
 
-/// One refused construct, resolved to the source position a caller shows the user: the file it was read
-/// from, the 1-based line and column its span starts at, and a message naming the construct and why it was
-/// refused. The wasm delta return carries a list of these so a swallowed refusal reads back as a real
-/// `file:line:col` diagnostic rather than the bare `<main>:0:` it used to collapse to.
-struct Diagnostic {
-	file:	String,
-	line:	usize,
-	col:	usize,
-	message:	String,
-}
-
-/// A delta compile's result plus the diagnostics the delta path now surfaces: the changed-only page delta,
-/// every refused site at its source span, and the terse skip summary (`None` when nothing was skipped).
-struct DeltaOut {
-	delta:	delta::PageDelta,
-	diagnostics:	Vec<Diagnostic>,
-	skip:	Option<String>,
-}
-
-/// Resolves each refused site to a [`Diagnostic`], reading the tagged source file's line and column from
-/// the source map (still installed when this runs, before the caller clears it). A site whose source is not
-/// in the map -- which should not happen, every refusal is tagged with an injected file -- still reports,
-/// at column one, so a refusal is never silently dropped.
-fn diagnostics_from_refusals(refusals: &lang::Refusals) -> Vec<Diagnostic> {
-	let mut out = Vec::new();
-	let mut cache: HashMap<String, Option<String>> = HashMap::new();
-	for r in refusals.sites() {
-		let src = cache.entry(r.file.clone())
-			.or_insert_with(|| vfs::read_to_string(&PathBuf::from(&r.file)).ok());
-		let (line, col) = match src {
-			Some(text)	=> { let (l, c, _) = lang::line_col_of(text, r.span.start); (l, c) },
-			None		=> (0, 1),
-		};
-		out.push(Diagnostic {
-			file:		r.file.clone(),
-			line,
-			col,
-			message:	fmt!("skipped {} ({})", r.name, r.class.label()),
-		});
-	}
-	out
-}
-
-/// `{ version, order: string[], changed: [{ id, svg }], reset, diagnostics: [{ file, line, col, message }],
-/// skipped? }` -- the changed-only delta with its diagnostics. Ids (page content hashes) are decimal
-/// strings, since a JavaScript number holds only 53 bits exactly and would silently corrupt a 64-bit hash;
-/// the consumer treats them as opaque keys. `diagnostics` is always present (empty on a clean compile);
-/// `skipped` is set only when the reader passed over a construct.
-fn ok_delta(out: &DeltaOut) -> JsValue {
-	let d = &out.delta;
+/// `{ svg: string[], pages, diagnostics, skipped, needs, counters }`.
+fn ok_svg(made: &Made<Vec<String>>) -> JsValue {
 	let obj = js_sys::Object::new();
-	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("version"), &JsValue::from_f64(d.version as f64));
+	set(&obj, "svg", &strings_js(&made.product));
+	set_report(&obj, &made.report, &made.needs);
+	set_counters(&obj, &made.counters);
+	obj.into()
+}
+
+/// The delta's `changed` array, built as the pages are drawn: each page's SVG goes into a JavaScript string
+/// the moment it is rendered and the Rust copy is dropped, so wasm memory never holds more than one page's SVG.
+#[derive(Default)]
+struct JsChanged {
+	arr:	js_sys::Array,
+}
+
+impl Changed for JsChanged {
+	fn take(&mut self, id: u64, svg: String) -> Outcome<()> {
+		let entry = js_sys::Object::new();
+		set(&entry, "id", &JsValue::from_str(&fmt!("{}", id)));
+		set(&entry, "svg", &JsValue::from_str(&svg));
+		self.arr.push(&entry);
+		Ok(())
+	}
+}
+
+/// `{ version, order: string[], sizes: [w, h][], changed: [{ id, svg }], reset, pages, diagnostics, skipped,
+/// needs, counters }`.
+/// Ids (page content hashes) are decimal strings, since a JavaScript number holds only 53 bits exactly and
+/// would silently corrupt a 64-bit hash; the consumer treats them as opaque keys.
+fn ok_delta(made: &Made<(Head, JsChanged)>) -> JsValue {
+	let (head, changed) = &made.product;
+	let obj = js_sys::Object::new();
+	set(&obj, "version", &JsValue::from_f64(head.version as f64));
 	let order = js_sys::Array::new();
-	for id in &d.order {
+	for id in &head.order {
 		order.push(&JsValue::from_str(&fmt!("{}", id)));
 	}
-	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("order"), &order);
-	let changed = js_sys::Array::new();
-	for (id, svg) in &d.changed {
-		let entry = js_sys::Object::new();
-		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("id"), &JsValue::from_str(&fmt!("{}", id)));
-		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("svg"), &JsValue::from_str(svg));
-		changed.push(&entry);
+	set(&obj, "order", &order);
+	let sizes = js_sys::Array::new();
+	for (w, h) in &head.sizes {
+		let pair = js_sys::Array::new();
+		pair.push(&JsValue::from_f64(*w as f64));
+		pair.push(&JsValue::from_f64(*h as f64));
+		sizes.push(&pair);
 	}
-	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("changed"), &changed);
-	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("reset"), &JsValue::from_bool(d.reset));
-	let diags = js_sys::Array::new();
-	for diag in &out.diagnostics {
-		let entry = js_sys::Object::new();
-		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("file"), &JsValue::from_str(&diag.file));
-		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("line"), &JsValue::from_f64(diag.line as f64));
-		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("col"), &JsValue::from_f64(diag.col as f64));
-		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("message"), &JsValue::from_str(&diag.message));
-		diags.push(&entry);
-	}
-	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("diagnostics"), &diags);
-	if let Some(skip) = &out.skip {
-		let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("skipped"), &JsValue::from_str(skip));
-	}
+	set(&obj, "sizes", &sizes);
+	set(&obj, "changed", &changed.arr);
+	set(&obj, "reset", &JsValue::from_bool(head.reset));
+	set_report(&obj, &made.report, &made.needs);
+	set_counters(&obj, &made.counters);
 	obj.into()
 }
 
-/// `{ error: String }` -- the shape every method returns on failure, so a caller never sees a throw.
-fn err_obj(msg: &str) -> JsValue {
+/// `{ error: "file:line:col: message", diagnostics, skipped, needs }`, and `pages` when the compile got as
+/// far as laying pages out: the shape every compile returns on failure, so a caller never sees a throw.
+/// `diagnostics` leads with the error's own entry, then every site the compile reached.
+fn err_obj(fail: &Failure) -> JsValue {
 	let obj = js_sys::Object::new();
-	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("error"), &JsValue::from_str(msg));
+	set(&obj, "error", &JsValue::from_str(&fmt!("{}", fail.head)));
+	let mut diags = vec![fail.head.clone()];
+	diags.extend(fail.rest.iter().cloned());
+	if let Some(pages) = fail.pages {
+		set(&obj, "pages", &JsValue::from_f64(pages as f64));
+	}
+	set(&obj, "diagnostics", &diagnostics_array(&diags));
+	set(&obj, "skipped", &opt_str(fail.skipped.as_deref()));
+	set(&obj, "needs", &strings_js(&fail.needs));
 	obj.into()
+}
+
+/// The rows of a query as a JavaScript array. A row's `value` is parsed from its JSON text, `null` where the
+/// element has no such field.
+fn rows_js(rows: &[Row]) -> JsValue {
+	let arr = js_sys::Array::new();
+	for r in rows {
+		let entry = js_sys::Object::new();
+		set(&entry, "kind", &JsValue::from_str(&r.kind));
+		set(&entry, "label", &opt_str(r.label.as_deref()));
+		set(&entry, "page", &match r.page {
+			Some(p)	=> JsValue::from_f64(p as f64),
+			None	=> JsValue::NULL,
+		});
+		let value = match &r.value {
+			Some(text)	=> js_sys::JSON::parse(text).unwrap_or(JsValue::NULL),
+			None		=> JsValue::NULL,
+		};
+		set(&entry, "value", &value);
+		if let Some(t) = &r.title {
+			set(&entry, "title", &JsValue::from_str(t));
+		}
+		if let Some(l) = r.level {
+			set(&entry, "level", &JsValue::from_f64(l as f64));
+		}
+		arr.push(&entry);
+	}
+	arr.into()
 }

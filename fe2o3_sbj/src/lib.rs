@@ -15,6 +15,7 @@ pub mod canon;
 pub mod card;
 pub mod doc;
 pub mod envelope;
+pub mod export;
 pub mod import;
 pub mod index;
 pub mod key;
@@ -36,6 +37,11 @@ pub const HEADER_LEN: usize = 8;
 
 /// Schema identifier for an oxeweb document payload, which admits the kinds 1 to 13 and no others.
 pub const SCHEMA_DOC: &'static str = "oxeweb/doc/0";
+
+/// Schema identifier for an oxeweb document of the page vocabulary: the kinds of `oxeweb/doc/0` and the
+/// page kinds 17 to 33, which carry every construct of `fe2o3_text::doc` without loss. What
+/// `import::from_doc` writes and `export::to_doc` reads.
+pub const SCHEMA_DOC_1: &'static str = "oxeweb/doc/1";
 
 /// Schema identifier for the browser's own chrome, which admits the document kinds and the `edit`
 /// node (§4.2).

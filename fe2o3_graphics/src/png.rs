@@ -45,6 +45,7 @@ use crate::{
 	colour::Rgba,
 	pixmap::{
 		Pixmap,
+		Tone,
 		MAX_PIXELS,
 	},
 };
@@ -670,6 +671,13 @@ fn expected_size(hdr: &Header, passes: &[Pass]) -> Outcome<usize> {
 /// the decompressed stream is refused the moment it exceeds the size the header implies, so a small
 /// file cannot expand into a large allocation.
 pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
+	let (pm, _) = res!(decode_toned(buf));
+	Ok(pm)
+}
+
+/// Decodes as [`decode`] does, and says whether the file held grey samples alone. A palette is colour, whatever
+/// its entries.
+pub fn decode_toned(buf: &[u8]) -> Outcome<(Pixmap, Tone)> {
 	if buf.len() < SIG.len() || buf[..SIG.len()] != SIG {
 		return Err(err!(
 			"The bytes do not begin with the PNG signature."; Invalid, Input, Decode));
@@ -815,7 +823,11 @@ pub fn decode(buf: &[u8]) -> Outcome<Pixmap> {
 			prev.copy_from_slice(&line);
 		}
 	}
-	Ok(pm)
+	let tone = match hdr.ct {
+		ColourType::Grey | ColourType::GreyAlpha				=> Tone::Grey,
+		ColourType::Rgb | ColourType::Palette | ColourType::Rgba	=> Tone::Colour,
+	};
+	Ok((pm, tone))
 }
 
 /// Reads the image header, and refuses by name every combination the format does not define.
@@ -1352,6 +1364,21 @@ mod tests {
 		let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
 		res!(z.write_all(raw));
 		Ok(res!(z.finish()))
+	}
+
+	#[test]
+	fn test_a_grey_file_decodes_with_a_grey_tone() -> Outcome<()> {
+		for (ct, raw, tone) in [
+			(0u8,	vec![0, 128],				Tone::Grey),
+			(4,		vec![0, 128, 255],			Tone::Grey),
+			(2,		vec![0, 1, 2, 3],			Tone::Colour),
+			(6,		vec![0, 1, 2, 3, 4],		Tone::Colour),
+		] {
+			let buf = assemble(&[(b"IHDR", ihdr(1, 1, ct)), (b"IDAT", res!(idat_of(&raw)))]);
+			let (_, got) = res!(decode_toned(&buf));
+			assert_eq!(got, tone, "colour type {}", ct);
+		}
+		Ok(())
 	}
 
 	#[test]

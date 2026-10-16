@@ -7,6 +7,7 @@ pub use crate::{
 	blur::Shadow,
 	colour::{
 		ColourVision,
+		Ink,
 		Rgba,
 	},
 	jpeg::{
@@ -20,7 +21,10 @@ pub use crate::{
 		Polyline,
 		Pt,
 	},
-	pixmap::Pixmap,
+	pixmap::{
+		Pixmap,
+		Tone,
+	},
 	png::{
 		Animation,
 		Delay,
@@ -30,6 +34,7 @@ pub use crate::{
 		QrMatrix,
 	},
 	raster::FillRule,
+	sniff::ImageKind,
 	stroke::{
 		Cap,
 		Dash,

@@ -295,18 +295,21 @@ impl Dat {
             },
             // Variable length bytes
             Self::BU8(v) => {
+                res!(Self::check_width("BU8", v.len(), u8::MAX as u64));
                 self.append_code(&mut buf);
                 // Use a u8 for the data length.
                 buf.extend_from_slice(&(v.len() as u8).to_be_bytes());
                 buf.extend_from_slice(v);
             },
             Self::BU16(v) => {
+                res!(Self::check_width("BU16", v.len(), u16::MAX as u64));
                 self.append_code(&mut buf);
                 // Use a u16 for the data length.
                 buf.extend_from_slice(&(v.len() as u16).to_be_bytes());
                 buf.extend_from_slice(v);
             },
             Self::BU32(v) => {
+                res!(Self::check_width("BU32", v.len(), u32::MAX as u64));
                 self.append_code(&mut buf);
                 // Use a u32 for the data length.
                 buf.extend_from_slice(&(v.len() as u32).to_be_bytes());
@@ -653,18 +656,18 @@ impl Dat {
         Ok(pre)
     }
 
-    pub fn byte_wrapper_var_len(len: usize) -> Outcome<u8> {
-        if len <= u8::MAX as usize { Ok(2) }
-        else if len <= u16::MAX as usize { Ok(3) }
-        else if len <= u32::MAX as usize { Ok(5) }
-        else if len <= u64::MAX as usize { Ok(9) }
-        else {
-            Err(err!(
-                "The byte length of {}, which exceeds the maximum u64::MAX = {},
-                cannot be represented a variable size Dat byte wrapper.",
-                len, u64::MAX;
-            Size, TooBig))
+    // A fixed-width byte variant writes its length in a field of that width, so a payload
+    // longer than the field can state would be written with its length cut and read back as a
+    // shorter value followed by stray bytes. Refuse it here, where the length is known.
+    pub(crate) fn check_width(kind: &str, len: usize, max: u64) -> Outcome<()> {
+        if (len as u64) > max {
+            return Err(err!(
+                "A Dat::{} payload of {} bytes exceeds the {} bytes its length field can state; \
+                use Dat::wrap_dat, which chooses a wider variant.",
+                kind, len, max;
+            Size, TooBig));
         }
+        Ok(())
     }
 
     pub fn wrap_dat(byts: Vec<u8>) -> Self {

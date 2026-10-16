@@ -30,10 +30,12 @@
 //! well.  The quadtree indexing, the `u64` layout, the exact-parent property and the
 //! re-indexing neighbour walk are this library's own.
 
+use crate::proj::EARTH_RADIUS_M;
+
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
-    f64::consts::{FRAC_2_PI, FRAC_PI_2},
+    f64::consts::{FRAC_2_PI, FRAC_PI_2, PI},
     fmt,
     str::FromStr,
 };
@@ -454,6 +456,131 @@ impl Cell {
         }
         Ok(frontier)
     }
+
+    /// The cell's boundary as unit vectors, each edge divided into `segs` pieces along its
+    /// great circle, counter-clockwise from the first corner and not closed.
+    ///
+    /// The edges are great circles, so on the globe a straight line between corners is
+    /// already the edge's chord; on a flat map a large cell's edge is visibly curved.  About
+    /// eight pieces serve below level 8 and one above it, where an edge is a few kilometres
+    /// and no projection bends it by a pixel.
+    pub fn outline(&self, segs: u32) -> Vec<[f64; 3]> {
+        let segs = segs.max(1) as usize;
+        let c = self.corners();
+        let mut out = Vec::with_capacity(4 * segs);
+        for k in 0..4 {
+            let a = c[k].vec;
+            let b = c[(k + 1) % 4].vec;
+            for s in 0..segs {
+                // A normalised straight blend of two points stays on their great circle.
+                let t = s as f64 / segs as f64;
+                out.push(normalise(&[
+                    a[0] + t * (b[0] - a[0]),
+                    a[1] + t * (b[1] - a[1]),
+                    a[2] + t * (b[2] - a[2]),
+                ]));
+            }
+        }
+        out
+    }
+
+    /// The smallest cap about the cell's centre that holds the whole cell, as the centre and
+    /// the cap's angular radius in radians.
+    ///
+    /// The furthest point of a quadrilateral with great-circle edges from a point inside it is
+    /// a corner, so the radius is the furthest corner's.
+    pub fn bounding_cap(&self) -> ([f64; 3], f64) {
+        let centre = self.centre_vec();
+        let mut far: f64 = 0.0;
+        for corner in self.corners().iter() {
+            far = far.max(dot(&centre, &corner.vec).clamp(-1.0, 1.0).acos());
+        }
+        (centre, far)
+    }
+}
+
+/// The cells of a level that a spherical cap may touch: every cell whose bounding cap meets
+/// the query cap.
+///
+/// A breadth-first walk over [`Cell::neighbours`] from the cell holding the cap's centre, so
+/// the cost is the size of the answer and not of the level, and the answer comes nearest
+/// first.  `max` bounds that answer: a cap that would cover more cells is refused rather than
+/// walked, because a caller that asked for the cells on a screen and got millions has asked
+/// at the wrong level.
+///
+/// # Arguments
+/// * `centre` - The cap's centre as a vector; its length does not matter.
+/// * `radius_rad` - The cap's angular radius, in radians of arc.
+pub fn cover_cap(
+    centre:     [f64; 3],
+    radius_rad: f64,
+    level:      u8,
+    max:        usize,
+)
+    -> Outcome<Vec<Cell>>
+{
+    let len = dot(&centre, &centre).sqrt();
+    if !(len > 0.0 && len.is_finite()) {
+        return Err(err!("A cap centred on {:?} has no direction.", centre; Invalid, Input));
+    }
+    if !(radius_rad >= 0.0 && radius_rad.is_finite()) {
+        return Err(err!("A cap of radius {} radians is not a cap.", radius_rad;
+            Invalid, Input, Range));
+    }
+    if max == 0 {
+        return Err(err!("A cover of at most no cells cannot hold the cap's own centre.";
+            Invalid, Input, Range));
+    }
+    let c = normalise(&centre);
+    let (lat, lon) = vec_to_latlon(&c);
+    let first = res!(Cell::at(lat, lon, level));
+    let meets = |cell: &Cell| -> bool {
+        let (v, r) = cell.bounding_cap();
+        dot(&v, &c).clamp(-1.0, 1.0).acos() <= r + radius_rad + 1.0e-12
+    };
+    let mut seen: std::collections::HashSet<Cell> = std::collections::HashSet::new();
+    let mut out: Vec<Cell> = Vec::new();
+    let mut queue: std::collections::VecDeque<Cell> = std::collections::VecDeque::new();
+    seen.insert(first);
+    out.push(first);
+    queue.push_back(first);
+    while let Some(cell) = queue.pop_front() {
+        for nb in res!(cell.neighbours()) {
+            if seen.insert(nb) && meets(&nb) {
+                if out.len() >= max {
+                    return Err(err!(
+                        "A cap of {} radians covers more than {} level-{} cells.",
+                        radius_rad, max, level;
+                    Excessive, Size));
+                }
+                out.push(nb);
+                queue.push_back(nb);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The mean side of a level's cells in metres, on a sphere of [`EARTH_RADIUS_M`]: the square
+/// root of the mean cell area, about 9,220 km at level 0 and halving with each level.
+pub fn mean_side_m(level: u8) -> f64 {
+    EARTH_RADIUS_M * (2.0 * PI / 3.0).sqrt() / (1u64 << level.min(MAX_LEVEL)) as f64
+}
+
+/// The finest level whose mean cell side spans at least `min_px` pixels at a scale of
+/// `m_per_px` ground metres per pixel, which is the level a map draws its grid at.
+///
+/// Level 0 when even that is smaller, and [`MAX_LEVEL`] when every level is larger.
+pub fn level_for_scale(m_per_px: f64, min_px: f64) -> u8 {
+    if !(m_per_px > 0.0 && min_px > 0.0) || !(m_per_px * min_px).is_finite() {
+        return 0;
+    }
+    let want = m_per_px * min_px;
+    let mut level = 0u8;
+    while level < MAX_LEVEL && mean_side_m(level + 1) >= want {
+        level += 1;
+    }
+    level
 }
 
 /// The `(s, t)` coordinate representing a stepped neighbour along one axis.

@@ -37,6 +37,7 @@ pub use self::{
         LocalTimeResult,
         LocalTimeType,
         LeapSecond,
+        ZoneOffset,
     },
     ntp::{
         NtpClient,

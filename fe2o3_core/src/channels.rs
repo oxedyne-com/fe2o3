@@ -49,6 +49,36 @@ pub use flume::{
     RecvTimeoutError,
 };
 
+/// Waits until a message is waiting on any of the receivers, or until `timeout` has run out when
+/// one is given, and returns the position of the receiver it came from.  `None` says the time ran
+/// out first.  Nothing is polled: the caller sleeps until a sender wakes it, so a bot with several
+/// channels to watch can block on all of them at once.
+pub fn recv_any<M: 'static>(
+    rxs:        &[&Receiver<M>],
+    timeout:    Option<Duration>,
+)
+    -> Outcome<Option<(usize, M)>>
+{
+    let mut sel = flume::Selector::new();
+    for (i, rx) in rxs.iter().enumerate() {
+        sel = sel.recv(*rx, move |r| (i, r));
+    }
+    let (i, r) = match timeout {
+        Some(d) => match sel.wait_timeout(d) {
+            Ok(got) => got,
+            Err(_)  => return Ok(None),
+        },
+        None => sel.wait(),
+    };
+    match r {
+        Ok(m)   => Ok(Some((i, m))),
+        Err(e)  => Err(err!(e,
+            "While waiting on {} channels, the one at position {} was found disconnected.",
+            rxs.len(), i;
+            Channel, Read)),
+    }
+}
+
 pub fn full_duplex<M>() -> FullDuplex<M> {
     FullDuplex (
         simplex(),
@@ -143,6 +173,23 @@ impl<M: 'static + Debug + Send + Sync> Simplex<M> {
     pub fn send(&self, msg: M) -> Outcome<()> {
         res!(self.tx().send(msg));
         Ok(())
+    }
+
+    /// Sends the message unless the channel has been closed, and says whether it was sent.  A
+    /// `Simplex` and every clone of it hold the receiving end as well as the sending end, so
+    /// `send` cannot fail because the reader has gone: it queues the message for nobody.  A
+    /// reader that gives up closes the channel instead, and the open flag is held while a message
+    /// is sent, so once `close` has returned no message can arrive that the closer's last
+    /// `try_recv` has not seen.
+    pub fn send_if_open(&self, msg: M) -> Outcome<bool> {
+        let open = lock_read!(self.open,
+            "While trying to send only if the channel is open.",
+        );
+        if !*open {
+            return Ok(false);
+        }
+        res!(self.tx().send(msg));
+        Ok(true)
     }
 
     /// Waits until a message is available.

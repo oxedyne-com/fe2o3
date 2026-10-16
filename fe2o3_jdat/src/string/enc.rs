@@ -1139,48 +1139,43 @@ impl Dat {
     )
         -> Outcome<()>
     {
-        if cfg.to_lines
+        // A note on nothing is a comment to the end of the line, in a map as in a list. A note on a
+        // value is not: it takes the ordinary path, which writes the value with its note.
+        let bare = |d: &Dat| matches!(d, Dat::ABox(_, b, _) if b.kind() == Kind::Empty);
+        let line_note = cfg.to_lines
             && cfg.comment_allowed
-            && cfg.kind_scope != KindScope::Everything
-            && (k.kind().is_abox() || v.kind().is_abox())
-        {
-            // Special case of abox annotation to end of line.
-            if !k.kind().is_abox() {
-                // :! A comment\n i.e. () => abox!((), "A comment")
-                if let Dat::ABox(ncfg, boxdat, comment) = v {
-                    if boxdat.kind() == Kind::Empty {
-                        let key_str = if k.kind() == Kind::Empty {
-                            fmt!("")
-                        } else {
-                            res!(k.recursive_encode(&cfg, state.clone()))
-                        };
-                        s.push_str(&fmt!("{}{}:{} {}\n",
-                            indent,
-                            key_str,
-                            if ncfg.is_type1() {
-                                cfg.comment1_start_char
-                            } else {
-                                cfg.comment2_start_char
-                            },
-                            comment,
-                        ));
-                    }
-                }
-            } else if !v.kind().is_abox() {
-                // ! A comment\n i.e. abox!((), "A comment") => ()
-                if let Dat::ABox(ncfg, boxdat, comment) = k {
-                    if boxdat.kind() == Kind::Empty {
-                        s.push_str(&fmt!("{}{} {}\n",
-                            indent,
-                            if ncfg.is_type1() {
-                                cfg.comment1_start_char
-                            } else {
-                                cfg.comment2_start_char
-                            },
-                            comment,
-                        ));
-                    }
-                }
+            && cfg.kind_scope != KindScope::Everything;
+        if line_note && !k.kind().is_abox() && bare(v) {
+            // :! A comment\n i.e. () => abox!((), "A comment")
+            if let Dat::ABox(ncfg, _, comment) = v {
+                let key_str = if k.kind() == Kind::Empty {
+                    fmt!("")
+                } else {
+                    res!(k.recursive_encode(&cfg, state.clone()))
+                };
+                s.push_str(&fmt!("{}{}:{} {}\n",
+                    indent,
+                    key_str,
+                    if ncfg.is_type1() {
+                        cfg.comment1_start_char
+                    } else {
+                        cfg.comment2_start_char
+                    },
+                    comment,
+                ));
+            }
+        } else if line_note && bare(k) && v.kind() == Kind::Empty {
+            // ! A comment\n i.e. abox!((), "A comment") => ()
+            if let Dat::ABox(ncfg, _, comment) = k {
+                s.push_str(&fmt!("{}{} {}\n",
+                    indent,
+                    if ncfg.is_type1() {
+                        cfg.comment1_start_char
+                    } else {
+                        cfg.comment2_start_char
+                    },
+                    comment,
+                ));
             }
         } else {
             s.push_str(&fmt!("{}{}: {}{}",
@@ -1213,24 +1208,27 @@ impl Dat {
                 &mut state,
             );
             for (i, v) in list.iter().enumerate() {
+                // A note on nothing is a comment to the end of the line; a note on a value is written with it.
+                let bare = match v {
+                    Dat::ABox(_, b, _) => b.kind() == Kind::Empty,
+                    _ => false,
+                };
                 if cfg.to_lines
                     && cfg.comment_allowed
                     && cfg.kind_scope != KindScope::Everything
-                    && v.kind().is_abox()
+                    && bare
                 {
                     // Special case of abox annotation to end of line.
-                    if let Dat::ABox(ncfg, boxdat, comment) = v {
-                        if boxdat.kind() == Kind::Empty {
-                            s.push_str(&fmt!("{}{} {}\n",
-                                indent,
-                                if ncfg.is_type1() {
-                                    cfg.comment1_start_char
-                                } else {
-                                    cfg.comment2_start_char
-                                },
-                                comment,
-                            ));
-                        }
+                    if let Dat::ABox(ncfg, _, comment) = v {
+                        s.push_str(&fmt!("{}{} {}\n",
+                            indent,
+                            if ncfg.is_type1() {
+                                cfg.comment1_start_char
+                            } else {
+                                cfg.comment2_start_char
+                            },
+                            comment,
+                        ));
                     }
                 } else {
                     s.push_str(&fmt!("{}{}{}",

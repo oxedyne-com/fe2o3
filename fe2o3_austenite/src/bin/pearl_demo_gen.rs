@@ -79,7 +79,7 @@ fn main() -> Outcome<()> {
 	let link_box = |target: LinkTarget, w: f64, h: f64| -> Outcome<Graphic> {
 		let fill	= res!(Path::rect(Bounds::new(0.0, 0.0, w as f32, h as f32)));
 		let mut g	= Graphic::new(
-			vec![DrawOp::Fill { path: fill, colour: Rgba::new(219, 234, 254, 255) }],
+			vec![DrawOp::Fill { path: fill, colour: Rgba::new(219, 234, 254, 255).into() }],
 			Dims::new(Sp::from_pt(w), Sp::from_pt(h), Sp::ZERO));
 		g.link = Some(target);
 		Ok(g)

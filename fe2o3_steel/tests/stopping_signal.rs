@@ -409,7 +409,7 @@ fn a_signal_stops_it_cleanly(signal: &str, name: &str) -> Outcome<()> {
     // would be a worse fault than the one being fixed.
     {
         let db_dir = dir.join("o3db");
-        let mut db = res!(new_db(&db_dir, &key));
+        let mut db = res!(new_db(&db_dir, &key, false));
         // The sequence the server itself runs, to the letter. Starting
         // without the rest of it leaves the bots up but not answering, and
         // every read then fails on a responder timeout that says nothing

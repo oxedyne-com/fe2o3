@@ -29,13 +29,19 @@
 //! Anthropic Claude
 
 pub mod bib;
+pub mod bib_hayagriva;
 pub mod book;
+pub mod caches;
 pub mod compile;
 pub mod delta;
+pub mod diag;
 pub mod diagram;
 pub mod doc;
+pub mod door;
 pub mod driver;
 pub mod emit;
+pub mod eval;
+pub mod flow;
 pub mod font;
 pub mod fonts;
 pub mod hyphenate;
@@ -49,8 +55,11 @@ pub mod mathtable;
 pub mod memo;
 pub mod page;
 pub mod plot;
+pub mod settings;
+pub mod syntax;
 pub mod table;
 pub mod theme;
+pub mod timings;
 pub mod vfs;
 pub mod watch;
 

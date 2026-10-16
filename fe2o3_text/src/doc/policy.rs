@@ -39,11 +39,13 @@
 //! built to overflow a stack is refused rather than walked.
 
 use crate::doc::{
+	Attrs,
 	Block,
 	Cell,
 	Doc,
 	Inline,
 	Row,
+	Term,
 };
 
 
@@ -53,6 +55,24 @@ use crate::doc::{
 /// is one too -- a `data:text/html` destination is a document of the sender's choosing served from
 /// the site's own origin.
 pub const SAFE_SCHEMES: &[&str] = &["http", "https", "mailto"];
+
+/// Which names of a kind a policy lets through: any, or only those listed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AllowList {
+	Any,
+	Only(Vec<String>),
+}
+
+impl AllowList {
+
+	/// Does the list let this name through?
+	pub fn permits(&self, name: &str) -> bool {
+		match self {
+			Self::Any		=> true,
+			Self::Only(names)	=> names.iter().any(|n| n == name),
+		}
+	}
+}
 
 /// What a document from an untrusted author may contain.
 ///
@@ -74,9 +94,14 @@ pub struct Policy {
 	pub heading_floor:	Option<u8>,
 	/// Whether tables survive.
 	pub allow_tables:	bool,
-	/// Whether a division or span keeps the attributes that name it. Off by default: an id or a class
-	/// a stranger chose lands in the site's own document.
-	pub allow_attrs:	bool,
+	/// The classes a division, span, figure or definition list may keep. None by default: a class a
+	/// stranger chose borrows the site's styling.
+	pub classes:		AllowList,
+	/// Whether an id survives. Off by default: a stranger's id can collide with the page's own.
+	pub ids:		bool,
+	/// The key-value pairs that survive, by key. None by default. Whatever this says, the HTML
+	/// writer refuses a key that could carry script or style; see `html::write`.
+	pub pairs:		AllowList,
 	/// How deep the tree may nest before the walk stops and drops what is below.
 	pub max_depth:		usize,
 }
@@ -91,7 +116,9 @@ impl Default for Policy {
 			allow_images:	false,
 			heading_floor:	Some(3),
 			allow_tables:	true,
-			allow_attrs:	false,
+			classes:	AllowList::Only(Vec::new()),
+			ids:		false,
+			pairs:		AllowList::Only(Vec::new()),
 			max_depth:	16,
 		}
 	}
@@ -110,7 +137,9 @@ impl Policy {
 			allow_images:	true,
 			heading_floor:	None,
 			allow_tables:	true,
-			allow_attrs:	true,
+			classes:	AllowList::Any,
+			ids:		true,
+			pairs:		AllowList::Any,
 			max_depth:	usize::MAX,
 		}
 	}
@@ -212,87 +241,117 @@ pub fn retarget<F>(doc: &Doc, map: F) -> Doc
 where
 	F: Fn(&str) -> Option<String>,
 {
-	Doc { blocks: retarget_blocks(&doc.blocks, &map) }
+	map_inlines(doc, |item| match item {
+		Inline::Link { to, content } => match map(&to) {
+			Some(there)	=> vec![Inline::Link { to: there, content }],
+			// The words stay and the destination goes, which is what a refused destination
+			// already does. See [`retarget`].
+			None		=> content,
+		},
+		Inline::Image { src, alt, attrs } => match map(&src) {
+			Some(there)			=> vec![Inline::Image { src: there, alt, attrs }],
+			None if !alt.trim().is_empty()	=> vec![Inline::Text(alt)],
+			None				=> Vec::new(),
+		},
+		other => vec![other],
+	})
 }
 
-/// The blocks, their destinations rewritten.
-fn retarget_blocks<F>(items: &[Block], map: &F) -> Vec<Block>
+/// Every inline of the document, wherever it sits (paragraph, heading, list, table cell, caption,
+/// term, figure or division), handed to `f` after its own content has been, so the innermost is
+/// rewritten first. `f` returns what replaces the inline: itself, something else, several things,
+/// or nothing. Block structure is kept as it is.
+///
+/// This is the walk [`retarget`] is built on, for a rewrite that is not a destination: an image's
+/// attributes filled in from a store, say, or a source moved to a new address along with them.
+pub fn map_inlines<F>(doc: &Doc, f: F) -> Doc
 where
-	F: Fn(&str) -> Option<String>,
+	F: Fn(Inline) -> Vec<Inline>,
+{
+	Doc { blocks: map_blocks(&doc.blocks, &f) }
+}
+
+fn map_blocks<F>(items: &[Block], f: &F) -> Vec<Block>
+where
+	F: Fn(Inline) -> Vec<Inline>,
 {
 	let mut out = Vec::with_capacity(items.len());
 	for item in items {
 		out.push(match item {
 			Block::Heading { level, content } => Block::Heading {
 				level:		*level,
-				content:	retarget_inlines(content, map),
+				content:	map_list(content, f),
 			},
-			Block::Para(content)	=> Block::Para(retarget_inlines(content, map)),
+			Block::Para(content)	=> Block::Para(map_list(content, f)),
 			Block::List { ordered, items } => Block::List {
 				ordered:	*ordered,
-				items:		items.iter().map(|it| retarget_blocks(it, map)).collect(),
+				items:		items.iter().map(|it| map_blocks(it, f)).collect(),
 			},
-			Block::Quote(inner)		=> Block::Quote(retarget_blocks(inner, map)),
-			Block::Table { head, rows, cols } => Block::Table {
-				head:	head.as_ref().map(|h| retarget_row(h, map)),
-				rows:	rows.iter().map(|r| retarget_row(r, map)).collect(),
-				cols:	cols.clone(),
+			Block::Quote(inner)		=> Block::Quote(map_blocks(inner, f)),
+			Block::Table { head, rows, cols, caption } => Block::Table {
+				head:		head.as_ref().map(|h| map_row(h, f)),
+				rows:		rows.iter().map(|r| map_row(r, f)).collect(),
+				cols:		cols.clone(),
+				caption:	map_list(caption, f),
+			},
+			Block::Figure { attrs, content, caption } => Block::Figure {
+				attrs:		attrs.clone(),
+				content:	map_blocks(content, f),
+				caption:	map_list(caption, f),
+			},
+			Block::Terms { attrs, items } => Block::Terms {
+				attrs:	attrs.clone(),
+				items:	items.iter().map(|t| Term {
+					term:	map_list(&t.term, f),
+					defs:	t.defs.iter().map(|d| map_blocks(d, f)).collect(),
+				}).collect(),
 			},
 			Block::Div { attrs, content } => Block::Div {
 				attrs:		attrs.clone(),
-				content:	retarget_blocks(content, map),
+				content:	map_blocks(content, f),
 			},
-			// A code block and a rule hold no destination, so there is nothing here to rewrite.
+			// A code block and a rule hold no inline.
 			Block::Code { .. } | Block::Rule	=> item.clone(),
 		});
 	}
 	out
 }
 
-/// A row, its cells' destinations rewritten.
-fn retarget_row<F>(r: &Row, map: &F) -> Row
+fn map_row<F>(r: &Row, f: &F) -> Row
 where
-	F: Fn(&str) -> Option<String>,
+	F: Fn(Inline) -> Vec<Inline>,
 {
-	Row(r.0.iter().map(|c| Cell(retarget_inlines(&c.0, map))).collect())
+	Row(r.0.iter().map(|c| Cell { content: map_list(&c.content, f), header: c.header }).collect())
 }
 
-/// The inlines, their destinations rewritten.
-fn retarget_inlines<F>(items: &[Inline], map: &F) -> Vec<Inline>
+/// The inlines, each one's content first and then the inline itself.
+fn map_list<F>(items: &[Inline], f: &F) -> Vec<Inline>
 where
-	F: Fn(&str) -> Option<String>,
+	F: Fn(Inline) -> Vec<Inline>,
 {
 	let mut out = Vec::with_capacity(items.len());
 	for item in items {
-		match item {
-			Inline::Link { to, content } => {
-				let kept = retarget_inlines(content, map);
-				match map(to) {
-					Some(there)	=> out.push(Inline::Link { to: there, content: kept }),
-					// The words stay and the destination goes, which is what a refused
-					// destination already does. See [`retarget`].
-					None		=> out.extend(kept),
-				}
-			}
-			Inline::Image { src, alt } => match map(src) {
-				Some(there)	=> out.push(Inline::Image { src: there, alt: alt.clone() }),
-				None if !alt.trim().is_empty()	=> out.push(Inline::Text(alt.clone())),
-				None		=> {},
+		let inner = match item {
+			Inline::Link { to, content } => Inline::Link {
+				to:		to.clone(),
+				content:	map_list(content, f),
 			},
-			Inline::Emph { strong, content } => out.push(Inline::Emph {
+			Inline::Emph { strong, content } => Inline::Emph {
 				strong:		*strong,
-				content:	retarget_inlines(content, map),
-			}),
-			Inline::Span { attrs, content } => out.push(Inline::Span {
+				content:	map_list(content, f),
+			},
+			Inline::Span { attrs, content } => Inline::Span {
 				attrs:		attrs.clone(),
-				content:	retarget_inlines(content, map),
-			}),
-			Inline::Text(_) | Inline::Code(_) | Inline::Break	=> out.push(item.clone()),
-		}
+				content:	map_list(content, f),
+			},
+			Inline::Sup(content)	=> Inline::Sup(map_list(content, f)),
+			Inline::Sub(content)	=> Inline::Sub(map_list(content, f)),
+			Inline::Image { .. } | Inline::Text(_) | Inline::Code(_) | Inline::Break	=> item.clone(),
+		};
+		out.extend(f(inner));
 	}
 	out
 }
-
 
 /// The blocks that survive, at a given depth.
 fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
@@ -333,7 +392,7 @@ fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
 			// the language name reaches a class attribute -- which is why it is passed through the
 			// same attribute rule as everything else.
 			Block::Code { lang, text } => out.push(Block::Code {
-				lang:	if policy.allow_attrs { lang.clone() } else { lang.as_ref()
+				lang:	if policy.classes == AllowList::Any { lang.clone() } else { lang.as_ref()
 						.filter(|l| l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 						.cloned() },
 				text:	text.clone(),
@@ -344,10 +403,14 @@ fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
 					out.push(Block::Quote(kept));
 				}
 			}
-			Block::Table { head, rows, cols } => {
+			Block::Table { head, rows, cols, caption } => {
 				if !policy.allow_tables {
-					// A table that is not permitted still said something; its cells become
-					// paragraphs rather than vanishing.
+					// A table that is not permitted still said something; its caption and cells
+					// become paragraphs rather than vanishing.
+					let caption = inlines(caption, policy, depth);
+					if !caption.is_empty() {
+						out.push(Block::Para(caption));
+					}
 					if let Some(h) = head {
 						out.extend(row_as_paras(h, policy, depth));
 					}
@@ -357,10 +420,34 @@ fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
 					continue;
 				}
 				out.push(Block::Table {
-					head:	head.as_ref().map(|h| row(h, policy, depth)),
-					rows:	rows.iter().map(|r| row(r, policy, depth)).collect(),
-					cols:	cols.clone(),
+					head:		head.as_ref().map(|h| row(h, policy, depth)),
+					rows:		rows.iter().map(|r| row(r, policy, depth)).collect(),
+					cols:		cols.clone(),
+					caption:	inlines(caption, policy, depth),
 				});
+			}
+			Block::Figure { attrs, content, caption } => {
+				let content = blocks(content, policy, depth + 1);
+				let caption = inlines(caption, policy, depth + 1);
+				if content.is_empty() && caption.is_empty() {
+					continue;
+				}
+				out.push(Block::Figure { attrs: kept(attrs, policy), content, caption });
+			}
+			Block::Terms { attrs, items } => {
+				let items: Vec<Term> = items.iter()
+					.map(|t| Term {
+						term:	inlines(&t.term, policy, depth + 1),
+						defs:	t.defs.iter()
+							.map(|d| blocks(d, policy, depth + 1))
+							.filter(|d| !d.is_empty())
+							.collect(),
+					})
+					.filter(|t| !t.term.is_empty() || !t.defs.is_empty())
+					.collect();
+				if !items.is_empty() {
+					out.push(Block::Terms { attrs: kept(attrs, policy), items });
+				}
 			}
 			Block::Rule => out.push(Block::Rule),
 			Block::Div { attrs, content } => {
@@ -368,12 +455,13 @@ fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
 				if kept.is_empty() {
 					continue;
 				}
-				if policy.allow_attrs {
-					out.push(Block::Div { attrs: attrs.clone(), content: kept });
-				} else {
+				let attrs = self::kept(attrs, policy);
+				if attrs.is_empty() {
 					// The division's content is kept and its naming is not: the words were the
 					// author's to write and the site's markup was not theirs to join.
 					out.extend(kept);
+				} else {
+					out.push(Block::Div { attrs, content: kept });
 				}
 			}
 		}
@@ -381,15 +469,31 @@ fn blocks(items: &[Block], policy: &Policy, depth: usize) -> Vec<Block> {
 	out
 }
 
+/// The attributes an element keeps under the policy: the permitted classes and pairs, and the id
+/// where ids are permitted.
+///
+/// The element itself is the author's to write, so a figure or a definition list stays whatever
+/// goes; a division or a span left naming nothing is unwrapped by its caller.
+fn kept(attrs: &Attrs, policy: &Policy) -> Attrs {
+	Attrs {
+		id:		match policy.ids {
+			true	=> attrs.id.clone(),
+			false	=> None,
+		},
+		classes:	attrs.classes.iter().filter(|c| policy.classes.permits(c)).cloned().collect(),
+		pairs:		attrs.pairs.iter().filter(|(k, _)| policy.pairs.permits(k)).cloned().collect(),
+	}
+}
+
 /// A row, its cells brought within the policy.
 fn row(r: &Row, policy: &Policy, depth: usize) -> Row {
-	Row(r.0.iter().map(|c| Cell(inlines(&c.0, policy, depth))).collect())
+	Row(r.0.iter().map(|c| Cell { content: inlines(&c.content, policy, depth), header: c.header }).collect())
 }
 
 /// A row's cells as paragraphs, for a table a policy will not keep.
 fn row_as_paras(r: &Row, policy: &Policy, depth: usize) -> Vec<Block> {
 	r.0.iter()
-		.map(|c| Block::Para(inlines(&c.0, policy, depth)))
+		.map(|c| Block::Para(inlines(&c.content, policy, depth)))
 		.filter(|b| match b { Block::Para(c) => !c.is_empty(), _ => true })
 		.collect()
 }
@@ -405,6 +509,8 @@ fn inlines(items: &[Inline], policy: &Policy, depth: usize) -> Vec<Inline> {
 			Inline::Text(t)	=> out.push(Inline::Text(t.clone())),
 			Inline::Code(c)	=> out.push(Inline::Code(c.clone())),
 			Inline::Break	=> out.push(Inline::Break),
+			Inline::Sup(content)	=> out.push(Inline::Sup(inlines(content, policy, depth + 1))),
+			Inline::Sub(content)	=> out.push(Inline::Sub(inlines(content, policy, depth + 1))),
 			Inline::Emph { strong, content } => out.push(Inline::Emph {
 				strong:		*strong,
 				content:	inlines(content, policy, depth + 1),
@@ -419,9 +525,13 @@ fn inlines(items: &[Inline], policy: &Policy, depth: usize) -> Vec<Inline> {
 					out.extend(kept);
 				}
 			}
-			Inline::Image { src, alt } => {
+			Inline::Image { src, alt, attrs } => {
 				if policy.allow_images && policy.permits_url(src) {
-					out.push(Inline::Image { src: src.clone(), alt: alt.clone() });
+					out.push(Inline::Image {
+						src:	src.clone(),
+						alt:	alt.clone(),
+						attrs:	self::kept(attrs, policy),
+					});
 				} else if !alt.trim().is_empty() {
 					// What the image stood for is what the author said it stood for.
 					out.push(Inline::Text(alt.clone()));
@@ -429,10 +539,11 @@ fn inlines(items: &[Inline], policy: &Policy, depth: usize) -> Vec<Inline> {
 			}
 			Inline::Span { attrs, content } => {
 				let kept = inlines(content, policy, depth + 1);
-				if policy.allow_attrs {
-					out.push(Inline::Span { attrs: attrs.clone(), content: kept });
-				} else {
+				let attrs = self::kept(attrs, policy);
+				if attrs.is_empty() {
 					out.extend(kept);
+				} else {
+					out.push(Inline::Span { attrs, content: kept });
 				}
 			}
 		}
@@ -545,7 +656,7 @@ mod tests {
 				to:			fmt!("../../elsewhere"),
 				content:	vec![Inline::Text(fmt!("up and out"))],
 			},
-			Inline::Image { src: fmt!("logo.png"), alt: fmt!("a logo") },
+			Inline::Image { src: fmt!("logo.png"), alt: fmt!("a logo"), attrs: Attrs::default() },
 		])] };
 		let out = retarget(&doc, |to: &str| {
 			if to.starts_with("..") {
@@ -588,6 +699,7 @@ mod tests {
 		let d = para(vec![Inline::Image {
 			src: fmt!("https://tracker.example/pixel.gif"),
 			alt: fmt!("a picture of a cat"),
+			attrs: Attrs::default(),
 		}]);
 		let html = html::render(&apply(&d, &Policy::default()));
 		assert!(!html.contains("<img"), "an image survived: {}", html);
@@ -654,7 +766,7 @@ mod tests {
 	fn test_the_trusting_policy_changes_nothing_07() -> Outcome<()> {
 		let p = Policy::trusting();
 		assert!(p.permits_url("javascript:alert(1)"), "the trusting policy refused a scheme");
-		let d = para(vec![Inline::Image { src: fmt!("a.png"), alt: fmt!("alt") }]);
+		let d = para(vec![Inline::Image { src: fmt!("a.png"), alt: fmt!("alt"), attrs: Attrs::default() }]);
 		let html = html::render(&apply(&d, &p));
 		assert!(html.contains("<img"), "the trusting policy dropped an image: {}", html);
 		Ok(())
@@ -668,6 +780,69 @@ mod tests {
 		assert!(!html.contains("<script>"), "a script tag was written: {}", html);
 		assert!(!html.contains("<img"), "an img tag was written: {}", html);
 		assert!(html.contains("&lt;script&gt;"), "the words were lost: {}", html);
+		Ok(())
+	}
+
+	/// An image's names pass the policy as any other node's do: classes and pairs by the lists, the
+	/// id only where ids are allowed.
+	#[test]
+	fn test_an_images_names_are_filtered_like_any_others_09() -> Outcome<()> {
+		let d = para(vec![Inline::Image {
+			src:	fmt!("a.png"),
+			alt:	fmt!("alt"),
+			attrs:	Attrs {
+				id:		Some(fmt!("x")),
+				classes:	vec![fmt!("diagram"), fmt!("evil")],
+				pairs:		vec![(fmt!("width"), fmt!("5")), (fmt!("onload"), fmt!("go()"))],
+			},
+		}]);
+		let mut p = Policy::default();
+		p.allow_images	= true;
+		p.classes	= AllowList::Only(vec![fmt!("diagram")]);
+		p.pairs		= AllowList::Only(vec![fmt!("width")]);
+		p.ids		= false;
+		let html = html::render(&apply(&d, &p));
+		assert!(html.contains("class=\"diagram\""), "a permitted class was lost: {}", html);
+		assert!(html.contains("width=\"5\""), "a permitted pair was lost: {}", html);
+		for gone in ["evil", "onload", "id="] {
+			assert!(!html.contains(gone), "{:?} survived: {}", gone, html);
+		}
+		Ok(())
+	}
+
+	/// An image deep in a table cell and a link is reached, rewritten with its attributes, and the
+	/// rest of the tree is as it was.
+	#[test]
+	fn test_every_inline_can_be_rewritten_11() -> Outcome<()> {
+		let img = Inline::Image {
+			src:	fmt!("img/a.jpg"),
+			alt:	fmt!("a"),
+			attrs:	Attrs { id: None, classes: Vec::new(), pairs: vec![(fmt!("width"), fmt!("9"))] },
+		};
+		let doc = Doc { blocks: vec![
+			Block::Table {
+				head:		None,
+				rows:		vec![Row(vec![Cell {
+					content:	vec![Inline::Link { to: fmt!("x"), content: vec![img.clone()] }],
+					header:		false,
+				}])],
+				cols:		Vec::new(),
+				caption:	Vec::new(),
+			},
+			Block::Para(vec![Inline::Text(fmt!("words")), img]),
+		] };
+		let out = map_inlines(&doc, |i| match i {
+			Inline::Image { alt, .. } => vec![Inline::Image {
+				src:	fmt!("/media/0.jpg"),
+				alt,
+				attrs:	Attrs::default(),
+			}],
+			other => vec![other],
+		});
+		let html = html::render(&out);
+		assert_eq!(html.matches("src=\"/media/0.jpg\"").count(), 2, "{}", html);
+		assert!(!html.contains("width"), "{}", html);
+		assert!(html.contains("href=\"x\"") && html.contains("words"), "{}", html);
 		Ok(())
 	}
 }

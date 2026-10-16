@@ -232,7 +232,7 @@ pub fn run() -> Outcome<()> {
                     pass_bytes,
                     DEFAULT_WALLET_KDF_NAME,
                 ));
-                res!(wallet.save(
+                res!(wallet.save_secret(
                     &wallet_path,
                     "  ",
                     Some(EncoderConfig::<(), ()>::default()),

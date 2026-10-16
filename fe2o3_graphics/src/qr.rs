@@ -6,8 +6,8 @@
 //! byte-mode segment packing, Reed-Solomon error correction over GF(256), version selection,
 //! function-pattern layout, the eight data masks, and the penalty-driven choice between them.
 //!
-//! Only the module matrix is produced. Turning that grid into pixels, an SVG, or a printed square
-//! is a rendering concern that belongs to the caller, so no image output lives here.
+//! The module matrix is the product. [`QrMatrix::to_svg`] writes it as a crisp SVG with its quiet
+//! zone, the one rendering every web caller needs; pixels or a printed square are left to the caller.
 //!
 //! # What is encoded
 //!
@@ -138,7 +138,36 @@ impl QrMatrix {
 		}
 		self.mods[y * self.size + x]
 	}
+
+	/// An SVG of the symbol: dark modules as one `<path>` on a white square, inside a quiet zone
+	/// of [`QUIET_ZONE`] modules, one user unit per module and `crispEdges` so no scale blurs a
+	/// module edge. It carries no width or height, so the caller sizes it. Each row's dark runs
+	/// are written `M{x} {y}h{n}v1h-{n}z`, with `x` and `y` counted from the zone's outer edge.
+	pub fn to_svg(&self) -> String {
+		let side = self.size + 2 * QUIET_ZONE;
+		let mut d = String::new();
+		for y in 0..self.size {
+			let mut x = 0;
+			while x < self.size {
+				if !self.get(x, y) {
+					x += 1;
+					continue;
+				}
+				let x0 = x;
+				while x < self.size && self.get(x, y) {
+					x += 1;
+				}
+				let n = x - x0;
+				d.push_str(&fmt!("M{} {}h{}v1h-{}z", x0 + QUIET_ZONE, y + QUIET_ZONE, n, n));
+			}
+		}
+		fmt!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {s} {s}\" shape-rendering=\"crispEdges\">\
+			<path fill=\"#fff\" d=\"M0 0h{s}v{s}H0z\"/><path fill=\"#000\" d=\"{d}\"/></svg>", s = side, d = d)
+	}
 }
+
+/// The light margin, in modules, a reader expects around the symbol.
+pub const QUIET_ZONE: usize = 4;
 
 /// Encodes text as a QR Code in byte mode, choosing the smallest version that fits at the given
 /// error-correction level and the mask with the lowest penalty.

@@ -10,6 +10,7 @@ use crate::{
         },
     },
     comm::{
+        channels::FinishStage,
         msg::OzoneMsg,
         response::{
             Responder,
@@ -282,6 +283,29 @@ impl<
         Ok(())
     }
     pub fn set_cfg(&mut self, hand: Handle<UIDL, UID, ENC, KH>) { self.cfg = hand; }
+
+    /// Have all the bots of the given stage of a close ended?
+    pub fn stage_ended(&self, stage: FinishStage) -> bool {
+        match stage {
+            FinishStage::Servers        => self.sbots.iter().all(|h| h.sentinel().is_finished()),
+            FinishStage::Workers(typs)  => self.ended(typs),
+        }
+    }
+
+    /// Have all the workers of the given types, in every zone, ended?
+    pub fn ended(&self, typs: &[WorkerType]) -> bool {
+        typs.iter().all(|typ| {
+            let pools = match typ {
+                WorkerType::Cache       => &self.cbots,
+                WorkerType::File        => &self.fbots,
+                WorkerType::InitGarbage => &self.igbots,
+                WorkerType::Reader      => &self.rbots,
+                WorkerType::Scan        => &self.scbots,
+                WorkerType::Writer      => &self.wbots,
+            };
+            pools.iter().all(|zone| zone.iter().all(|h| h.sentinel().is_finished()))
+        })
+    }
 
     pub fn wait_init(self) {
         self.wait_init.wait();

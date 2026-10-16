@@ -17,13 +17,15 @@
 //! the ASN.1 sibling of the fixed-form verifier a browser's own WebCrypto key
 //! uses. ES256 is the near-universal default of Apple, Google and Windows
 //! authenticators; EdDSA (COSE `-8`) is modelled too for the rare Ed25519
-//! passkey, over `ring`'s Ed25519 verifier.
+//! passkey, over `fe2o3_crypto`'s strict Ed25519 verifier.
 //!
 //! A second downstream caller (a device-key admin surface, an operator console)
 //! reuses this verbatim, which is why it lives here rather than in one app.
 //!
 //! Reference: WebAuthn Level 2, §5.8.1 (attested/authenticator data) and §7.2
 //! (verifying an authentication assertion).
+
+pub mod challenge;
 
 use crate::acme::jose::base64url_decode;
 use crate::ecdsa::verify_p256_sha256_asn1;
@@ -34,15 +36,11 @@ use oxedyne_fe2o3_jdat::{
     string::dec::DecoderConfig,
 };
 
-use ring::{
-    digest::{
-        Context,
-        SHA256,
-    },
-    signature::{
-        UnparsedPublicKey,
-        ED25519,
-    },
+use oxedyne_fe2o3_crypto::sign::verify_ed25519;
+
+use ring::digest::{
+    Context,
+    SHA256,
 };
 
 
@@ -72,6 +70,48 @@ const FLAG_UV: u8 = 0x04;   // user verified
 // rpIdHash(32) || flags(1) || signCount(4): the fixed head every assertion carries.
 const AUTH_DATA_MIN_LEN: usize = 37;
 
+
+/// The fixed head of authenticator data, which `credentials.create()` returns as well as
+/// `credentials.get()`: an enrolment reads it from `getAuthenticatorData()` to check the
+/// rpIdHash and the UP and UV flags before it stores a key. Only the head is read; the attested
+/// credential data and extensions after it, which are CBOR, are not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthDataHead {
+    pub rp_id_hash:     [u8; 32],
+    pub user_present:   bool,   // UP
+    pub user_verified:  bool,   // UV
+    pub counter:        u32,    // signCount, big-endian on the wire
+}
+
+impl AuthDataHead {
+    pub fn read(authenticator_data: &[u8]) -> Outcome<Self> {
+        if authenticator_data.len() < AUTH_DATA_MIN_LEN {
+            return Err(err!(
+                "WebAuthn authenticatorData is {} bytes, need at least {}.",
+                authenticator_data.len(), AUTH_DATA_MIN_LEN;
+                Invalid, Input, Size));
+        }
+        let mut rp_id_hash = [0u8; 32];
+        rp_id_hash.copy_from_slice(&authenticator_data[0..32]);
+        let flags = authenticator_data[32];
+        Ok(Self {
+            rp_id_hash,
+            user_present:   flags & FLAG_UP != 0,
+            user_verified:  flags & FLAG_UV != 0,
+            counter:        u32::from_be_bytes([
+                authenticator_data[33],
+                authenticator_data[34],
+                authenticator_data[35],
+                authenticator_data[36],
+            ]),
+        })
+    }
+
+    /// Was this authenticator data made for `rp_id`?
+    pub fn rp_id_matches(&self, rp_id: &str) -> bool {
+        self.rp_id_hash == sha256(rp_id.as_bytes())
+    }
+}
 
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut ctx = Context::new(&SHA256);
@@ -151,37 +191,25 @@ pub fn verify_assertion(
     }
 
     // authenticatorData: rpIdHash, flags and the signature counter.
-    if authenticator_data.len() < AUTH_DATA_MIN_LEN {
-        return Err(err!(
-            "WebAuthn authenticatorData is {} bytes, need at least {}.",
-            authenticator_data.len(), AUTH_DATA_MIN_LEN;
-            Invalid, Input, Size));
-    }
-    if authenticator_data[0..32] != sha256(rp_id.as_bytes()) {
+    let head = res!(AuthDataHead::read(authenticator_data));
+    if !head.rp_id_matches(rp_id) {
         return Err(err!(
             "WebAuthn rpIdHash does not match SHA-256({:?}).", rp_id;
             Invalid, Input, Mismatch, Security));
     }
-    let flags = authenticator_data[32];
-    let user_present  = flags & FLAG_UP != 0;
-    let user_verified = flags & FLAG_UV != 0;
-    if !user_present {
+    if !head.user_present {
         return Err(err!(
             "WebAuthn assertion has the user-present (UP) flag clear.";
             Invalid, Input, Security));
     }
-    if !user_verified {
+    if !head.user_verified {
         return Err(err!(
             "WebAuthn assertion has the user-verified (UV) flag clear; \
             userVerification:'required' was expected.";
             Invalid, Input, Security));
     }
-    let counter = u32::from_be_bytes([
-        authenticator_data[33],
-        authenticator_data[34],
-        authenticator_data[35],
-        authenticator_data[36],
-    ]);
+    let (counter, user_present, user_verified) =
+        (head.counter, head.user_present, head.user_verified);
 
     // The signature is over authenticatorData || SHA-256(clientDataJSON).
     let mut signed = Vec::with_capacity(authenticator_data.len() + 32);
@@ -190,9 +218,9 @@ pub fn verify_assertion(
 
     let ok = match alg {
         CoseAlg::Es256 => verify_p256_sha256_asn1(stored_key, &signed, signature),
-        CoseAlg::EdDsa => {
-            UnparsedPublicKey::new(&ED25519, stored_key).verify(&signed, signature).is_ok()
-        }
+        // Hematite's one Ed25519 verifier, which refuses a small-order key that
+        // `ring`'s would take as signing anything.
+        CoseAlg::EdDsa => matches!(verify_ed25519(stored_key, &signed, signature), Ok(true)),
     };
     if !ok {
         return Err(err!(
@@ -203,6 +231,70 @@ pub fn verify_assertion(
     Ok(VerifiedAssertion { counter, user_present, user_verified })
 }
 
+
+// The DER head of a P-256 `SubjectPublicKeyInfo`: SEQUENCE { SEQUENCE { id-ecPublicKey,
+// prime256v1 }, BIT STRING (66 bytes, no unused bits) }, after which come the 65 bytes of the
+// uncompressed point.
+const SPKI_P256_PREFIX: [u8; 26] = [
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+];
+// The DER head of an Ed25519 `SubjectPublicKeyInfo` (RFC 8410): SEQUENCE { SEQUENCE { id-Ed25519 },
+// BIT STRING (33 bytes, no unused bits) }, after which come the 32 key bytes.
+const SPKI_ED25519_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
+
+/// Turn the `SubjectPublicKeyInfo` a browser returns from `response.getPublicKey()` at enrolment
+/// into the algorithm and key form [`verify_assertion`] takes: the 65-byte uncompressed SEC1 point
+/// for a P-256 key, the 32 raw bytes for an Ed25519 one.
+///
+/// Only the two exact encodings are accepted. A browser emits nothing else for these algorithms,
+/// so anything that differs -- an RSA or P-384 key, a compressed point, trailing bytes -- is
+/// refused rather than parsed generously.
+pub fn stored_key_from_spki(spki_der: &[u8]) -> Outcome<(CoseAlg, Vec<u8>)> {
+    let p256_len = SPKI_P256_PREFIX.len() + 65;
+    if spki_der.len() == p256_len && spki_der.starts_with(&SPKI_P256_PREFIX) {
+        let point = &spki_der[SPKI_P256_PREFIX.len()..];
+        if point[0] != 0x04 {
+            return Err(err!(
+                "WebAuthn SPKI: a P-256 key whose point starts 0x{:02x}, not 0x04 (uncompressed).",
+                point[0];
+                Invalid, Input, Security));
+        }
+        return Ok((CoseAlg::Es256, point.to_vec()));
+    }
+    let ed_len = SPKI_ED25519_PREFIX.len() + 32;
+    if spki_der.len() == ed_len && spki_der.starts_with(&SPKI_ED25519_PREFIX) {
+        return Ok((CoseAlg::EdDsa, spki_der[SPKI_ED25519_PREFIX.len()..].to_vec()));
+    }
+    Err(err!(
+        "WebAuthn SPKI: {} bytes holding {}, where only a P-256 ({} bytes) or an Ed25519 ({} \
+        bytes) key is accepted. It begins {}.",
+        spki_der.len(), spki_key_kind(spki_der), p256_len, ed_len,
+        spki_der.iter().take(26).map(|b| fmt!("{:02x}", b)).collect::<String>();
+        Invalid, Input, Security))
+}
+
+// Names the key an unaccepted SPKI holds, by the algorithm and curve object identifiers it
+// carries, so the refusal says what was offered rather than only that it was wrong.
+fn spki_key_kind(der: &[u8]) -> &'static str {
+    const KNOWN: [(&[u8], &str); 7] = [
+        (&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],     "a P-256 key in an unexpected encoding"),
+        (&[0x2b, 0x81, 0x04, 0x00, 0x22],                       "a P-384 key"),
+        (&[0x2b, 0x81, 0x04, 0x00, 0x23],                       "a P-521 key"),
+        (&[0x2b, 0x81, 0x04, 0x00, 0x0a],                       "a secp256k1 key"),
+        (&[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01], "an RSA key"),
+        (&[0x2b, 0x65, 0x71],                                   "an Ed448 key"),
+        (&[0x2b, 0x65, 0x70],                                   "an Ed25519 key in an unexpected encoding"),
+    ];
+    for (oid, name) in KNOWN.iter() {
+        if der.windows(oid.len()).any(|w| w == *oid) {
+            return name;
+        }
+    }
+    "no key this recognises"
+}
 
 #[cfg(test)]
 mod tests {
@@ -282,6 +374,48 @@ mod tests {
             let sig = res!(self.sign(&signed));
             Ok((ad, cdj, sig))
         }
+    }
+
+    /// An EdDSA assertion signed by a real Ed25519 key verifies, and one "signed"
+    /// for the identity as a key, with R the identity and S zero, is refused.
+    /// That pair satisfies the cofactorless equation over any message, and
+    /// `ring`'s Ed25519 verifier, which this path used before, takes it, as the
+    /// second assertion shows.
+    #[test]
+    fn test_verify_assertion_eddsa_refuses_a_small_order_key() -> Outcome<()> {
+        use oxedyne_fe2o3_crypto::sign::SignatureScheme;
+        use oxedyne_fe2o3_iop_crypto::{
+            keys::KeyManager,
+            sign::Signer,
+        };
+
+        let challenge = b"eddsa-challenge";
+        let ad = make_auth_data(RP_ID, FLAG_UP | FLAG_UV, 3);
+        let cdj = client_data("webauthn.get", challenge, ORIGIN);
+        let mut signed = ad.clone();
+        signed.extend_from_slice(&sha256(&cdj));
+
+        let key = SignatureScheme::new_ed25519();
+        let public = match res!(key.get_public_key()) {
+            Some(pk) => pk.to_vec(),
+            None => return Err(err!("A new Ed25519 key has no public half."; Test, Missing)),
+        };
+        let sig = res!(key.sign(&signed));
+        let v = res!(verify_assertion(
+            CoseAlg::EdDsa, &public, challenge, ORIGIN, RP_ID, &ad, &cdj, &sig));
+        assert_eq!(v.counter, 3);
+
+        let mut identity = [0u8; 32];
+        identity[0] = 0x01;
+        let mut forged = [0u8; 64];
+        forged[0] = 0x01;
+        assert!(ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &identity)
+            .verify(&signed, &forged).is_ok(),
+            "ring's verifier takes the forgery, which is why this path no longer uses it");
+        assert!(verify_assertion(
+            CoseAlg::EdDsa, &identity, challenge, ORIGIN, RP_ID, &ad, &cdj, &forged).is_err(),
+            "the identity key's forgery must be refused");
+        Ok(())
     }
 
     /// A well-formed ES256 assertion verifies, and its counter and flags come back.
@@ -374,6 +508,158 @@ mod tests {
             CoseAlg::Es256, &key.pubkey, challenge, ORIGIN, RP_ID, &ad,
             b"not json at all", &sig).is_err(),
             "junk clientDataJSON must be refused");
+        Ok(())
+    }
+
+    // ── SPKI extraction ───────────────────────────────────────────────────
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0))
+            .collect()
+    }
+
+    /// A P-256 key generated by `ring`, encoded as an SPKI by `rcgen` rather than by this module,
+    /// comes back as the very point `ring` reports, and an assertion it signs verifies against it.
+    #[cfg(feature = "async")]
+    #[test]
+    fn test_stored_key_from_spki_p256_ring_key() -> Outcome<()> {
+        let rng = SystemRandom::new();
+        let pkcs8 = match EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng) {
+            Ok(d) => d,
+            Err(e) => return Err(err!("ring pkcs8 gen failed: {}.", e; Test, Init)),
+        };
+        let kp = match EcdsaKeyPair::from_pkcs8(
+            &ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng) {
+            Ok(k) => k,
+            Err(e) => return Err(err!("ring pkcs8 load failed: {}.", e; Test, Init)),
+        };
+        let spki = match rcgen::KeyPair::from_der(pkcs8.as_ref()) {
+            Ok(k) => k.public_key_der(),
+            Err(e) => return Err(err!("rcgen load failed: {}.", e; Test, Init)),
+        };
+        let (alg, key) = res!(stored_key_from_spki(&spki));
+        assert_eq!(alg, CoseAlg::Es256);
+        assert_eq!(key.as_slice(), kp.public_key().as_ref());
+        assert_eq!(key.len(), 65);
+
+        let challenge = b"spki-p256";
+        let ad = make_auth_data(RP_ID, FLAG_UP | FLAG_UV, 1);
+        let cdj = client_data("webauthn.get", challenge, ORIGIN);
+        let mut signed = ad.clone();
+        signed.extend_from_slice(&sha256(&cdj));
+        let sig = match kp.sign(&rng, &signed) {
+            Ok(s) => s.as_ref().to_vec(),
+            Err(e) => return Err(err!("ring sign failed: {}.", e; Test, Data)),
+        };
+        let v = res!(verify_assertion(alg, &key, challenge, ORIGIN, RP_ID, &ad, &cdj, &sig));
+        assert!(v.user_verified);
+        Ok(())
+    }
+
+    /// The same for an Ed25519 key.
+    #[cfg(feature = "async")]
+    #[test]
+    fn test_stored_key_from_spki_ed25519_ring_key() -> Outcome<()> {
+        use ring::signature::Ed25519KeyPair;
+        let rng = SystemRandom::new();
+        let pkcs8 = match Ed25519KeyPair::generate_pkcs8(&rng) {
+            Ok(d) => d,
+            Err(e) => return Err(err!("ring pkcs8 gen failed: {}.", e; Test, Init)),
+        };
+        let kp = match Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()) {
+            Ok(k) => k,
+            Err(e) => return Err(err!("ring pkcs8 load failed: {}.", e; Test, Init)),
+        };
+        let spki = match rcgen::KeyPair::from_der(pkcs8.as_ref()) {
+            Ok(k) => k.public_key_der(),
+            Err(e) => return Err(err!("rcgen load failed: {}.", e; Test, Init)),
+        };
+        let (alg, key) = res!(stored_key_from_spki(&spki));
+        assert_eq!(alg, CoseAlg::EdDsa);
+        assert_eq!(key.as_slice(), kp.public_key().as_ref());
+
+        let challenge = b"spki-ed25519";
+        let ad = make_auth_data(RP_ID, FLAG_UP | FLAG_UV, 2);
+        let cdj = client_data("webauthn.get", challenge, ORIGIN);
+        let mut signed = ad.clone();
+        signed.extend_from_slice(&sha256(&cdj));
+        let sig = kp.sign(&signed).as_ref().to_vec();
+        let v = res!(verify_assertion(alg, &key, challenge, ORIGIN, RP_ID, &ad, &cdj, &sig));
+        assert_eq!(v.counter, 2);
+        Ok(())
+    }
+
+    /// Fixed encodings made elsewhere: a P-256 SPKI from `openssl ec -pubout -outform DER`, and
+    /// the Ed25519 public key of RFC 8410 section 10.1.
+    #[test]
+    fn test_stored_key_from_spki_fixed_vectors() -> Outcome<()> {
+        let p256 = hex("3059301306072a8648ce3d020106082a8648ce3d03010703420004f3bb3612ddeaa340\
+            2901985c75ce5a1f71e4edf4587ae216401670c574f11250938a94e952f87af1459d7b47f6ca176c74ae\
+            03d7fde4384d6e165e4f8fc6a9c3".split_whitespace().collect::<String>().as_str());
+        let (alg, key) = res!(stored_key_from_spki(&p256));
+        assert_eq!(alg, CoseAlg::Es256);
+        assert_eq!(&key[..], &p256[26..]);
+
+        let ed = hex("302a300506032b657003210019bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e1");
+        let (alg, key) = res!(stored_key_from_spki(&ed));
+        assert_eq!(alg, CoseAlg::EdDsa);
+        assert_eq!(key, hex("19bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e1"));
+        Ok(())
+    }
+
+    /// Anything other than the two exact encodings is refused, and the refusal names what it saw.
+    #[test]
+    fn test_stored_key_from_spki_refusals() {
+        let p256 = hex("3059301306072a8648ce3d020106082a8648ce3d03010703420004f3bb3612ddeaa340\
+            2901985c75ce5a1f71e4edf4587ae216401670c574f11250938a94e952f87af1459d7b47f6ca176c74ae\
+            03d7fde4384d6e165e4f8fc6a9c3".split_whitespace().collect::<String>().as_str());
+        let msg = |der: &[u8]| match stored_key_from_spki(der) {
+            Ok(_)   => String::from("accepted"),
+            Err(e)  => fmt!("{}", e),
+        };
+
+        let mut trailing = p256.clone();
+        trailing.push(0);
+        assert!(msg(&trailing).contains("P-256 key in an unexpected encoding"), "{}", msg(&trailing));
+
+        let mut hybrid = p256.clone();
+        hybrid[26] = 0x06;
+        assert!(msg(&hybrid).contains("not 0x04"), "{}", msg(&hybrid));
+
+        assert!(msg(&p256[..60]).contains("60 bytes"), "{}", msg(&p256[..60]));
+
+        // The head of an RSA and of a P-384 SPKI; the key bytes do not matter to the refusal.
+        let mut rsa = hex("30820122300d06092a864886f70d01010105000382010f00");
+        rsa.extend_from_slice(&[0u8; 270]);
+        assert!(msg(&rsa).contains("an RSA key"), "{}", msg(&rsa));
+        let mut p384 = hex("3076301006072a8648ce3d020106052b81040022036200");
+        p384.extend_from_slice(&[4u8; 97]);
+        assert!(msg(&p384).contains("a P-384 key"), "{}", msg(&p384));
+
+        assert!(msg(&[]).contains("no key this recognises"), "{}", msg(&[]));
+    }
+
+    /// The head of enrolment-style authenticator data -- head, then attested credential data --
+    /// reads as the verifier reads it, and a short buffer is refused naming its length.
+    #[test]
+    fn test_auth_data_head_00() -> Outcome<()> {
+        let mut ad = make_auth_data(RP_ID, FLAG_UP | FLAG_UV | 0x40, 0x0102_0304);
+        ad.extend_from_slice(&[0xa5; 80]);
+        let head = res!(AuthDataHead::read(&ad));
+        assert!(head.rp_id_matches(RP_ID));
+        assert!(!head.rp_id_matches("evil.example.com"));
+        assert!(head.user_present);
+        assert!(head.user_verified);
+        assert_eq!(head.counter, 0x0102_0304);
+
+        let head = res!(AuthDataHead::read(&make_auth_data(RP_ID, FLAG_UP, 0)));
+        assert!(head.user_present && !head.user_verified);
+
+        match AuthDataHead::read(&ad[..36]) {
+            Ok(_)   => return Err(err!("A 36-byte head was accepted."; Test)),
+            Err(e)  => assert!(fmt!("{}", e).contains("36 bytes"), "{}", e),
+        }
         Ok(())
     }
 }

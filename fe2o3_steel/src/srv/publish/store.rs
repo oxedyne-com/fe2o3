@@ -378,6 +378,9 @@ impl Record {
 
 
 /// Writes a post, adding it to the index if it is new.
+///
+/// The record and its index entry are written under one write guard, so two writers cannot each read the
+/// index, add their own slug and write it back over the other's.
 pub fn put<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -391,16 +394,18 @@ pub fn put<
 )
 	-> Outcome<()>
 {
-	let (db_arc, user) = db;
-	{
-		let guard = lock_read!(db_arc);
-		res!(guard.insert(key_of(&rec.slug), rec.to_dat(), *user, None));
-	}
-	let mut slugs = res!(index(db, id));
-	if !slugs.iter().any(|s| s == &rec.slug) {
-		slugs.push(rec.slug.clone());
-		res!(put_index(db, &slugs));
-	}
+	res!(exclusive(db, |dbr, user| -> Outcome<()> {
+		res!(dbr.insert(key_of(&rec.slug), rec.to_dat(), user, None));
+		res!(edit_in(dbr, user, &dat!(INDEX_KEY), |old| -> Outcome<(Edit, ())> {
+			let mut slugs = res!(names_of(old, "index"));
+			if slugs.iter().any(|s| s == &rec.slug) {
+				return Ok((Edit::Keep, ()));
+			}
+			slugs.push(rec.slug.clone());
+			Ok((Edit::Set(names_dat(&slugs)), ()))
+		}));
+		Ok(())
+	}));
 	debug!("{}: publish: wrote '{}'", id, rec.slug);
 	Ok(())
 }
@@ -527,19 +532,22 @@ pub fn delete<
 >(
 	db:	&(Arc<RwLock<DB>>, UID),
 	slug:	&str,
-	id:	&str,
+	_id:	&str,
 )
 	-> Outcome<bool>
 {
-	let (db_arc, user) = db;
-	let existed = {
-		let guard = lock_read!(db_arc);
-		res!(guard.delete(&key_of(slug), *user, None))
-	};
-	let slugs = res!(index(db, id));
-	let kept: Vec<String> = slugs.into_iter().filter(|s| s != slug).collect();
-	res!(put_index(db, &kept));
-	Ok(existed)
+	exclusive(db, |dbr, user| -> Outcome<bool> {
+		let existed = res!(dbr.delete(&key_of(slug), user, None));
+		res!(edit_in(dbr, user, &dat!(INDEX_KEY), |old| -> Outcome<(Edit, ())> {
+			let slugs = res!(names_of(old, "index"));
+			let kept: Vec<String> = slugs.iter().filter(|s| s.as_str() != slug).cloned().collect();
+			if kept.len() == slugs.len() {
+				return Ok((Edit::Keep, ()));
+			}
+			Ok((Edit::Set(names_dat(&kept)), ()))
+		}));
+		Ok(existed)
+	})
 }
 
 /// Every record the store holds, whatever its state, newest first.
@@ -902,17 +910,131 @@ fn index<
 {
 	let (db_arc, _) = db;
 	let guard = lock_read!(db_arc);
-	let val = match res!(guard.get(&dat!(INDEX_KEY), None)) {
-		Some((v, _))	=> v,
-		// No index is an empty store, not an error: a site that has published nothing is a site, and
-		// its index is the empty list it never wrote.
-		None		=> return Ok(Vec::new()),
+	// No index is an empty store, not an error: a site that has published nothing is a site, and its
+	// index is the empty list it never wrote.
+	let old = match res!(guard.get(&dat!(INDEX_KEY), None)) {
+		Some((v, _))	=> Some(v),
+		None		=> None,
+	};
+	names_of(old, "index")
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ READ-MODIFY-WRITE                                                         │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// What a read-modify-write does with the value it was handed.
+#[derive(Clone, Debug)]
+pub enum Edit {
+	Keep,		// leave the key as it is, with no write
+	Set(Dat),	// write this value
+	Clear,		// delete the key
+}
+
+/// Runs `f` under the vhost database's write lock, handing it the database and the user to write as.
+///
+/// Every derived row in this module (an index, a counter, a secret) is read, changed and written back,
+/// and with only read guards held two requests can each read the old value and the later write drops
+/// the earlier change. This is the one place that serialises them. Inside `f` the lock is held, so
+/// `f` must use the `&DB` it is given and never call a function that takes `db` again: a std
+/// `RwLock` is not re-entrant, and that call would wait on itself for ever.
+///
+/// The guard is never held across an `.await`; `f` is synchronous, and the guard is not `Send`.
+pub fn exclusive<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+	R,
+	F:	FnOnce(&DB, UID) -> Outcome<R>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	f:	F,
+)
+	-> Outcome<R>
+{
+	let (db_arc, user) = db;
+	let guard = lock_write!(db_arc);
+	f(&*guard, *user)
+}
+
+/// Reads one key, lets `f` say what it becomes, and applies that, all on a database already locked.
+///
+/// For use inside [`exclusive`], where several keys change together. `f` is given the stored value
+/// or `None` and answers an [`Edit`] together with whatever the caller wants back.
+pub fn edit_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+	R,
+	F:	FnOnce(Option<Dat>) -> Outcome<(Edit, R)>,
+>(
+	dbr:	&DB,
+	user:	UID,
+	key:	&Dat,
+	f:	F,
+)
+	-> Outcome<R>
+{
+	let old = match res!(dbr.get(key, None)) {
+		Some((v, _))	=> Some(v),
+		None		=> None,
+	};
+	let had = old.is_some();
+	let (edit, out) = res!(f(old));
+	match edit {
+		Edit::Keep	=> {},
+		Edit::Set(v)	=> {
+			res!(dbr.insert(key.clone(), v, user, None));
+		},
+		// Deleting a key that was never there would only leave a tombstone.
+		Edit::Clear	=> {
+			if had {
+				res!(dbr.delete(key, user, None));
+			}
+		},
+	}
+	Ok(out)
+}
+
+/// Reads, changes and writes one key under the write lock: the primitive for a single-key
+/// read-modify-write.
+pub fn update<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+	R,
+	F:	FnOnce(Option<Dat>) -> Outcome<(Edit, R)>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	key:	&Dat,
+	f:	F,
+)
+	-> Outcome<R>
+{
+	exclusive(db, |dbr, user| edit_in(dbr, user, key, f))
+}
+
+/// The strings of a stored list, where the key holds one.
+///
+/// An absent key is the empty list. `what` names the list in the error for anything else. Items that
+/// are not strings are passed over, as the readers have always done.
+pub fn names_of(val: Option<Dat>, what: &str) -> Outcome<Vec<String>> {
+	let val = match val {
+		Some(v)	=> v,
+		None	=> return Ok(Vec::new()),
 	};
 	let items = match &val {
 		Dat::List(items)	=> items.clone(),
 		Dat::Vek(vek)		=> vek.as_slice().to_vec(),
 		_			=> return Err(err!(
-			"publish: the index must be a list, not {:?}.", val.kind();
+			"publish: the {} must be a list, not {:?}.", what, val.kind();
 			Invalid, Input, Mismatch)),
 	};
 	let mut out = Vec::new();
@@ -924,23 +1046,9 @@ fn index<
 	Ok(out)
 }
 
-fn put_index<
-	const UIDL: usize,
-	UID:	NumIdDat<UIDL>,
-	ENC:	Encrypter,
-	KH:	Hasher,
-	DB:	Database<UIDL, UID, ENC, KH>,
->(
-	db:	&(Arc<RwLock<DB>>, UID),
-	slugs:	&[String],
-)
-	-> Outcome<()>
-{
-	let (db_arc, user) = db;
-	let list = Dat::List(slugs.iter().map(|s| dat!(s.clone())).collect());
-	let guard = lock_read!(db_arc);
-	res!(guard.insert(dat!(INDEX_KEY), list, *user, None));
-	Ok(())
+/// A list of strings as the daticle the store keeps.
+pub fn names_dat(names: &[String]) -> Dat {
+	Dat::List(names.iter().map(|s| dat!(s.clone())).collect())
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -1073,26 +1181,13 @@ pub fn admins_get<
 {
 	let (db_arc, _) = db;
 	let guard = lock_read!(db_arc);
-	let val = match res!(guard.get(&dat!(ADMINS_KEY), None)) {
-		Some((v, _))	=> v,
-		// No key is a site that has granted no admins from the browser, which is not an error: its
-		// database admin list is the empty one it never wrote.
-		None		=> return Ok(Vec::new()),
+	// No key is a site that has granted no admins from the browser, which is not an error: its
+	// database admin list is the empty one it never wrote.
+	let old = match res!(guard.get(&dat!(ADMINS_KEY), None)) {
+		Some((v, _))	=> Some(v),
+		None		=> None,
 	};
-	let items = match &val {
-		Dat::List(items)	=> items.clone(),
-		Dat::Vek(vek)		=> vek.as_slice().to_vec(),
-		_			=> return Err(err!(
-			"publish: the admin list must be a list, not {:?}.", val.kind();
-			Invalid, Input, Mismatch)),
-	};
-	let mut out = Vec::new();
-	for item in &items {
-		if let Dat::Str(s) = item {
-			out.push(s.clone());
-		}
-	}
-	Ok(out)
+	names_of(old, "admin list")
 }
 
 /// Adds an id-hash to the database admin list, once.
@@ -1112,10 +1207,15 @@ pub fn admins_add<
 )
 	-> Outcome<()>
 {
-	let mut hashes = res!(admins_get(db, id));
-	if !hashes.iter().any(|h| h == hash) {
+	let added = res!(update(db, &dat!(ADMINS_KEY), |old| -> Outcome<(Edit, bool)> {
+		let mut hashes = res!(names_of(old, "admin list"));
+		if hashes.iter().any(|h| h == hash) {
+			return Ok((Edit::Keep, false));
+		}
 		hashes.push(hash.to_string());
-		res!(put_admins(db, &hashes));
+		Ok((Edit::Set(names_dat(&hashes)), true))
+	}));
+	if added {
 		debug!("{}: publish: granted site admin to '{}'", id, hash);
 	}
 	Ok(())
@@ -1139,33 +1239,15 @@ pub fn admins_remove<
 )
 	-> Outcome<()>
 {
-	let hashes = res!(admins_get(db, id));
-	let kept: Vec<String> = hashes.into_iter().filter(|h| h != hash).collect();
-	res!(put_admins(db, &kept));
+	res!(update(db, &dat!(ADMINS_KEY), |old| -> Outcome<(Edit, ())> {
+		let hashes = res!(names_of(old, "admin list"));
+		let kept: Vec<String> = hashes.iter().filter(|h| h.as_str() != hash).cloned().collect();
+		if kept.len() == hashes.len() {
+			return Ok((Edit::Keep, ()));
+		}
+		Ok((Edit::Set(names_dat(&kept)), ()))
+	}));
 	debug!("{}: publish: revoked site admin from '{}'", id, hash);
-	Ok(())
-}
-
-/// Writes the database admin list.
-///
-/// Private, and the only writer of [`ADMINS_KEY`] besides the two above that go through it: the list is
-/// derived from nothing, so it is written whole where it changes and nowhere else.
-fn put_admins<
-	const UIDL: usize,
-	UID:	NumIdDat<UIDL>,
-	ENC:	Encrypter,
-	KH:	Hasher,
-	DB:	Database<UIDL, UID, ENC, KH>,
->(
-	db:	&(Arc<RwLock<DB>>, UID),
-	hashes:	&[String],
-)
-	-> Outcome<()>
-{
-	let (db_arc, user) = db;
-	let list = Dat::List(hashes.iter().map(|s| dat!(s.clone())).collect());
-	let guard = lock_read!(db_arc);
-	res!(guard.insert(dat!(ADMINS_KEY), list, *user, None));
 	Ok(())
 }
 
@@ -1196,34 +1278,42 @@ pub fn rebuild_index<
 )
 	-> Outcome<usize>
 {
-	let (db_arc, _) = db;
-	let found = {
-		let guard = lock_read!(db_arc);
-		let mut opts = ScanOpts::default();
-		opts.prefix = Some(dat!(KEY_PREFIX));
-		opts.include_values = false;
-		res!(guard.scan(&opts, None))
-	};
-	let mut slugs = Vec::new();
-	let mut marked = 0;
-	for (k, _, _) in &found {
-		let s = match k {
-			Dat::Str(s)	=> s,
-			_		=> continue,
+	// The whole repair runs under the write guard, so a post written while it scans is not left out of
+	// the index it then replaces.
+	let (slugs, marked) = res!(exclusive(db, |dbr, user| -> Outcome<(Vec<String>, usize)> {
+		let found = {
+			let mut opts = ScanOpts::default();
+			opts.prefix = Some(dat!(KEY_PREFIX));
+			opts.include_values = false;
+			res!(dbr.scan(&opts, None))
 		};
-		let slug = match s.strip_prefix(KEY_PREFIX) {
-			Some(slug)	=> slug,
-			None		=> continue,
-		};
-		// The scan said the key is there; the read says whether it still means anything.
-		match res!(get(db, slug)) {
-			Some(_)	=> slugs.push(slug.to_string()),
-			None	=> marked += 1,
+		let mut slugs = Vec::new();
+		let mut marked = 0;
+		for (k, _, _) in &found {
+			let s = match k {
+				Dat::Str(s)	=> s,
+				_		=> continue,
+			};
+			let slug = match s.strip_prefix(KEY_PREFIX) {
+				Some(slug)	=> slug,
+				None		=> continue,
+			};
+			// The scan said the key is there; the read says whether it still means anything.
+			match res!(dbr.get(&key_of(slug), None)) {
+				Some((val, _))	=> {
+					res!(Record::from_dat(&val));
+					slugs.push(slug.to_string());
+				},
+				None		=> marked += 1,
+			}
 		}
-	}
-	slugs.sort();
+		slugs.sort();
+		res!(edit_in(dbr, user, &dat!(INDEX_KEY), |_| -> Outcome<(Edit, ())> {
+			Ok((Edit::Set(names_dat(&slugs)), ()))
+		}));
+		Ok((slugs, marked))
+	}));
 	let n = slugs.len();
-	res!(put_index(db, &slugs));
 	if marked > 0 {
 		debug!("{}: publish: the scan offered {} deleted keys, which were not taken", id, marked);
 	}

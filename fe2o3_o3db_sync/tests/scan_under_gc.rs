@@ -99,8 +99,8 @@ const DEEP: Shape = Shape {
 };
 
 // Fraction of the keys superseded before collection is switched on. It has to
-// clear OLD_DATA_PERCENT_GC_TRIGGER, which is measured against the maximum data
-// file size rather than the file's own size.
+// clear OLD_DATA_PERCENT_GC_TRIGGER, which for these full files is measured
+// against the maximum data file size.
 const OLD_FRAC:     f64 = 0.5;
 
 const NUM_BASELINE: usize = 3;  // quiet scans establishing the latency baseline

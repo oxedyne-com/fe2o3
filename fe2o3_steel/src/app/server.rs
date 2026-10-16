@@ -2,7 +2,10 @@ use crate::{
     app::{
         self,
         constant as app_const,
-        https::AppWebHandler,
+        https::{
+            AppWebHandler,
+            VhostDbRef,
+        },
         repl::AppShellContext,
     },
     srv::{
@@ -15,7 +18,11 @@ use crate::{
             Alerter,
         },
         cert::Certificate,
-        cfg::ServerConfig,
+        api::ApiHandlerRegistry,
+        cfg::{
+            ApiRoute,
+            ServerConfig,
+        },
         constant as srv_const,
         context::{
             new_db,
@@ -32,6 +39,10 @@ use crate::{
         id,
         server::Server,
         stop,
+        tiles::{
+            TileService,
+            TileSource,
+        },
         ws::{
             handler::AppWebSocketHandler,
             syntax::WebSocketSyntax,
@@ -105,7 +116,28 @@ impl AppShellContext {
             .absolute();
 
         info!("Reading server config...");
-        let server_cfg = res!(ServerConfig::from_datmap(self.app_cfg.server_cfg.clone()));
+        let mut server_cfg = res!(ServerConfig::from_datmap(self.app_cfg.server_cfg.clone()));
+
+        // Resolve the health token's `{file:...}` reference at load, from a path
+        // outside the tree, so the secret compared on both sides is the file's
+        // bytes and not the literal reference text -- and so it is readable while
+        // the box is sealed. A token stored verbatim would make the path the
+        // secret, which is exactly the leak the file-homing rule exists to stop.
+        if !server_cfg.health_token.is_empty() {
+            server_cfg.health_token = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(
+                &server_cfg.health_token, root_path.as_ref()));
+        }
+        // A stamp with an unusable name or a relative path is a refusal to start, not a
+        // warning: served past, it would be a field that is quietly never in the body, and an
+        // absent field trips no watcher's threshold, so the job it watches could stop unheard.
+        let health_stamps = res!(server_cfg.get_health_stamps());
+        if !health_stamps.is_empty() {
+            info!("The health body reports the age of {} stamp(s): {}.",
+                health_stamps.len(),
+                health_stamps.iter()
+                    .map(|s| fmt!("{} <- {:?}", s.field, s.path))
+                    .collect::<Vec<_>>().join(", "));
+        }
 
         info!("Reading dev config...");
         let dev_cfg = res!(DevConfig::from_datmap(self.app_cfg.dev_cfg.clone()));
@@ -131,6 +163,21 @@ impl AppShellContext {
                 warn!("Server configuration validation issues: {}", e);
                 info!("Continuing with available routes...");
             }
+        }
+
+        // A handshake semaphore without a deadline is a slowloris amplifier -- a
+        // permit held across a drip-fed handshake is never returned -- so this
+        // combination is a hard refusal to start, not a warning to serve past.
+        // (The general `validate` above is advisory in this harness; admission
+        // safety is not.)
+        if server_cfg.max_tls_handshakes > 0 && server_cfg.tls_handshake_timeout_ms == 0 {
+            return Err(err!(
+                "Refusing to start: max_tls_handshakes is {} but \
+                tls_handshake_timeout_ms is 0. Bounding handshake concurrency \
+                without a per-handshake deadline turns the bound into a \
+                denial-of-service vector. Set tls_handshake_timeout_ms (e.g. 10000).",
+                server_cfg.max_tls_handshakes;
+                Configuration, Invalid, Input));
         }
 
         if dev_mode {
@@ -160,13 +207,15 @@ impl AppShellContext {
         let logger_console_thread = logger_console.go();
         log_cfg.console = Some(logger_console_thread.chan.clone());
         (log_cfg.level, _) = res!(self.app_cfg.server_log_level());
+        let (log_max, log_keep, log_age) = server_cfg.log_rotation();
+        let (log_flush, log_durable) = server_cfg.log_flush();
         log_cfg.file = Some(FileConfig::new(
             PathBuf::from(&root_path).join("www").join("logs"),
             self.app_cfg.app_name.clone(),
             "log".to_string(),
             0,
-            Some(1_048_576), // Activate multiple log file archiving using this max size.
-        ));
+            Some(log_max), // Activate multiple log file archiving using this max size.
+        ).with_retention(log_keep, log_age).with_flush(log_flush, log_durable));
         debug!("log_cfg = {:?}", log_cfg);
         log_set_config!(log_cfg);
         println!("Server now logging at {:?}", log_get_file_path!());
@@ -210,6 +259,8 @@ impl AppShellContext {
         >> = Arc::new(RwLock::new(HashMap::new()));
 
         let mut db_specs: Vec<VhostDbSpec> = Vec::new();
+        // The in-process routes of each vhost with a database, whose handlers are told when it opens.
+        let mut db_routes: HashMap<String, Vec<ApiRoute>> = HashMap::new();
         for vh in &vhosts_cfg {
             let primary_lc = vh.primary_hostname().to_lowercase();
             let db_dir = match res!(vh.get_db_dir(&root_path)) {
@@ -222,9 +273,14 @@ impl AppShellContext {
             };
             info!("Vhost '{}' has a database at {:?}; it will be opened on unseal.",
                 primary_lc, db_dir);
+            db_routes.insert(primary_lc.clone(), vh.api_routes.iter()
+                .filter(|r| r.handler.is_some())
+                .cloned()
+                .collect());
             db_specs.push(VhostDbSpec {
-                vhost_key:  primary_lc,
+                vhost_key:      primary_lc,
                 db_dir,
+                sync_on_write:  vh.db_sync_on_write,
             });
         }
 
@@ -378,7 +434,14 @@ impl AppShellContext {
         // recorder so dashboard reads and request-pipeline writes
         // see one consistent view.
         let traffic = TrafficRecorder::new_shared(0);
-        let host_sampler = crate::srv::admin::host_sampler::HostSampler::new_shared();
+        // The sampler also reads what the health body needs beyond its snapshot --
+        // the `health_residents` processes on a slower cadence of its own, and how
+        // full the app root's filesystem is -- so a request formats figures rather
+        // than walking `/proc`. Resident names were checked at validation.
+        let host_sampler = crate::srv::admin::host_sampler::HostSampler::new_shared_for_health(
+            res!(server_cfg.get_health_residents()),
+            Some(PathBuf::from(&root_path)),
+        );
         let addr_guard = res!(crate::srv::admin::guard::new_shared_with(
             server_cfg.get_addr_guard_settings(),
         ));
@@ -392,6 +455,20 @@ impl AppShellContext {
         let auth_guard = res!(crate::srv::admin::guard::new_shared_with(
             auth_settings,
         ));
+        // Durable whitelist: addresses that bypass the rate guard entirely,
+        // written in config so they survive a restart rather than living only in
+        // the in-memory map. Applied to both the general and the auth guard, so a
+        // whitelisted address is never throttled on either path. Parsed already
+        // at validation, so an unparseable entry has failed before here.
+        let whitelist_ips = res!(server_cfg.get_whitelist_ips());
+        for ip in &whitelist_ips {
+            res!(addr_guard.whitelist(ip));
+            res!(auth_guard.whitelist(ip));
+        }
+        if !whitelist_ips.is_empty() {
+            info!("Whitelisted {} address(es) from config; they bypass the rate guard \
+                across restarts.", whitelist_ips.len());
+        }
         // The periodic traffic and host samplers are spawned inside
         // Server::start (not here) because this function runs in a
         // sync context -- the tokio runtime `rt` has been built but
@@ -490,14 +567,34 @@ impl AppShellContext {
         // an outbound TLS client for the same practical reason. Both absences
         // are said out loud rather than logged at debug, since the operator who
         // configured a watch believes they are covered.
-        match res!(server_cfg.get_watch()) {
-            Some(wcfg) => match (&alerter, &tls_client) {
+        //
+        // What the watcher sees goes into the shared fleet rings too, which the
+        // dashboard's Fleet page draws. A host that watches nobody still gets an
+        // empty fleet, since the page always has this host's own row to show.
+        let fleet = match res!(server_cfg.get_watch()) {
+            Some(mut wcfg) => {
+                // Resolve each peer's health-token `{file:...}` at load, the same
+                // reason the server's own token is resolved: the secret must be
+                // the file's bytes, not the reference text, or the watcher would
+                // present the literal `{file:/x}` string as its token.
+                for p in &mut wcfg.peers {
+                    if let Some(tok) = &p.token {
+                        if !tok.is_empty() {
+                            p.token = Some(res!(crate::srv::cfg::ApiRoute::resolve_file_refs(
+                                tok, root_path.as_ref())));
+                        }
+                    }
+                }
+                let fleet = crate::srv::fleet::Fleet::new_shared(
+                    alert_host.clone(), Some(&wcfg));
+                match (&alerter, &tls_client) {
                 (Some(a), Some(tls)) => {
                     let w = res!(crate::srv::watch::Watcher::new(
                         Arc::new(wcfg),
                         Arc::new(a.clone()),
                         tls.clone(),
                         alert_host.to_string(),
+                        fleet.clone(),
                     ));
                     // `rt.spawn`, NOT `tokio::spawn`. This function is sync: the
                     // runtime is built at the top and is not current until
@@ -516,49 +613,14 @@ impl AppShellContext {
                 (_, None) => warn!("A watch list is configured but this Steel has no \
                     outbound TLS client, so it cannot probe anything. The watcher \
                     was not started."),
-            },
-            None => {},
-        }
-
-        // The site's own newsletter sender: the DKIM identities and an outbound SMTP client, built
-        // from the same mail configuration the mail server and the alerter use, and shared by every
-        // vhost. `None` where no mail is configured -- newsletter signup then answers "not set up"
-        // rather than recording a pending subscriber it could never confirm. A build failure warns and
-        // disables the newsletter rather than taking the server down: the websites do not depend on it.
-        let mail_sender = match res!(server_cfg.get_mail_any()) {
-            // Built whenever there is a sending identity -- a hostname to greet with and at least one
-            // DKIM key -- independent of whether the mail *server* (the listeners) is enabled. This is
-            // what lets a site send its newsletter without becoming an MX.
-            Some(mail_cfg) if !mail_cfg.hostname.is_empty()
-                && (!mail_cfg.dkim_key_file.is_empty() || !mail_cfg.dkim_rsa_key_file.is_empty()) => {
-                let dkim = res!(
-                    crate::srv::server::load_dkim_signers(&mail_cfg, &root_path));
-                let domain = if mail_cfg.dkim_domain.is_empty() {
-                    mail_cfg.hostname.clone()
-                } else {
-                    mail_cfg.dkim_domain.clone()
-                };
-                let default_from = fmt!("news@{}", domain);
-                match crate::srv::publish::send::MailSender::new(
-                    mail_cfg.hostname.clone(), dkim.clone(), default_from.clone())
-                {
-                    Ok(s) => {
-                        info!("Newsletter sender ready (default from {}, {} DKIM key(s)).",
-                            default_from, dkim.len());
-                        Some(Arc::new(s))
-                    }
-                    Err(e) => {
-                        warn!("Building the newsletter sender failed ({}); newsletter \
-                            signup will report itself unavailable.", e);
-                        None
-                    }
                 }
-            }
-            _ => {
-                info!("No mail configured, so the newsletter is unavailable; signup says so.");
-                None
-            }
+                fleet
+            },
+            None => crate::srv::fleet::Fleet::new_shared(alert_host.clone(), None),
         };
+
+        // Any failure here disables the newsletter with a warning; see `newsletter_sender`.
+        let mail_sender = newsletter_sender(res!(server_cfg.get_mail_any()), &root_path);
 
         let admin_state = res!(AdminState::new(
             self.wallet.clone(),
@@ -572,7 +634,7 @@ impl AppShellContext {
             auth_guard.clone(),
             admin_keys_cfg,
             head_injection_url_cfg,
-        ));
+        )).with_fleet(fleet).with_health_stamps(health_stamps);
         let admin_state = Arc::new(admin_state);
         info!("Admin dashboard runtime initialised \
             (traffic ring capacity {}; host sampler capacity {}).",
@@ -602,6 +664,10 @@ impl AppShellContext {
                 everything serves normally.");
         }
 
+        let mut outboxes: HashMap<String, (
+            Arc<crate::srv::publish::PublishConfig>,
+            Arc<crate::srv::publish::send::MailSender>,
+        )> = HashMap::new();
         for vh in &vhosts_cfg {
             let public_dir = match res!(vh.get_public_dir(&root_path)) {
                 Some(p) => p,
@@ -651,6 +717,15 @@ impl AppShellContext {
                 res!(p.resolve_secrets(root_path.as_ref()));
             }
 
+            let publish = publish.map(Arc::new);
+            // A vhost that publishes and has a sender gets a drainer once its database opens.
+            if let (Some(p), Some(m)) = (&publish, &mail_sender) {
+                outboxes.insert(
+                    vh.primary_hostname().to_lowercase(),
+                    (p.clone(), m.clone()),
+                );
+            }
+
             let web_handler = AppWebHandler::new(
                 server_cfg.clone(),
                 public_dir,
@@ -664,10 +739,11 @@ impl AppShellContext {
                 tls_client.clone(),
                 Some(admin_state.clone()),
                 Some(traffic.clone()),
-                publish.map(Arc::new),
+                publish,
                 mail_sender.clone(),
                 Arc::new(vh.site_admins.clone()),
-            );
+            ).with_admin_dashboard(vh.admin_dashboard)
+            .with_vhost_db(VhostDbRef::new(vhost_dbs.clone(), vh.primary_hostname()));
 
             // One terminal manager per vhost, built only where the config asks
             // for it. It is shared two ways: attached to the WS syntax handler
@@ -681,6 +757,23 @@ impl AppShellContext {
                     &tc.launch_command,
                 )
             ));
+            // Every build is opened now, so a missing or unreadable archive stops start-up
+            // rather than surfacing as failed tiles. None of this names a tile.
+            let tiles = match &vh.tiles {
+                Some(tc) => {
+                    let svc = res!(TileService::new(
+                        tc,
+                        vh.primary_hostname(),
+                        server_cfg.hsts_max_age_secs as u64,
+                        TileSource::open,
+                    ));
+                    info!("Vhost '{}': tiles under {} from {} build(s), current '{}'; \
+                        access log off.", vh.primary_hostname(), svc.prefix(),
+                        tc.builds.len(), svc.current());
+                    Some(Arc::new(svc))
+                }
+                None => None,
+            };
             let runtime = Arc::new(VhostRuntime {
                 hostnames:      vh.hostnames.clone(),
                 web_handler,
@@ -694,6 +787,12 @@ impl AppShellContext {
                 ws_routes:      vh.ws_routes.clone(),
                 term_manager:   term_manager.clone(),
                 uses_sessions:  vh.uses_sessions(),
+                permissions_policy: vh.permissions_policy.clone(),
+                tiles,
+                access_log:     vh.access_log,
+                response_headers: vh.response_headers.iter()
+                    .map(|(k, v)| (oxedyne_fe2o3_net::http::fields::HeaderName::from(k.as_str()), v.clone()))
+                    .collect(),
             });
 
             let primary_lc = vh.primary_hostname().to_lowercase();
@@ -753,6 +852,9 @@ impl AppShellContext {
             vhost_dbs.clone(),
             db_specs,
             uid,
+            outboxes,
+            self.api_handler_registry.clone(),
+            db_routes,
         ));
 
         info!("Starting server...");
@@ -864,7 +966,7 @@ pub fn build_outbound_tls_client()
 // │ DATABASE OPENER AND CLOSER                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-type VhostDb = O3db<
+pub type VhostDb = O3db<
     { id::UID_LEN },
     id::Uid,
     EncryptionScheme,
@@ -914,10 +1016,19 @@ async fn open_dbs_on_unseal(
                     >>,
     db_specs:       Vec<VhostDbSpec>,
     uid:            id::Uid,
+    outboxes:       HashMap<String, (
+                        Arc<crate::srv::publish::PublishConfig>,
+                        Arc<crate::srv::publish::send::MailSender>,
+                    )>,
+    handlers:       Arc<ApiHandlerRegistry>,
+    db_routes:      HashMap<String, Vec<ApiRoute>>,
 ) {
     if db_specs.is_empty() {
         return;
     }
+    let handle = tokio::runtime::Handle::current();
+    // Each drainer tells the operator through the host's alerter, where there is one.
+    let alerter = admin_state.alerter().cloned();
 
     let enc_key = match admin_state.await_master_key().await {
         Ok(k) => k,
@@ -933,7 +1044,7 @@ async fn open_dbs_on_unseal(
         for spec in &db_specs {
             info!("Starting database for vhost '{}' at {:?}...",
                 spec.vhost_key, spec.db_dir);
-            let mut db = res!(new_db(&spec.db_dir, &enc_key));
+            let mut db = res!(new_db(&spec.db_dir, &enc_key, spec.sync_on_write));
             // Label is the vhost's canonical name so log output
             // disambiguates multi-vhost deployments.
             let label = fmt!("db_{}", spec.vhost_key);
@@ -949,12 +1060,34 @@ async fn open_dbs_on_unseal(
             // Publish as soon as each database is up, rather than
             // batching at the end: a vhost whose database is ready has
             // no reason to keep answering 503 while a later one starts.
+            let db = Arc::new(RwLock::new(db));
+            // Each in-process handler on the vhost does its start-up work over the store before
+            // any request can reach it with the store (`ApiHandler::db_opened`).
+            for route in db_routes.get(&spec.vhost_key).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let handler = match route.handler.as_deref().and_then(|n| handlers.get(n)) {
+                    Some(h) => h,
+                    None    => continue,
+                };
+                if let Err(e) = handler.db_opened(route, (db.clone(), uid)) {
+                    error!(e, "Vhost '{}': the handler of route '{}' failed its start-up over \
+                        the database.", spec.vhost_key, route.path);
+                }
+            }
             let mut guard = lock_write!(vhost_dbs,
                 "Attaching the database for vhost '{}'.", spec.vhost_key);
-            guard.insert(
-                spec.vhost_key.clone(),
-                (Arc::new(RwLock::new(db)), uid),
-            );
+            guard.insert(spec.vhost_key.clone(), (db.clone(), uid));
+            // The outbox drains from the moment its database is up. One task for each vhost that
+            // publishes, all sharing the sender's pacer, so the host's ceiling is one ceiling.
+            if let Some((cfg, mail)) = outboxes.get(&spec.vhost_key) {
+                handle.spawn(crate::srv::publish::outbox::run(
+                    (db, uid),
+                    cfg.clone(),
+                    mail.clone(),
+                    mail.pacer().clone(),
+                    alerter.clone(),
+                    spec.vhost_key.clone(),
+                ));
+            }
             opened += 1;
         }
         Ok(opened)
@@ -967,5 +1100,128 @@ async fn open_dbs_on_unseal(
             "The database opener task failed to join.";
             Thread, Panic),
             "Opening the per-vhost databases after unseal."),
+    }
+}
+
+
+
+/// The site's own newsletter sender: the DKIM identities and an outbound SMTP client, built from
+/// the `mail` block whether or not the mail server is enabled, and shared by every vhost.
+///
+/// `None` where there is no sending identity -- a hostname to greet with and at least one DKIM
+/// key -- or where one cannot be built. Newsletter signup then answers "not set up" rather than
+/// recording a pending subscriber it could never confirm. A failure warns and disables the
+/// newsletter rather than refusing to start, because the websites do not depend on it: on
+/// 2026-09-21 a disabled `mail` block naming an RSA key that was never generated stopped birch,
+/// a forge proxy that sends no mail, from starting. The keys are still loaded when mail is
+/// disabled, since that is what lets a site send its newsletter signed without becoming an MX.
+fn newsletter_sender(
+    mail:   Option<crate::srv::cfg::MailConfig>,
+    root:   &oxedyne_fe2o3_core::path::NormPathBuf,
+)
+    -> Option<Arc<crate::srv::publish::send::MailSender>>
+{
+    let mail_cfg = match mail {
+        Some(m) if !m.hostname.is_empty()
+            && (!m.dkim_key_file.is_empty() || !m.dkim_rsa_key_file.is_empty()) => m,
+        _ => {
+            info!("No mail configured, so the newsletter is unavailable; signup says so.");
+            return None;
+        },
+    };
+    let dkim = match crate::srv::server::load_dkim_signers(&mail_cfg, root) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("The newsletter is disabled, and signup will say so: its DKIM key(s) could \
+                not be loaded ({}). The websites are unaffected.", e);
+            return None;
+        },
+    };
+    let domain = if mail_cfg.dkim_domain.is_empty() {
+        mail_cfg.hostname.clone()
+    } else {
+        mail_cfg.dkim_domain.clone()
+    };
+    let default_from = fmt!("news@{}", domain);
+    match crate::srv::publish::send::MailSender::new(
+        mail_cfg.hostname.clone(), dkim.clone(), default_from.clone())
+    {
+        Ok(s) => {
+            info!("Newsletter sender ready (default from {}, {} DKIM key(s), outbound ceiling {} \
+                an hour{}).", default_from, dkim.len(), mail_cfg.outbound_hourly,
+                if mail_cfg.outbound_hourly == 0 { ", so every send is held" } else { "" });
+            Some(Arc::new(s.with_outbound_hourly(mail_cfg.outbound_hourly)))
+        },
+        Err(e) => {
+            warn!("Building the newsletter sender failed ({}); newsletter \
+                signup will report itself unavailable.", e);
+            None
+        },
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::srv::cfg::MailConfig;
+    use oxedyne_fe2o3_core::path::NormalPath;
+
+    /// A fresh scratch directory, removed by the caller.
+    fn scratch(tag: &str) -> Outcome<std::path::PathBuf> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(fmt!(
+            "fe2o3_steel_newsletter_{}_{}_{}", tag, std::process::id(), nanos));
+        res!(std::fs::create_dir_all(&dir), IO, File);
+        Ok(dir)
+    }
+
+    /// THE BIRCH START-UP FAILURE: a disabled `mail` block naming an RSA key that was never
+    /// generated disables the newsletter and lets the server start, where it used to refuse.
+    #[test]
+    fn a_missing_newsletter_key_disables_the_newsletter_and_does_not_stop_start_up() -> Outcome<()> {
+        let dir = res!(scratch("missing"));
+        let root = Path::new(&dir).normalise().absolute();
+        let mut cfg = MailConfig::default();
+        cfg.enabled = false;
+        cfg.hostname = fmt!("birch.example.test");
+        cfg.dkim_rsa_key_file = fmt!("mail/dkim_rsa.key");
+        assert!(newsletter_sender(Some(cfg), &root).is_none(),
+            "a key that is not there cannot sign, so there is no newsletter sender");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// Mail disabled is not signing disabled: a site with a key sends its newsletter signed,
+    /// which is why the key is not skipped wholesale when `enabled` is false.
+    #[test]
+    fn a_send_only_newsletter_is_still_signed_when_mail_is_disabled() -> Outcome<()> {
+        let dir = res!(scratch("signed"));
+        let root = Path::new(&dir).normalise().absolute();
+        let mut cfg = MailConfig::default();
+        cfg.enabled = false;
+        cfg.hostname = fmt!("site.example.test");
+        cfg.dkim_key_file = fmt!("mail/dkim.key");
+        let sender = match newsletter_sender(Some(cfg), &root) {
+            Some(s) => s,
+            None => return Err(err!("A send-only site lost its newsletter sender."; Test)),
+        };
+        let shown = fmt!("{:?}", sender);
+        assert!(shown.contains("news@site.example.test") && shown.contains("dkim: 1"),
+            "the sender must sign with its one key: {}", shown);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn no_mail_block_means_no_newsletter() {
+        let root = Path::new("/nonexistent").normalise().absolute();
+        assert!(newsletter_sender(None, &root).is_none());
+        let mut bare = MailConfig::default();
+        bare.hostname = fmt!("site.example.test");
+        assert!(newsletter_sender(Some(bare), &root).is_none(), "no key, no sending identity");
     }
 }

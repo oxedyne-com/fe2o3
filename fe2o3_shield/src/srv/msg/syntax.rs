@@ -37,7 +37,7 @@ pub fn base_msg() -> Outcome<SyntaxRef> {
     //
     //let arg_uid = Arg::from(ArgConfig {
     //    name:   fmt!("IdDat"),
-    //    hyph1:  fmt!("u"),
+    //    hyph1:  Some(fmt!("u")),
     //    hyph2:  Some(fmt!("uid")),
     //    evals:  vec![UID::KIND],
     //    help:   Some(fmt!("User identifier (unsigned int)")),
@@ -45,15 +45,15 @@ pub fn base_msg() -> Outcome<SyntaxRef> {
     //});
     let arg_sid = Arg::from(ArgConfig {
         name:   fmt!("IdDat"),
-        hyph1:  fmt!("s"),
+        hyph1:  Some(fmt!("s")),
         hyph2:  Some(fmt!("sid")),
-        vals:   vec![(constant::SESSION_ID_KIND, fmt!("Id (unsigned int)"))],
+        vals:   vec![(constant::SESSION_ID_KIND, fmt!("Id (unsigned int)")).into()],
         help:   Some(fmt!("Session identifier")),
         ..Default::default()
     });
     //let arg_pow_code = Arg::from(ArgConfig {
     //    name:   fmt!("PowCode"),
-    //    hyph1:  fmt!("pc"),
+    //    hyph1:  Some(fmt!("pc")),
     //    hyph2:  Some(fmt!("pow-code")),
     //    evals:  vec![Kind::BC64],
     //    help:   Some(fmt!("Use this proof of work code for packets")),
@@ -61,15 +61,15 @@ pub fn base_msg() -> Outcome<SyntaxRef> {
     //});
     let arg_pow_zbits = Arg::from(ArgConfig {
         name:   fmt!("PowZeroBits"),
-        hyph1:  fmt!("zb"),
+        hyph1:  Some(fmt!("zb")),
         hyph2:  Some(fmt!("zero-bits")),
-        vals:   vec![(Kind::U16, fmt!("Number of zero bits (u16)"))],
+        vals:   vec![(Kind::U16, fmt!("Number of zero bits (u16)")).into()],
         help:   Some(fmt!("Number of zero bits to use for proof of work")),
         ..Default::default()
     });
     //let arg_my_pack_sign_pk = Arg::from(ArgConfig {
     //    name:   fmt!("MyPacketPublicSigningKey"),
-    //    hyph1:  fmt!("mpsp"),
+    //    hyph1:  Some(fmt!("mpsp")),
     //    hyph2:  Some(fmt!("my-pack-sign-pk")),
     //    evals:  vec![Kind::BC64],
     //    help:   Some(fmt!("My packet public signing key")),
@@ -77,15 +77,15 @@ pub fn base_msg() -> Outcome<SyntaxRef> {
     //});
     let arg_your_pack_sign_pk = Arg::from(ArgConfig {
         name:   fmt!("YourPacketPublicSigningKey"),
-        hyph1:  fmt!("yppsk"),
+        hyph1:  Some(fmt!("yppsk")),
         hyph2:  Some(fmt!("your-pack-sign-pk")),
-        vals:   vec![(Kind::BC64, fmt!("Public key"))],
+        vals:   vec![(Kind::BC64, fmt!("Public key")).into()],
         help:   Some(fmt!("Your packet public signing key")),
         ..Default::default()
     });
     //let arg_my_msg_sign_pk = Arg::from(ArgConfig {
     //    name:   fmt!("MyMessagePublicSigningKey"),
-    //    hyph1:  fmt!("mmsp"),
+    //    hyph1:  Some(fmt!("mmsp")),
     //    hyph2:  Some(fmt!("my-msg-sign-pk")),
     //    evals:  vec![Kind::BC64],
     //    help:   Some(fmt!("My message public signing key")),
@@ -93,7 +93,7 @@ pub fn base_msg() -> Outcome<SyntaxRef> {
     //});
     //let arg_your_msg_sign_pk = Arg::from(ArgConfig {
     //    name:   fmt!("YourMessagePublicSigningKey"),
-    //    hyph1:  fmt!("ymsp"),
+    //    hyph1:  Some(fmt!("ymsp")),
     //    hyph2:  Some(fmt!("your-msg-sign-pk")),
     //    evals:  vec![Kind::BC64],
     //    help:   Some(fmt!("Your message public signing key")),
@@ -101,7 +101,7 @@ pub fn base_msg() -> Outcome<SyntaxRef> {
     //});
     //let arg_sign = Arg::from(ArgConfig {
     //    name:   fmt!("Signature"),
-    //    hyph1:  fmt!("sig"),
+    //    hyph1:  Some(fmt!("sig")),
     //    hyph2:  Some(fmt!("signature")),
     //    evals:  vec![Kind::BC64],
     //    help:   Some(fmt!("Signature applied to message contents")),
@@ -135,7 +135,7 @@ pub fn base_msg() -> Outcome<SyntaxRef> {
     });
     //let arg_send_sign_pk = Arg::from(ArgConfig {
     //    name:   fmt!("SendPublicSigningKey"),
-    //    hyph1:  fmt!("sspk"),
+    //    hyph1:  Some(fmt!("sspk")),
     //    hyph2:  Some(fmt!("send-sign-pk")),
     //    help:   Some(fmt!("Send signing public key")),
     //    ..Default::default()
@@ -164,9 +164,9 @@ pub fn base_msg() -> Outcome<SyntaxRef> {
     });
     let arg_skey_enc = Arg::from(ArgConfig {
         name:   fmt!("EncSymKey"),
-        hyph1:  fmt!("sk"),
+        hyph1:  Some(fmt!("sk")),
         hyph2:  Some(fmt!("sym-key")),
-        vals:   vec![(Kind::BC64, fmt!("Private key"))],
+        vals:   vec![(Kind::BC64, fmt!("Private key")).into()],
         help:   Some(fmt!("Encrypted symmetric encryption key for session")),
         ..Default::default()
     });
@@ -180,9 +180,9 @@ pub fn base_msg() -> Outcome<SyntaxRef> {
     // identifier.
     let arg_payload = Arg::from(ArgConfig {
         name:   fmt!("Payload"),
-        hyph1:  fmt!("p"),
+        hyph1:  Some(fmt!("p")),
         hyph2:  Some(fmt!("payload")),
-        vals:   vec![(Kind::BU64, fmt!("Opaque application bytes"))],
+        vals:   vec![(Kind::BU64, fmt!("Opaque application bytes")).into()],
         help:   Some(fmt!("Application payload, which the protocol does not read")),
         ..Default::default()
     });

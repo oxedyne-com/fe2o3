@@ -1,9 +1,12 @@
 use crate::{
     prelude::*,
-    file::floc::{
-        DataLocation,
-        FileLocation,
-        FileNum,
+    file::{
+        floc::{
+            DataLocation,
+            FileLocation,
+            FileNum,
+        },
+        stored::RecordDigest,
     },
 };
 
@@ -25,17 +28,24 @@ impl Default for Present {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataState {
-    Cur, // Current version of value for this key.
-    Old, // Value flagged for garbage collection.
+    Cur,                // Current version of value for this key.
+    Old(RecordDigest),  // Value flagged for garbage collection, and which record it was.
 }
 
 impl std::fmt::Display for DataState {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::Cur => write!(f, "cur"),
-            Self::Old => write!(f, "old"),
+            Self::Old(_) => write!(f, "old"),
         }
     }
+}
+
+/// Where a collection carried a record, and which record it was.
+#[derive(Clone, Copy, Debug)]
+pub struct Move {
+    to:     u64,
+    rid:    RecordDigest,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -47,8 +57,8 @@ pub struct FileState {
     oldsum:     u64,
     oldcnt:     usize,
     dmap:       BTreeMap<u64, DataState>, // Map of key-value pair starting positions in data file.
-    mmap:       BTreeMap<u64, u64>, // Ephemeral map of the movement of starting positions due to gc.
-    pending_old: BTreeMap<u64, u64>, // Supersessions that arrived before the record's insert; start -> registered length.
+    mmap:       BTreeMap<u64, Move>, // Ephemeral map of the movement of starting positions due to gc.
+    pending_old: BTreeMap<u64, (u64, RecordDigest)>, // Supersessions that arrived before the record's insert; start -> (registered length, rid).
     gc_active:  bool,
     readers:    usize,
 }
@@ -178,7 +188,18 @@ impl FileState {
     pub fn pending_old_empty(&self) -> bool {
         self.pending_old.is_empty()
     }
-    pub fn pending_old(&self) -> &BTreeMap<u64, u64> { &self.pending_old }
+    pub fn pending_old(&self) -> &BTreeMap<u64, (u64, RecordDigest)> { &self.pending_old }
+
+    /// The records of this file flagged old, which a deletion of the file reclaims.
+    pub fn old_rids(&self) -> Vec<RecordDigest> {
+        let mut rids = Vec::new();
+        for dstat in self.dmap.values() {
+            if let DataState::Old(rid) = dstat {
+                rids.push(*rid);
+            }
+        }
+        rids
+    }
 
     pub fn data_map_empty(&self) -> bool {
         self.dmap.len() == 0
@@ -206,7 +227,7 @@ impl FileState {
         // case (c)), apply the deferred flag now that the record is present.  The parked length
         // must match the record actually inserted here; a mismatch means the parked supersession
         // referred to a different record at this position -- a genuine inconsistency, not a race.
-        if let Some(plen) = self.pending_old.remove(&floc.start) {
+        if let Some((plen, prid)) = self.pending_old.remove(&floc.start) {
             let rec_len = floc.klen + floc.vlen;
             if plen != rec_len {
                 return Err(err!(
@@ -215,7 +236,7 @@ impl FileState {
                     Bug, Mismatch, Data));
             }
             match self.dmap.get_mut(&floc.start) {
-                Some(dstat) => *dstat = DataState::Old,
+                Some(dstat) => *dstat = DataState::Old(prid),
                 None => return Err(err!(
                     "The record just inserted at position {} vanished before its parked \
                     supersession could be applied.", floc.start;
@@ -295,18 +316,21 @@ impl FileState {
         Ok(len)
     }
 
+    /// Records that a collection carried the record `rid` names from `dloc` to `new_start`.
     pub fn update_moved(
         &mut self,
         dloc:       &DataLocation,
         new_start:  u64,
+        rid:        RecordDigest,
     ) {
-        self.mmap.insert(dloc.start, new_start);
+        self.mmap.insert(dloc.start, Move { to: new_start, rid });
         self.dmap.remove(&dloc.start);
     }
 
     pub fn register_old(
         &mut self,
-        dloc: &DataLocation,
+        dloc:   &DataLocation,
+        rid:    RecordDigest,
     )
         -> Outcome<()>
     {
@@ -329,19 +353,19 @@ impl FileState {
         //       record -- the fault class that masked the 2026-07-28 rollover bug -- still fails
         //       loudly rather than being swallowed.
         match self.dmap.get_mut(&dloc.start) {
-            Some(dstat @ DataState::Cur) => *dstat = DataState::Old,
+            Some(dstat @ DataState::Cur) => *dstat = DataState::Old(rid),
             // (b) Provable duplicate: same location, already accounted old.  Nothing to do.
-            Some(DataState::Old) => return Ok(()),
+            Some(DataState::Old(_)) => return Ok(()),
             // (c) The record has not been inserted yet; park until it is.
             None => {
                 match self.pending_old.get(&dloc.start) {
-                    Some(len) if *len == dloc.len => (), // already parked, same record
-                    Some(len) => return Err(err!(
+                    Some((len, _)) if *len == dloc.len => (), // already parked, same record
+                    Some((len, _)) => return Err(err!(
                         "Two different supersessions were parked for position {}: lengths {} \
                         and {}. A start is unique within a file generation, so this is a genuine \
                         accounting inconsistency, not a race.", dloc.start, len, dloc.len;
                         Bug, Mismatch, Data)),
-                    None => { self.pending_old.insert(dloc.start, dloc.len); },
+                    None => { self.pending_old.insert(dloc.start, (dloc.len, rid)); },
                 }
                 return Ok(());
             },
@@ -408,29 +432,42 @@ impl FileState {
         Ok(dat_len)
     }
 
-    /// The move map maps old -> new.  If there is no old, nothing is done and `None` is returned.
-    /// Otherwise this method removes old and returns `Some(new)`.
-    pub fn delete_move_entry(
-        &mut self,
-        dloc: &DataLocation,
+    /// Where the record `rid` names, last seen at `dloc` before a collection, now starts, if the
+    /// collection moved it and a supersession has still to find it there.  A move entry is
+    /// matched by the record as well as the offset: with records of one size, a new offset can
+    /// equal an old one whose move is still pending, and matched by offset alone a read of the
+    /// record now at that offset was handed the other record (2026-09-23).  A read only looks:
+    /// the entry stays for the supersession it is kept for.
+    pub fn moved_to(
+        &self,
+        dloc:   &DataLocation,
+        rid:    &RecordDigest,
     )
         -> Option<u64>
     {
-        self.mmap.remove(&dloc.start)
+        match self.mmap.get(&dloc.start) {
+            Some(mv) if mv.rid == *rid => Some(mv.to),
+            _ => None,
+        }
     }
 
+    /// As `moved_to`, and the entry is then spent: its record is current at its new start until
+    /// the caller says otherwise.  For a supersession, and for the collector re-anchoring a record
+    /// in its cache.  An entry of another record at the same offset is left alone.
     pub fn map_and_remove(
         &mut self,
-        dloc: &DataLocation,
+        dloc:   &DataLocation,
+        rid:    &RecordDigest,
     )
         -> Option<u64>
     {
-        if let Some(new_start) = self.mmap.remove(&dloc.start) {
-            self.dmap.insert(new_start, DataState::Cur);
-            Some(new_start)
-        } else {
-            None
-        }
+        let to = match self.moved_to(dloc, rid) {
+            Some(to) => to,
+            None => return None,
+        };
+        self.mmap.remove(&dloc.start);
+        self.dmap.insert(to, DataState::Cur);
+        Some(to)
     }
 }
 

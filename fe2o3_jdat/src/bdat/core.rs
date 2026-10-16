@@ -268,8 +268,6 @@ impl Dat {
 mod tests {
     use super::*;
 
-    use crate::prelude::*;
-
     use oxedyne_fe2o3_num::BigInt;
 
     /// Every kind here is one the encoder writes as a code and a run of children, which is what

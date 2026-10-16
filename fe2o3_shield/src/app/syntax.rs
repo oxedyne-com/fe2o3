@@ -69,7 +69,7 @@ pub fn new_shell(
     });
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("test"),
-        hyph1:  fmt!("t"),
+        hyph1:  Some(fmt!("t")),
         vals:   vec![],
         reqd:   false,
         help:   Some(fmt!("Run server in test mode.")),
@@ -92,16 +92,16 @@ pub fn new_shell(
     });
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("create"),
-        hyph1:  fmt!("c"),
-        vals:   vec![(Kind::Str, fmt!("Name of secret for indexing"))],
+        hyph1:  Some(fmt!("c")),
+        vals:   vec![(Kind::Str, fmt!("Name of secret for indexing")).into()],
         reqd:   false,
         help:   Some(fmt!("Interactively create a new encrypted secret.")),
         ..Default::default()
     });
     let a2 = Arg::from(ArgConfig {
         name:   fmt!("recover"),
-        hyph1:  fmt!("r"),
-        vals:   vec![(Kind::Str, fmt!("Name of secret for indexing"))],
+        hyph1:  Some(fmt!("r")),
+        vals:   vec![(Kind::Str, fmt!("Name of secret for indexing")).into()],
         reqd:   false,
         help:   Some(fmt!("Interactively recover an encrypted secret.")),
         ..Default::default()

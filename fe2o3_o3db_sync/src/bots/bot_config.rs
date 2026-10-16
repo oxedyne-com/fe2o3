@@ -2,13 +2,18 @@ use crate::{
     prelude::*,
     base::index::ZoneInd,
     bots::base::bot_deps::*,
-    comm::channels::{
-        BotChannels,
-        ChannelPool,
+    comm::{
+        channels::{
+            BotChannels,
+            ChannelPool,
+            Fault,
+        },
+        response::Responder,
     },
     file::zdir::{
         ZoneDir,
         ZoneDirStr,
+        flush_for_replay,
     },
     format_zone_dir,
 };
@@ -85,9 +90,13 @@ impl<
             Recv::Result(Err(e)) => self.err_cannot_receive(err!(e,
                 "{}: Waiting for message.", self.ozid();
                 IO, Channel)),
-            Recv::Result(Ok(OzoneMsg::ZoneInitTrigger)) => {
-                let result = self.zone_init();
-                self.result(&result);
+            Recv::Result(Ok(OzoneMsg::ZoneInitTrigger(resp))) => {
+                // Each zone asked answers for itself.  The one this failed on, and any after it,
+                // never will, so the supervisor waiting on them is told why here.
+                if let Err(e) = self.zone_init(&resp) {
+                    self.error(e.clone());
+                    self.respond(Err(e), &resp);
+                }
             },
             // ... listen here for custom messages
             Recv::Result(Ok(msg)) => return self.listen_more(msg),
@@ -142,7 +151,7 @@ impl<
     
     fn zbots(&self) -> &ChannelPool<UIDL, UID, ENC, KH> { &self.chans().all_zbots() }
 
-    pub fn zone_init(&mut self) -> Outcome<()> {
+    pub fn zone_init(&mut self, resp: &Responder<UIDL, UID, ENC, KH>) -> Outcome<()> {
         let zcfg = self.cfg().zone_config();
         let default = ZoneDir {
             dir:        self.cfg().zone_root(self.db_root()),
@@ -150,8 +159,8 @@ impl<
         };
         let zdirs = res!(self.process_zone_overrides());
         let nz = self.cfg().num_zones;
+        let mut all = Vec::with_capacity(nz as usize);
         for z in 0..nz {
-            let zind = ZoneInd::new(z);
             let mut zdir = match zdirs.get(&z) {
                 None => default.clone(),
                 Some(zd) => zd.clone(),
@@ -160,9 +169,22 @@ impl<
             if !zdir.dir.exists() {
                 res!(std::fs::create_dir(&zdir.dir));
             }
+            all.push(zdir);
+        }
+        // A run stopped by a failed sync or cut back left the files it could not prove: each is
+        // cut back to the length its fault record names before anything replays it, as a power
+        // cut at the failure would.
+        // The record names zones and file numbers, so the cut follows a store that has moved.
+        let paths: Vec<PathBuf> = all.iter().map(|zd| zd.dir.clone()).collect();
+        res!(Fault::cut_after(self.db_root(), &paths));
+        // Every file is made durable before any zone replays (R2), in one flush per filesystem.
+        res!(flush_for_replay(self.db_root(), &paths));
+        for (z, zdir) in all.into_iter().enumerate() {
+            let z = z as u16;
+            let zind = ZoneInd::new(z);
             let bot = res!(self.zbots().get_bot(z as usize));
-            if let Err(e) = bot.send(OzoneMsg::ZoneInit(zdir, zcfg.clone())) {
-                self.err_cannot_send(err!(e,
+            if let Err(e) = bot.send(OzoneMsg::ZoneInit(zdir, zcfg.clone(), resp.clone())) {
+                return Err(err!(e,
                     "{}: Sending init data to zone {:?}", self.ozid(), zind;
                     Init, IO, Channel));
             }

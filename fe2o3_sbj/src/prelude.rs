@@ -2,7 +2,11 @@
 
 pub use crate::{
 	canon,
-	doc::Doc,
+	doc::{
+		Doc,
+		Foreign,
+		ForeignSchema,
+	},
 	envelope::{
 		Envelope,
 		Header,
@@ -19,5 +23,6 @@ pub use crate::{
 	SCHEMA_APP,
 	SCHEMA_CHROME,
 	SCHEMA_DOC,
+	SCHEMA_DOC_1,
 	VERSION_MAJOR,
 };

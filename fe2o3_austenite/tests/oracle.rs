@@ -35,6 +35,7 @@ use driver::{
 	baseline_path,
 	compare_root,
 	corpus,
+	expected_baseline,
 	qc_dir,
 	record_and_diff,
 	trio,
@@ -53,9 +54,10 @@ use oxedyne_fe2o3_core::prelude::*;
 ///   run diffs against; a later run that DOES drift fails unless `ORACLE_ACCEPT=1` is set, in which case
 ///   the drift is printed and the baseline is re-recorded rather than the run failing.
 ///
-/// A root whose oracle comparison could not run at all (`oxeweb-techspec`, at the time of writing -- see
-/// [`driver::corpus`]'s doc comment) is reported, not failed: the Austenite-only checks above still ran
-/// for it.
+/// A root whose oracle comparison could not run at all (a missing `typst` binary, or a template/helper
+/// incompatibility this crate does not own -- see [`driver::corpus`]'s doc comment for the one such case
+/// found and the re-check that closed it) is reported, not failed: the Austenite-only checks above still
+/// ran for it. No root in the corpus is in that state as of 2026-09-23.
 #[test]
 fn corpus_roots_compile_and_match_the_typst_oracle() -> Outcome<()> {
 	let work_dir	= res!(qc_dir());
@@ -260,12 +262,16 @@ fn expected_json_pin_blocks_bootstrap_for_crate_owned_roots() -> Outcome<()> {
 		pdf_path:			PathBuf::from("/nonexistent/expected-selftest.pdf"),
 	};
 
-	// styling-fixture is pinned; this is exactly its hash in tests/oracle/expected.json.
-	const FIXTURE_HASH: &str = "d035bd3c146435ef5571d26708f274b94dc412e9914317bbc98624c5db45d53f";
+	// styling-fixture is pinned; its hash is read from tests/oracle/expected.json itself, so a re-pin there
+	// does not leave a stale copy here.
+	let fixture_hash = match res!(expected_baseline()).get("styling-fixture") {
+		Some(e)	=> e.pdf_sha256,
+		None	=> return Err(err!("styling-fixture is no longer pinned in expected.json."; Test, Missing)),
+	};
 
 	// A matching render on a fresh cache is Unchanged (the reference came from expected.json), not Bootstrapped.
 	let _ = std::fs::remove_file(&path);
-	match res!(record_and_diff(&path, &report("styling-fixture", FIXTURE_HASH), false)) {
+	match res!(record_and_diff(&path, &report("styling-fixture", &fixture_hash), false)) {
 		BaselineOutcome::Unchanged	=> {},
 		_							=> return Err(err!(
 			"a pinned root matching expected.json was not Unchanged -- it bootstrapped or rejected instead";
@@ -303,7 +309,7 @@ fn expected_json_pin_blocks_bootstrap_for_crate_owned_roots() -> Outcome<()> {
 		});
 		res!(Baseline::from_entries(seeded).write_to_file(&path));
 	}
-	match res!(record_and_diff(&path, &report("styling-fixture", FIXTURE_HASH), false)) {
+	match res!(record_and_diff(&path, &report("styling-fixture", &fixture_hash), false)) {
 		BaselineOutcome::Unchanged	=> {},
 		_							=> return Err(err!(
 			"a pinned root was governed by a poisoned cache instead of expected.json";

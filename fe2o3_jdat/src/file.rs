@@ -13,6 +13,7 @@ use crate::{
 
 use oxedyne_fe2o3_core::{
     prelude::*,
+    file as core_file,
     map::MapMut,
 };
 use oxedyne_fe2o3_text::string::Stringer;
@@ -86,6 +87,39 @@ pub trait JdatFile: FromDat + ToDat {
         Ok(())
     }
 
+    /// As [`save`](Self::save), but for a file holding key material: the
+    /// write is atomic and the file ends at mode 0600 whatever the caller's
+    /// umask, even when it already existed at a more permissive mode.
+    /// `save` itself is untouched, so every other caller keeps its current
+    /// permissions behaviour.
+    fn save_secret<
+        P: AsRef<Path>,
+        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
+        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
+    >(
+        &self,
+        path:           P,
+        tab:            &str,
+        enc_cfg_opt:    Option<EncoderConfig<M1, M2>>,
+    )
+        -> Outcome<()>
+    {
+        let path = path.as_ref();
+        let dat = res!(self.to_dat());
+        let s = if let Some(cfg) = enc_cfg_opt {
+            res!(dat.encode_string_with_config(&cfg))
+        } else {
+            fmt!("{:?}", dat)
+        };
+        let mut text = String::new();
+        for mut line in Stringer::new(s).to_lines(tab) {
+            line.push_str("\n");
+            text.push_str(&line);
+        }
+        res!(core_file::save_secret(path, text.as_bytes()));
+        Ok(())
+    }
+
 }
 
 /// `JdatMapFile` is suitable for simpler `struct`s that have derived `FromDatMap` and `ToDatMap`.
@@ -144,4 +178,100 @@ pub enum LoadableJdat<J: JdatFile> {
 pub enum LoadableJdatMap<J: JdatMapFile> {
     Data(J),
     Path(PathBuf),
+}
+
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    use std::{
+        os::unix::fs::PermissionsExt,
+        sync::atomic::{
+            AtomicU64,
+            Ordering,
+        },
+    };
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A minimal `JdatFile` implementor, in the shape of `Wallet` in
+    /// `fe2o3_crypto` -- a thin wrapper that hands its `Dat` straight
+    /// through -- so `save`/`save_secret` can be exercised here without a
+    /// dependency this crate cannot take (`fe2o3_crypto` depends on
+    /// `fe2o3_jdat`, not the other way round).
+    #[derive(Clone, Debug)]
+    struct TestDoc(Dat);
+
+    impl ToDat for TestDoc {
+        fn to_dat(&self) -> Outcome<Dat> { Ok(self.0.clone()) }
+    }
+
+    impl FromDat for TestDoc {
+        fn from_dat(dat: Dat) -> Outcome<Self> { Ok(Self(dat)) }
+    }
+
+    impl JdatFile for TestDoc {}
+
+    fn scratch_path(label: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(fmt!(
+            "fe2o3_jdat_file_test_{}_{}_{}", std::process::id(), n, label,
+        ))
+    }
+
+    fn mode_of(path: &Path) -> Outcome<u32> {
+        match fs::metadata(path) {
+            Ok(m) => Ok(m.permissions().mode() & 0o777),
+            Err(e) => Err(err!(e, "Could not stat {:?}.", path; Test, File, IO, Read)),
+        }
+    }
+
+    /// `save` is the path every existing caller relies on for non-secret
+    /// files, e.g. `ServerConfig`. It must keep leaving a file's mode alone,
+    /// so an already-permissive config file stays exactly as permissive.
+    #[test]
+    fn test_ordinary_save_does_not_restrict_an_existing_files_mode() -> Outcome<()> {
+        let path = scratch_path("ordinary_save");
+        if let Err(e) = fs::write(&path, b"placeholder") {
+            return Err(err!(e, "Could not pre-seed {:?}.", path; Test, File, IO, Write));
+        }
+        if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o644)) {
+            return Err(err!(e, "Could not set 0644 on {:?}.", path; Test, File, IO));
+        }
+
+        let doc = TestDoc(Dat::Str("not a secret".to_string()));
+        let save_res = doc.save(&path, "  ", Some(EncoderConfig::<(), ()>::default()));
+
+        let mode = mode_of(&path);
+        let _ = fs::remove_file(&path);
+        res!(save_res);
+        if res!(mode) != 0o644 {
+            return Err(err!(
+                "The ordinary JdatFile::save changed {:?}'s mode away from 0644; \
+                a non-secret save must leave permissions alone.", path;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// `save_secret` is the path key material -- the wallet, TLS and DKIM
+    /// keys -- must go through instead: the file must end at 0600 even
+    /// though nothing here asked for a restrictive mode explicitly.
+    #[test]
+    fn test_save_secret_restricts_a_new_files_mode() -> Outcome<()> {
+        let path = scratch_path("save_secret");
+        let doc = TestDoc(Dat::Str("top secret".to_string()));
+        let save_res = doc.save_secret(&path, "  ", Some(EncoderConfig::<(), ()>::default()));
+
+        let mode = mode_of(&path);
+        let _ = fs::remove_file(&path);
+        res!(save_res);
+        if res!(mode) != 0o600 {
+            return Err(err!(
+                "save_secret left {:?} at a mode other than 0600.", path;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
 }

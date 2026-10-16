@@ -64,6 +64,41 @@ pub fn decode_str(s: &str) -> Outcome<String> {
     }
 }
 
+/// Decode an `application/x-www-form-urlencoded` body into its fields, in the order sent.
+///
+/// A `+` is a space, as an HTML form writes one, and the rest is [`decode_str`]: a broken escape or
+/// a field that is not UTF-8 is an error naming the field. A field with no `=` has an empty value,
+/// and an empty pair (`a=1&&b=2`) is skipped. A key may repeat; the caller decides what that means.
+pub fn form(body: &[u8]) -> Outcome<Vec<(String, String)>> {
+    let s = match std::str::from_utf8(body) {
+        Ok(s)   => s,
+        Err(e)  => return Err(err!(e,
+            "A form body must be ASCII, its other bytes percent-escaped."; Invalid, Input, Decode)),
+    };
+    let mut out = Vec::new();
+    for (i, pair) in s.split('&').enumerate() {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = match pair.find('=') {
+            Some(at)    => (&pair[..at], &pair[at + 1..]),
+            None        => (pair, ""),
+        };
+        let key = match decode_str(&k.replace('+', " ")) {
+            Ok(k)   => k,
+            Err(e)  => return Err(err!(e,
+                "Decoding the name of form field {}.", i; Invalid, Input, Decode)),
+        };
+        let val = match decode_str(&v.replace('+', " ")) {
+            Ok(v)   => v,
+            Err(e)  => return Err(err!(e,
+                "Decoding the value of form field {} ('{}').", i, key; Invalid, Input, Decode)),
+        };
+        out.push((key, val));
+    }
+    Ok(out)
+}
+
 /// Percent-encode one component of a URI, escaping exactly what `encodeURIComponent` escapes.
 ///
 /// The unreserved set left alone is `A-Z a-z 0-9 - _ . ! ~ * ' ( )`. Everything else, including
@@ -124,6 +159,21 @@ mod tests {
     fn test_decode_bytes_that_are_not_text_00() -> Outcome<()> {
         assert_eq!(res!(decode("%FF%FE")), vec![0xFF, 0xFE]);
         assert!(decode_str("%FF%FE").is_err(), "those bytes are not UTF-8");
+        Ok(())
+    }
+    /// A form body decodes field by field, `+` as a space and `%2B` as a plus, in the order sent.
+    #[test]
+    fn test_form_fields_00() -> Outcome<()> {
+        let f = res!(form(b"summary=Fixed+a+typo&text=1%2B1+%3D+2%0A%5B%5BHachik%C5%8D%5D%5D&&flag&summary=again"));
+        assert_eq!(f, vec![
+            ("summary".to_string(),	"Fixed a typo".to_string()),
+            ("text".to_string(),	"1+1 = 2\n[[Hachikō]]".to_string()),
+            ("flag".to_string(),	String::new()),
+            ("summary".to_string(),	"again".to_string()),
+        ]);
+        assert!(form(b"a=%2").is_err(), "a broken escape must be refused");
+        assert!(form(b"a=%FF").is_err(), "a value that is not UTF-8 must be refused");
+        assert_eq!(res!(form(b"")), Vec::new());
         Ok(())
     }
 }

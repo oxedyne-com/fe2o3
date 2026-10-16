@@ -1,7 +1,10 @@
 use crate::{
     prelude::*,
     bot,
-    channels::Simplex,
+    channels::{
+        Recv,
+        Simplex,
+    },
     log::{
         base::{
             LogLevel,
@@ -102,15 +105,21 @@ impl<ETAG: GenTag> Config<ETAG>
 
 #[derive(Clone, Debug, Default)]
 pub struct FileConfig {
-    pub dir:    PathBuf,        // Directory for numbered log files.
-    pub name:   String,         // Log file base name.
-    pub ext:    String,         // Log file extension.
-    pub num:    u16,            // Current log file number.
-    pub max:    Option<u64>,    // Maximum file size.
-    pub path:   PathBuf,        // Current log file path.
+    pub dir:        PathBuf,                // Directory for numbered log files.
+    pub name:       String,                 // Log file base name.
+    pub ext:        String,                 // Log file extension.
+    pub num:        u16,                    // Next archive number.
+    pub max:        Option<u64>,            // Maximum file size.
+    pub path:       PathBuf,                // Current log file path.
+    pub keep:       Option<usize>,          // archives kept, newest first; `None` keeps all
+    pub keep_age:   Option<time::Duration>, // archives older than this go; `None` keeps all
+    pub flush:      time::Duration,         // longest a routine line waits for a sync
+    pub durable:    bool,                   // sync after every line
 }
 
 impl FileConfig {
+
+    pub const FLUSH: time::Duration = time::Duration::from_secs(1);
 
     pub fn new(
         dir:    PathBuf,
@@ -127,11 +136,97 @@ impl FileConfig {
             ext,
             num,
             max,
-            path: PathBuf::new(),
+            path:       PathBuf::new(),
+            keep:       None,
+            keep_age:   None,
+            flush:      Self::FLUSH,
+            durable:    false,
         };
         result.path = result.path();
         trace!("Log file path = {:?}", result.path);
         result
+    }
+
+    /// Bounds the archives a size limit (`max`) makes: at most `keep` of them, the newest,
+    /// and none older than `age`. Either bound alone may be given, and the smaller wins.
+    /// They are applied after each archive, when the file is opened, and hourly.
+    pub fn with_retention(mut self, keep: Option<usize>, age: Option<time::Duration>) -> Self {
+        self.keep = keep;
+        self.keep_age = age;
+        self
+    }
+
+    /// Sets how often written lines are synced to disk. Routine lines are synced at most
+    /// `flush` after they are written, so a machine crash loses at most that much of them; an
+    /// error line, an archive and a shutdown are synced at once. `durable` syncs after every
+    /// line instead, which costs a disk flush per line. A zero `flush` means the default, 1 s.
+    pub fn with_flush(mut self, flush: time::Duration, durable: bool) -> Self {
+        self.flush = if flush.is_zero() { Self::FLUSH } else { flush };
+        self.durable = durable;
+        self
+    }
+
+    /// Every archive of this log in its directory, `<name>.<ext>.<number>.gz`, newest first by
+    /// modification time, with its number.
+    pub fn archives(&self) -> Outcome<Vec<(PathBuf, time::SystemTime, u16)>> {
+        let stem = fmt!("{}.{}.", self.name, self.ext);
+        let list = match std::fs::read_dir(&self.dir) {
+            Ok(l) => l,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(err!(e,
+                "Listing the log directory {:?} for archives.", self.dir;
+            IO, File, Read)),
+        };
+        let mut out = Vec::new();
+        for entry in list {
+            let entry = res!(entry);
+            let fname = entry.file_name();
+            let num = match fname.to_str()
+                .and_then(|f| f.strip_prefix(&stem))
+                .and_then(|f| f.strip_suffix(".gz"))
+            {
+                Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) =>
+                    match n.parse::<u16>() {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    },
+                _ => continue,
+            };
+            let meta = res!(entry.metadata());
+            if !meta.is_file() {
+                continue;
+            }
+            let at = meta.modified().unwrap_or(time::UNIX_EPOCH);
+            out.push((entry.path(), at, num));
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+        Ok(out)
+    }
+
+    /// Removes the archives past `keep` or older than `keep_age` at `now`, and gives how many
+    /// went.
+    pub fn prune(&self, now: time::SystemTime) -> Outcome<usize> {
+        if self.keep.is_none() && self.keep_age.is_none() {
+            return Ok(0);
+        }
+        let mut n = 0;
+        for (i, (path, at, _)) in res!(self.archives()).into_iter().enumerate() {
+            let too_many = self.keep.map(|k| i >= k).unwrap_or(false);
+            let too_old = match self.keep_age {
+                Some(age) => now.duration_since(at).map(|d| d > age).unwrap_or(false),
+                None => false,
+            };
+            if too_many || too_old {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => n += 1,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(err!(e,
+                        "Removing the log archive {:?}.", path;
+                    IO, File, Write)),
+                }
+            }
+        }
+        Ok(n)
     }
 
     pub fn path(&self) -> PathBuf {
@@ -150,6 +245,13 @@ impl FileConfig {
         res!(self.make_dir());
         let path = self.path();
         self.path = path.clone();
+        // Number on from the archives already there, so a restart never writes over one.
+        if let Some(last) = res!(self.archives()).iter().map(|(_, _, n)| *n).max() {
+            if last >= self.num {
+                self.num = last.wrapping_add(1);
+            }
+        }
+        res!(self.prune(time::SystemTime::now()));
         let file = res!(OpenOptions::new()
             .create(true)
             .append(true)
@@ -164,9 +266,13 @@ impl FileConfig {
 pub struct LogBot<ETAG: GenTag>
     where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
 {
-    file:   Option<File>,   
-    cfg:    Arc<RwLock<Config<ETAG>>>,
-    chan:   Simplex<Msg<ETAG>>,
+    file:       Option<File>,
+    cfg:        Arc<RwLock<Config<ETAG>>>,
+    chan:       Simplex<Msg<ETAG>>,
+    pruned:     Option<time::Instant>,  // the last age prune
+    unsynced:   Option<time::Instant>,  // the first line written since the last sync
+    #[cfg(test)]
+    syncs:      usize,                  // live file syncs, counted for the tests
 }
 
 impl<ETAG: GenTag> LogBot<ETAG>
@@ -200,6 +306,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
     }
 
     pub fn update_file(&mut self) -> Outcome<()> {
+        res!(self.sync()); // the file being replaced
         let mut unlocked_cfg = lock_write!(self.cfg);
         self.file = res!(unlocked_cfg.update_file());
         if unlocked_cfg.console.is_none() && self.file.is_none() {
@@ -283,9 +390,47 @@ impl<ETAG: GenTag> LogBot<ETAG>
         })
     }
 
+    /// The live file's flush interval and whether every line is synced.
+    fn flush_cfg(&self) -> Outcome<(time::Duration, bool)> {
+        let unlocked_cfg = lock_read!(self.cfg);
+        Ok(match unlocked_cfg.file.as_ref() {
+            Some(file_cfg) => (file_cfg.flush, file_cfg.durable),
+            None => (FileConfig::FLUSH, false),
+        })
+    }
+
+    fn wrote(&mut self) {
+        if self.unsynced.is_none() {
+            self.unsynced = Some(time::Instant::now());
+        }
+    }
+
+    /// Syncs the live file to disk, if anything has been written to it since the last sync.
+    fn sync(&mut self) -> Outcome<()> {
+        if self.unsynced.take().is_some() {
+            if let Some(f) = &self.file {
+                res!(f.sync_data());
+                #[cfg(test)]
+                { self.syncs += 1; }
+            }
+        }
+        Ok(())
+    }
+
+    /// Syncs now when the line just written must not wait, an error line or any line when
+    /// durable, or when the oldest unsynced line has waited the flush interval.
+    fn sync_after(&mut self, urgent: bool) -> Outcome<()> {
+        if let Some(t) = self.unsynced {
+            let (flush, durable) = res!(self.flush_cfg());
+            if urgent || durable || t.elapsed() >= flush {
+                res!(self.sync());
+            }
+        }
+        Ok(())
+    }
+
     fn check_for_archiving(&mut self) -> Outcome<()> {
         if let Some(f) = &self.file {
-            res!(f.sync_all());
             let size = res!(f.metadata()).len();
             if let Some(max_size) = res!(self.file_max_size()) {
                 if size > max_size {
@@ -293,28 +438,35 @@ impl<ETAG: GenTag> LogBot<ETAG>
                 }
             }
         }
+        // An age bound must hold on a quiet log too, which may archive once a month.
+        const PRUNE_EVERY: time::Duration = time::Duration::from_secs(3600);
+        if self.pruned.map(|t| t.elapsed() >= PRUNE_EVERY).unwrap_or(true) {
+            self.pruned = Some(time::Instant::now());
+            let unlocked_cfg = lock_read!(self.cfg);
+            if let Some(file_cfg) = unlocked_cfg.file.as_ref() {
+                res!(file_cfg.prune(time::SystemTime::now()));
+            }
+        }
         Ok(())
     }
 
     fn archive(&mut self) -> Outcome<()> {
+        res!(self.sync());
         let mut unlocked_cfg = lock_write!(self.cfg);
-        if let Some(file_cfg) = unlocked_cfg.file.as_mut() {
+        if let (Some(file_cfg), Some(old)) = (unlocked_cfg.file.as_mut(), self.file.as_mut()) {
             let mut log_path = file_cfg.dir.clone();
-            let mut name = file_cfg.name.clone();
-            name.push('.');
-            name.push_str(&file_cfg.ext);
-            name.push('.');
-            name.push_str(&fmt!("{:02}.gz", file_cfg.num));
-            log_path.push(name);
+            log_path.push(fmt!("{}.{}.{:02}.gz", file_cfg.name, file_cfg.ext, file_cfg.num));
             let mut new = res!(File::create(log_path));
-            let old = self.file.as_mut().unwrap();
             res!(old.seek(SeekFrom::Start(0)));
-            let old_buf = BufReader::new(old);
-            let mut gz = GzEncoder::new(old_buf, Compression::fast());
-            res!(io::copy(&mut gz, &mut new));
-            // Archive to new compressed file.
-            res!(self.file.as_mut().unwrap().set_len(0)); // Return to start.
-            file_cfg.num = file_cfg.num.wrapping_add(1); 
+            {
+                let old_buf = BufReader::new(&mut *old);
+                let mut gz = GzEncoder::new(old_buf, Compression::fast());
+                res!(io::copy(&mut gz, &mut new));
+            }
+            res!(new.sync_all()); // the archive is whole before the live file is cut
+            res!(old.set_len(0)); // Return to start.
+            file_cfg.num = file_cfg.num.wrapping_add(1);
+            res!(file_cfg.prune(time::SystemTime::now()));
         }
         Ok(())
     }
@@ -373,9 +525,12 @@ impl<ETAG: GenTag> LogBot<ETAG>
                     Err(e) => msg!("{}", err!(e,
                         "Error writing '{}' to the log file.", msg;
                     IO, File, Write)),
-                    _ => (),
+                    _ => self.wrote(),
                 }
             }
+        }
+        if let Err(e) = self.sync_after(true) {
+            msg!("{}", err!(e, "Error syncing the log file after an error line."; IO, File, Write));
         }
     }
 
@@ -438,9 +593,16 @@ impl<ETAG: GenTag> LogBot<ETAG>
                         Err(e) => msg!("{}", err!(e,
                             "Error writing '{}' to the log file {:?}.", msg, path_opt;
                         IO, File, Write)),
-                        _ => (),
+                        _ => self.wrote(),
                     }
                 }
+            }
+            // The line that explains a crash must not wait for the interval.
+            let urgent = level == LogLevel::Error;
+            if let Err(e) = self.sync_after(urgent) {
+                msg!("{}", err!(e,
+                    "Error syncing the log file {:?} after a {:?} line.", path_opt, level;
+                IO, File, Write));
             }
         }
     }
@@ -455,8 +617,31 @@ impl<ETAG: GenTag> LogBot<ETAG>
         }
     }
 
+    /// Waits for the next message; while unsynced lines wait, only until the flush interval
+    /// is up, so a quiet log still syncs them on time.
+    fn next_msg(&mut self) -> Option<Outcome<Msg<ETAG>>> {
+        let wait = match (self.unsynced, self.flush_cfg()) {
+            (None, _)               => return Some(self.chan.recv()),
+            (Some(t), Ok((f, _)))   => f.saturating_sub(t.elapsed()),
+            (Some(_), Err(_))       => time::Duration::ZERO,
+        };
+        match self.chan.recv_timeout(wait) {
+            Recv::Result(r) => Some(r),
+            Recv::Empty => None,
+        }
+    }
+
     fn listen(&mut self) -> bool {
-        match self.chan.recv() {
+        let next = match self.next_msg() {
+            Some(next) => next,
+            None => {
+                if let Err(e) = self.sync() {
+                    msg!("{}", err!(e, "Error syncing the log file on its interval."; IO, File, Write));
+                }
+                return false;
+            }
+        };
+        match next {
             Err(e) => {
                 let e = err!(e,
                     "Error while LogBot attempted to receive a message.";
@@ -472,6 +657,9 @@ impl<ETAG: GenTag> LogBot<ETAG>
                 let msg = fmt!("Finish message received, LogBot finishing now.");
                 let level = LogLevel::Warn;
                 self.write(level, &src, Ok(msg), String::new());
+                if let Err(e) = self.sync() {
+                    msg!("{}", err!(e, "Error syncing the log file at finish."; IO, File, Write));
+                }
                 return true;
             }
             Ok(Msg::Base(bot::BaseMsg::Ready)) => msg!("LogBot now ready to receive messages."),
@@ -511,5 +699,159 @@ impl<ETAG: GenTag> LogBot<ETAG>
             _ => (),
         }
         false
+    }
+}
+
+impl<ETAG: GenTag> Drop for LogBot<ETAG>
+    where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
+{
+    fn drop(&mut self) {
+        if let Err(e) = self.sync() {
+            msg!("{}", err!(e, "Error syncing the log file as the log bot ends."; IO, File, Write));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(fmt!("fe2o3_log_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn touch_archive(cfg: &FileConfig, num: u16, age_secs: u64) -> Outcome<()> {
+        let p = cfg.dir.join(fmt!("{}.{}.{:02}.gz", cfg.name, cfg.ext, num));
+        let f = res!(File::create(&p));
+        let at = time::SystemTime::now() - time::Duration::from_secs(age_secs);
+        res!(f.set_modified(at));
+        Ok(())
+    }
+
+    fn bot_for(tag: &str, fcfg: impl FnOnce(FileConfig) -> FileConfig)
+        -> Outcome<(LogBot<ErrTag>, Simplex<Msg<ErrTag>>, PathBuf)>
+    {
+        let dir = scratch(tag);
+        let file = fcfg(FileConfig::new(dir.clone(), fmt!("app"), fmt!("log"), 0, None));
+        let cfg = Config { file: Some(file), console: None, level: LogLevel::Trace };
+        let chan = crate::channels::simplex();
+        let mut bot = LogBot::new();
+        res!(bot.init(Arc::new(RwLock::new(cfg)), chan.clone()));
+        Ok((bot, chan, dir))
+    }
+
+    fn line(chan: &Simplex<Msg<ErrTag>>, level: LogLevel, n: usize) -> Outcome<()> {
+        let src = Source { tid: std::thread::current().id(), file: file!(), line: line!() };
+        res!(chan.send(Msg::Log { level, src, erropt: None, msg: fmt!("line {}", n), stream: String::new() }));
+        Ok(())
+    }
+
+    #[test]
+    fn test_routine_lines_are_not_synced_one_by_one() -> Outcome<()> {
+        const N: usize = 200;
+        let (mut bot, chan, dir) = res!(bot_for("routine", |f| f));
+        for n in 0..N {
+            res!(line(&chan, LogLevel::Info, n));
+            bot.listen();
+        }
+        assert!(bot.syncs <= 3, "{} routine lines took {} syncs.", N, bot.syncs);
+        let text = res!(std::fs::read_to_string(dir.join("app.log")));
+        assert_eq!(text.lines().count(), N);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_an_error_line_is_synced_at_once() -> Outcome<()> {
+        let hour = time::Duration::from_secs(3600);
+        let (mut bot, chan, dir) = res!(bot_for("errline", |f| f.with_flush(hour, false)));
+        for n in 0..5 {
+            res!(line(&chan, LogLevel::Info, n));
+            bot.listen();
+        }
+        assert_eq!(bot.syncs, 0, "Routine lines were synced within the interval.");
+        res!(line(&chan, LogLevel::Error, 5));
+        bot.listen();
+        assert_eq!(bot.syncs, 1, "The error line was not synced at once.");
+        assert!(bot.unsynced.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_durable_syncs_every_line() -> Outcome<()> {
+        const N: usize = 20;
+        let hour = time::Duration::from_secs(3600);
+        let (mut bot, chan, dir) = res!(bot_for("durable", |f| f.with_flush(hour, true)));
+        for n in 0..N {
+            res!(line(&chan, LogLevel::Info, n));
+            bot.listen();
+        }
+        assert_eq!(bot.syncs, N);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_quiet_log_syncs_on_its_interval() -> Outcome<()> {
+        let flush = time::Duration::from_millis(200);
+        let (mut bot, chan, dir) = res!(bot_for("quiet", |f| f.with_flush(flush, false)));
+        res!(line(&chan, LogLevel::Info, 0));
+        bot.listen();
+        assert_eq!(bot.syncs, 0);
+        // Nothing more arrives, so the wait times out and the line is synced.
+        let t = time::Instant::now();
+        bot.listen();
+        assert_eq!(bot.syncs, 1);
+        assert!(t.elapsed() < time::Duration::from_secs(2));
+        // A line still waiting is synced at finish.
+        res!(line(&chan, LogLevel::Info, 1));
+        bot.listen();
+        let src = Source { tid: std::thread::current().id(), file: file!(), line: line!() };
+        res!(chan.send(Msg::Finish(src)));
+        assert!(bot.listen(), "Finish did not end the bot.");
+        assert_eq!(bot.syncs, 2, "Finish did not sync the lines left.");
+        drop(bot);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_prune_keeps_the_newest_and_drops_the_old() -> Outcome<()> {
+        let dir = scratch("prune");
+        res!(std::fs::create_dir_all(&dir));
+        let cfg = FileConfig::new(dir.clone(), fmt!("app"), fmt!("log"), 0, Some(10))
+            .with_retention(Some(3), Some(time::Duration::from_secs(30 * 86_400)));
+        // Five archives a day apart, and one past the age bound.
+        for n in 0..5u16 {
+            res!(touch_archive(&cfg, n, (5 - n as u64) * 86_400));
+        }
+        res!(touch_archive(&cfg, 7, 31 * 86_400));
+        // Neither a stranger nor the live file is an archive.
+        res!(File::create(dir.join("app.log")));
+        res!(File::create(dir.join("other.log.01.gz")));
+        assert_eq!(res!(cfg.archives()).len(), 6);
+        let gone = res!(cfg.prune(time::SystemTime::now()));
+        assert_eq!(gone, 3);
+        let left: Vec<u16> = res!(cfg.archives()).into_iter().map(|(_, _, n)| n).collect();
+        assert_eq!(left, vec![4, 3, 2]);
+        assert!(dir.join("app.log").exists() && dir.join("other.log.01.gz").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_reopening_numbers_on_from_the_last_archive() -> Outcome<()> {
+        let dir = scratch("renum");
+        res!(std::fs::create_dir_all(&dir));
+        let mut cfg = FileConfig::new(dir.clone(), fmt!("app"), fmt!("log"), 0, Some(10));
+        res!(touch_archive(&cfg, 0, 60));
+        res!(touch_archive(&cfg, 1, 30));
+        let _f = res!(cfg.update());
+        assert_eq!(cfg.num, 2, "A restart would have written over archive 00.");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

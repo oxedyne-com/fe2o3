@@ -9,41 +9,52 @@
 //! reached ~19 GB.  [`sweep_orphans`] reclaims them in place, against a live store, without downtime
 //! or a second store.
 //!
+//! Since 2026-10-10 (Ozone run 2) a store retires the chunk set its head displaced once that head
+//! is durable, so an overwrite or a delete no longer leaves orphans behind it.  The sweep is needed
+//! only for two cases, neither of them a loss: a crash between a head and its retire, and a store
+//! that stopped waiting before its head landed.  Someone must still run it for those.  A set whose store is in progress is held in the database's pending
+//! sets, in the memory of the process that writes, so the sweep must run in that process
+//! (`OzoneApi` on the open store), never as a second process on the same store.
+//!
 //! The sweep is the in-place counterpart of [`crate::migrate`]: the migration copies the live set
 //! into a fresh store and achieves zero residue (no orphans, no tombstones, no empty file states)
 //! but needs the store stopped and twice the disk transiently; the sweep runs online and reclaims
-//! the large chunk orphans, at the cost of leaving a small dead tombstone per orphan behind (the
-//! residue §"What it does not do" names).  Operators run the sweep routinely and a migration rarely.
+//! the large chunk orphans, leaving a small tombstone per orphan until collection reclaims it in
+//! turn (§"What it does not do").  Operators run the sweep routinely and a migration rarely.
 //!
 //! # How it stays correct against concurrent writers
 //!
-//! A record's `Meta.time` is stamped once per write and cloned identically onto the bunch key and
-//! every chunk of a chunked value (`api::OzoneApi::prepare_write`), so a chunked value's bunch key
-//! and all its chunks share one timestamp.  The sweep stamps `T0` before it scans and retires a
-//! chunk-data key only when it is both (a) absent from the live set reconstructed from every live
-//! bunch key and (b) stamped strictly before `T0 - epoch_skew`.  A value written after `T0` has
-//! chunk timestamps at or after `T0`, so it is never retired even if its bunch key was written too
-//! late for the live scan to see it; a value present and still live before `T0` has its chunks in
-//! the live set and is kept.  A conservative `epoch_skew` (a few seconds) only defers reclaiming a
-//! genuine orphan to a later sweep; it never retires a live chunk.  `epoch_skew` of zero degenerates
-//! to the quiesced/offline case, correct only when nothing is writing.
+//! A chunk-data key is retired only when it is absent from the live set reconstructed from every
+//! live bunch key and its set was held by no store at any moment of the sweep.  The database's
+//! set registry holds a set from the draw of its id until its head's outcome is final, and while
+//! a sweep watches it also keeps every set let go since the watch began, so a store whose head
+//! lands too late for the live scan is still spared, however it overlaps the sweep.  The sweep
+//! makes its scan durable before it retires, and refuses once a failed sync has stopped the store.  No
+//! clock is read: since 2026-10-10 a store's stamps may run past the wall clock after a restart
+//! (the stamp floor), and an age test would keep such an orphan for as long as they did.
 //!
 //! # What it does not do
 //!
-//! Retiring a large chunk orphan converts it into a small dead tombstone (a deleted-kind marker
-//! record at the chunk key).  The sweep therefore turns gigabytes of chunk orphans into a few
-//! mebibytes of tombstones -- a >99.9% reclaim -- but does not remove the key.  Clearing the
-//! tombstones is left to the offline migration, which drops them by never copying them.
+//! Retiring a large chunk orphan converts it into a small tombstone (a deleted-kind marker record
+//! at the chunk key), so the sweep turns gigabytes of chunk orphans into a few mebibytes of
+//! tombstones.  Since 2026-10-09 a cache forgets a chunk tombstone once every older record of its
+//! key is durably gone and flags it old, so collection reclaims the tombstone after the orphan:
+//! bounded only while GC is on, since a record no collection reaches keeps its tombstone.  The
+//! offline migration leaves none, by never copying them.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{
     prelude::*,
-    comm::response::Wait,
+    comm::{
+        channels::PendingSets,
+        response::Wait,
+    },
+    gateway,
+    test::hooks,
 };
 
-use oxedyne_fe2o3_data::time::Timestamp;
 use oxedyne_fe2o3_jdat::{
     prelude::*,
     id::NumIdDat,
@@ -57,7 +68,6 @@ use std::{
     collections::HashSet,
     fs,
     path::Path,
-    time::Duration,
 };
 
 
@@ -75,9 +85,9 @@ pub struct SweepReport {
     pub scanned_main_keys:      usize,  // main keys the live scan emitted (Complete and bunch keys)
     pub live_chunk_keys:        usize,  // chunk keys referenced by a live bunch key
     pub chunk_data_keys:        usize,  // all chunk-data keys (cind >= 1) the inverse scan emitted
-    pub orphans_found:          usize,  // not in the live set and older than the epoch threshold
+    pub orphans_found:          usize,  // in no live value and no store's set during the sweep
     pub orphans_retired:        usize,  // tombstones written (equals orphans_found on success)
-    pub skipped_recent:         usize,  // not in the live set but at/after the epoch threshold: kept
+    pub skipped_pending:        usize,  // in no live value, but held by a store during the sweep: kept
     pub bytes_before:           u64,    // zone data-file bytes when the sweep started
 }
 
@@ -90,7 +100,7 @@ impl SweepReport {
         s.push_str(&fmt!("  live chunk keys     : {}\n", self.live_chunk_keys));
         s.push_str(&fmt!("  chunk-data keys seen: {}\n", self.chunk_data_keys));
         s.push_str(&fmt!("  orphans retired     : {} of {} found\n", self.orphans_retired, self.orphans_found));
-        s.push_str(&fmt!("  skipped (too recent): {}\n", self.skipped_recent));
+        s.push_str(&fmt!("  skipped (in a store): {}\n", self.skipped_pending));
         s.push_str(&fmt!("  data bytes at start : {}\n", self.bytes_before));
         s
     }
@@ -111,16 +121,14 @@ impl SweepReport {
 ///   set id) are both absent from it while a live value's chunks are all present.
 /// - **Conservative on uncertainty.** A failure to read any scanned main key aborts the sweep
 ///   rather than narrowing the live set, so a transient read error can never widen the orphan set.
-/// - **Epoch guard.** Only chunk records stamped before `T0 - epoch_skew` are retired, so a value
-///   written during the sweep is excluded even if its bunch key was enumerated late.  `epoch_skew`
-///   of zero is correct only for a quiesced store.
+/// - **Watched sets.** A chunk whose set any store of this process held while the sweep ran is
+///   kept, so a value written during the sweep is excluded even if its bunch key was enumerated
+///   late.  The sweep must therefore run in the process that writes the store.
 ///
 /// # Arguments
 /// * `scan_wait` - how long each of the two store-wide scans may take.  A scan walks every index
 ///   file in every zone, so a large store needs far longer than the shared user-request deadline;
 ///   pass a generous wait.
-/// * `epoch_skew` - the clock margin below `T0`; a few seconds guards against a writer whose clock
-///   is marginally behind the sweeper's.  Pass `Duration::ZERO` only for a store nothing is writing.
 pub fn sweep_orphans<
     const UIDL: usize,
     UID:    NumIdDat<UIDL> + 'static,
@@ -133,29 +141,166 @@ pub fn sweep_orphans<
     user:       UID,
     schms2:     Option<&RestSchemesOverride<ENC, KH>>,
     scan_wait:  Wait,
-    epoch_skew: Duration,
 )
     -> Outcome<SweepReport>
 {
-    let enc = api.schemes().encrypter();
-    let or_enc = schms2.map(|s| s.encrypter());
-
-    // 1. Stamp the epoch before touching the store, and derive the retirement threshold.  A chunk
-    //    record is old enough to retire only if its timestamp is strictly below this.
-    let t0 = res!(Timestamp::now());
-    let t0_dur: Duration = *t0;
-    let threshold_dur = t0_dur.saturating_sub(epoch_skew);
-    let threshold = Timestamp::new(threshold_dur.as_secs(), threshold_dur.subsec_nanos());
+    // A stopped store retires nothing: what it would retire on may be cut.
+    if let Some(fault) = api.fault() {
+        return Err(err!(
+            "{}: {}, so the sweep is refused.  Restart the store; it recovers from the disk.",
+            api.ozid(), fault.stopped();
+            Write, Fatal));
+    }
+    // 1. Watch the set registry before touching the store: every set held from here until the
+    //    chunks are classified is spared, whether its store finished before then or not, since its
+    //    bunch key may be published after the live scan reads its key.
+    let _watch = res!(SetWatch::begin(api.chans().pending_sets()));
 
     let bytes_before = res!(zone_data_bytes(api.db_root()));
 
-    // 2. Build the LIVE chunk-key set from every live bunch key.  Scan for main keys, fetch each to
-    //    its stored value, and for a chunked value (a Tup5u64 bunch value) reconstruct its chunk
-    //    keys exactly as the reader does.  A read error aborts: never narrow the live set on
-    //    uncertainty.  An absent value (a tombstone, or a value mid-write) contributes no live
-    //    chunks, which is safe because the epoch guard keeps any recent value's chunks regardless.
+    // 2. Build the LIVE chunk-key set from every live bunch key.  An absent value contributes no
+    //    live chunks, which is safe because the watch keeps the chunks of any store during the sweep.
+    let (live, scanned_main_keys) = res!(live_chunk_keys(api, schms2, dup_wait(&scan_wait)));
+    let live_chunk_keys = live.len();
+    hooks::sweep_hold();
+
+    // 3. Enumerate every chunk-data key (the inverse scan), classify against the live set and the
+    //    watched sets, and collect the orphans to retire.  Each candidate decodes to its Tup5u64 chunk
+    //    key; one that does not is left untouched rather than guessed at.
+    let chunk_opts = ScanOpts::all().chunk_data_only(true);
+    let chunk_entries = res!(api.scan_with_wait(&chunk_opts, schms2, dup_wait(&scan_wait)));
+    let chunk_data_keys = chunk_entries.len();
+
+    // Taken after the chunk scan, so a set drawn before a chunk of it was scanned is in it.
+    let pending = {
+        let reg = lock_mutex!(api.chans().pending_sets());
+        reg.watched()
+    };
+    // Every head the live scan read is made durable before anything is retired against it: one
+    // still past its mark could be undone by a power cut, and the set it displaced would be the
+    // key's value again.
+    res!(api.sync_now(dup_wait(&scan_wait)));
+    let mut orphans: Vec<Dat> = Vec::new();
+    let mut skipped_pending = 0usize;
+    for (kdat, _empty, _meta) in &chunk_entries {
+        let tup = match kdat {
+            Dat::Tup5u64(arr) => *arr,
+            // A chunk-data key that is not a Tup5u64 cannot be classified; leave it alone.
+            _ => continue,
+        };
+        if live.contains(&tup) {
+            continue; // Referenced by a live bunch key: keep.
+        }
+        if pending.contains(&tup[0]) {
+            skipped_pending += 1;
+            continue; // A store during the sweep: its bunch key may be still to come.
+        }
+        orphans.push(kdat.clone());
+    }
+    let orphans_found = orphans.len();
+
+    // 4. Retire each orphan through the ordinary supersession path: an unencrypted deleted-kind
+    //    tombstone at the chunk key, which supersedes the chunk record at the same stored key so the
+    //    running collector flags its bytes old and reclaims them.  One shared responder collects one
+    //    acknowledgement per tombstone, so the function returns only once every write has landed,
+    //    and a writer that fails one says so rather than being counted as an answer.
+    let mut orphans_retired = 0usize;
+    if orphans_found > 0 {
+        let resp = api.responder();
+        for ck in &orphans {
+            res!(api.tombstone_chunk_key(ck, user, schms2, resp.clone()));
+            orphans_retired += 1;
+        }
+        let liveness = scan_wait.max_wait;
+        let durability = std::cmp::max(liveness, constant::DURABILITY_TIMEOUT);
+        res!(resp.recv_write_acks(orphans_retired, liveness, durability));
+    }
+
+    // The function returns here, as soon as every tombstone is acknowledged.  It does NOT wait for
+    // the collector: reclamation is asynchronous, so a caller that wants the reclaimed footprint
+    // settles and re-measures the root itself (see the `o3db_sweep` example).
+    Ok(SweepReport {
+        scanned_main_keys,
+        live_chunk_keys,
+        chunk_data_keys,
+        orphans_found,
+        orphans_retired,
+        skipped_pending,
+        bytes_before,
+    })
+}
+
+// A watch of the set registry for the length of one sweep, ended on every path out of it.
+struct SetWatch {
+    sets: PendingSets,
+}
+
+impl SetWatch {
+    fn begin(sets: &PendingSets) -> Outcome<Self> {
+        let mut reg = lock_mutex!(sets);
+        reg.watch();
+        Ok(Self { sets: sets.clone() })
+    }
+}
+
+impl Drop for SetWatch {
+    fn drop(&mut self) {
+        if let Ok(mut reg) = self.sets.lock() {
+            reg.unwatch();
+        }
+    }
+}
+
+/// Opens a store for a sweep from a process of its own, as the `o3db_sweep` tool does, under the
+/// gateway's parameterisation with collection on.  A store another process holds is refused with
+/// what to do instead: the sweep spares only the sets of stores in the process it runs in.
+pub fn open_store_alone(
+    root:   &Path,
+    key:    &[u8; gateway::DB_KEY_LEN],
+    label:  &str,
+)
+    -> Outcome<(gateway::Db, usize)>
+{
+    match gateway::open_store(root, None, key, true, label) {
+        Ok(opened) => Ok(opened),
+        Err(e) => {
+            let tags = e.tags();
+            if tags.contains(&ErrTag::Lock) && tags.contains(&ErrTag::Conflict) {
+                Err(err!(e,
+                    "The store at {:?} is open in another process, most likely the gateway.  \
+                    Stop the gateway before this sweep, or have the process that holds the store \
+                    call sweep::sweep_orphans on its own open store.", root;
+                    Init, Lock, Conflict))
+            } else {
+                Err(e)
+            }
+        },
+    }
+}
+
+/// Every chunk key a live bunch key names, with the number of main keys scanned.  Scans for main
+/// keys, fetches each to its stored value, and for a chunked value (a Tup5u64 bunch value)
+/// reconstructs its chunk keys exactly as the reader does.  A read error aborts: never narrow the
+/// live set on uncertainty.  An absent value (a tombstone, or a value mid-write) contributes no
+/// live chunks.
+pub fn live_chunk_keys<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>(
+    api:    &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
+    schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    wait:   Wait,
+)
+    -> Outcome<(HashSet<[u64; 5]>, usize)>
+{
+    let enc = api.schemes().encrypter();
+    let or_enc = schms2.map(|s| s.encrypter());
     let main_opts = ScanOpts::all();
-    let main_entries = res!(api.scan_with_wait(&main_opts, schms2, dup_wait(&scan_wait)));
+    let main_entries = res!(api.scan_with_wait(&main_opts, schms2, wait));
     let scanned_main_keys = main_entries.len();
 
     let mut live: HashSet<[u64; 5]> = HashSet::new();
@@ -176,63 +321,7 @@ pub fn sweep_orphans<
             _ => (),
         }
     }
-    let live_chunk_keys = live.len();
-
-    // 3. Enumerate every chunk-data key (the inverse scan), classify against the live set and the
-    //    epoch, and collect the orphans to retire.  Each candidate decodes to its Tup5u64 chunk
-    //    key; one that does not is left untouched rather than guessed at.
-    let chunk_opts = ScanOpts::all().chunk_data_only(true);
-    let chunk_entries = res!(api.scan_with_wait(&chunk_opts, schms2, dup_wait(&scan_wait)));
-    let chunk_data_keys = chunk_entries.len();
-
-    let mut orphans: Vec<Dat> = Vec::new();
-    let mut skipped_recent = 0usize;
-    for (kdat, _empty, meta) in &chunk_entries {
-        let tup = match kdat {
-            Dat::Tup5u64(arr) => *arr,
-            // A chunk-data key that is not a Tup5u64 cannot be classified; leave it alone.
-            _ => continue,
-        };
-        if live.contains(&tup) {
-            continue; // Referenced by a live bunch key: keep.
-        }
-        // Not referenced: an orphan by membership.  Retire only if old enough; a recent one is a
-        // value that may still be settling, so it is kept and reclaimed by a later sweep.
-        if meta.time < threshold {
-            orphans.push(kdat.clone());
-        } else {
-            skipped_recent += 1;
-        }
-    }
-    let orphans_found = orphans.len();
-
-    // 4. Retire each orphan through the ordinary supersession path: an unencrypted deleted-kind
-    //    tombstone at the chunk key, which supersedes the chunk record at the same stored key so the
-    //    running collector flags its bytes old and reclaims them.  One shared responder collects one
-    //    acknowledgement per tombstone, so the function returns only once every write has landed.
-    let mut orphans_retired = 0usize;
-    if orphans_found > 0 {
-        let resp = api.responder();
-        for ck in &orphans {
-            res!(api.tombstone_chunk_key(ck, user, schms2, resp.clone()));
-            orphans_retired += 1;
-        }
-        let ack_wait = dup_wait(&scan_wait);
-        res!(resp.recv_number(orphans_retired, ack_wait));
-    }
-
-    // The function returns here, as soon as every tombstone is acknowledged.  It does NOT wait for
-    // the collector: reclamation is asynchronous, so a caller that wants the reclaimed footprint
-    // settles and re-measures the root itself (see the `o3db_sweep` example).
-    Ok(SweepReport {
-        scanned_main_keys,
-        live_chunk_keys,
-        chunk_data_keys,
-        orphans_found,
-        orphans_retired,
-        skipped_recent,
-        bytes_before,
-    })
+    Ok((live, scanned_main_keys))
 }
 
 /// A fresh copy of a `Wait`, since `scan_with_wait` and `recv_number` take it by value and it is not
@@ -260,7 +349,16 @@ fn zone_data_bytes(root: &Path) -> Outcome<u64> {
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().map(|e| e == constant::DATA_FILE_EXT).unwrap_or(false) {
-                let meta = res!(entry.metadata());
+                // The collector runs while the sweep counts, so a file listed a moment ago may be
+                // gone; it holds no bytes now.
+                let meta = match entry.metadata() {
+                    Ok(meta)                                                => meta,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound    => continue,
+                    Err(e) => return Err(err!(e,
+                        "Cannot read the size of data file {:?} while totalling the store's data \
+                        before a sweep.", path;
+                        IO, File, Read)),
+                };
                 total += meta.len();
             }
         }

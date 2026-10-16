@@ -33,7 +33,7 @@ use oxedyne_fe2o3_core::{
 };
 use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::Ink,
 	path::{
 		Bounds,
 		Path,
@@ -75,7 +75,7 @@ use std::sync::Arc;
 fn dot_page(number: u32, geom: PageGeometry) -> Outcome<Page> {
 	let fill	= res!(Path::rect(Bounds::new(0.0, 0.0, 20.0, 20.0)));
 	let graphic	= Graphic::new(
-		vec![DrawOp::Fill { path: fill, colour: Rgba::BLACK }],
+		vec![DrawOp::Fill { path: fill, colour: Ink::BLACK }],
 		Dims::new(Sp::from_pt(20.0), Sp::from_pt(20.0), Sp::ZERO));
 	let mut frame = Frame::new();
 	frame.push(Placed::new(

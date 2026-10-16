@@ -1,0 +1,2 @@
+// oracle: rejects
+$ foo(x) $

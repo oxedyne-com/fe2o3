@@ -111,6 +111,28 @@ impl<
         }
     }
 
+    /// The requester stops waiting for the reply, so that a bot that has handed it something it
+    /// must give back, such as a file's reader pin, can find out and take it back.  Returns what
+    /// arrived too late to be read, which the requester must give back itself.
+    pub fn give_up(&self) -> Outcome<Vec<OzoneMsg<UIDL, UID, ENC, KH>>> {
+        let mut late = Vec::new();
+        if let Some(chan) = self.channel() {
+            // Once closed, nothing more can be sent, so what is queued now is all there will be.
+            res!(chan.close());
+            loop {
+                match chan.try_recv() {
+                    Recv::Empty => break,
+                    Recv::Result(Ok(msg)) => late.push(msg),
+                    Recv::Result(Err(e)) => return Err(err!(e,
+                        "While collecting the replies that reached a responder after its \
+                        requester gave up.";
+                        Channel, Read)),
+                }
+            }
+        }
+        Ok(late)
+    }
+
     /// A receiver waiting for a complete `Dat` wrapped byte vector.  Also returns whether
     /// garbage collection has just been performed on the read file, during which time it is
     /// possible the value may have been updated.  This method does not assemble a `Dat`
@@ -145,34 +167,8 @@ impl<
                         // an "unexpected" error.
                         OzoneMsg::Value(Value::Complete(Some((dat, meta)), postgc)) |
                         OzoneMsg::Value(Value::Chunk(Some((dat, meta)), _, postgc)) => {
-                            // A deletion is stored as a tombstone value under the deleted key, and
-                            // the reader finds it exactly as it finds any other value.  A key whose
-                            // newest value is a tombstone has no value, so say so here, once, for
-                            // every caller: a deleted key reads as absent, indistinguishable from
-                            // one that was never written.  The tombstone is deliberately left
-                            // unencrypted so that it can be recognised without a key.
-                            if let Dat::Usr(kind, _) = &dat {
-                                if *kind == id::usr_kind_id_deleted() {
-                                    return Ok((None, postgc));
-                                }
-                            }
-                            let or_is_some = match or {
-                                Some(or) => or.is_some(),
-                                None => false,
-                            };
-                            if enc.is_none() && !or_is_some {
-                                return Ok((Some((dat, meta)), postgc));
-                            }
-                            let val = try_extract_dat!(dat, BU8, BU16, BU32, BU64);
-                            let plain = res!(enc.or_decrypt(&val, or));
-                            match Dat::from_bytes(&plain) {
-                                Err(e) => return Err(err!(e,
-                                    "Could not form a Dat from the value bytes, \
-                                    this could be due to the use of an encryption scheme \
-                                    differing from the one provided ({}).", enc.or_debug(or);
-                                    Decode, Bytes)),
-                                Ok((dat, _)) => return Ok((Some((dat, meta)), postgc)),
-                            }
+                            let dat = res!(decode_stored(dat, enc, or));
+                            Ok((dat.map(|dat| (dat, meta)), postgc))
                         },
                         OzoneMsg::Value(Value::Complete(None, _)) |
                         OzoneMsg::Value(Value::Chunk(None, ..)) => Ok((None, false)),
@@ -205,6 +201,97 @@ impl<
         }
     }
 
+    /// Waits for the answers to a store dispatched with this responder: the count of records it
+    /// was split into, then each record confirmed written and all of them confirmed durable.
+    /// Returns whether the key already held a value, and the number of records.
+    pub fn recv_store_ack(&self) -> Outcome<(bool, usize)> {
+        // The count is sent before anything is dispatched, so it is waiting already.
+        let n = match res!(self.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
+            OzoneMsg::Chunks(n) => n,
+            OzoneMsg::Error(e) => return Err(e),
+            msg => return Err(err!(
+                "Expected an OzoneMsg::Chunks counting the records of a store, received {:?}.", msg;
+                Channel, Unexpected)),
+        };
+        // Passed on as it is, not wrapped: its tags are the caller's only way to tell a write
+        // that landed unconfirmed (`Unconfirmed`) from one that did not, and a wrapper's tags are
+        // all that `Error::tags` reports.
+        let acks = ok!(self.recv_write_acks(
+            n,
+            constant::USER_REQUEST_TIMEOUT,
+            constant::DURABILITY_TIMEOUT,
+        ));
+        let mut exists = false;
+        for ack in acks {
+            match ack {
+                OzoneMsg::KeyExists(b)          => exists = b,
+                OzoneMsg::KeyChunkExists(b, 0)  => exists = b, // the bunch key
+                _ => (),
+            }
+        }
+        Ok((exists, n))
+    }
+
+    /// Waits for the answer to a delete dispatched with this responder, and returns whether the
+    /// key held a value.
+    pub fn recv_delete_ack(&self) -> Outcome<bool> {
+        // Passed on as it is, for its tags, as in `recv_store_ack`.
+        let acks = ok!(self.recv_write_acks(
+            1,
+            constant::USER_REQUEST_TIMEOUT,
+            constant::DURABILITY_TIMEOUT,
+        ));
+        match acks.first() {
+            Some(OzoneMsg::KeyExists(b)) => Ok(*b),
+            msg => Err(err!(
+                "Expected an OzoneMsg::KeyExists answering a delete, received {:?}.", msg;
+                Channel, Unexpected)),
+        }
+    }
+
+    /// Collects the final answers to `n` records written under this responder.  Each record is
+    /// first confirmed written, which is the writer's own work and so is held to `liveness`, and
+    /// then confirmed durable and readable, which waits on the disk and is held to `durability`.
+    /// Both deadlines measure silence, counted from the last answer of any kind: a value of many
+    /// chunks is not failed for taking long while its writers keep answering, nor a busy disk
+    /// for being slow while its barriers keep completing.
+    ///
+    /// Expiry of the first says a writer did not answer, so whether its record lands is unknown.
+    /// Expiry of the second says every record is written but not all are confirmed durable, which
+    /// is not a failure: the records are in the files and become durable, and readable, when the
+    /// disk completes them.  That, and every error a store sends about a record after writing it,
+    /// is tagged `Unconfirmed`, which nothing that fails a write before it lands is.
+    pub fn recv_write_acks(
+        &self,
+        n:          usize,
+        liveness:   Duration,
+        durability: Duration,
+    )
+        -> Outcome<Vec<OzoneMsg<UIDL, UID, ENC, KH>>>
+    {
+        let chan = match self.channel() {
+            Some(chan) => chan,
+            None => return Err(err!("This responder does not have a channel."; Channel, Missing)),
+        };
+        let mut wait = AckWait::new(n, liveness, durability);
+        while !wait.is_done() {
+            let left = wait.left();
+            if left.is_zero() {
+                return Err(wait.expired());
+            }
+            match chan.recv_timeout(left) {
+                Recv::Empty => (), // Out of time, which the next pass reports.
+                Recv::Result(Err(e)) => return Err(err!(e,
+                    "Could not read from responder channel.";
+                    Channel, Read)),
+                // Passed on as it is: the tags of an answer are the caller's only way to tell a
+                // write that landed unconfirmed from one that did not.
+                Recv::Result(Ok(msg)) => { ok!(wait.feed(msg)); },
+            }
+        }
+        Ok(wait.into_acks())
+    }
+
     /// Collect replies within a given time.
     pub fn recv_number(
         &self,
@@ -227,8 +314,11 @@ impl<
                         Recv::Result(Err(e)) => return Err(err!(e,
                             "Could not read from responder channel.";
                             Channel, Read)),
-                        Recv::Result(Ok(OzoneMsg::Finish)) => {
-                            continue; // Don't count Finish messages.
+                        // Neither is an answer: `Finish` trails one, and `Written` precedes a
+                        // write's final answer, which is what a caller counting answers wants.
+                        Recv::Result(Ok(OzoneMsg::Finish)) |
+                        Recv::Result(Ok(OzoneMsg::Written)) => {
+                            continue;
                         }
                         Recv::Result(Ok(msg)) => {
                             msgs.push(msg);
@@ -351,6 +441,94 @@ impl Default for Wait {
     }
 }
 
+/// The answers to `n` records written under one responder, taken one message at a time, so that
+/// a bot with other work to do can wait on them without blocking (`Responder::recv_write_acks`
+/// is this in a loop).  The deadlines are those of `recv_write_acks`, which describes them.
+pub struct AckWait<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+> {
+    n:          usize,
+    written:    usize,
+    acks:       Vec<OzoneMsg<UIDL, UID, ENC, KH>>,
+    heard:      Instant, // the last answer, or the start
+    liveness:   Duration,
+    durability: Duration,
+}
+
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+>
+    AckWait<UIDL, UID, ENC, KH>
+{
+    pub fn new(n: usize, liveness: Duration, durability: Duration) -> Self {
+        Self {
+            n,
+            written:    0,
+            acks:       Vec::with_capacity(n),
+            heard:      Instant::now(),
+            liveness,
+            durability,
+        }
+    }
+
+    /// Have all the final answers arrived?
+    pub fn is_done(&self) -> bool { self.acks.len() >= self.n }
+
+    /// The time left before the silence that fails the wait, zero once it has run out.
+    pub fn left(&self) -> Duration {
+        let deadline = if self.written < self.n { self.liveness } else { self.durability };
+        deadline.saturating_sub(self.heard.elapsed())
+    }
+
+    /// Takes in one message from the responder's channel, and says whether every answer is now
+    /// in.  An error a writer sent is returned as it stands.
+    pub fn feed(&mut self, msg: OzoneMsg<UIDL, UID, ENC, KH>) -> Outcome<bool> {
+        match msg {
+            OzoneMsg::Written => {
+                self.written += 1;
+                self.heard = Instant::now();
+            },
+            OzoneMsg::KeyExists(_) |
+            OzoneMsg::KeyChunkExists(..) => {
+                self.acks.push(msg);
+                self.heard = Instant::now();
+            },
+            OzoneMsg::Finish => (),
+            OzoneMsg::Error(e) => return Err(e),
+            msg => return Err(err!(
+                "Expected the answer to a write, received {:?}.", msg;
+                Channel, Unexpected)),
+        }
+        Ok(self.is_done())
+    }
+
+    /// The error for a wait whose silence has run out.
+    pub fn expired(&self) -> Error<ErrTag> {
+        if self.written < self.n {
+            return err!(
+                "{} of {} records of this write were confirmed written, and the writer \
+                holding the rest has said nothing for {:?}, so whether they land is not \
+                known.", self.written, self.n, self.liveness;
+                Channel, Timeout);
+        }
+        err!(
+            "All {} records of this write were written, but {} of them were not \
+            confirmed durable, the disk having completed nothing for {:?}.  The write \
+            has not failed: its records are in the store's files and become durable, \
+            and readable, when the disk completes them, unless the machine stops first.",
+            self.n, self.n - self.acks.len(), self.durability;
+            Write, Timeout, Unconfirmed)
+    }
+
+    pub fn into_acks(self) -> Vec<OzoneMsg<UIDL, UID, ENC, KH>> { self.acks }
+}
+
 impl Wait {
 
     pub fn new(
@@ -387,5 +565,44 @@ impl Wait {
             max_wait,
             check_interval: Duration::default(),
         }
+    }
+}
+
+/// A stored value as its writer gave it: `None` for the deleted marker, else the value,
+/// decrypted when a scheme is set.  The tombstone is deliberately left unencrypted so that it can
+/// be recognised without a key, but one found after decryption is absent too: `O3dbCas` and
+/// `O3dbStorage` wrote theirs through `store`, encrypted, until 2026-10-16.
+pub(crate) fn decode_stored<ENC: Encrypter>(
+    dat:    Dat,
+    enc:    &EncrypterDefAlt<EncryptionScheme, ENC>,
+    or:     Option<&Override<EncryptionScheme, ENC>>,
+)
+    -> Outcome<Option<Dat>>
+{
+    // A deletion is stored as a tombstone value under the deleted key, and the reader finds it
+    // exactly as it finds any other value.  A key whose newest value is a tombstone has no value,
+    // so say so here, once, for every caller: a deleted key reads as absent, indistinguishable
+    // from one that was never written.
+    if let Dat::Usr(kind, _) = &dat {
+        if *kind == id::usr_kind_id_deleted() {
+            return Ok(None);
+        }
+    }
+    let or_is_some = match or {
+        Some(or) => or.is_some(),
+        None => false,
+    };
+    if enc.is_none() && !or_is_some {
+        return Ok(Some(dat));
+    }
+    let val = try_extract_dat!(dat, BU8, BU16, BU32, BU64);
+    let plain = res!(enc.or_decrypt(&val, or));
+    match Dat::from_bytes(&plain) {
+        Err(e) => Err(err!(e,
+            "Could not form a Dat from the value bytes, this could be due to the use of an \
+            encryption scheme differing from the one provided ({}).", enc.or_debug(or);
+            Decode, Bytes)),
+        Ok((Dat::Usr(kind, _), _)) if kind == id::usr_kind_id_deleted() => Ok(None),
+        Ok((dat, _)) => Ok(Some(dat)),
     }
 }

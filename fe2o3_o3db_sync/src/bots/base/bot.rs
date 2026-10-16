@@ -1,5 +1,6 @@
 use crate::{
     prelude::*,
+    bots::worker::bot::WorkerType,
     base::{
         cfg::OzoneConfig,
         id::{
@@ -13,6 +14,7 @@ use crate::{
         msg::OzoneMsg,
         response::Responder,
     },
+    file::floc::FileNum,
 };
 
 use oxedyne_fe2o3_bot::{
@@ -96,8 +98,20 @@ pub trait OzoneBot<
         result: Outcome<OzoneMsg<UIDL, UID, ENC, KH>>,
         resp:   &Responder<UIDL, UID, ENC, KH>,
     ) {
+        let _ = self.try_respond(result, resp);
+    }
+
+    /// As `respond`, and says whether the reply went to a requester still waiting for it, which is
+    /// the question a bot that has given the requester something to give back must ask.
+    fn try_respond(
+        &self,
+        result: Outcome<OzoneMsg<UIDL, UID, ENC, KH>>,
+        resp:   &Responder<UIDL, UID, ENC, KH>,
+    )
+        -> bool
+    {
         match resp.channel() {
-            None => return,
+            None => return false,
             Some(simplex) => {
                 let msg = match result {
                     Err(e) => OzoneMsg::Error(e),
@@ -107,11 +121,44 @@ pub trait OzoneBot<
                     "While trying to return a msg {:?} via a responder for ticket {}",
                     msg, resp.ticket(),
                 );
-                if let Err(e) = simplex.send(msg) {
-                    self.err_cannot_send(err!(e, "{}", err_msg; Channel, Write));
+                match simplex.send_if_open(msg) {
+                    Ok(sent) => sent,
+                    Err(e) => {
+                        self.err_cannot_send(err!(e, "{}", err_msg; Channel, Write));
+                        false
+                    },
                 }
             },
         }
+    }
+
+    /// Tells every rbot to drop its cached handle on the given files, because a collection has
+    /// just renamed new ones over them or compaction has deleted them, and a handle left on a
+    /// deleted file keeps its bytes allocated on the disk.  Every pool in every zone is told: a
+    /// file number is only unique within a zone, so a same-numbered file elsewhere is invalidated
+    /// needlessly, but that costs one reopen and keeps the notice independent of which zone a
+    /// reader serves.
+    fn notify_file_replaced(
+        &self,
+        fnum:   FileNum,
+        typs:   &[FileType],
+    )
+        -> Outcome<()>
+    {
+        for pool in self.chans().get_all_workers_of_type(&WorkerType::Reader) {
+            for i in 0..pool.len() {
+                let bot = res!(pool.get_bot(i));
+                for typ in typs {
+                    if let Err(e) = bot.send(OzoneMsg::FileReplaced(fnum, typ.clone())) {
+                        return Err(err!(e,
+                            "{}: Cannot tell rbot {} that {:?} file {} has been replaced.",
+                            self.ozid(), i, typ, fnum;
+                            Channel, Write));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Message handling common to all Ozone bots.
