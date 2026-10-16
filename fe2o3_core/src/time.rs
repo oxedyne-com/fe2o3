@@ -139,18 +139,18 @@ pub enum ClockSource {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct Driven {
-    path:   PathBuf,
-    last:   AtomicU64,  // Highest millisecond value returned
-    last_ns:AtomicU64,  // Last now_nanos value returned, u64 until 2554
+    path:		PathBuf,
+    last:		AtomicU64,	// Highest millisecond value returned
+    last_ns:	AtomicU64,	// Last now_nanos value returned, u64 until 2554
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Driven {
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
         Self {
-            path:   path.into(),
-            last:   AtomicU64::new(0),
-            last_ns:AtomicU64::new(0),
+            path:		path.into(),
+            last:		AtomicU64::new(0),
+            last_ns:	AtomicU64::new(0),
         }
     }
 
@@ -182,7 +182,8 @@ impl Driven {
             let next = match prev.checked_add(1) {
                 Some(p1)    => cand.max(p1),
                 None        => return Err(err!(
-                    "Driven clock nanosecond counter is exhausted at {}.", prev;
+                    "Driven clock file {:?}: the nanosecond counter is exhausted at {}.",
+                    self.path, prev;
                 Overflow)),
             };
             match self.last_ns.compare_exchange_weak(
@@ -266,6 +267,26 @@ impl ClockSource {
             Self::System    => Ok(crate::wasm::now_ms() as u64),
             #[cfg(not(target_arch = "wasm32"))]
             Self::Driven(d) => d.read_millis(),
+        }
+    }
+
+    /// The time as a `SystemTime`, for code that keeps `SystemTime` stamps.  For
+    /// `Driven`, the file's milliseconds after the epoch.  Native only, since
+    /// `SystemTime::now` is unavailable on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn now_system_time(&self) -> Outcome<SystemTime> {
+        match self {
+            Self::System    => Ok(SystemTime::now()),
+            Self::Driven(d) => {
+                let ms = res!(d.read_millis());
+                match UNIX_EPOCH.checked_add(Duration::from_millis(ms)) {
+                    Some(t) => Ok(t),
+                    None    => Err(err!(
+                        "Driven clock file {:?} holds {} ms, beyond what SystemTime \
+                        can represent.", d.path, ms;
+                    Invalid, Input, Overflow)),
+                }
+            }
         }
     }
 
