@@ -229,9 +229,9 @@ struct PeerState {
     failing_at:         Option<Instant>,    // first seen failing, so a recovery can say how long
     told_at:            Option<Instant>,    // last told down, so a lasting outage reminds not streams
     told_n:             u32,                // reminders of this outage so far, to pick the next gap
-    // Consecutive over-threshold readings while still `Up`, so distress needs the same run of
-    // agreeing evidence that a death does before it wakes anyone.
-    distress_rising:    u32,
+    // Each class's consecutive over-threshold readings, so distress needs a run of agreeing
+    // evidence, as a death does, and a class whose bursts are routine can be made to need more.
+    runs:               BTreeMap<String, u32>,
     distress_at:        Option<Instant>,    // when the distress run began, for the recovery line
     distress_told_at:   Option<Instant>,    // last told distressed, for the repeat cadence
     distress_told_n:    u32,                // reminders of this distress so far
@@ -244,7 +244,7 @@ impl Default for PeerState {
             failing_at:         None,
             told_at:            None,
             told_n:             0,
-            distress_rising:    0,
+            runs:               BTreeMap::new(),
             distress_at:        None,
             distress_told_at:   None,
             distress_told_n:    0,
@@ -304,6 +304,50 @@ fn is_below_clear(peer: &WatchPeer, body: &HealthBody) -> bool {
         }
     }
     true
+}
+
+/// Classes whose readings are bursty by nature, and the consecutive readings each must stay over
+/// its threshold before it is distress, where a peer's `sustain` map does not say.
+///
+/// `dropped_1m` counts connections the shield refused: a scanner's burst is the shield working,
+/// not a peer in trouble. Ten minutes at the usual round. (16 Oct 2026: a scanner's bursts at
+/// birch, 215 a minute, were told as distress, and the mail telling it was refused.)
+pub(crate) const SUSTAIN_DEFAULTS: &[(&str, u32)] = &[
+    ("dropped_1m",  10),
+];
+
+/// The consecutive over-threshold readings `field` needs before it is distress.
+fn sustain_of(peer: &WatchPeer, field: &str, threshold: u32) -> u32 {
+    if let Some(n) = peer.sustain.get(field) {
+        return (*n).max(1) as u32;
+    }
+    SUSTAIN_DEFAULTS.iter()
+        .find(|(f, _)| *f == field)
+        .map(|(_, n)| *n)
+        .unwrap_or(threshold)
+}
+
+/// Fold one reading's breaching classes into the per-class runs, returning those that have now
+/// been over long enough to be distress. A class not breaching loses its run.
+fn sustained(
+    peer:       &WatchPeer,
+    runs:       &mut BTreeMap<String, u32>,
+    breaching:  &[(String, i64)],
+    threshold:  u32,
+)
+    -> Vec<(String, i64)>
+{
+    let mut next = BTreeMap::new();
+    let mut out = Vec::new();
+    for (field, v) in breaching {
+        let n = runs.get(field).copied().unwrap_or(0).saturating_add(1);
+        next.insert(field.clone(), n);
+        if n >= sustain_of(peer, field, threshold) {
+            out.push((field.clone(), *v));
+        }
+    }
+    *runs = next;
+    out
 }
 
 /// The firing classes as one line for an alarm, e.g. `mem_pct 94, swap_pct 71`.
@@ -852,31 +896,30 @@ fn decide(
                 if !have_reading {
                     // Healthy liveness, nothing to assess.
                     st.health = Health::Up { failures: 0 };
-                    st.distress_rising = 0;
+                    st.runs.clear();
                     return out;
                 }
-                if breaching.is_empty() {
-                    // Under threshold: the rising run is broken.
-                    st.distress_rising = 0;
-                    st.health = Health::Up { failures: 0 };
-                    return out;
-                }
-                // Over threshold: distress needs the same run of agreeing evidence a death does.
-                st.distress_rising += 1;
-                if st.distress_rising >= threshold {
-                    st.health = Health::Distressed { over: st.distress_rising, failures: 0 };
+                // Over threshold: distress needs a run of agreeing evidence, as a death does.
+                let over = sustained(peer, &mut st.runs, &breaching, threshold);
+                if !over.is_empty() {
+                    let run = st.runs.values().copied().max().unwrap_or(0);
+                    st.health = Health::Distressed { over: run, failures: 0 };
                     st.distress_at = Some(now);
                     st.distress_told_at = Some(now);
                     st.distress_told_n = 0;
                     out.push(AlertEvent::PeerDistress {
                         peer:       name.clone(),
                         url:        url.clone(),
-                        classes:    classes_text(&breaching),
+                        classes:    classes_text(&over),
                         since_secs: 0,
                         noticed_by: whoami.to_string(),
                     });
                 } else {
                     st.health = Health::Up { failures: 0 };
+                    if !breaching.is_empty() {
+                        info!("Watch: {} over ({}), not yet sustained; no alert.",
+                            name, classes_text(&breaching));
+                    }
                 }
             },
             Health::Distressed { over, .. } => {
@@ -886,6 +929,13 @@ fn decide(
                 let cleared = match &body {
                     Some(b) if watches_distress => is_below_clear(peer, b),
                     _ => false,
+                };
+                // Reminders name only the classes that are sustained, so a burst in a bursty
+                // class during another's episode is not told as part of it.
+                let over_now = match &body {
+                    Some(_) if watches_distress =>
+                        sustained(peer, &mut st.runs, &breaching, threshold),
+                    _ => Vec::new(),
                 };
                 if cleared {
                     let were = st.distress_at
@@ -904,7 +954,7 @@ fn decide(
                     let gap = reminder_gap(repeat, st.distress_told_n);
                     let due = st.distress_told_at
                         .map(|t| now.duration_since(t) >= gap).unwrap_or(true);
-                    if due && !breaching.is_empty() {
+                    if due && !over_now.is_empty() {
                         st.distress_told_at = Some(now);
                         st.distress_told_n = st.distress_told_n.saturating_add(1);
                         let since = st.distress_at
@@ -912,7 +962,7 @@ fn decide(
                         out.push(AlertEvent::PeerDistress {
                             peer:       name.clone(),
                             url:        url.clone(),
-                            classes:    classes_text(&breaching),
+                            classes:    classes_text(&over_now),
                             since_secs: since,
                             noticed_by: whoami.to_string(),
                         });
@@ -1011,6 +1061,7 @@ mod tests {
             distress: BTreeMap::new(),
             clear:    BTreeMap::new(),
             token:    None,
+            sustain:  BTreeMap::new(),
             repeat_secs: None,
             speaks:   true,
         }
@@ -1803,5 +1854,53 @@ mod tests {
         ];
         assert_eq!(distress_unheard(&peers, false), vec![fmt!("jarrah")]);
         assert!(distress_unheard(&peers, true).is_empty());
+    }
+
+    /// A shield-drop burst is the shield working, not distress: `dropped_1m` must stay over its
+    /// threshold for ten rounds running before the peer is called distressed, and a break in the
+    /// run starts it again. Memory beside it keeps the ordinary run of three. (16 Oct 2026: a
+    /// scanner's bursts at birch, dropped_1m 215, were told as distress.)
+    #[test]
+    fn a_drop_burst_is_not_distress_until_it_is_sustained() {
+        let peer = distress_peer("birch",
+            &[("dropped_1m", 60), ("mem_pct", 90)], &[("dropped_1m", 0), ("mem_pct", 80)]);
+        let mut st = PeerState::default();
+        let now = Instant::now();
+        let burst = body_of(&[("dropped_1m", 215), ("mem_pct", 40)]);
+        let calm = body_of(&[("dropped_1m", 0), ("mem_pct", 40)]);
+
+        // Nine minutes of bursts, a quiet minute, nine more: never distress.
+        for round in 0..19 {
+            let b = if round == 9 { calm.clone() } else { burst.clone() };
+            let ev = decide(3, "karri", &peer, &mut st, true, Some(b), &[900], now);
+            assert!(ev.is_empty(), "a drop burst was told as distress at round {}", round);
+            assert!(matches!(st.health, Health::Up { .. }));
+        }
+        // The tenth minute running is sustained, and only dropped_1m is named.
+        let ev = decide(3, "karri", &peer, &mut st, true, Some(burst.clone()), &[900], now);
+        assert_eq!(kinds(&ev), vec!["distress"]);
+        match &ev[0] {
+            AlertEvent::PeerDistress { classes, .. } => assert_eq!(classes, "dropped_1m 215"),
+            other => panic!("expected distress, got {:?}", other),
+        }
+
+        // Memory keeps the run of three.
+        let mut st = PeerState::default();
+        let hot = body_of(&[("dropped_1m", 0), ("mem_pct", 95)]);
+        for _ in 0..2 {
+            assert!(decide(3, "karri", &peer, &mut st, true, Some(hot.clone()), &[900], now)
+                .is_empty());
+        }
+        let ev = decide(3, "karri", &peer, &mut st, true, Some(hot), &[900], now);
+        assert_eq!(kinds(&ev), vec!["distress"]);
+
+        // A peer's own `sustain` overrides the default.
+        let mut quick = peer.clone();
+        quick.sustain.insert(fmt!("dropped_1m"), 2);
+        let mut st = PeerState::default();
+        assert!(decide(3, "karri", &quick, &mut st, true, Some(burst.clone()), &[900], now)
+            .is_empty());
+        let ev = decide(3, "karri", &quick, &mut st, true, Some(burst), &[900], now);
+        assert_eq!(kinds(&ev), vec!["distress"]);
     }
 }

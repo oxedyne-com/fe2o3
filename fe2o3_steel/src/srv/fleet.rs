@@ -383,6 +383,7 @@ mod tests {
                 distress:   BTreeMap::new(),
                 clear:      BTreeMap::new(),
                 token:      Some(fmt!("secret")),
+                sustain:    BTreeMap::new(),
                 repeat_secs: None,
                 speaks:      true,
             });

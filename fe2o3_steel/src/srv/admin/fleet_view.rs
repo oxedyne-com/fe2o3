@@ -658,6 +658,7 @@ mod tests {
             distress:   [(fmt!("mem_pct"), 90)].into_iter().collect(),
             clear:      [(fmt!("mem_pct"), 75)].into_iter().collect(),
             token:      token.map(|t| t.to_string()),
+            sustain:    BTreeMap::new(),
             repeat_secs: None,
             speaks:      true,
         };
@@ -763,6 +764,7 @@ mod tests {
             distress:   distress.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             clear:      clear.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             token:      Some(fmt!("the-mesh-token")),
+            sustain:    BTreeMap::new(),
             repeat_secs: None,
             speaks:      true,
         };

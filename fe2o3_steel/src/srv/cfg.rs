@@ -2311,6 +2311,11 @@ pub struct WatchPeer {
     // a peer enters distress at `distress` and leaves it only under `clear`. A field named in
     // `distress` but not here uses its distress value as the clear boundary, i.e. no dead-band.
     pub clear:    BTreeMap<String, i64>,
+    // Health-body field -> the consecutive over-threshold readings before that class is distress,
+    // in place of `watch.fail_threshold`. A field absent here takes its default from
+    // `crate::srv::watch::SUSTAIN_DEFAULTS` -- `dropped_1m` 10, since a burst of shield drops is
+    // the shield working -- and otherwise `fail_threshold`.
+    pub sustain:  BTreeMap<String, i64>,
     // The shared secret to present in the `x-steel-health-token` header, so the peer serves its
     // body rather than a 404. `None` sends no header and reads only liveness. Supports
     // `{file:...}`, resolved at start-up.
@@ -2555,6 +2560,7 @@ impl WatchConfig {
                 };
                 let distress = res!(thresholds("distress"));
                 let clear = res!(thresholds("clear"));
+                let sustain = res!(thresholds("sustain"));
                 let token = match pm.get(&dat!("token")) {
                     Some(Dat::Str(s)) if !s.is_empty() => Some(s.clone()),
                     _ => None,
@@ -2567,7 +2573,8 @@ impl WatchConfig {
                 // Absent means true: silence must be written down, never fallen into.
                 let speaks = !matches!(pm.get(&dat!("speaks")), Some(Dat::Bool(false)));
                 out.peers.push(WatchPeer {
-                    name, host, url, plain_ok, distress, clear, token, repeat_secs, speaks,
+                    name, host, url, plain_ok, distress, clear, sustain, token, repeat_secs,
+                    speaks,
                 });
             }
         }

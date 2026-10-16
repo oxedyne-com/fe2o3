@@ -95,6 +95,10 @@ const SMS_TIMEOUT: Duration = Duration::from_secs(30);
 // The SMTP client holds each step to its own deadline; this bounds the whole leg.
 const MAIL_TIMEOUT: Duration = Duration::from_secs(120);
 
+// One SMS part in the GSM 7-bit alphabet. A text longer than this is sent as several, each
+// charged, and some handsets show the parts out of order.
+const SMS_PART: usize = 160;
+
 /// A way this host reaches its operator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Channel {
@@ -204,6 +208,7 @@ pub enum AlertEvent {
         channel:    Channel,
         reason:     String,     // the provider's own words, from the latest failure
         missed:     String,     // the subject of the latest alert this channel lost
+        missed_text: String,    // that alert's one-line form, which a text falls back to
         failures:   u32,        // consecutive failed deliveries
         since_secs: u64,        // since the first of them
     },
@@ -288,6 +293,11 @@ impl AlertEvent {
             Self::PeerRecovered { peer, .. }    => fmt!("{} is back", peer),
             Self::Heartbeat { peers_ok, peers_total, .. } => fmt!(
                 "{}: alerting alive, {}/{} ok", host, peers_ok, peers_total),
+            // Mail failing reaches the phone in place of the alert it lost, so the text is that
+            // alert, with the failure as a suffix: told only that mail fails, the operator learns
+            // nothing about what happened.
+            Self::ChannelFailing { channel: Channel::Mail, missed_text, failures, .. }
+                if !missed_text.is_empty() => fit_text(missed_text, &mail_failing(*failures)),
             Self::ChannelFailing { channel, .. } => fmt!(
                 "{}: {} FAILING", host, channel.alerts()),
             Self::ChannelRestored { channel, .. } => fmt!(
@@ -417,7 +427,7 @@ impl AlertEvent {
                 the alerting is what has failed, not the estate.\n",
                 host = host, days = uptime_secs / 86400,
                 ok = peers_ok, total = peers_total),
-            Self::ChannelFailing { channel, reason, missed, failures, since_secs } => fmt!(
+            Self::ChannelFailing { channel, reason, missed, failures, since_secs, .. } => fmt!(
                 "Alerts from {host} are not getting through by {by}.\n\n\
                 Failed:    {failures} in a row, over {mins} minute(s)\n\
                 Last lost: {missed}\n\
@@ -507,7 +517,7 @@ impl ChannelBook {
     /// Fold one delivery's outcome into the book, returning the report it is owed, if any.
     ///
     /// `failure` is the provider's words for a failed delivery and `None` for a success;
-    /// `missed` is the subject of the alert concerned. The first failure of a run is reported,
+    /// `missed` is the alert concerned. The first failure of a run is reported,
     /// then one each [`CHANNEL_REMIND`] while the run lasts, and the first success after it
     /// ends the run with a report of its own. Each of those happens once, which is what stops a
     /// report whose own delivery fails from setting off another.
@@ -515,7 +525,8 @@ impl ChannelBook {
         &mut self,
         ch:         Channel,
         failure:    Option<&str>,
-        missed:     &str,
+        missed:     &AlertEvent,
+        host:       &str,
         now:        Instant,
     )
         -> Option<AlertEvent>
@@ -541,7 +552,8 @@ impl ChannelBook {
                 Some(AlertEvent::ChannelFailing {
                     channel:    ch,
                     reason:     why.to_string(),
-                    missed:     missed.to_string(),
+                    missed:     missed.subject(host),
+                    missed_text: missed.short(host),
                     failures:   1,
                     since_secs: 0,
                 })
@@ -555,7 +567,8 @@ impl ChannelBook {
                 Some(AlertEvent::ChannelFailing {
                     channel:    ch,
                     reason:     why.to_string(),
-                    missed:     missed.to_string(),
+                    missed:     missed.subject(host),
+                    missed_text: missed.short(host),
                     failures:   f.failures,
                     since_secs: now.saturating_duration_since(f.since).as_secs(),
                 })
@@ -725,6 +738,37 @@ impl Alerter {
         }
     }
 
+    /// The channels a channel report goes by, given whether the alert it reports was texted.
+    ///
+    /// A mail failure is texted in place of the alert it lost, and only when that alert was
+    /// not texted already: an alert goes to the phone once. One that was texted has been told,
+    /// and while mail stays down every text says so (see [`Self::text_of`]).
+    fn owed(&self, report: &AlertEvent, texted: bool) -> Route {
+        let mut r = self.route(report);
+        if texted && matches!(report, AlertEvent::ChannelFailing { channel: Channel::Mail, .. }) {
+            r.sms = false;
+        }
+        r
+    }
+
+    /// Is mail in a run of failed deliveries?
+    fn mail_failing(&self) -> Option<u32> {
+        let book = lock_mutex_or_recover!(self.channels,
+            "The alerter's channel book was poisoned; carrying on with what it held.");
+        book.mail.as_ref().map(|f| f.failures)
+    }
+
+    /// The text an event is sent as: its one-line form, with a suffix while mail is failing so
+    /// the operator knows the mail behind it will not come.
+    fn text_of(&self, event: &AlertEvent) -> String {
+        let text = event.short(&self.host);
+        match (event, self.mail_failing()) {
+            (AlertEvent::ChannelFailing { channel: Channel::Mail, .. }, _) => text,
+            (_, Some(n))    => fit_text(&text, &mail_failing(n)),
+            (_, None)       => text,
+        }
+    }
+
     /// Send an alert, without blocking the caller.
     ///
     /// Delivery runs on its own task. The request path must never wait on an
@@ -736,6 +780,10 @@ impl Alerter {
     /// recipient, is logged as an error rather than dropped: it is an alert nobody will get.
     pub fn raise(&self, event: AlertEvent) {
         let route = self.route(&event);
+        self.raise_by(event, route);
+    }
+
+    fn raise_by(&self, event: AlertEvent, route: Route) {
         if route.is_empty() {
             fault!("ALERT NOT DELIVERED: no channel on this host carries it. {} goes by {}, \
                 and this host has {}. The event still happened: {}",
@@ -786,9 +834,9 @@ impl Alerter {
                     Network, Timeout)),
             };
             match sent {
-                Ok(()) => self.settle(Channel::Mail, None, &event),
+                Ok(()) => self.settle(Channel::Mail, None, &event, route.sms),
                 Err(e) => {
-                    self.settle(Channel::Mail, Some(e.plain()), &event);
+                    self.settle(Channel::Mail, Some(e.plain()), &event, route.sms);
                     // Log loudly. This is the case where the operator believes they are
                     // covered and are not.
                     error!(e, "ALERT NOT DELIVERED BY MAIL. The event still happened: {}",
@@ -802,9 +850,9 @@ impl Alerter {
                 return;
             }
             match self.send_sms(&event).await {
-                Ok(()) => self.settle(Channel::Sms, None, &event),
+                Ok(()) => self.settle(Channel::Sms, None, &event, route.sms),
                 Err(e) => {
-                    self.settle(Channel::Sms, Some(e.plain()), &event);
+                    self.settle(Channel::Sms, Some(e.plain()), &event, route.sms);
                     error!(e, "ALERT NOT DELIVERED BY SMS. The event still happened: {}",
                         event.subject(&self.host));
                 },
@@ -815,14 +863,23 @@ impl Alerter {
 
     /// Record how a channel did, and raise the report that is owed: a channel that has started
     /// failing, is still failing a day on, or has just recovered is told through the others.
-    fn settle(&self, ch: Channel, failure: Option<String>, event: &AlertEvent) {
+    /// `texted` says whether `event` went by text as well, which decides whether a mail failure
+    /// is owed a text of its own.
+    fn settle(&self, ch: Channel, failure: Option<String>, event: &AlertEvent, texted: bool) {
         let report = {
             let mut book = lock_mutex_or_recover!(self.channels,
                 "The alerter's channel book was poisoned; carrying on with what it held.");
-            book.note(ch, failure.as_deref(), &event.subject(&self.host), Instant::now())
+            book.note(ch, failure.as_deref(), event, &self.host, Instant::now())
         };
         if let Some(r) = report {
-            self.raise(r);
+            let route = self.owed(&r, texted);
+            if route.is_empty() && texted {
+                warn!("Alert mail is failing, and the alert it lost was texted already, so no \
+                    second text is sent; texts carry \"mail failing\" until mail works: {}",
+                    r.subject(&self.host));
+                return;
+            }
+            self.raise_by(r, route);
         }
     }
 
@@ -860,7 +917,7 @@ impl Alerter {
             Configuration, Missing)));
 
         let cred = Credential { user: &user, secret: &secret };
-        let text = event.short(&self.host);
+        let text = self.text_of(event);
         let mut outcomes = Vec::with_capacity(sms.to.len());
         for to in &sms.to {
             let got = text_one(sms, &cred, to, &text, tls.clone()).await;
@@ -995,6 +1052,25 @@ impl Alerter {
     }
 }
 
+
+/// The suffix a text carries while alert mail is failing.
+fn mail_failing(failures: u32) -> String {
+    if failures > 1 {
+        fmt!(" (mail failing, {} lost)", failures)
+    } else {
+        fmt!(" (mail failing)")
+    }
+}
+
+/// `text` with `suffix`, the text shortened as needed so the whole is one SMS part.
+fn fit_text(text: &str, suffix: &str) -> String {
+    let room = SMS_PART.saturating_sub(suffix.chars().count());
+    if text.chars().count() <= room {
+        return fmt!("{}{}", text, suffix);
+    }
+    let cut: String = text.chars().take(room.saturating_sub(3)).collect();
+    fmt!("{}...{}", cut.trim_end(), suffix)
+}
 
 /// Dial the gateway for one number and read its answer, which is a receipt only when the
 /// gateway took the message.
@@ -1329,11 +1405,17 @@ mod tests {
         }
     }
 
+    // A stand-in for the alert a channel lost, told apart by its count.
+    fn lost(n: usize) -> AlertEvent {
+        AlertEvent::SealedStart { db_count: n }
+    }
+
     fn failing(channel: Channel) -> AlertEvent {
         AlertEvent::ChannelFailing {
             channel,
             reason:     fmt!("refused"),
             missed:     fmt!("[steel:karri] jarrah IS DOWN (3m)"),
+            missed_text: fmt!("jarrah is DOWN"),
             failures:   1,
             since_secs: 0,
         }
@@ -1382,7 +1464,7 @@ mod tests {
         // The report goes by mail, never by the channel that refused, and says why.
         let both = alerter_with(true, true);
         let mut book = ChannelBook::default();
-        let report = match book.note(Channel::Sms, Some(&words), subject, Instant::now()) {
+        let report = match book.note(Channel::Sms, Some(&words), &jarrah_down(), "karri", Instant::now()) {
             Some(r) => r,
             None => panic!("the first refusal of a run owes a report"),
         };
@@ -1401,10 +1483,10 @@ mod tests {
         let at = |s: u64| t0 + Duration::from_secs(s);
         let why = "clicksend refused the message: INSUFFICIENT_CREDIT";
 
-        assert!(book.note(Channel::Sms, None, "x", t0).is_none(), "a working channel owes nothing");
-        match book.note(Channel::Sms, Some(why), "[steel:karri] jarrah IS DOWN (3m)", at(60)) {
+        assert!(book.note(Channel::Sms, None, &lost(0), "karri", t0).is_none(), "a working channel owes nothing");
+        match book.note(Channel::Sms, Some(why), &jarrah_down(), "karri", at(60)) {
             Some(AlertEvent::ChannelFailing {
-                channel: Channel::Sms, reason, missed, failures: 1, since_secs: 0,
+                channel: Channel::Sms, reason, missed, failures: 1, since_secs: 0, ..
             }) => {
                 assert_eq!(reason, why);
                 assert_eq!(missed, "[steel:karri] jarrah IS DOWN (3m)");
@@ -1412,22 +1494,22 @@ mod tests {
             other => panic!("the first failure must be reported, got {:?}", other),
         }
         for i in 2..10u64 {
-            assert!(book.note(Channel::Sms, Some(why), "x", at(60 + i * 900)).is_none(),
+            assert!(book.note(Channel::Sms, Some(why), &lost(0), "karri", at(60 + i * 900)).is_none(),
                 "failure {} of a run already told was reported again", i);
         }
-        assert!(book.note(Channel::Mail, None, "x", at(9_000)).is_none(),
+        assert!(book.note(Channel::Mail, None, &lost(0), "karri", at(9_000)).is_none(),
             "mail working says nothing about the texts");
-        match book.note(Channel::Sms, Some(why), "y", at(60 + 86_400)) {
+        match book.note(Channel::Sms, Some(why), &lost(2), "karri", at(60 + 86_400)) {
             Some(AlertEvent::ChannelFailing { failures: 10, since_secs: 86_400, missed, .. }) =>
-                assert_eq!(missed, "y", "a reminder names the latest alert lost"),
+                assert_eq!(missed, lost(2).subject("karri"), "a reminder names the latest alert lost"),
             other => panic!("a day on, a failure must remind, got {:?}", other),
         }
-        assert!(book.note(Channel::Sms, Some(why), "z", at(60 + 86_401)).is_none());
-        match book.note(Channel::Sms, None, "w", at(60 + 90_000)) {
+        assert!(book.note(Channel::Sms, Some(why), &lost(3), "karri", at(60 + 86_401)).is_none());
+        match book.note(Channel::Sms, None, &lost(4), "karri", at(60 + 90_000)) {
             Some(AlertEvent::ChannelRestored { channel: Channel::Sms, lost: 11, were_secs: 90_000 }) => (),
             other => panic!("the first success after a run must close it, got {:?}", other),
         }
-        assert!(book.note(Channel::Sms, None, "v", at(60 + 90_060)).is_none(), "the run is over");
+        assert!(book.note(Channel::Sms, None, &lost(5), "karri", at(60 + 90_060)).is_none(), "the run is over");
     }
 
     /// Mail when there is a recipient, a text for what is critical, and never the channel whose
@@ -1508,8 +1590,9 @@ mod tests {
 
     /// THE STALL THAT WAS D-06 A2: the relay takes the connection and never speaks, as a wedged
     /// karri would while its kernel still completes handshakes. The text leg must settle while
-    /// the mail leg is still waiting, not after it; the mail leg must then end as a failure; and
-    /// that failure must be told by text. The text leg fails here for want of an outbound TLS
+    /// the mail leg is still waiting, not after it; and the mail leg must then end as a failure.
+    /// That failure is not texted: the alert went by text already, and an alert goes to the
+    /// phone once (16 Oct 2026). The text leg fails here for want of an outbound TLS
     /// client, a failure met before any gateway is asked, which is enough to show it ran.
     #[test]
     fn test_a_stuck_mail_leg_does_not_delay_the_text_leg_00() {
@@ -1565,17 +1648,18 @@ mod tests {
                 "the text leg settled only after the mail leg had ended, {:?} in: it waited \
                 behind a relay that never spoke", start.elapsed());
 
-            // The mail leg ends, as a failure, and the failure is told by the other channel.
+            // The mail leg ends, as a failure, and no second text follows for this alert.
             loop {
-                let (mail, sms) = book(&a);
-                let told = sms.map(|f| f.failures >= 2).unwrap_or(false);
-                if (mail.is_some() && told) || Instant::now() > deadline {
+                let (mail, _) = book(&a);
+                if mail.is_some() || Instant::now() > deadline {
                     assert!(mail.is_some(), "the stuck mail leg never ended");
-                    assert!(told, "the failing mail was not told by text");
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let texts = book(&a).1.map(|f| f.failures).unwrap_or(0);
+            assert_eq!(texts, 1, "the failing mail of an alert already texted was texted again");
         });
     }
 
@@ -1592,5 +1676,75 @@ mod tests {
             assert!(!body.to_lowercase().contains(bait),
                 "the alert must not carry an authorising link ({})", bait);
         }
+    }
+
+    /// birch's distress, 16 Oct 2026: the mail carrying it failed, and the text that fell back
+    /// for it must carry the alert itself -- host, condition and value -- in one SMS part, with
+    /// the failing mail as a suffix rather than the whole message.
+    #[test]
+    fn test_a_failed_mail_falls_back_to_a_text_of_the_alert_00() {
+        let distress = AlertEvent::PeerDistress {
+            peer:       fmt!("birch steel host (forge)"),
+            url:        fmt!("https://oregami.oxegen.io/_steel/health"),
+            classes:    fmt!("dropped_1m 215"),
+            since_secs: 0,
+            noticed_by: fmt!("karri"),
+        };
+        let mut book = ChannelBook::default();
+        let why = "550 5.7.1 Gmail has detected that this message is likely suspicious";
+        let report = match book.note(Channel::Mail, Some(why), &distress, "karri",
+            Instant::now())
+        {
+            Some(r) => r,
+            None => panic!("the first mail failure of a run owes a report"),
+        };
+        let both = alerter_with(true, true);
+        assert_eq!(both.route(&report), Route { mail: false, sms: true });
+        let text = report.short("karri");
+        assert!(text.contains("birch steel host (forge)") && text.contains("distress")
+            && text.contains("dropped_1m 215"),
+            "the text must carry the alert itself: {}", text);
+        assert!(text.contains("mail failing"), "the text must say the mail failed: {}", text);
+        assert!(!text.starts_with("karri: alert mail"), "the failure is a suffix: {}", text);
+        assert!(text.chars().count() <= SMS_PART, "{} chars: {}", text.chars().count(), text);
+        assert_eq!(text, "[steel:karri] birch steel host (forge) in distress (dropped_1m 215) \
+            (mail failing)");
+
+        // Through a stub gateway call, never dialled: the request carries that text.
+        let cred = Credential { user: "u", secret: "s" };
+        let m = SmsMessage { to: "+61400000000", from: "", body: &text };
+        match SmsProvider::ClickSend.request(&cred, &m) {
+            Ok(call) => assert!(String::from_utf8_lossy(&call.body).contains("dropped_1m 215"),
+                "the gateway request lost the alert"),
+            Err(e) => panic!("request: {}", e),
+        }
+
+        // A long alert is cut to fit one part, the suffix kept whole.
+        let long = fit_text(&"x".repeat(300), &mail_failing(4));
+        assert_eq!(long.chars().count(), SMS_PART);
+        assert!(long.ends_with("... (mail failing, 4 lost)"), "{}", long);
+    }
+
+    /// An alert goes to the phone once. A critical alert texted already owes no second text
+    /// when its mail fails; while mail stays down, the next texts say so instead.
+    #[test]
+    fn test_a_texted_alert_is_not_texted_again_when_its_mail_fails_00() {
+        let both = alerter_with(true, true);
+        let down = jarrah_down();
+        assert_eq!(both.route(&down), Route { mail: true, sms: true });
+        let report = {
+            let mut book = match both.channels.lock() {
+                Ok(g) => g,
+                Err(_) => panic!("lock"),
+            };
+            match book.note(Channel::Mail, Some("550 refused"), &down, "karri", Instant::now()) {
+                Some(r) => r,
+                None => panic!("the first mail failure of a run owes a report"),
+            }
+        };
+        assert!(both.owed(&report, true).is_empty(), "the alert would be texted twice");
+        assert_eq!(both.owed(&report, false), Route { mail: false, sms: true });
+        assert_eq!(both.text_of(&down), "jarrah is DOWN (mail failing)");
+        assert_eq!(both.text_of(&report).matches("mail failing").count(), 1);
     }
 }
