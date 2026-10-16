@@ -48,6 +48,7 @@ static PAIR_HAND_FAILS:  AtomicBool = AtomicBool::new(false); // new live pairs 
 static COLLECT_FAILS:    AtomicBool = AtomicBool::new(false); // every collection fails before it commits
 static COLLECTS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
 static COMPACT_FAILS:    AtomicBool = AtomicBool::new(false); // the zone bots cannot pass on a compaction order
+static RECORD_BYTES_READ: AtomicU64 = AtomicU64::new(0);      // read from data files by the reader bots
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
 /// of a busy disk's writes would be held.
@@ -313,4 +314,15 @@ pub(crate) fn trace(step: Step) {
             steps.push(step);
         }
     }
+}
+
+/// The bytes of every record a reader bot has read from a data file for a key, so a test can
+/// tell a lookup answered from the index from one that read values.  Counted always, since it
+/// costs one relaxed addition per read.
+pub fn record_bytes_read() -> u64 {
+    RECORD_BYTES_READ.load(Ordering::Relaxed)
+}
+
+pub(crate) fn count_record_read(n: usize) {
+    RECORD_BYTES_READ.fetch_add(n as u64, Ordering::Relaxed);
 }

@@ -73,6 +73,26 @@ impl<
         )
     }
 
+    fn contains(
+        &self,
+        key:    &Dat,
+        or:     Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<bool>
+    {
+        self.api().contains_wait(key, or)
+    }
+
+    fn contains_many(
+        &self,
+        keys:   &[Dat],
+        or:     Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Vec<bool>>
+    {
+        self.api().contains_many_wait(keys, or)
+    }
+
     fn delete(
         &self,
         key:    &Dat,
@@ -187,6 +207,28 @@ impl<
             key,
             or,
         )
+    }
+
+    fn contains(
+        &self,
+        key:    &Dat,
+        or:     Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<bool>
+    {
+        let unlocked_api = lock_read!(self.0);
+        unlocked_api.contains_wait(key, or)
+    }
+
+    fn contains_many(
+        &self,
+        keys:   &[Dat],
+        or:     Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Vec<bool>>
+    {
+        let unlocked_api = lock_read!(self.0);
+        unlocked_api.contains_many_wait(keys, or)
     }
 
     fn delete(

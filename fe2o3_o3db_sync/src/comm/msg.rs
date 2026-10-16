@@ -26,6 +26,7 @@ use crate::{
         cache::{
             Cache,
             MetaLocation,
+            Presence,
         },
         core::{
             Key,
@@ -160,6 +161,7 @@ pub enum OzoneMsg<
     Ready,
     ReadCache(Key, Responder<UIDL, UID, ENC, KH>),
     ReadFileRequest(FileNum, Vec<u8>, MetaLocation<UIDL, UID>, Responder<UIDL, UID, ENC, KH>), // key bytes
+    PresenceOf(Vec<Vec<u8>>, Responder<UIDL, UID, ENC, KH>), // stored keys, for whether each holds a value
     ScanRequest {
         opts:   ScanOpts,
         schms2: Option<RestSchemesOverride<ENC, KH>>,
@@ -199,6 +201,7 @@ pub enum OzoneMsg<
     Value(Value<UIDL, UID>),
     Written, // a write's record is appended; its durable answer follows
     ReadResult(ReadResult<UIDL, UID>),
+    Presences(Vec<Presence>), // answers PresenceOf, in its order
     // Wrap
     ProcessGcBuffer(Box<OzoneMsg<UIDL, UID, ENC, KH>>),
     // Server

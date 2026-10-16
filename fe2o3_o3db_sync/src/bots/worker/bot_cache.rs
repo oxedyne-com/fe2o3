@@ -1,5 +1,6 @@
 use crate::{
     prelude::*,
+    base::id,
     bots::{
         base::bot_deps::*,
         worker::{
@@ -10,6 +11,7 @@ use crate::{
     data::{
         cache::{
             Cache,
+            Presence,
             ValueOrLocation,
         },
         core::Key,
@@ -23,7 +25,10 @@ use crate::{
 
 use oxedyne_fe2o3_core::channels::Recv;
 use oxedyne_fe2o3_iop_db::api::Meta;
-use oxedyne_fe2o3_jdat::id::NumIdDat;
+use oxedyne_fe2o3_jdat::{
+    prelude::*,
+    id::NumIdDat,
+};
 
 use std::{
     sync::Arc,
@@ -236,6 +241,10 @@ impl<
                             let result = self.read(key, resp_r2);
                             self.result(&result);
                         },
+                        OzoneMsg::PresenceOf(keys, resp) => {
+                            let result = self.presence(&keys).map(OzoneMsg::Presences);
+                            self.respond(result, &resp);
+                        },
                         _ => return self.listen_more(msg),
                     }
                 }
@@ -358,6 +367,13 @@ impl<
         }));
 
         Ok(())
+    }
+
+    /// Whether each stored key holds a value, from the index alone.
+    pub fn presence(&self, keys: &[Vec<u8>]) -> Outcome<Vec<Presence>> {
+        let tomb = res!(Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty))).as_bytes());
+        let csum_len = res!(self.api().schemes().checksummer().len());
+        Ok(keys.iter().map(|k| self.cache.presence(k, &tomb, csum_len)).collect())
     }
 
     pub fn read(

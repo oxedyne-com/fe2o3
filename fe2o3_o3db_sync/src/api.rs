@@ -39,6 +39,7 @@ use crate::{
         cache::{
             CacheEntry,
             KeyVal,
+            Presence,
         },
         choose::ChooseCache,
         core::{
@@ -1181,6 +1182,87 @@ impl<
         let resp = res!(self.fetch_using_schemes(k, schms2));
         let (got, _) = res!(resp.recv_daticle(enc, or_enc));
         Ok(got)
+    }
+
+    /// Does the key hold a value?  `contains_many_wait` for one key.
+    pub fn contains_wait(
+        &self,
+        k:      &Dat,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<bool>
+    {
+        let held = res!(self.contains_many_wait(std::slice::from_ref(k), schms2));
+        Ok(held.first() == Some(&true))
+    }
+
+    /// Whether each key holds a value, in order, answered from the zone caches' key index without
+    /// reading or decrypting a value: one request to each cache bot that holds any of the keys,
+    /// all sent before any answer is awaited.  The answer is `get_wait(k).is_some()`'s, a deleted
+    /// key absent.  A key mid-write is answered as `get_wait` would answer at the same moment,
+    /// from the record the cache bot holds, so it is absent, or its prior value's, until the
+    /// cache bot has entered the write.  The one read made is of a record with a tombstone's
+    /// length whose bytes the cache no longer holds, a few dozen bytes.  A chunked value is
+    /// present by its head, its chunks unread, where `get_wait` would fail on a chunk lost from
+    /// under a current head.
+    pub fn contains_many_wait(
+        &self,
+        keys:   &[Dat],
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Vec<bool>>
+    {
+        let mut by_bot: BTreeMap<WorkerInd, (Vec<usize>, Vec<Vec<u8>>)> = BTreeMap::new();
+        for (i, k) in keys.iter().enumerate() {
+            let (kbuf, cbwind, _chash) = res!(self.ozone_key_dat(k, schms2));
+            let (inds, kbufs) = by_bot.entry(cbwind).or_default();
+            inds.push(i);
+            kbufs.push(kbuf);
+        }
+        let mut asked = Vec::with_capacity(by_bot.len());
+        for (cbwind, (inds, kbufs)) in by_bot {
+            let resp = self.responder();
+            let cbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Cache, cbwind.zind()));
+            let bot = res!(cbots.get_bot(**cbwind.bpind()));
+            if let Err(e) = bot.send(OzoneMsg::PresenceOf(kbufs, resp.clone())) {
+                return Err(err!(e,
+                    "{}: Asking cbot {} whether {} keys hold values.",
+                    self.ozid(), cbwind, inds.len();
+                    Channel, Write));
+            }
+            asked.push((cbwind, inds, resp));
+        }
+        let mut held = vec![false; keys.len()];
+        let mut unsure = Vec::new();
+        for (cbwind, inds, resp) in asked {
+            match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
+                OzoneMsg::Presences(got) if got.len() == inds.len() => {
+                    for (i, p) in inds.into_iter().zip(got) {
+                        match p {
+                            Presence::Present   => held[i] = true,
+                            Presence::Absent    => (),
+                            Presence::Unsure    => unsure.push(i),
+                        }
+                    }
+                },
+                OzoneMsg::Presences(got) => return Err(err!(
+                    "{}: Cbot {} answered {} presences for {} keys.",
+                    self.ozid(), cbwind, got.len(), inds.len();
+                    Bug, Mismatch, Size)),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: Cbot {} could not say whether {} keys hold values.",
+                    self.ozid(), cbwind, inds.len();
+                    Read)),
+                msg => return Err(err!(
+                    "{}: Unexpected answer from cbot {} to a presence request: {:?}",
+                    self.ozid(), cbwind, msg;
+                    Channel, Unexpected)),
+            }
+        }
+        for i in unsure {
+            held[i] = res!(self.get_head_wait(&keys[i], schms2)).is_some();
+        }
+        Ok(held)
     }
 
     // Read API, lower level.
