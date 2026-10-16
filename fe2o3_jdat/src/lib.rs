@@ -118,6 +118,7 @@ pub mod chunk;
 pub mod constant;
 pub mod conv;
 pub mod daticle;
+pub mod derive;
 pub mod file;
 pub mod id;
 pub mod int;
@@ -134,9 +135,14 @@ use oxedyne_fe2o3_core::prelude::*;
 pub use oxedyne_fe2o3_core::conv::BestFrom;
 
 pub use dat_map::{
+    FromDat,
     FromDatMap,
+    ToDat,
     ToDatMap,
 };
+
+// Lets the derives name this crate by its path from inside it too.
+extern crate self as oxedyne_fe2o3_jdat;
 
 pub use crate::{
     daticle::Dat,

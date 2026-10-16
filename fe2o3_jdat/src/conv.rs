@@ -6,6 +6,7 @@ use crate::{
 
 use oxedyne_fe2o3_core::{
     prelude::*,
+    error::ErrWire,
 };
 use oxedyne_fe2o3_num::{
     float::{
@@ -34,6 +35,19 @@ pub trait ToDatMap : Default {
 
 pub trait ToDat {
     fn to_dat(&self) -> Outcome<Dat>;
+
+    /// How a slice of this type is encoded, so that `Vec<T>` can have one impl: a list by
+    /// default, bytes for `u8`.
+    fn slice_to_dat(items: &[Self]) -> Outcome<Dat> where Self: Sized {
+        let mut list = Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            match item.to_dat() {
+                Ok(dat) => list.push(dat),
+                Err(e)  => return Err(err!(e, "Encoding item {} of a list.", i; Encode)),
+            }
+        }
+        Ok(Dat::List(list))
+    }
 }
 
 pub trait IntoDat: ToDat {
@@ -44,6 +58,25 @@ pub trait IntoDat: ToDat {
 
 pub trait FromDat {
     fn from_dat(dat: Dat) -> Outcome<Self> where Self: Sized;
+
+    /// The counterpart of `ToDat::slice_to_dat`.
+    fn vec_from_dat(dat: Dat) -> Outcome<Vec<Self>> where Self: Sized {
+        let list = match dat {
+            Dat::List(list)     => list,
+            Dat::Vek(Vek(list)) => list,
+            other               => return Err(err!(
+                "A list was expected, a {:?} was found.", other.kind();
+            Decode, Mismatch)),
+        };
+        let mut out = Vec::with_capacity(list.len());
+        for (i, dat) in list.into_iter().enumerate() {
+            match Self::from_dat(dat) {
+                Ok(v)   => out.push(v),
+                Err(e)  => return Err(err!(e, "Decoding item {} of a list.", i; Decode)),
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl AsRef<Dat> for &Dat {
@@ -70,7 +103,6 @@ impl FromDat for Dat {
 // Logic
 to_from_dat! { bool,    Bool    }
 // Fixed
-to_from_dat! { u8,      U8      }
 to_from_dat! { u16,     U16     }
 to_from_dat! { u32,     U32     }
 to_from_dat! { u64,     U64     }
@@ -89,7 +121,6 @@ to_from_dat! { String,      Str     }
 // Molecule Kinds =========================
 // Unitary
 // Heterogenous
-to_from_dat!        { Vec<Dat>,     List    }
 to_from_dat_boxed!  { [Dat;  2],    Tup2    }
 to_from_dat_boxed!  { [Dat;  3],    Tup3    }
 to_from_dat_boxed!  { [Dat;  4],    Tup4    }
@@ -101,7 +132,6 @@ to_from_dat_boxed!  { [Dat;  9],    Tup9    }
 to_from_dat_boxed!  { [Dat; 10],    Tup10   }
 // Homogenous
 // Variable length bytes
-to_from_dat! { Vec<u8>,     BU64 }
 // Fixed length bytes
 to_from_dat! { [u8; 2],     B2  }
 to_from_dat! { [u8; 3],     B3  }
@@ -505,3 +535,243 @@ impl Dat {
 }
 
 
+
+// The byte, whose slices are bytes rather than lists.
+impl From<u8> for Dat {
+    fn from(x: u8) -> Self { Dat::U8(x) }
+}
+
+impl ToDat for u8 {
+    fn to_dat(&self) -> Outcome<Dat> { Ok(Dat::U8(*self)) }
+
+    fn slice_to_dat(items: &[Self]) -> Outcome<Dat> { Ok(Dat::BU64(items.to_vec())) }
+}
+
+impl FromDat for u8 {
+    fn from_dat(dat: Dat) -> Outcome<Self> { Ok(try_extract_dat!(dat, U8)) }
+
+    fn vec_from_dat(dat: Dat) -> Outcome<Vec<Self>> {
+        Ok(try_extract_dat!(dat, BU8, BU16, BU32, BU64, BC64))
+    }
+}
+
+impl From<Vec<Dat>> for Dat {
+    fn from(x: Vec<Dat>) -> Self { Dat::List(x) }
+}
+
+impl From<Vec<u8>> for Dat {
+    fn from(x: Vec<u8>) -> Self { Dat::BU64(x) }
+}
+
+// Blanket conversions for standard library types, so that derived types nest.
+
+impl<T: ToDat> ToDat for Vec<T> {
+    fn to_dat(&self) -> Outcome<Dat> { T::slice_to_dat(self) }
+}
+
+impl<T: FromDat> FromDat for Vec<T> {
+    fn from_dat(dat: Dat) -> Outcome<Self> { T::vec_from_dat(dat) }
+}
+
+impl<T: ToDat> ToDat for Option<T> {
+    fn to_dat(&self) -> Outcome<Dat> {
+        Ok(Dat::Opt(Box::new(match self {
+            Some(v) => Some(res!(v.to_dat())),
+            None    => None,
+        })))
+    }
+}
+
+impl<T: FromDat> FromDat for Option<T> {
+    fn from_dat(dat: Dat) -> Outcome<Self> {
+        match *try_extract_dat!(dat, Opt) {
+            Some(inner) => Ok(Some(res!(T::from_dat(inner)))),
+            None        => Ok(None),
+        }
+    }
+}
+
+/// A box is transparent: it encodes as what it holds.
+impl<T: ToDat> ToDat for Box<T> {
+    fn to_dat(&self) -> Outcome<Dat> { (**self).to_dat() }
+}
+
+impl<T: FromDat> FromDat for Box<T> {
+    fn from_dat(dat: Dat) -> Outcome<Self> { Ok(Box::new(res!(T::from_dat(dat)))) }
+}
+
+impl<K: ToDat, V: ToDat> ToDat for BTreeMap<K, V> {
+    fn to_dat(&self) -> Outcome<Dat> {
+        let mut map = DaticleMap::new();
+        for (k, v) in self {
+            map.insert(res!(k.to_dat()), res!(v.to_dat()));
+        }
+        Ok(Dat::Map(map))
+    }
+}
+
+impl<K: FromDat + Ord, V: FromDat> FromDat for BTreeMap<K, V> {
+    fn from_dat(dat: Dat) -> Outcome<Self> {
+        let mut out = BTreeMap::new();
+        for (k, v) in try_extract_dat!(dat, Map) {
+            out.insert(res!(K::from_dat(k)), res!(V::from_dat(v)));
+        }
+        Ok(out)
+    }
+}
+
+/// A result is an enum like any derived one: `{"Ok": value}` or `{"Err": error}`.
+impl<T: ToDat, E: ToDat> ToDat for Result<T, E> {
+    fn to_dat(&self) -> Outcome<Dat> {
+        Ok(match self {
+            Ok(v)   => crate::derive::variant("Ok", res!(crate::derive::enc(v, "Result::Ok", "0"))),
+            Err(e)  => crate::derive::variant("Err", res!(crate::derive::enc(e, "Result::Err", "0"))),
+        })
+    }
+}
+
+impl<T: FromDat, E: FromDat> FromDat for Result<T, E> {
+    fn from_dat(dat: Dat) -> Outcome<Self> {
+        let (name, payload) = res!(crate::derive::take_variant(dat, "Result"));
+        match name.as_str() {
+            "Ok"    => Ok(Ok(res!(T::from_dat(payload)))),
+            "Err"   => Ok(Err(res!(E::from_dat(payload)))),
+            _       => Err(crate::derive::unknown_variant("Result", &name)),
+        }
+    }
+}
+
+macro_rules! tuple_dat {
+    ($variant:ident; $($t:ident $v:ident $i:tt),+) => {
+        impl<$($t: ToDat),+> ToDat for ($($t,)+) {
+            fn to_dat(&self) -> Outcome<Dat> {
+                Ok(Dat::$variant(Box::new([$(res!(self.$i.to_dat())),+])))
+            }
+        }
+
+        impl<$($t: FromDat),+> FromDat for ($($t,)+) {
+            fn from_dat(dat: Dat) -> Outcome<Self> {
+                let [$($v),+] = *try_extract_dat!(dat, $variant);
+                Ok(($(res!($t::from_dat($v)),)+))
+            }
+        }
+    };
+}
+
+tuple_dat! { Tup2; A a 0, B b 1 }
+tuple_dat! { Tup3; A a 0, B b 1, C c 2 }
+tuple_dat! { Tup4; A a 0, B b 1, C c 2, D d 3 }
+tuple_dat! { Tup5; A a 0, B b 1, C c 2, D d 3, E e 4 }
+tuple_dat! { Tup6; A a 0, B b 1, C c 2, D d 3, E e 4, F f 5 }
+
+impl ToDat for () {
+    fn to_dat(&self) -> Outcome<Dat> { Ok(Dat::Empty) }
+}
+
+impl FromDat for () {
+    fn from_dat(dat: Dat) -> Outcome<Self> {
+        match dat {
+            Dat::Empty  => Ok(()),
+            other       => Err(err!("An empty daticle was expected, a {:?} was found.", other.kind();
+                Decode, Mismatch)),
+        }
+    }
+}
+
+impl ToDat for f64 {
+    fn to_dat(&self) -> Outcome<Dat> { Ok(Dat::F64(Float64(*self))) }
+}
+
+impl FromDat for f64 {
+    fn from_dat(dat: Dat) -> Outcome<Self> {
+        match dat {
+            Dat::F64(Float64(f))    => Ok(f),
+            Dat::F32(Float32(f))    => Ok(f as f64),
+            other                   => Err(err!("A float was expected, a {:?} was found.", other.kind();
+                Decode, Mismatch)),
+        }
+    }
+}
+
+impl ToDat for f32 {
+    fn to_dat(&self) -> Outcome<Dat> { Ok(Dat::F32(Float32(*self))) }
+}
+
+impl FromDat for f32 {
+    fn from_dat(dat: Dat) -> Outcome<Self> { Ok(try_extract_dat!(dat, F32).0) }
+}
+
+/// A `usize` travels as a `u64`, and any narrower unsigned width is taken back.
+impl ToDat for usize {
+    fn to_dat(&self) -> Outcome<Dat> { Ok(Dat::U64(*self as u64)) }
+}
+
+impl FromDat for usize {
+    fn from_dat(dat: Dat) -> Outcome<Self> {
+        let n = try_extract_dat_as!(dat, u64, U8, U16, U32, U64);
+        match usize::try_from(n) {
+            Ok(n)   => Ok(n),
+            Err(_)  => Err(err!("{} does not fit a usize on this machine.", n; Decode, Overflow)),
+        }
+    }
+}
+
+/// An `isize` travels as an `i64`, and any narrower signed width is taken back.
+impl ToDat for isize {
+    fn to_dat(&self) -> Outcome<Dat> { Ok(Dat::I64(*self as i64)) }
+}
+
+impl FromDat for isize {
+    fn from_dat(dat: Dat) -> Outcome<Self> {
+        let n = try_extract_dat_as!(dat, i64, I8, I16, I32, I64);
+        match isize::try_from(n) {
+            Ok(n)   => Ok(n),
+            Err(_)  => Err(err!("{} does not fit an isize on this machine.", n; Decode, Overflow)),
+        }
+    }
+}
+
+/// An error travels as its `ErrWire` form, encoded like a derived enum.
+impl ToDat for ErrWire {
+    fn to_dat(&self) -> Outcome<Dat> {
+        use crate::derive as d;
+        Ok(match self {
+            ErrWire::Frame { msg, tags, cause } => {
+                let mut map = DaticleMap::new();
+                d::put(&mut map, "msg", Dat::Str(msg.clone()));
+                d::put(&mut map, "tags", res!(tags.to_dat()));
+                d::put(&mut map, "cause", res!(cause.to_dat()));
+                d::variant("Frame", Dat::Map(map))
+            },
+            ErrWire::Collection(list) => d::variant("Collection", res!(list.to_dat())),
+        })
+    }
+}
+
+impl FromDat for ErrWire {
+    fn from_dat(dat: Dat) -> Outcome<Self> {
+        use crate::derive as d;
+        let (name, payload) = res!(d::take_variant(dat, "ErrWire"));
+        match name.as_str() {
+            "Frame" => {
+                let ty = "ErrWire::Frame";
+                let mut map = res!(d::take_map(payload, ty));
+                let msg = res!(d::field(&mut map, ty, "msg"));
+                let tags = res!(d::field(&mut map, ty, "tags"));
+                let cause = res!(d::field(&mut map, ty, "cause"));
+                res!(d::done(map, ty));
+                Ok(ErrWire::Frame { msg, tags, cause })
+            },
+            "Collection" => Ok(ErrWire::Collection(res!(Vec::<ErrWire>::from_dat(payload)))),
+            _ => Err(d::unknown_variant("ErrWire", &name)),
+        }
+    }
+}
+
+impl ToDat for Error<ErrTag> {
+    fn to_dat(&self) -> Outcome<Dat> { self.to_wire().to_dat() }
+}
+
+impl FromDat for Error<ErrTag> {
+    fn from_dat(dat: Dat) -> Outcome<Self> { Ok(res!(ErrWire::from_dat(dat)).to_error()) }
+}
