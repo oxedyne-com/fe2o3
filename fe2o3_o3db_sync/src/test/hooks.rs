@@ -58,6 +58,7 @@ static COLLECTS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the s
 static COLLECT_FAILS_FOR: AtomicU64 = AtomicU64::new(u64::MAX); // collections of this one file fail
 static DIR_SYNC_FAILS:   AtomicBool = AtomicBool::new(false); // the directory sync after a collection's data rename fails
 static COMPACT_FAILS:    AtomicBool = AtomicBool::new(false); // the zone bots cannot pass on a compaction order
+static RECORD_BYTES_READ: AtomicU64 = AtomicU64::new(0);      // read from data files by the reader bots
 static HEAD_INSERT_FAILS: AtomicBool = AtomicBool::new(false); // a cache bot cannot enter a store's head
 static HEAD_HAND_FAILS:  AtomicBool = AtomicBool::new(false); // a writer cannot hand a written head to its syncer
 static HEAD_HOLD:        AtomicBool = AtomicBool::new(false); // a store waits before it sends its head
@@ -722,4 +723,15 @@ pub(crate) fn stale_stamp() -> Option<Duration> {
         Ok(s)   => *s,
         Err(_)  => None,
     }
+}
+
+/// The bytes of every record a reader bot has read from a data file for a key, so a test can
+/// tell a lookup answered from the index from one that read values.  Counted always, since it
+/// costs one relaxed addition per read.
+pub fn record_bytes_read() -> u64 {
+    RECORD_BYTES_READ.load(Ordering::Relaxed)
+}
+
+pub(crate) fn count_record_read(n: usize) {
+    RECORD_BYTES_READ.fetch_add(n as u64, Ordering::Relaxed);
 }

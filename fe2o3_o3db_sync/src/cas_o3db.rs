@@ -176,16 +176,16 @@ impl<
 		self.read(id)
 	}
 
+	// From the key index, reading no value (2026-10-16: a presence query read every chunk whole).
 	fn has(&self, id: &ContentId) -> Outcome<bool> {
-		Ok(res!(self.read(id)).is_some())
+		self.db.api().contains_wait(&Self::encode_key(id), None)
 	}
 
 	fn delete(&self, id: &ContentId) -> Outcome<bool> {
-		let existed = res!(self.read(id)).is_some();
-		if !existed {
+		let key = Self::encode_key(id);
+		if !res!(self.db.api().contains_wait(&key, None)) {
 			return Ok(false);
 		}
-		let key = Self::encode_key(id);
 		let tombstone = Dat::Usr(
 			usr_kind_id_deleted(),
 			Some(Box::new(Dat::Empty)),

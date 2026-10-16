@@ -30,6 +30,7 @@ use crate::{
             Cache,
             MetaLocation,
             PinnedHeads,
+            Presence,
         },
         core::{
             Key,
@@ -218,6 +219,7 @@ pub enum OzoneMsg<
     ReadCache(Key, Responder<UIDL, UID, ENC, KH>),
     ReadFileRequest(FileNum, Vec<u8>, MetaLocation<UIDL, UID>, Responder<UIDL, UID, ENC, KH>), // key bytes
     RecordsOf(Vec<Vec<u8>>, Responder<UIDL, UID, ENC, KH>), // stored keys, for the record each holds now
+    PresenceOf(Vec<Vec<u8>>, Responder<UIDL, UID, ENC, KH>), // stored keys, for whether each holds a value
     HeadsStamped(Vec<Meta<UIDL, UID>>, Vec<u64>, Responder<UIDL, UID, ENC, KH>), // the current heads written with any of these metas, or under a key of these legacy set ids
     ScanRequest {
         opts:   ScanOpts,
@@ -260,6 +262,7 @@ pub enum OzoneMsg<
     Written, // a write's record is appended; its durable answer follows
     ReadResult(ReadResult<UIDL, UID>),
     RecordsAt(Vec<Option<(Meta<UIDL, UID>, FileLocation)>>), // answers RecordsOf, in its order
+    Presences(Vec<Presence>), // answers PresenceOf, in its order
     HeadsAt(Vec<(Vec<u8>, Meta<UIDL, UID>)>), // answers HeadsStamped: stored key and metadata
     // Wrap
     ProcessGcBuffer(Box<OzoneMsg<UIDL, UID, ENC, KH>>),

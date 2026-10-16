@@ -1,5 +1,6 @@
 use crate::{
     prelude::*,
+    base::id,
     bots::{
         base::bot_deps::*,
         worker::{
@@ -17,6 +18,7 @@ use crate::{
     data::{
         cache::{
             Cache,
+            Presence,
             Prior,
             Superseded,
             ValueOrLocation,
@@ -318,6 +320,10 @@ impl<
                                 .map(|k| self.cache.record_at(k).map(|(m, f)| (m.clone(), f.clone())))
                                 .collect();
                             self.respond(Ok(OzoneMsg::RecordsAt(held)), &resp);
+                        },
+                        OzoneMsg::PresenceOf(keys, resp) => {
+                            let result = self.presence(&keys).map(OzoneMsg::Presences);
+                            self.respond(result, &resp);
                         },
                         OzoneMsg::HeadsStamped(metas, set_ids, resp) => {
                             let heads = self.cache.heads_stamped(&metas, &set_ids);
@@ -728,6 +734,31 @@ impl<
                 held.release(&id);
             }
         }
+    }
+
+    /// Whether each stored key holds a value, from the index alone.  A stopped store answers only
+    /// for records a barrier proved, as `read` serves only those.
+    pub fn presence(&self, keys: &[Vec<u8>]) -> Outcome<Vec<Presence>> {
+        let tomb = res!(Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty))).as_bytes());
+        let csum_len = res!(self.api().schemes().checksummer().len());
+        let chans = self.api().chans();
+        let fault = chans.fault().get();
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            if let Some(fault) = &fault {
+                if let Some(floc) = self.cache.located(k) {
+                    if !res!(chans.marks().covers(self.wind.z(), floc)) {
+                        return Err(err!(
+                            "{}: {}, and the record cached for a key asked after, at {:?}, was \
+                            never proven durable, so its presence is not answered.  Restart the \
+                            store; it recovers from the disk.", self.ozid(), fault.stopped(), floc;
+                            Read, Fatal));
+                    }
+                }
+            }
+            out.push(self.cache.presence(k, &tomb, csum_len));
+        }
+        Ok(out)
     }
 
     pub fn read(

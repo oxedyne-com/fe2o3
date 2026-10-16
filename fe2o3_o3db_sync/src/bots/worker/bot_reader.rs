@@ -392,6 +392,7 @@ impl<
 
             match result {
                 Ok(rec) => {
+                    hooks::count_record_read(rec.len());
                     // The value, without its checksum, follows the key.
                     let klen = try_into!(usize, floc.klen);
                     let end = klen + vlen - res!(self.api().schms.checksummer().len());

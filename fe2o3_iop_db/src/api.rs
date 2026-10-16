@@ -234,6 +234,33 @@ pub trait Database<
     )
         -> Outcome<Option<(Dat, Meta<UIDL, UID>)>>;
 
+    /// Does the key hold a value, a deleted key not?  This default reads the value, and a
+    /// database that can answer from its key index alone overrides it.
+    fn contains(
+        &self,
+        key:    &Dat,
+        or:     Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<bool>
+    {
+        Ok(res!(self.get(key, or)).is_some())
+    }
+
+    /// `contains` for each key, in order, so that a database can answer a batch in one pass.
+    fn contains_many(
+        &self,
+        keys:   &[Dat],
+        or:     Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Vec<bool>>
+    {
+        let mut held = Vec::with_capacity(keys.len());
+        for key in keys {
+            held.push(res!(self.contains(key, or)));
+        }
+        Ok(held)
+    }
+
     /// Deletes the given key and its value from the database, or at least marks it for deletion.
     fn delete(
         &self,
