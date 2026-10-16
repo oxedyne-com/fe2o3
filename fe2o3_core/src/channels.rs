@@ -1,7 +1,13 @@
 //! Provides added convenience and ergonomics when using an existing channel implementation,
-//! currently [crossbeam-channel](https://crates.io/crates/crossbeam-channel).  `Simplex`
-//! packages a transmission and receiver pair for communicating in one direction, while
-//! `FullDuplex` packages two of these for simultaneous bi-directional communication.
+//! currently [flume](https://crates.io/crates/flume), whose channels can be used both blocking
+//! and async, under any executor and on wasm32.  `Simplex` packages a transmission and receiver
+//! pair for communicating in one direction, while `FullDuplex` packages two of these for
+//! simultaneous bi-directional communication.
+//!
+//! For async actors there are also `watch`, a single-writer, many-reader cell holding the latest
+//! value, and `oneshot`, a single reply.  Neither needs a runtime, and neither requires its value to
+//! be `Send`, so both serve single-threaded executors (`spawn_local`, a tokio `LocalSet`) as well as
+//! threads.  A bounded flume channel (`bounded`) is the mailbox: when full, `send_async` waits.
 
 use crate::{
     prelude::*,
@@ -11,9 +17,18 @@ use crate::{
 
 use std::{
     fmt::Debug,
+    future::Future,
+    ops::Deref,
+    pin::Pin,
     sync::{
         Arc,
         RwLock,
+        RwLockReadGuard,
+    },
+    task::{
+        Context,
+        Poll,
+        Waker,
     },
     time::{
         Duration,
@@ -22,10 +37,14 @@ use std::{
 };
 
 pub use flume::{
+    bounded,
     unbounded,
     Sender,
     Receiver,
+    RecvError,
+    SendError,
     TryRecvError,
+    TrySendError,
     RecvTimeoutError,
 };
 
@@ -234,5 +253,188 @@ impl<M: 'static + Debug + Send + Sync> FullDuplex<M> {
 impl<M> Default for FullDuplex<M> {
     fn default() -> Self {
         full_duplex::<M>()
+    }
+}
+
+// Watch.
+
+/// Creates a latest-value cell holding `init`.  The single `WatchSender` replaces the value; any
+/// number of `WatchReceiver`s borrow it and await the next change.  Dropping the sender closes it.
+pub fn watch<T>(init: T) -> (WatchSender<T>, WatchReceiver<T>) {
+    let shared = Arc::new(RwLock::new(WatchState {
+        value:      init,
+        version:    0,
+        closed:     false,
+        wakers:     Vec::new(),
+    }));
+    (
+        WatchSender { shared: shared.clone() },
+        WatchReceiver { shared, seen: 0 },
+    )
+}
+
+struct WatchState<T> {
+    value:      T,
+    version:    u64,
+    closed:     bool,
+    wakers:     Vec<Waker>,
+}
+
+/// The single writer of a `watch` cell.  Not `Clone`.
+pub struct WatchSender<T> {
+    shared: Arc<RwLock<WatchState<T>>>,
+}
+
+impl<T> WatchSender<T> {
+
+    /// Replaces the value and wakes every reader waiting in `changed`.  Succeeds whether or not any
+    /// reader remains.
+    pub fn send(&self, value: T) -> Outcome<()> {
+        let wakers = {
+            let mut state = lock_write!(self.shared, "While sending to a watch cell.");
+            state.value = value;
+            state.version = state.version.wrapping_add(1);
+            std::mem::take(&mut state.wakers)
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    /// A new reader that sees the current value as already seen.
+    pub fn subscribe(&self) -> WatchReceiver<T> {
+        let seen = match self.shared.read() {
+            Ok(state)   => state.version,
+            Err(p)      => p.into_inner().version,
+        };
+        WatchReceiver { shared: self.shared.clone(), seen }
+    }
+
+    pub fn borrow(&self) -> Outcome<WatchRef<'_, T>> {
+        Ok(WatchRef(lock_read!(self.shared, "While borrowing a watch cell.")))
+    }
+}
+
+impl<T> Drop for WatchSender<T> {
+    fn drop(&mut self) {
+        let wakers = {
+            let mut state = match self.shared.write() {
+                Ok(state)   => state,
+                Err(p)      => p.into_inner(),
+            };
+            state.closed = true;
+            std::mem::take(&mut state.wakers)
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+}
+
+/// A reader of a `watch` cell.  Each clone tracks what it has seen separately.
+pub struct WatchReceiver<T> {
+    shared: Arc<RwLock<WatchState<T>>>,
+    seen:   u64,
+}
+
+impl<T> Clone for WatchReceiver<T> {
+    fn clone(&self) -> Self {
+        Self { shared: self.shared.clone(), seen: self.seen }
+    }
+}
+
+impl<T> WatchReceiver<T> {
+
+    /// The current value.  Hold the guard briefly: the sender waits while it is held.
+    pub fn borrow(&self) -> Outcome<WatchRef<'_, T>> {
+        Ok(WatchRef(lock_read!(self.shared, "While borrowing a watch cell.")))
+    }
+
+    /// Resolves once a value newer than the last one seen is sent, marking it seen.  A value sent
+    /// before the sender dropped is still delivered; after that, it resolves to an error.
+    pub fn changed(&mut self) -> WatchChanged<'_, T> {
+        WatchChanged { rx: self }
+    }
+
+    /// Whether the sender has dropped.
+    pub fn is_closed(&self) -> Outcome<bool> {
+        Ok(lock_read!(self.shared, "While reading a watch cell.").closed)
+    }
+}
+
+/// A read guard on the value of a `watch` cell.
+pub struct WatchRef<'a, T>(RwLockReadGuard<'a, WatchState<T>>);
+
+impl<'a, T> Deref for WatchRef<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T { &self.0.value }
+}
+
+/// The future returned by `WatchReceiver::changed`.
+pub struct WatchChanged<'a, T> {
+    rx: &'a mut WatchReceiver<T>,
+}
+
+impl<'a, T> Future for WatchChanged<'a, T> {
+    type Output = Outcome<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let rx = &mut self.get_mut().rx;
+        let mut state = match rx.shared.write() {
+            Ok(state)   => state,
+            Err(_)      => return Poll::Ready(Err(err!(
+                "While awaiting a change in a watch cell: lock poisoned.";
+            Channel, Lock, Poisoned))),
+        };
+        if state.version != rx.seen {
+            rx.seen = state.version;
+            return Poll::Ready(Ok(()));
+        }
+        if state.closed {
+            return Poll::Ready(Err(err!(
+                "Watch cell closed: its sender has dropped.";
+            Channel, Read, Missing)));
+        }
+        if !state.wakers.iter().any(|w| w.will_wake(cx.waker())) {
+            state.wakers.push(cx.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
+// Oneshot.
+
+/// Creates a single-use reply channel over a bounded(1) flume channel.
+pub fn oneshot<T>() -> (OneshotSender<T>, OneshotReceiver<T>) {
+    let (tx, rx) = bounded(1);
+    (OneshotSender(tx), OneshotReceiver(rx))
+}
+
+/// Sends one value, consuming itself.  Dropping it unsent is an error the receiver sees.
+pub struct OneshotSender<T>(Sender<T>);
+
+impl<T> OneshotSender<T> {
+    pub fn send(self, value: T) -> Outcome<()> {
+        match self.0.try_send(value) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(err!(
+                "Oneshot reply not sent: its receiver has dropped.";
+            Channel, Write, Missing)),
+        }
+    }
+}
+
+/// Receives one value, consuming itself.
+pub struct OneshotReceiver<T>(Receiver<T>);
+
+impl<T> OneshotReceiver<T> {
+    pub async fn recv(self) -> Outcome<T> {
+        match self.0.recv_async().await {
+            Ok(value)   => Ok(value),
+            Err(e)      => Err(err!(e,
+                "Oneshot reply never came: its sender dropped unsent.";
+            Channel, Read, Missing)),
+        }
     }
 }
