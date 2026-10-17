@@ -457,6 +457,19 @@ impl<
     }
 }
 
+/// Is this the error of a write that may have landed, or may yet land, after its caller was told
+/// it failed?  Two errors are: a writer that said nothing in time (`Channel, Write, Timeout`, see
+/// `AckWait::expired`), and a record written but not confirmed durable (`Unconfirmed`).  A caller
+/// that has a way to repeat the write without doing it twice, such as an idempotent key or an
+/// identifier the reader de-duplicates on, should repeat it rather than report it failed.
+pub fn outcome_unknown(e: &Error<ErrTag>) -> bool {
+    let tags = e.tags();
+    tags.contains(&ErrTag::Unconfirmed)
+        || (tags.contains(&ErrTag::Channel)
+            && tags.contains(&ErrTag::Write)
+            && tags.contains(&ErrTag::Timeout))
+}
+
 pub struct Wait {
     pub max_wait:       Duration,
     pub check_interval: Duration,
@@ -538,14 +551,15 @@ impl<
         Ok(self.is_done())
     }
 
-    /// The error for a wait whose silence has run out.
+    /// The error for a wait whose silence has run out.  Both forms answer true to
+    /// [`outcome_unknown`], and nothing else this crate raises does.
     pub fn expired(&self) -> Error<ErrTag> {
         if self.written < self.n {
             return err!(
                 "{} of {} records of this write were confirmed written, and the writer \
                 holding the rest has said nothing for {:?}, so whether they land is not \
                 known.", self.written, self.n, self.liveness;
-                Channel, Timeout);
+                Channel, Write, Timeout);
         }
         err!(
             "All {} records of this write were written, but {} of them were not \
