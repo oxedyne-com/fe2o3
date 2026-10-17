@@ -75,6 +75,19 @@ impl JsonObjectText {
         self.find(key).map(|i| &self.text[self.members[i].val.clone()])
     }
 
+    /// The value of the top-level member named `key` decoded, when that value is a JSON string:
+    /// every escape, `\uXXXX` and surrogate pairs among them, read as RFC 8259 reads it. Nothing
+    /// when there is no such member or its value is not a string.
+    pub fn get_str(&self, key: &str) -> Option<String> {
+        let val = match self.get(key) {
+            Some(v) if v.starts_with('"')   => v,
+            _                               => return None,
+        };
+        // The text was read whole when it was taken, so this string decodes.
+        let mut w = Walk { b: val.as_bytes(), pos: 0, limits: self.limits };
+        w.string().ok()
+    }
+
     /// Gives the member named `key` the value `val`, JSON text, in place of the value it had, or
     /// adds it after the last member when there is none. `val` must be exactly one JSON value,
     /// and a refused `val` changes nothing.

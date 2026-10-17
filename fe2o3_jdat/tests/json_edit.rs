@@ -146,3 +146,14 @@ fn test_nesting_past_the_limit_is_refused_00() {
     let deep = fmt!("{{\"a\":{}1{}}}", "[".repeat(100_000), "]".repeat(100_000));
     assert!(JsonObjectText::new(&deep).is_err(), "a hundred thousand levels must be refused");
 }
+
+#[test]
+fn test_get_str_decodes_a_top_level_string_00() {
+    let o = edit(r#"{"meta":{"note":"deep"},"note":"a\u000bb\"é😀\/","n":1,"s":"plain"}"#);
+    assert_eq!(o.get_str("note"), Some(fmt!("a\u{0b}b\"\u{e9}\u{1f600}/")));
+    assert_eq!(o.get_str("s"), Some(fmt!("plain")));
+    // Not a string, or not a top-level member: nothing.
+    assert_eq!(o.get_str("n"), None);
+    assert_eq!(o.get_str("meta"), None);
+    assert_eq!(o.get_str("missing"), None);
+}
