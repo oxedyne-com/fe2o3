@@ -2,10 +2,19 @@
 //! rising sequence number, read in pages above a cursor, trimmed from the bottom, with lazy expiry
 //! and per-reader cursors whose least live value is the lane's `stable` point.
 //!
-//! Every method runs on a database the caller holds exclusively, and [`Lane::new`] takes the
-//! `&mut` that proves it (from a write guard, `&mut *guard`, or from owning the store): the head,
-//! the floor and the reader table are read, changed and written back, and two unserialised callers
+//! Every method runs while the caller holds THAT LANE's lock, and [`Lane::new`] takes the
+//! [`LaneGuard`] that proves it, obtainable only from [`LaneLocks::lock`]: the head, the floor and
+//! the reader table are read, changed and written back, and two unserialised callers on one lane
 //! would lose an update.  `read_after` writes too, since it deletes the expired entries it meets.
+//! The lane's prefix is the guard's, so a guard for one lane cannot open another.  Only the lane
+//! is serialised, not the store: the database is shared (`&DB`, its `insert`, `get` and `delete`
+//! being `&self` and thread-safe), so lanes of different accounts and scopes run side by side
+//! and a lane section never holds up the rest of the store.  Every key a lane touches is under
+//! its own prefix, so two lanes never write the same key.
+//!
+//! Each request's hold on its lane is bounded by the caller's doors: an append batch by its
+//! record count (the caller's), and a page by both bytes and `max_steps`, the slots (entries,
+//! holes and expired entries alike) one [`Lane::read_after`] may visit before it answers `more`.
 //! The lane reads values throughout and never relies on a key-only presence answer.
 //!
 //! A replay whose entry has gone (trimmed, removed or expired) appends anew; refusing a replayed
@@ -35,7 +44,96 @@ use oxedyne_fe2o3_jdat::{
 	id::NumIdDat,
 };
 
-use std::marker::PhantomData;
+use std::{
+	collections::hash_map::RandomState,
+	hash::BuildHasher,
+	marker::PhantomData,
+	sync::{
+		Mutex,
+		MutexGuard,
+	},
+};
+
+
+/// The per-lane locks: a fixed set of mutexes (stripes), each lane taking the one its prefix
+/// hashes to under a per-process random key, so the set is bounded whatever the number of lanes
+/// and nobody outside can aim two lanes at one stripe.  Two lanes on one stripe only take turns.
+///
+/// Hold at most one [`LaneGuard`] per thread: two lanes on one stripe would wait on each other.
+#[derive(Debug)]
+pub struct LaneLocks {
+	stripes:	Box<[Mutex<()>]>,
+	hasher:		RandomState,
+}
+
+impl Default for LaneLocks {
+	fn default() -> Self {
+		Self::new(Self::DEFAULT_STRIPES)
+	}
+}
+
+impl LaneLocks {
+	/// Enough stripes that unrelated lanes rarely meet, at one mutex each.
+	pub const DEFAULT_STRIPES: usize = 256;
+
+	/// `stripes` mutexes, at least one.
+	pub fn new(stripes: usize) -> Self {
+		let n = stripes.max(1);
+		let mut v = Vec::with_capacity(n);
+		for _ in 0..n {
+			v.push(Mutex::new(()));
+		}
+		Self {
+			stripes:	v.into_boxed_slice(),
+			hasher:		RandomState::new(),
+		}
+	}
+
+	/// Takes the lock of the lane under `prefix`, waiting while another holds it, and answers the
+	/// guard [`Lane::new`] takes.  A poisoned stripe is taken as it is: a lane writes each entry
+	/// before the head that counts it, so a section cut short by a panic leaves a lane that reads
+	/// whole.
+	pub fn lock<S: Into<String>>(&self, prefix: S) -> LaneGuard<'_> {
+		let prefix = prefix.into();
+		let i = self.stripe(&prefix);
+		let held = match self.stripes[i].lock() {
+			Ok(g)	=> g,
+			Err(p)	=> p.into_inner(),
+		};
+		LaneGuard { _held: held, prefix }
+	}
+
+	/// As [`lock`](Self::lock), but `None` rather than waiting when the lane's stripe is held.
+	pub fn try_lock<S: Into<String>>(&self, prefix: S) -> Option<LaneGuard<'_>> {
+		let prefix = prefix.into();
+		let i = self.stripe(&prefix);
+		let held = match self.stripes[i].try_lock() {
+			Ok(g)									=> g,
+			Err(std::sync::TryLockError::Poisoned(p))	=> p.into_inner(),
+			Err(std::sync::TryLockError::WouldBlock)	=> return None,
+		};
+		Some(LaneGuard { _held: held, prefix })
+	}
+
+	fn stripe(&self, prefix: &str) -> usize {
+		(self.hasher.hash_one(prefix) % self.stripes.len() as u64) as usize
+	}
+}
+
+/// The proof that the holder has the lock of the lane under [`prefix`](Self::prefix), from
+/// [`LaneLocks::lock`] only; the lock is released when it drops.
+#[derive(Debug)]
+pub struct LaneGuard<'l> {
+	_held:	MutexGuard<'l, ()>,
+	prefix:	String,
+}
+
+impl LaneGuard<'_> {
+	/// The prefix of the lane this guard holds.
+	pub fn prefix(&self) -> &str {
+		&self.prefix
+	}
+}
 
 
 /// What [`Lane::append`] answers.
@@ -76,8 +174,8 @@ pub struct Reader {
 	pub state:	ReaderState,
 }
 
-/// A lane over a database the caller holds exclusively.  Made for one exclusive section and
-/// dropped with it; it holds nothing the store does not.
+/// A lane over a shared database, under its lane's lock.  Made for one section and dropped with
+/// it; it holds nothing the store does not.
 #[derive(Debug)]
 pub struct Lane<
 	'a,
@@ -89,7 +187,7 @@ pub struct Lane<
 > {
 	db:		&'a DB,
 	user:	UID,
-	prefix:	String,
+	prefix:	&'a str,
 	phantom:	PhantomData<(ENC, KH)>,
 }
 
@@ -103,13 +201,13 @@ impl<
 >
 	Lane<'a, UIDL, UID, ENC, KH, DB>
 {
-	/// The `&mut` is the proof of the exclusive section: a read guard or a shared `Arc` cannot give
-	/// one, and the lane keeps the borrow for its life.
-	pub fn new<S: Into<String>>(db: &'a mut DB, user: UID, prefix: S) -> Self {
+	/// The guard is the proof of the lane's section, and names the lane: the lane keeps the borrow
+	/// for its life, so the lock outlives every call on it.
+	pub fn new(db: &'a DB, user: UID, guard: &'a LaneGuard<'_>) -> Self {
 		Self {
 			db,
 			user,
-			prefix:		prefix.into(),
+			prefix:		guard.prefix(),
 			phantom:	PhantomData,
 		}
 	}
@@ -178,18 +276,50 @@ impl<
 
 	/// Entries above `after` in sequence order, stopping before the one that would carry the page
 	/// over `max_bytes` of encoded values (a first entry larger than that is still answered, so a
-	/// reader is never stuck).  Holes are skipped.  An entry whose `exp_ms` is at or before `now_ms`
+	/// reader is never stuck), or once `max_steps` slots have been visited, holes and expired
+	/// entries counting as entries do; either way `more` is set and `through` is the last slot
+	/// visited, so the next page goes on from there.  Holes are skipped.  An entry whose `exp_ms` is at or before `now_ms`
 	/// reads absent and is deleted, for every reader, so `now_ms` must be the gateway's receipt
 	/// clock, the one `exp_ms` was set on, never a device's.  A cursor below the floor answers from
 	/// the floor with `gap` set: the entries between were trimmed and the reader must re-base.
-	pub fn read_after(&self, after: u64, max_bytes: usize, now_ms: u64) -> Outcome<Page> {
+	pub fn read_after(
+		&self,
+		after:		u64,
+		max_bytes:	usize,
+		max_steps:	usize,
+		now_ms:		u64,
+	)
+		-> Outcome<Page>
+	{
+		self.read_after_measured(after, max_bytes, max_steps, now_ms, |v| v.byte_len())
+	}
+
+	/// As [`read_after`](Self::read_after), with each entry's size taken from `measure` rather
+	/// than its encoded length, so a caller can page by what it will send (a wire form) rather
+	/// than by what is stored.  `None` from `measure` is an error.
+	pub fn read_after_measured<F: Fn(&Dat) -> Option<usize>>(
+		&self,
+		after:		u64,
+		max_bytes:	usize,
+		max_steps:	usize,
+		now_ms:		u64,
+		measure:	F,
+	)
+		-> Outcome<Page>
+	{
 		let (head, floor) = res!(self.meta());
 		let mut through = after.max(floor).min(head);
 		let mut entries = Vec::new();
 		let mut used = 0usize;
 		let mut more = false;
+		let mut steps = 0usize;
 		let mut seq = through;
 		while seq < head {
+			if steps >= max_steps {
+				more = true;
+				break;
+			}
+			steps += 1;
 			seq += 1;
 			let (exp_ms, id, val) = match res!(self.entry_at(seq)) {
 				Some(e)	=> e,
@@ -205,7 +335,7 @@ impl<
 					continue;
 				}
 			}
-			let size = match val.byte_len() {
+			let size = match measure(&val) {
 				Some(n)	=> n,
 				None	=> return Err(err!(
 					"lane {}: entry {} cannot be measured.", self.prefix, seq;
@@ -251,13 +381,18 @@ impl<
 	}
 
 	/// Records that `name` has read through `cursor` (held at the head), and marks it live.  A
-	/// cursor may move back, for a reader starting over.  Answers the cursor kept.
+	/// cursor may move back, for a reader starting over.  Writes only when the cursor or the state
+	/// changes, so a reader acknowledging where it already stands costs no write.  Answers the
+	/// cursor kept.
 	pub fn ack(&self, name: &str, cursor: u64) -> Outcome<u64> {
 		let head = res!(self.head());
 		let cursor = cursor.min(head);
 		let mut rs = res!(self.readers());
 		match rs.iter_mut().find(|r| r.name == name) {
 			Some(r)	=> {
+				if r.cursor == cursor && r.state == ReaderState::Live {
+					return Ok(cursor);
+				}
 				r.cursor = cursor;
 				r.state = ReaderState::Live;
 			},
