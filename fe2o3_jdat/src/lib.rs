@@ -125,6 +125,8 @@ pub mod int;
 pub mod kind;
 pub mod map;
 pub mod note;
+#[cfg(feature = "pipe")]
+pub mod pipe;
 pub mod prelude;
 pub mod string;
 pub mod usr;
