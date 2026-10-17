@@ -292,6 +292,7 @@ impl<
                 anything was written.", self.ozid();
                 Thread, Missing, Write));
         }
+        hooks::write_hold();
         let start = res!(self.write_to_file(FileType::Data, vec![&kbyts[..], &vstored[..]]));
 
         // Define the location.
