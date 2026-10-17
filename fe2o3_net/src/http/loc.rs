@@ -103,7 +103,12 @@ impl HttpLocator {
             let mut split = pair.split('=');
             if let (Some(k), Some(v)) = (split.next(), split.next()) {
                 let k = res!(Dat::from_str(k));
-                let v = res!(Dat::from_str(v));
+                // A value the daticle reader cannot read (`have=s1:c1,s2:c2`, say) is the
+                // text it is, not a refusal of the whole request.
+                let v = match Dat::from_str(v) {
+                    Ok(d)  => d,
+                    Err(_) => Dat::Str(v.to_string()),
+                };
                 result.insert(k, v);
             }
         }
