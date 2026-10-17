@@ -35,6 +35,7 @@ use oxedyne_fe2o3_jdat::{
 pub struct ReadFailure {
     pub key:        Dat,
     pub chunked:    bool,   // stored under a bunch key
+    pub damaged:    bool,   // the bytes failed, not the store's answer
     pub error:      String,
 }
 
@@ -64,25 +65,50 @@ impl VerifyReport {
         s.push_str(&fmt!("  failed to read : {}\n", self.failures.len()));
         for f in &self.failures {
             let k: String = fmt!("{:?}", f.key).chars().take(max_key).collect();
-            s.push_str(&fmt!("  FAILED{} {}\n      {}\n",
-                if f.chunked { " (chunked)" } else { "" }, k, f.error));
+            s.push_str(&fmt!("  FAILED{}{} {}\n      {}\n",
+                if f.chunked { " (chunked)" } else { "" },
+                if f.damaged { "" } else { " (unanswered)" }, k, f.error));
         }
         s
     }
 }
 
 /// What reading one key back through the ordinary read path found.
+///
+/// `Damaged` and `Unavailable` are kept apart because only the first says anything about the
+/// bytes.  A store too busy to answer within its deadline fails a read just as a damaged record
+/// does, and a caller that removes damaged records must never remove one on a timeout
+/// (CHUNK-VERIFY D1, 2026-10-17).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeyCheck {
-    Whole   { chunked: bool },                  // read, rejoined, decrypted and decoded
-    Absent,                                     // no record, or the newest is a deletion
-    Failed  { chunked: bool, error: String },   // a record the index holds that will not read
+    Whole       { chunked: bool },                  // read, rejoined, decrypted and decoded
+    Absent,                                         // no record, or the newest is a deletion
+    Damaged     { chunked: bool, error: String },   // the bytes fail checksum, decryption or decoding
+    Unavailable { chunked: bool, error: String },   // no answer: a timeout, a channel, anything else
+}
+
+impl KeyCheck {
+
+    /// Classifies a failed read by the tags anywhere in its chain.  Only `Mismatch` (a checksum,
+    /// or a record other than the one named, on every attempt), `Decrypt` and `Decode` say the
+    /// bytes are bad; every other failure, a responder timeout included, is `Unavailable`, so
+    /// an error nobody foresaw never condemns a record.
+    pub fn of_error(chunked: bool, e: &Error<ErrTag>) -> Self {
+        let error = fmt!("{}", e);
+        let damaged = e.tags().iter()
+            .any(|t| matches!(t, ErrTag::Mismatch | ErrTag::Decrypt | ErrTag::Decode));
+        if damaged {
+            Self::Damaged { chunked, error }
+        } else {
+            Self::Unavailable { chunked, error }
+        }
+    }
 }
 
 /// Reads `key` back whole, gathering and rejoining a chunked value, and says what it found.  It
 /// issues no write, so unlike [`verify_live_set`] it is safe against a live store: it is one
 /// ordinary read.  A record the key index holds but whose bytes fail their checksum, decryption
-/// or decoding is [`KeyCheck::Failed`], which a presence lookup (`contains_wait`) cannot see.
+/// or decoding is [`KeyCheck::Damaged`], which a presence lookup (`contains_wait`) cannot see.
 pub fn verify_key<
     const UIDL: usize,
     UID:    NumIdDat<UIDL> + 'static,
@@ -99,7 +125,7 @@ pub fn verify_key<
 {
     // The head first, so that a chunked value is known as one whether or not its chunks read.
     let head = match api.get_head_wait(key, schms2) {
-        Err(e)              => return KeyCheck::Failed { chunked: false, error: fmt!("{}", e) },
+        Err(e)              => return KeyCheck::of_error(false, &e),
         Ok(None)            => return KeyCheck::Absent,
         Ok(Some((head, _))) => head,
     };
@@ -108,7 +134,7 @@ pub fn verify_key<
     }
     match api.fetch_chunks(&head, schms2) {
         Ok(_)   => KeyCheck::Whole { chunked: true },
-        Err(e)  => KeyCheck::Failed { chunked: true, error: fmt!("{}", e) },
+        Err(e)  => KeyCheck::of_error(true, &e),
     }
 }
 
@@ -142,9 +168,13 @@ pub fn verify_live_set<
                 if chunked { rep.chunked += 1; }
             },
             KeyCheck::Absent                    => rep.absent += 1,
-            KeyCheck::Failed { chunked, error } => {
+            KeyCheck::Damaged { chunked, error } => {
                 if chunked { rep.chunked += 1; }
-                rep.failures.push(ReadFailure { key: k, chunked, error });
+                rep.failures.push(ReadFailure { key: k, chunked, damaged: true, error });
+            },
+            KeyCheck::Unavailable { chunked, error } => {
+                if chunked { rep.chunked += 1; }
+                rep.failures.push(ReadFailure { key: k, chunked, damaged: false, error });
             },
         }
     }

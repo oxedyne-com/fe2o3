@@ -199,9 +199,36 @@ fn verify_key_finds_a_flipped_byte_that_presence_reports_held() -> Outcome<()> {
     assert!(deleted.is_ok(), "the unreadable record could not be deleted: {:?}", deleted);
     assert_eq!(gone, vec![false], "the deleted record still reads present");
     assert_eq!(after, KeyCheck::Absent);
-    assert!(matches!(damaged, KeyCheck::Failed { chunked: false, .. }),
+    assert!(matches!(damaged, KeyCheck::Damaged { chunked: false, .. }),
         "the flipped record read as {:?}", damaged);
     assert_eq!(whole, KeyCheck::Whole { chunked: false });
     assert_eq!(never, KeyCheck::Absent);
+    Ok(())
+}
+
+// A read the store did not answer says nothing about the bytes, so it must never classify as
+// damage, however it is wrapped; the bytes failing must, however deep (CHUNK-VERIFY D1).
+#[test]
+fn a_timeout_is_unavailable_and_only_bad_bytes_are_damaged() -> Outcome<()> {
+    let timeout: Error<ErrTag> = err!(
+        "Failed to receive a message via responder within {:.2} [s].",
+        constant::USER_REQUEST_TIMEOUT.as_secs_f32();
+        Missing, Data);
+    let wrapped: Error<ErrTag> = err!(timeout.clone(), "While reading a head."; Read);
+    let channel: Error<ErrTag> = err!("Could not read from responder channel"; Channel, Read);
+    let busy:    Error<ErrTag> = err!("Not known."; Missing);
+    for e in [&timeout, &wrapped, &channel, &busy] {
+        assert!(matches!(KeyCheck::of_error(false, e), KeyCheck::Unavailable { chunked: false, .. }),
+            "{} classified as damage", e);
+    }
+    let checksum: Error<ErrTag> = err!("Mismatch detected"; Input, Mismatch);
+    let reader:   Error<ErrTag> = err!(checksum.clone(), "While reading Data file 1."; Data, Mismatch);
+    let deep:     Error<ErrTag> = err!(reader.clone(), "Fetching chunks."; Read);
+    let decrypt:  Error<ErrTag> = err!("While decrypting."; Decrypt);
+    let decode:   Error<ErrTag> = err!("Could not form a Dat."; Decode, Bytes);
+    for e in [&checksum, &reader, &deep, &decrypt, &decode] {
+        assert!(matches!(KeyCheck::of_error(true, e), KeyCheck::Damaged { chunked: true, .. }),
+            "{} not classified as damage", e);
+    }
     Ok(())
 }
