@@ -188,9 +188,17 @@ fn verify_key_finds_a_flipped_byte_that_presence_reports_held() -> Outcome<()> {
     let damaged = verify::verify_key(db.api(), &victim, None);
     let whole   = verify::verify_key(db.api(), &dat!("small 1"), None);
     let never   = verify::verify_key(db.api(), &dat!("never"), None);
+    // A record that does not read can still be deleted, which is what a caller rids itself of
+    // it with: the delete must not first need to read it.
+    let deleted = db.delete(&victim, Uid::default(), None);
+    let gone    = res!(db.contains_many(&[victim.clone()], None));
+    let after   = verify::verify_key(db.api(), &victim, None);
     res!(db.shutdown());
     let _ = fs::remove_dir_all(dir);
     assert_eq!(held, vec![true, true, false], "presence of the victim, a whole key and no key");
+    assert!(deleted.is_ok(), "the unreadable record could not be deleted: {:?}", deleted);
+    assert_eq!(gone, vec![false], "the deleted record still reads present");
+    assert_eq!(after, KeyCheck::Absent);
     assert!(matches!(damaged, KeyCheck::Failed { chunked: false, .. }),
         "the flipped record read as {:?}", damaged);
     assert_eq!(whole, KeyCheck::Whole { chunked: false });
