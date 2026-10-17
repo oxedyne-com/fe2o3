@@ -152,6 +152,7 @@ pub mod comm;
 pub mod dal; // Data Abstraction Layer.
 pub mod data;
 pub mod file;
+pub mod lane; // A sequence lane: a bounded log with rising sequence numbers, reader cursors and lazy expiry.
 pub mod gateway; // The gateway's own Ozone parameterisation, and opening a store under it for an operator tool.
 pub mod test;
 
