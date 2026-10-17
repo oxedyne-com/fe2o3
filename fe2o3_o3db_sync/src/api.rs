@@ -931,7 +931,10 @@ impl<
     }
 
     /// The part key of the value now at `k`, when that value is chunked.  The read is a whole
-    /// read, so a store pays it only where it must know.
+    /// read, so a store pays it only where it must know.  A record whose bytes fail their
+    /// checksum on every attempt cannot say whether it was chunked, and deleting it is how a
+    /// caller is rid of it, so it answers `None`: the key is tombstoned, and a chunk set it may
+    /// have headed is left to the orphan sweep.  Any other failure is an error.
     fn chunk_set_of(
         &self,
         k:      &Dat,
@@ -943,9 +946,18 @@ impl<
         let or_enc = schms2.map(|s| s.encrypter());
 
         let resp = res!(self.fetch_using_schemes(k, schms2));
-        match res!(resp.recv_daticle(enc, or_enc)) {
-            (Some((Dat::Tup5u64(tup), _)), _) => Ok(Some(PartKey(tup))),
-            _ => Ok(None),
+        match resp.recv_daticle(enc, or_enc) {
+            Ok((Some((Dat::Tup5u64(tup), _)), _)) => Ok(Some(PartKey(tup))),
+            Ok(_) => Ok(None),
+            Err(e) if e.tags().contains(&ErrTag::Mismatch) => {
+                warn!("{}: Deleting {:?}, whose record does not read back, so any chunks it \
+                    headed are left to the orphan sweep: {}", self.ozid(), k, e);
+                Ok(None)
+            },
+            Err(e) => Err(err!(e,
+                "{}: Deleting {:?}, its current value could not be read to learn whether it \
+                is chunked.", self.ozid(), k;
+                Read)),
         }
     }
 
