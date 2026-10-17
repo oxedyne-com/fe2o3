@@ -2,11 +2,14 @@
 //! rising sequence number, read in pages above a cursor, trimmed from the bottom, with lazy expiry
 //! and per-reader cursors whose least live value is the lane's `stable` point.
 //!
-//! Every method runs on a database the caller has already locked for writing (Steel's
-//! `publish::store::exclusive` is the pattern): the head, the floor and the reader table are read,
-//! changed and written back, and two unserialised callers would lose an update.  `read_after`
-//! writes too, since it deletes the expired entries it meets.  The lane reads values throughout and
-//! never relies on a key-only presence answer.
+//! Every method runs on a database the caller holds exclusively, and [`Lane::new`] takes the
+//! `&mut` that proves it (from a write guard, `&mut *guard`, or from owning the store): the head,
+//! the floor and the reader table are read, changed and written back, and two unserialised callers
+//! would lose an update.  `read_after` writes too, since it deletes the expired entries it meets.
+//! The lane reads values throughout and never relies on a key-only presence answer.
+//!
+//! A replay whose entry has gone (trimmed, removed or expired) appends anew; refusing a replayed
+//! ephemeral record after its expiry is the caller's (Daimond's C8), not the lane's.
 //!
 //! Keys, under the caller's prefix `p`:
 //!
@@ -56,6 +59,8 @@ pub struct Page {
 	pub entries:	Vec<Entry>,
 	pub through:	u64,	// every sequence up to this one has been answered or is a hole
 	pub more:		bool,	// entries above `through` were left for the next page
+	pub floor:		u64,	// the highest sequence trimmed when the page was read
+	pub gap:		bool,	// `after` was below the floor, so trimmed entries were never answered
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,8 +76,8 @@ pub struct Reader {
 	pub state:	ReaderState,
 }
 
-/// A lane over a database the caller holds locked.  Made for one exclusive section and dropped
-/// with it; it holds nothing the store does not.
+/// A lane over a database the caller holds exclusively.  Made for one exclusive section and
+/// dropped with it; it holds nothing the store does not.
 #[derive(Debug)]
 pub struct Lane<
 	'a,
@@ -98,7 +103,9 @@ impl<
 >
 	Lane<'a, UIDL, UID, ENC, KH, DB>
 {
-	pub fn new<S: Into<String>>(db: &'a DB, user: UID, prefix: S) -> Self {
+	/// The `&mut` is the proof of the exclusive section: a read guard or a shared `Arc` cannot give
+	/// one, and the lane keeps the borrow for its life.
+	pub fn new<S: Into<String>>(db: &'a mut DB, user: UID, prefix: S) -> Self {
 		Self {
 			db,
 			user,
@@ -124,7 +131,10 @@ impl<
 	}
 
 	/// Appends `val` at the next sequence.  With an `id` the lane already holds, nothing is written
-	/// and the held entry's sequence is answered, so a replayed append does not double.  The id is
+	/// and the held entry's sequence is answered, so a replayed append does not double.  Held means
+	/// the entry the id record names still carries that id: after a crash between the id write and
+	/// the head write, the next append takes that sequence, and the dangling record is not held.  The
+	/// id is
 	/// forgotten with its entry, so an append replayed after its entry was trimmed, removed or
 	/// expired appends anew.  `exp_ms` is the millisecond the entry stops reading, on whatever clock
 	/// the caller passes to [`read_after`](Self::read_after).
@@ -137,8 +147,10 @@ impl<
 		}
 		if let Some(id) = id {
 			if let Some(seq) = res!(self.id_seq(id)) {
-				if res!(self.db.get(&self.entry_key(seq), None)).is_some() {
-					return Ok(Appended { seq, replay: true });
+				if let Some((_, Some(held), _)) = res!(self.entry_at(seq)) {
+					if held.as_slice() == id {
+						return Ok(Appended { seq, replay: true });
+					}
 				}
 			}
 		}
@@ -167,7 +179,9 @@ impl<
 	/// Entries above `after` in sequence order, stopping before the one that would carry the page
 	/// over `max_bytes` of encoded values (a first entry larger than that is still answered, so a
 	/// reader is never stuck).  Holes are skipped.  An entry whose `exp_ms` is at or before `now_ms`
-	/// reads absent and is deleted.
+	/// reads absent and is deleted, for every reader, so `now_ms` must be the gateway's receipt
+	/// clock, the one `exp_ms` was set on, never a device's.  A cursor below the floor answers from
+	/// the floor with `gap` set: the entries between were trimmed and the reader must re-base.
 	pub fn read_after(&self, after: u64, max_bytes: usize, now_ms: u64) -> Outcome<Page> {
 		let (head, floor) = res!(self.meta());
 		let mut through = after.max(floor).min(head);
@@ -205,7 +219,7 @@ impl<
 			entries.push(Entry { seq, exp_ms, val });
 			through = seq;
 		}
-		Ok(Page { entries, through, more })
+		Ok(Page { entries, through, more, floor, gap: after < floor })
 	}
 
 	/// Deletes the entry at `seq`, leaving a hole reads skip.  Answers whether there was one.

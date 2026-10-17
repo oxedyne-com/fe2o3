@@ -83,19 +83,20 @@ fn run() -> Outcome<()> {
     let root = res!(root.canonicalize());
     let user = setup::Uid::default();
     {
-        let db = res!(open(&root, true));
-        res!(append_rises(&db, user));
-        res!(pages_honour_max_bytes(&db, user));
-        res!(holes_are_skipped(&db, user));
-        res!(expired_reads_absent_and_is_deleted(&db, user));
-        res!(replayed_append_does_not_double(&db, user));
-        res!(cursors_and_stable(&db, user));
-        res!(trim_never_passes_the_ask(&db, user));
+        let mut db = res!(open(&root, true));
+        res!(append_rises(&mut db, user));
+        res!(pages_honour_max_bytes(&mut db, user));
+        res!(holes_are_skipped(&mut db, user));
+        res!(expired_reads_absent_and_is_deleted(&mut db, user));
+        res!(replayed_append_does_not_double(&mut db, user));
+        res!(replay_after_a_torn_append_is_not_held(&mut db, user));
+        res!(cursors_and_stable(&mut db, user));
+        res!(trim_never_passes_the_ask(&mut db, user));
         res!(db.shutdown());
     }
     {
-        let db = res!(open(&root, false));
-        res!(survives_a_restart(&db, user));
+        let mut db = res!(open(&root, false));
+        res!(survives_a_restart(&mut db, user));
         res!(db.shutdown());
     }
     res!(replay_under_one_exclusive_section(&root, user));
@@ -103,7 +104,7 @@ fn run() -> Outcome<()> {
     Ok(())
 }
 
-fn append_rises(db: &TestDb, user: setup::Uid) -> Outcome<()> {
+fn append_rises(db: &mut TestDb, user: setup::Uid) -> Outcome<()> {
     let lane: TestLane = Lane::new(db, user, "t/rise");
     res!(check(res!(lane.head()) == 0, fmt!("a new lane has head {}", res!(lane.head()))));
     for i in 1..=5 {
@@ -124,7 +125,7 @@ fn append_rises(db: &TestDb, user: setup::Uid) -> Outcome<()> {
     Ok(())
 }
 
-fn pages_honour_max_bytes(db: &TestDb, user: setup::Uid) -> Outcome<()> {
+fn pages_honour_max_bytes(db: &mut TestDb, user: setup::Uid) -> Outcome<()> {
     let lane: TestLane = Lane::new(db, user, "t/page");
     for i in 1..=10 {
         res!(lane.append(val(i, 1_000), None, None));
@@ -157,7 +158,7 @@ fn pages_honour_max_bytes(db: &TestDb, user: setup::Uid) -> Outcome<()> {
     Ok(())
 }
 
-fn holes_are_skipped(db: &TestDb, user: setup::Uid) -> Outcome<()> {
+fn holes_are_skipped(db: &mut TestDb, user: setup::Uid) -> Outcome<()> {
     let lane: TestLane = Lane::new(db, user, "t/hole");
     for i in 1..=8 {
         res!(lane.append(val(i, 16), None, None));
@@ -177,7 +178,7 @@ fn holes_are_skipped(db: &TestDb, user: setup::Uid) -> Outcome<()> {
     Ok(())
 }
 
-fn expired_reads_absent_and_is_deleted(db: &TestDb, user: setup::Uid) -> Outcome<()> {
+fn expired_reads_absent_and_is_deleted(db: &mut TestDb, user: setup::Uid) -> Outcome<()> {
     let lane: TestLane = Lane::new(db, user, "t/exp");
     res!(lane.append(val(1, 16), None, Some(NOW + 1_000)));
     res!(lane.append(val(2, 16), Some(b"two"), Some(NOW + 5_000)));
@@ -201,7 +202,7 @@ fn expired_reads_absent_and_is_deleted(db: &TestDb, user: setup::Uid) -> Outcome
     Ok(())
 }
 
-fn replayed_append_does_not_double(db: &TestDb, user: setup::Uid) -> Outcome<()> {
+fn replayed_append_does_not_double(db: &mut TestDb, user: setup::Uid) -> Outcome<()> {
     let lane: TestLane = Lane::new(db, user, "t/replay");
     let a = res!(lane.append(val(1, 16), Some(&[0xab, 0x01]), None));
     let b = res!(lane.append(val(2, 16), Some(&[0xab, 0x02]), None));
@@ -215,7 +216,32 @@ fn replayed_append_does_not_double(db: &TestDb, user: setup::Uid) -> Outcome<()>
     Ok(())
 }
 
-fn cursors_and_stable(db: &TestDb, user: setup::Uid) -> Outcome<()> {
+// A crash between the id write and the head write leaves A's id naming a sequence the next
+// append, B, takes.  A replay of A must not answer B's entry as its own.
+fn replay_after_a_torn_append_is_not_held(db: &mut TestDb, user: setup::Uid) -> Outcome<()> {
+    let a_id: &[u8] = &[0xcd, 0x01];
+    res!(db.insert(
+        dat!("t/torn/e/1"),
+        Dat::List(vec![Dat::U64(0), Dat::bytdat(a_id.to_vec()), val(1, 16)]),
+        user,
+        None,
+    ));
+    res!(db.insert(dat!("t/torn/i/cd01"), Dat::U64(1), user, None));
+    let lane: TestLane = Lane::new(db, user, "t/torn");
+    let b = res!(lane.append(val(2, 16), Some(&[0xcd, 0x02]), None));
+    let r = res!(lane.append(val(1, 16), Some(a_id), None));
+    res!(check(b.seq == 1 && r.seq == 2 && !r.replay,
+        fmt!("after a torn append, B {:?}, the replay of A {:?}", b, r)));
+    let p = res!(lane.read_after(0, 1 << 20, NOW));
+    res!(check(seqs(&p) == vec![1, 2] && p.entries[0].val == val(2, 16) && p.entries[1].val == val(1, 16),
+        fmt!("after a torn append the lane holds {:?}", p.entries)));
+    // The id now names A's own entry, so a second replay is held.
+    let r = res!(lane.append(val(1, 16), Some(a_id), None));
+    res!(check(r.seq == 2 && r.replay, fmt!("a second replay of A answered {:?}", r)));
+    Ok(())
+}
+
+fn cursors_and_stable(db: &mut TestDb, user: setup::Uid) -> Outcome<()> {
     let lane: TestLane = Lane::new(db, user, "t/cur");
     for i in 1..=10 {
         res!(lane.append(val(i, 16), None, None));
@@ -251,7 +277,7 @@ fn cursors_and_stable(db: &TestDb, user: setup::Uid) -> Outcome<()> {
     Ok(())
 }
 
-fn trim_never_passes_the_ask(db: &TestDb, user: setup::Uid) -> Outcome<()> {
+fn trim_never_passes_the_ask(db: &mut TestDb, user: setup::Uid) -> Outcome<()> {
     let lane: TestLane = Lane::new(db, user, "t/trim");
     for i in 1..=10 {
         res!(lane.append(val(i, 16), None, None));
@@ -263,6 +289,11 @@ fn trim_never_passes_the_ask(db: &TestDb, user: setup::Uid) -> Outcome<()> {
     let p = res!(lane.read_after(0, 1 << 20, NOW));
     res!(check(f == 4 && seqs(&p) == vec![5, 6, 7, 8, 9, 10],
         fmt!("trim through stable {}: floor {}, left {:?}", s, f, seqs(&p))));
+    // A reader below the floor is told of the gap; one at or above it is not.
+    res!(check(p.gap && p.floor == 4, fmt!("from 0 over floor 4: gap {} floor {}", p.gap, p.floor)));
+    let p = res!(lane.read_after(4, 1 << 20, NOW));
+    res!(check(!p.gap && p.floor == 4 && seqs(&p) == vec![5, 6, 7, 8, 9, 10],
+        fmt!("from the floor: gap {} floor {} {:?}", p.gap, p.floor, seqs(&p))));
     // Never lowers the floor, and never passes the head.
     res!(check(res!(lane.trim_through(2)) == 4, fmt!("a lower trim moved the floor")));
     res!(check(res!(lane.trim_through(1_000)) == 10, fmt!("a trim past the head")));
@@ -273,7 +304,7 @@ fn trim_never_passes_the_ask(db: &TestDb, user: setup::Uid) -> Outcome<()> {
     Ok(())
 }
 
-fn survives_a_restart(db: &TestDb, user: setup::Uid) -> Outcome<()> {
+fn survives_a_restart(db: &mut TestDb, user: setup::Uid) -> Outcome<()> {
     let lane: TestLane = Lane::new(db, user, "t/cur");
     res!(check(res!(lane.head()) == 10, fmt!("after a restart head {}", res!(lane.head()))));
     let rs = res!(lane.readers());
@@ -298,11 +329,11 @@ fn replay_under_one_exclusive_section(root: &PathBuf, user: setup::Uid) -> Outco
             let mut got = Vec::new();
             for k in 0..8u64 {
                 let id = ((t + k) % 8).to_be_bytes();
-                let guard = match db.write() {
+                let mut guard = match db.write() {
                     Ok(g)   => g,
                     Err(_)  => return Err(err!("The store lock is poisoned."; Test, Lock)),
                 };
-                let lane: TestLane = Lane::new(&*guard, user, "t/excl");
+                let lane: TestLane = Lane::new(&mut *guard, user, "t/excl");
                 got.push(res!(lane.append(val(k, 16), Some(&id), None)).seq);
             }
             Ok(got)
@@ -315,11 +346,11 @@ fn replay_under_one_exclusive_section(root: &PathBuf, user: setup::Uid) -> Outco
             Err(_)      => return Err(err!("An append thread panicked."; Test, Thread)),
         }
     }
-    let guard = match db.read() {
+    let mut guard = match db.write() {
         Ok(g)   => g,
         Err(_)  => return Err(err!("The store lock is poisoned."; Test, Lock)),
     };
-    let lane: TestLane = Lane::new(&*guard, user, "t/excl");
+    let lane: TestLane = Lane::new(&mut *guard, user, "t/excl");
     let p = res!(lane.read_after(0, 1 << 20, NOW));
     res!(check(res!(lane.head()) == 8 && seqs(&p) == (1..=8).collect::<Vec<u64>>(),
         fmt!("64 appends of 8 ids: head {}, entries {:?}", res!(lane.head()), seqs(&p))));
