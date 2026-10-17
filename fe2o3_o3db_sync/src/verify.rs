@@ -7,6 +7,10 @@
 //! a store without encryption nothing covers a value across its chunks, and a torn value is found
 //! only when its bytes no longer decode.
 //!
+//! [`verify_key`] is the same check for one key, and issues one ordinary read, so a running
+//! process may call it on its own open store to find a record its index holds and its bytes no
+//! longer back.
+//!
 //! Opening a store starts its bots, which survey and may settle its files.  Check a `cp -a` copy
 //! taken while the store's own process is stopped, never a live store, and never with a second
 //! process on the same store.
@@ -67,6 +71,47 @@ impl VerifyReport {
     }
 }
 
+/// What reading one key back through the ordinary read path found.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum KeyCheck {
+    Whole   { chunked: bool },                  // read, rejoined, decrypted and decoded
+    Absent,                                     // no record, or the newest is a deletion
+    Failed  { chunked: bool, error: String },   // a record the index holds that will not read
+}
+
+/// Reads `key` back whole, gathering and rejoining a chunked value, and says what it found.  It
+/// issues no write, so unlike [`verify_live_set`] it is safe against a live store: it is one
+/// ordinary read.  A record the key index holds but whose bytes fail their checksum, decryption
+/// or decoding is [`KeyCheck::Failed`], which a presence lookup (`contains_wait`) cannot see.
+pub fn verify_key<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>(
+    api:    &OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
+    key:    &Dat,
+    schms2: Option<&RestSchemesOverride<ENC, KH>>,
+)
+    -> KeyCheck
+{
+    // The head first, so that a chunked value is known as one whether or not its chunks read.
+    let head = match api.get_head_wait(key, schms2) {
+        Err(e)              => return KeyCheck::Failed { chunked: false, error: fmt!("{}", e) },
+        Ok(None)            => return KeyCheck::Absent,
+        Ok(Some((head, _))) => head,
+    };
+    if !matches!(head, Dat::Tup5u64(_)) {
+        return KeyCheck::Whole { chunked: false };
+    }
+    match api.fetch_chunks(&head, schms2) {
+        Ok(_)   => KeyCheck::Whole { chunked: true },
+        Err(e)  => KeyCheck::Failed { chunked: true, error: fmt!("{}", e) },
+    }
+}
+
 /// Reads every live key of the store behind `api` and reports each that fails to read, decrypt
 /// or decode, with counts of the keys and of the chunked ones among them.  It issues no write.
 /// An error is returned only when the store cannot be scanned; a key that cannot be read is a
@@ -91,26 +136,16 @@ pub fn verify_live_set<
     let entries = res!(api.scan_with_wait(&ScanOpts::all(), schms2, scan_wait));
     let mut rep = VerifyReport { keys: entries.len(), ..Default::default() };
     for (k, _, _) in entries {
-        // The head first, so that a chunked value is counted whether or not its chunks read.
-        let head = match api.get_head_wait(&k, schms2) {
-            Err(e) => {
-                rep.failures.push(ReadFailure { key: k, chunked: false, error: fmt!("{}", e) });
-                continue;
+        match verify_key(api, &k, schms2) {
+            KeyCheck::Whole { chunked }         => {
+                rep.present += 1;
+                if chunked { rep.chunked += 1; }
             },
-            Ok(None) => {
-                rep.absent += 1;
-                continue;
+            KeyCheck::Absent                    => rep.absent += 1,
+            KeyCheck::Failed { chunked, error } => {
+                if chunked { rep.chunked += 1; }
+                rep.failures.push(ReadFailure { key: k, chunked, error });
             },
-            Ok(Some((head, _))) => head,
-        };
-        if !matches!(head, Dat::Tup5u64(_)) {
-            rep.present += 1;
-            continue;
-        }
-        rep.chunked += 1;
-        match api.fetch_chunks(&head, schms2) {
-            Ok(_)   => rep.present += 1,
-            Err(e)  => rep.failures.push(ReadFailure { key: k, chunked: true, error: fmt!("{}", e) }),
         }
     }
     Ok(rep)

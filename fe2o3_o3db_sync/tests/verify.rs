@@ -1,6 +1,8 @@
 //! `verify::verify_live_set` over an encrypted store opened as the gateway's tools open it: a
 //! clean store reads back whole with the right chunked count and is left byte-identical, and a
-//! value with one chunk of another write is named by its key.
+//! value with one chunk of another write is named by its key.  `verify::verify_key` on an open
+//! store tells a record whose bytes were damaged on disk from a whole one, where a presence lookup
+//! reports both held.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_db::api::Database;
@@ -18,6 +20,7 @@ use oxedyne_fe2o3_o3db_sync::{
     test::setup,
     verify::{
         self,
+        KeyCheck,
         VerifyReport,
     },
 };
@@ -138,5 +141,59 @@ fn verify_finds_a_torn_value_and_writes_nothing() -> Outcome<()> {
     assert_eq!(rep.failures[0].key, torn);
     assert!(rep.failures[0].chunked);
     assert_eq!((rep.keys, rep.present, rep.chunked), (9, 7, 3));
+    Ok(())
+}
+
+#[test]
+fn verify_key_finds_a_flipped_byte_that_presence_reports_held() -> Outcome<()> {
+    log_set_level!("error");
+    let dir = "./test_db_verify_key";
+    let _ = fs::remove_dir_all(dir);
+    res!(fs::create_dir_all(dir));
+    let root = res!(Path::new(dir).canonicalize());
+    let victim = dat!("victim");
+    {
+        let (db, _) = res!(gateway::open_store(&root, Some(res!(cfg())), &KEY, false, "vk-fill"));
+        for i in 0..3u8 {
+            res!(db.insert(dat!(fmt!("small {}", i)), val(300, i), Uid::default(), None));
+        }
+        res!(db.shutdown());
+    }
+    let before = res!(snapshot(&root));
+    {
+        let (db, _) = res!(gateway::open_store(&root, None, &KEY, false, "vk-victim"));
+        res!(db.insert(victim.clone(), val(300, 42), Uid::default(), None));
+        res!(db.shutdown());
+    }
+    // The victim's record is the tail the last write appended to the file that grew most; one
+    // byte well inside it is flipped, as a failing disk would leave it.
+    let after = res!(snapshot(&root));
+    let mut grown: Option<(PathBuf, usize, usize)> = None;
+    for (path, bytes) in &after {
+        let old = before.get(path).map(|b| b.len()).unwrap_or(0);
+        if bytes.len() > old && grown.as_ref().map_or(true, |(_, o, n)| bytes.len() - old > n - o) {
+            grown = Some((path.clone(), old, bytes.len()));
+        }
+    }
+    let (path, old, new) = res!(grown.ok_or_else(|| err!("No file grew with the victim's write."; Missing)));
+    assert!(new - old > 300, "the victim's record is {} bytes, not a whole value", new - old);
+    let mut bytes = res!(fs::read(&path));
+    let at = new - (new - old) / 4;
+    bytes[at] ^= 0xff;
+    res!(fs::write(&path, &bytes));
+
+    let (db, n) = res!(gateway::open_store(&root, None, &KEY, false, "vk-check"));
+    res!(gateway::require_answer(n, "vk-check", &root));
+    let held = res!(db.contains_many(&[victim.clone(), dat!("small 1"), dat!("never")], None));
+    let damaged = verify::verify_key(db.api(), &victim, None);
+    let whole   = verify::verify_key(db.api(), &dat!("small 1"), None);
+    let never   = verify::verify_key(db.api(), &dat!("never"), None);
+    res!(db.shutdown());
+    let _ = fs::remove_dir_all(dir);
+    assert_eq!(held, vec![true, true, false], "presence of the victim, a whole key and no key");
+    assert!(matches!(damaged, KeyCheck::Failed { chunked: false, .. }),
+        "the flipped record read as {:?}", damaged);
+    assert_eq!(whole, KeyCheck::Whole { chunked: false });
+    assert_eq!(never, KeyCheck::Absent);
     Ok(())
 }
