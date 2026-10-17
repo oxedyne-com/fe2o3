@@ -97,35 +97,38 @@ impl HttpLocator {
         Ok((path, map, query_string.to_string(), fragment.to_string()))
     }
 
+    /// The query's `key=value` pairs, each key and value percent-decoded (RFC 3986 §2.1, as a
+    /// browser's `encodeURIComponent` writes them) before it is read as a daticle, so
+    /// `have=s1%3A1` reads as `s1:1`, exactly as `have=s1:1` does.  A `+` is a plus, not a space:
+    /// that substitution belongs to form bodies, not to a URI's query.  The value is everything
+    /// after the first `=`, so a padded base64 value keeps its `=`s.  An escape that is malformed,
+    /// or that decodes to bytes which are not UTF-8, is left as written, as a browser's
+    /// `URLSearchParams` does; and a value the daticle reader cannot read is the text it is.
     fn parse_query_string(query: &str) -> Outcome<DaticleMap> {
-        let mut result = DaticleMap::new(); 
+        let mut result = DaticleMap::new();
         for pair in query.split('&') {
-            let mut split = pair.split('=');
-            if let (Some(k), Some(v)) = (split.next(), split.next()) {
-                let k = res!(Dat::from_str(k));
-                // A value the daticle reader cannot read (`have=s1:c1,s2:c2`, say) is the
-                // text it is, not a refusal of the whole request.
-                let v = match Dat::from_str(v) {
+            if let Some((k, v)) = pair.split_once('=') {
+                let k = res!(Dat::from_str(&Self::pct_decoded(k)));
+                let v = Self::pct_decoded(v);
+                let v = match Dat::from_str(&v) {
                     Ok(d)  => d,
-                    Err(_) => Dat::Str(v.to_string()),
+                    Err(_) => Dat::Str(v),
                 };
                 result.insert(k, v);
             }
         }
         Ok(result)
-        //Ok(query.split('&')
-        //    .filter_map(|pair| {
-        //        let mut split = pair.split('=');
-        //        if let (Some(k), Some(v)) = (split.next(), split.next()) {
-        //            let k = res!(Dat::from_str(k));
-        //            let v = res!(Dat::from_str(v));
-        //            Some((k, v))
-        //        } else {
-        //            None
-        //        }
-        //    })
-        //    .collect()
-        //)
+    }
+
+    /// `s` with its percent escapes decoded, or as written when they will not decode to text.
+    fn pct_decoded(s: &str) -> String {
+        if !s.contains('%') {
+            return s.to_string();
+        }
+        match crate::http::pct::decode_str(s) {
+            Ok(d)  => d,
+            Err(_) => s.to_string(),
+        }
     }
 
     /// A query parameter as a string, if it is present and is one.
@@ -424,6 +427,34 @@ mod url_tests {
         assert_eq!(loc.query_i64("view", 7), 7,   "a non-numeric value falls back");
         assert_eq!(loc.query_i64("absent", 5), 5, "an absent parameter falls back");
         assert_eq!(loc.query_str("absent"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_values_are_percent_decoded() -> Outcome<()> {
+        // What encodeURIComponent writes reads as what it encoded (C8a check F5: a percent-
+        // encoded `have=s1%3A1%2Cs2%3A2` was refused where `have=s1:1,s2:2` was taken).
+        let loc = res!(HttpLocator::new("/x?have=s1%3A1%2Cs2%3A2&raw=s1:1,s2:2&w=a%20b%2Fc"));
+        assert_eq!(loc.query_str("have"), Some(fmt!("s1:1,s2:2")));
+        assert_eq!(loc.query_str("raw"), Some(fmt!("s1:1,s2:2")));
+        assert_eq!(loc.query_str("w"), Some(fmt!("a b/c")));
+        // Multi-byte text, a plus kept a plus, and a padded value keeping its `=`s.
+        let loc = res!(HttpLocator::new("/x?t=caf%C3%A9&p=a+b&b=YQ%3D%3D&e=YQ=="));
+        assert_eq!(loc.query_str("t"), Some(fmt!("café")));
+        assert_eq!(loc.query_str("p"), Some(fmt!("a+b")));
+        assert_eq!(loc.query_str("b"), Some(fmt!("YQ==")));
+        assert_eq!(loc.query_str("e"), Some(fmt!("YQ==")));
+        // A decoded number is still a number, and an escaped key reads as its text.
+        let loc = res!(HttpLocator::new("/x?n=%31%32&d%65vice=ab"));
+        assert_eq!(loc.query_i64("n", 0), 12);
+        assert_eq!(loc.query_str("device"), Some(fmt!("ab")));
+        // A malformed escape, or one that is not UTF-8, is left as written.
+        let loc = res!(HttpLocator::new("/x?a=100%&b=%zz&c=%FF"));
+        assert_eq!(loc.query_str("a"), Some(fmt!("100%")));
+        assert_eq!(loc.query_str("b"), Some(fmt!("%zz")));
+        assert_eq!(loc.query_str("c"), Some(fmt!("%FF")));
+        // The raw query is still forwarded byte for byte.
+        assert_eq!(loc.query, "a=100%&b=%zz&c=%FF");
         Ok(())
     }
 
