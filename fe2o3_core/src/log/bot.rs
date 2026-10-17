@@ -45,6 +45,20 @@ use flate2::{
 };
 pub use humantime::format_rfc3339_seconds as timefmt;
 
+/// The time a log line is stamped with, read where the log call is made and carried to the
+/// sink in [`Msg::Log`], so a sink held up by a slow disk still shows each line's true time.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn stamp() -> time::SystemTime {
+    time::SystemTime::now()
+}
+
+/// No system clock exists on wasm; reconstruct the instant from the `Date.now()` millisecond
+/// reading, which is pure arithmetic on `UNIX_EPOCH` and never panics.
+#[cfg(target_arch = "wasm32")]
+pub fn stamp() -> time::SystemTime {
+    time::UNIX_EPOCH + time::Duration::from_millis(crate::wasm::now_ms() as u64)
+}
+
 /// Different messages can be sent to the console or file.
 #[derive(Clone, Debug)]
 pub enum Msg<ETAG: GenTag> where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error {
@@ -55,6 +69,7 @@ pub enum Msg<ETAG: GenTag> where oxedyne_fe2o3_core::error::Error<ETAG>: std::er
     GetStreams(Simplex<Arc<RwLock<HashMap<String, Simplex<String>>>>>),
     Level(Source, LogLevel),
     Log {
+        at:     time::SystemTime, // when the log call was made, from `stamp()`
         level:  LogLevel,
         src:    Source,
         erropt: Option<Error<ETAG>>,
@@ -318,7 +333,9 @@ impl<ETAG: GenTag> LogBot<ETAG>
         Ok(())
     }
 
+    /// Formats a line stamped `at`, the time of the log call rather than of this write.
     pub fn format_msg(
+        at:             time::SystemTime,
         level:          LogLevel,
         src:            &Source,
         res:            Outcome<String>,
@@ -342,13 +359,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
                 None => fmt!("{}", path.display()),
             };
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        let t = time::SystemTime::now();
-        // No system clock exists on wasm; reconstruct the instant from the
-        // `Date.now()` millisecond reading, which is pure arithmetic on
-        // `UNIX_EPOCH` and never panics.
-        #[cfg(target_arch = "wasm32")]
-        let t = time::UNIX_EPOCH + time::Duration::from_millis(crate::wasm::now_ms() as u64);
+        let t = at;
         let console_result = if for_console {
             let prefix = fmt!(
                 "{}: {:5?} {} {}:{}",
@@ -484,6 +495,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
         src:    &Source,
         e:      Error<ErrTag>,
     ) {
+        let at = stamp(); // the bot's own error, found now
         let mut for_console = true;
         let mut for_file = false;
         {
@@ -495,6 +507,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
                 },
                 Err(e) => {
                     let (msg_console_opt, _msg_file_opt) = Self::format_msg(
+                        at,
                         LogLevel::Error,
                         src,
                         Err(err!(
@@ -510,6 +523,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
             }
         }
         let (msg_console_opt, msg_file_opt) = Self::format_msg(
+            at,
             LogLevel::Error,
             src,
             Err(e),
@@ -536,6 +550,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
 
     fn write(
         &mut self,
+        at:     time::SystemTime,
         level:  LogLevel,
         src:    &Source,
         res:    Outcome<String>,
@@ -571,6 +586,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
         // Send log entry to media, as necessary.
         if level <= current_level {
             let (msg_console_opt, msg_file_opt) = Self::format_msg(
+                at,
                 level,
                 &src,
                 res,
@@ -656,20 +672,20 @@ impl<ETAG: GenTag> LogBot<ETAG>
             Ok(Msg::Finish(src)) => {
                 let msg = fmt!("Finish message received, LogBot finishing now.");
                 let level = LogLevel::Warn;
-                self.write(level, &src, Ok(msg), String::new());
+                self.write(stamp(), level, &src, Ok(msg), String::new());
                 if let Err(e) = self.sync() {
                     msg!("{}", err!(e, "Error syncing the log file at finish."; IO, File, Write));
                 }
                 return true;
             }
             Ok(Msg::Base(bot::BaseMsg::Ready)) => msg!("LogBot now ready to receive messages."),
-            Ok(Msg::Log { level, src, erropt, msg, stream }) => {
+            Ok(Msg::Log { at, level, src, erropt, msg, stream }) => {
                 let msg = if let Some(e) = erropt {
                     fmt!("{} {}", msg, e)
                 } else {
                     fmt!("{}", msg)
                 };
-                self.write(level, &src, Ok(msg), stream);
+                self.write(at, level, &src, Ok(msg), stream);
             }
             Ok(Msg::Update(src)) => match self.update_file() {
                 Ok(()) => (),
@@ -694,7 +710,7 @@ impl<ETAG: GenTag> LogBot<ETAG>
                     file: file!(),
                     line: line!(),
                 };
-                self.write(LogLevel::Error, &src, Err(e), String::new());
+                self.write(stamp(), LogLevel::Error, &src, Err(e), String::new());
             },
             _ => (),
         }
@@ -744,7 +760,7 @@ mod tests {
 
     fn line(chan: &Simplex<Msg<ErrTag>>, level: LogLevel, n: usize) -> Outcome<()> {
         let src = Source { tid: std::thread::current().id(), file: file!(), line: line!() };
-        res!(chan.send(Msg::Log { level, src, erropt: None, msg: fmt!("line {}", n), stream: String::new() }));
+        res!(chan.send(Msg::Log { at: stamp(), level, src, erropt: None, msg: fmt!("line {}", n), stream: String::new() }));
         Ok(())
     }
 
@@ -851,6 +867,39 @@ mod tests {
         res!(touch_archive(&cfg, 1, 30));
         let _f = res!(cfg.update());
         assert_eq!(cfg.num, 2, "A restart would have written over archive 00.");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A sink that stalls must not move a line's time: the line carries the time of the
+    /// call, not of the write.  The 16 Oct gateway log showed a 57 s silence and wrong
+    /// times on every queued line because the stamp was taken at the write.
+    #[test]
+    fn test_a_stalled_sink_keeps_the_time_of_the_call() -> Outcome<()> {
+        let (mut bot, chan, dir) = res!(bot_for("stamp", |f| f));
+        res!(line(&chan, LogLevel::Info, 0));
+        bot.listen();
+        // The second line is logged now, but the sink is held for 2 s before it writes.
+        let called = time::SystemTime::now();
+        res!(line(&chan, LogLevel::Info, 1));
+        std::thread::sleep(time::Duration::from_secs(2));
+        bot.listen();
+        drop(bot);
+        let text = res!(std::fs::read_to_string(dir.join("app.log")));
+        let second = match text.lines().nth(1) {
+            Some(l) => l.to_string(),
+            None => return Err(err!("The second line was not written: {:?}", text; Test, Missing)),
+        };
+        let stamp = match second.split(": ").next() {
+            Some(s) => s,
+            None => return Err(err!("No stamp on {:?}.", second; Test, Invalid)),
+        };
+        let at = res!(humantime::parse_rfc3339(stamp));
+        // The stamp is whole seconds, so it lies within the second before the call.
+        let early = called - time::Duration::from_secs(1);
+        assert!(at <= called && at > early,
+            "The line was stamped {} but called at {}: the stamp is the write time.",
+            timefmt(at), humantime::format_rfc3339_millis(called));
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
