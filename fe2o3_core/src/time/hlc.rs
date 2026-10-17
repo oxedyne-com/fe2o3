@@ -2,8 +2,8 @@
 //! when it does not, and the larger of its own and a peer's reading when a message arrives, so that
 //! a stamp taken after receiving another is always greater than it.
 //!
-//! The wall reading is a [`WallClock`] (a [`ClockSource`] is one, so a rig's driven clock drives the
-//! stamp) plus an offset the caller measures against a reference clock, so that a device whose own
+//! The wall reading is a [`WallClock`] (on main a `ClockSource` is one, so a rig's driven clock drives
+//! the stamp) plus an offset the caller measures against a reference clock, so that a device whose own
 //! clock is wrong still stamps near the reference's time.  A peer's wall more than `delta` ahead of
 //! the corrected wall is not believed: the merge keeps only its own counter step and answers a
 //! [`ClockFault`] for the caller to raise.  Built for Daimond's records (design (2), 16 Oct 2026,
@@ -12,10 +12,7 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::{
-    prelude::*,
-    time::ClockSource,
-};
+use crate::prelude::*;
 
 use std::{
     fmt,
@@ -117,15 +114,10 @@ impl FromStr for Hlc {
     }
 }
 
-/// Where an [`HlcClock`] reads its wall, in milliseconds since the Unix epoch.
+/// Where an [`HlcClock`] reads its wall, in milliseconds since the Unix epoch.  This base has no
+/// `ClockSource`, so the caller supplies its own wall.
 pub trait WallClock {
     fn wall_ms(&self) -> Outcome<u64>;
-}
-
-impl WallClock for ClockSource {
-    fn wall_ms(&self) -> Outcome<u64> {
-        self.now_millis()
-    }
 }
 
 impl<W: WallClock + ?Sized> WallClock for &W {

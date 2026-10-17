@@ -269,24 +269,3 @@ fn encoding_order_is_stamp_order() -> Outcome<()> {
     }
     Ok(())
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn a_driven_clock_source_drives_the_stamp() -> Outcome<()> {
-    use oxedyne_fe2o3_core::time::{
-        ClockSource,
-        Driven,
-    };
-    let dir = std::env::temp_dir().join(fmt!("fe2o3_hlc_{}", std::process::id()));
-    res!(std::fs::create_dir_all(&dir));
-    let path = dir.join("clock");
-    res!(std::fs::write(&path, (T0 + 777).to_le_bytes()));
-    let mut c = HlcClock::new(ClockSource::Driven(Driven::new(&path)), 1);
-    c.set_offset_ms(23);
-    let s = res!(c.now());
-    let _ = std::fs::remove_dir_all(&dir);
-    if s != Hlc::new(T0 + 800, 0, 1) {
-        return Err(err!("A driven wall of {} with offset 23 stamped {}.", T0 + 777, s; Test, Mismatch));
-    }
-    Ok(())
-}
