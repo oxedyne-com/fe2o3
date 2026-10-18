@@ -8,6 +8,7 @@ use crate::{
     prelude::*,
     bdat::limits::DecodeLimits,
     note::NoteConfig,
+    string::canon::canonical_divergence,
     int::{
         DatInt,
     },
@@ -78,6 +79,7 @@ pub struct DecoderConfig<
     pub omap_start:             u64,
     pub omap_delta:             u64,
     pub limits:                 DecodeLimits,
+    pub canonical:              bool, // Refuse any text Dat::json_canonical would not write.
 }
 
 impl<
@@ -101,6 +103,7 @@ impl<
             omap_start:             Dat::OMAP_ORDER_START_DEFAULT,
             omap_delta:             Dat::OMAP_ORDER_DELTA_DEFAULT,
             limits:                 DecodeLimits::text(),
+            canonical:              false,
         }
     }
 }
@@ -124,6 +127,17 @@ impl<
             trailing_comma_allowed: false,
             ukinds_opt,
             ..Default::default()
+        }
+    }
+
+    /// JSON in the canonical form of RFC 8785, exactly as [`Dat::json_canonical`] writes it.
+    /// Anything else is refused, among it `\/`, `\u0041` and other escapes the writer never
+    /// uses, keys out of order, whitespace outside strings, and numbers such as `-0`, `1.0` or
+    /// `1e2`, so that a value a signature or a hash covers has exactly one text.
+    pub fn json_canonical(ukinds_opt: Option<UsrKinds<M1, M2>>) -> Self {
+        Self {
+            canonical: true,
+            ..Self::json(ukinds_opt)
         }
     }
 
@@ -194,7 +208,7 @@ pub struct Located {
 
 impl Located {
     // The labels `class` gives, for a caller that counts refusals by class.
-    pub const CLASSES: [&'static str; 15] = [
+    pub const CLASSES: [&'static str; 16] = [
         "whole-number kind with a fraction",
         "whole-number kind, other",
         "no separator after a comment",
@@ -209,6 +223,7 @@ impl Located {
         "text after the value",
         "kind label",
         "number range",
+        "not canonical",
         "other",
     ];
 
@@ -280,7 +295,10 @@ impl Located {
         if any(&said, |m| m.contains("cannot be negative") || m.contains("cannot hold")) {
             return Self::CLASSES[13];
         }
-        Self::CLASSES[14]
+        if any(&said, |m| m.contains("Canonical JSON decode:")) {
+            return Self::CLASSES[14];
+        }
+        Self::CLASSES[15]
     }
 
     // Did a comment end the last thing before the character at `line`, `col` (1 based, in
@@ -1252,7 +1270,8 @@ impl Dat {
         // We want to take ownership of the String.
         let s = s.into();
         // One leading byte order mark is no text, and takes no column.
-        let s = if s.starts_with('\u{feff}') {
+        let bom = s.starts_with('\u{feff}'); // The canonical writer never writes one.
+        let s = if bom {
             s['\u{feff}'.len_utf8()..].to_string()
         } else {
             s
@@ -1280,6 +1299,29 @@ impl Dat {
             return Err(spot(err!(
                 "Found text after the end of the value; only whitespace and comments \
                 may follow it."; String, Input, Decode, Invalid), &cursor));
+        }
+        if cfg.canonical {
+            let div = match canonical_divergence(&s, &dat) {
+                Ok(div) => div,
+                Err(e)  => return Err(spot(err!(e,
+                    "Canonical JSON decode: the value read has no canonical form, so \
+                    Dat::json_canonical cannot have written this text.";
+                    String, Input, Decode, Invalid), &cursor)),
+            };
+            let div = if bom { Some(0) } else { div };
+            if let Some(pos) = div {
+                // Place the refusal at the character that leaves the canonical form.
+                let at = RefCell::new(Cursor::default());
+                for c in s.chars().take(pos + 1) {
+                    at.borrow_mut().advance(c);
+                }
+                return Err(spot(err!(
+                    "Canonical JSON decode: the text leaves the canonical form (RFC 8785, as \
+                    Dat::json_canonical writes it) at character {}. Refused there is an escape \
+                    the writer does not use, a key out of order, whitespace outside a string, \
+                    a number not as the writer spells it, or a JDAT form.", pos;
+                    String, Input, Decode, Invalid), &at));
+            }
         }
         Ok(dat)
     }

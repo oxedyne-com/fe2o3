@@ -900,7 +900,7 @@ fn test_no_refusal_holds_the_values_text_00() {
             fmt!("(f32|{}e38)", DIGITS), fmt!("(f64|{}e999)", DIGITS), fmt!("(f32|3.{}e38)", DIGITS),
             fmt!("{{\"{}\": (u8|-{})}}", KEYW, DIGITS),
         ]),
-        (Located::CLASSES[14], vec![
+        (Located::CLASSES[15], vec![
             // A number with no digit, or an exponent mark with no digit after it (M1).
             fmt!("(u8|e{})", DIGITS), fmt!("(u8|{}e)", DIGITS), fmt!("(i32|-e{})", DIGITS),
             fmt!("{{\"{}\": (u8|e{})}}", KEYW, DIGITS), fmt!("(adec|{}e-)", DIGITS),
