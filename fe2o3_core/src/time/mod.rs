@@ -1,3 +1,5 @@
+pub mod hlc;
+
 use crate::{
     prelude::*,
 };
