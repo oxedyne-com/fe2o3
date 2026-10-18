@@ -1,0 +1,221 @@
+use oxedyne_fe2o3_core::{
+    prelude::*,
+    channels::{
+        bounded,
+        oneshot,
+        watch,
+    },
+};
+
+use std::{
+    future::Future,
+    pin::pin,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
+    },
+    task::{
+        Context,
+        Poll,
+        Wake,
+        Waker,
+    },
+    thread,
+};
+
+/// Records that it was woken, so a test can poll by hand and see exactly when a future is ready.
+struct Flag(AtomicBool);
+
+impl Wake for Flag {
+    fn wake(self: Arc<Self>) { self.0.store(true, Ordering::SeqCst); }
+}
+
+fn flag() -> (Arc<Flag>, Waker) {
+    let f = Arc::new(Flag(AtomicBool::new(false)));
+    (f.clone(), Waker::from(f))
+}
+
+/// The smallest executor: park the thread until woken.
+struct Unpark(thread::Thread);
+
+impl Wake for Unpark {
+    fn wake(self: Arc<Self>) { self.0.unpark(); }
+}
+
+fn block_on<F: Future>(fut: F) -> F::Output {
+    let waker = Waker::from(Arc::new(Unpark(thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    let mut fut = pin!(fut);
+    loop {
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => return v,
+            Poll::Pending => thread::park(),
+        }
+    }
+}
+
+#[test]
+fn mailbox_full_makes_sender_wait() -> Outcome<()> {
+    let (tx, rx) = bounded::<usize>(64);
+    for i in 0..64 {
+        res!(tx.try_send(i));
+    }
+    let (woken, waker) = flag();
+    let mut cx = Context::from_waker(&waker);
+    let mut send = pin!(tx.send_async(64));
+    req!(send.as_mut().poll(&mut cx).is_pending(), true);
+    req!(tx.len(), 64);
+    req!(woken.0.load(Ordering::SeqCst), false);
+    // A second poll while still full stays pending: the mailbox never grows.
+    req!(send.as_mut().poll(&mut cx).is_pending(), true);
+    req!(tx.len(), 64);
+    req!(res!(rx.try_recv()), 0);
+    req!(woken.0.load(Ordering::SeqCst), true);
+    match send.as_mut().poll(&mut cx) {
+        Poll::Ready(r) => res!(r),
+        Poll::Pending => return Err(err!("65th send still pending after a slot was freed."; Test)),
+    }
+    req!(tx.len(), 64);
+    for i in 1..65 {
+        req!(res!(rx.try_recv()), i);
+    }
+    Ok(())
+}
+
+#[test]
+fn watch_late_reader_sees_latest() -> Outcome<()> {
+    let (tx, rx) = watch(0u32);
+    for i in 1..4 {
+        res!(tx.send(i));
+    }
+    req!(*res!(rx.borrow()), 3);
+    let late = tx.subscribe();
+    req!(*res!(late.borrow()), 3);
+    let cloned = late.clone();
+    req!(*res!(cloned.borrow()), 3);
+    Ok(())
+}
+
+#[test]
+fn watch_changed_wakes_on_send() -> Outcome<()> {
+    let (tx, mut rx) = watch(String::from("idle"));
+    {
+        let (woken, waker) = flag();
+        let mut cx = Context::from_waker(&waker);
+        let mut changed = pin!(rx.changed());
+        req!(changed.as_mut().poll(&mut cx).is_pending(), true);
+        res!(tx.send(String::from("stop")));
+        req!(woken.0.load(Ordering::SeqCst), true);
+        match changed.as_mut().poll(&mut cx) {
+            Poll::Ready(r) => res!(r),
+            Poll::Pending => return Err(err!("changed() still pending after send."; Test)),
+        }
+    }
+    req!(res!(rx.borrow()).as_str(), "stop");
+    // Seen: the next changed() waits again.
+    let (_woken, waker) = flag();
+    let mut cx = Context::from_waker(&waker);
+    req!(pin!(rx.changed()).poll(&mut cx).is_pending(), true);
+    // Across threads, with a parking executor.
+    let handle = thread::spawn(move || -> Outcome<()> {
+        res!(tx.send(String::from("again")));
+        Ok(())
+    });
+    res!(block_on(rx.changed()));
+    req!(res!(rx.borrow()).as_str(), "again");
+    match handle.join() {
+        Ok(r) => res!(r),
+        Err(_) => return Err(err!("Sender thread panicked."; Test)),
+    }
+    Ok(())
+}
+
+/// An abandoned wait (its task ended, or a select or timeout dropped it) must not leave its waker
+/// behind: a Stop cell that is rarely sent would otherwise grow without bound.
+#[test]
+fn watch_abandoned_waits_leave_no_waker() -> Outcome<()> {
+    let (tx, mut rx) = watch(0u8);
+    for _ in 0..16 {
+        let (_woken, waker) = flag();
+        let mut cx = Context::from_waker(&waker);
+        let mut changed = pin!(rx.changed());
+        req!(changed.as_mut().poll(&mut cx).is_pending(), true);
+        // A re-poll with another waker replaces, never adds.
+        let (_woken2, waker2) = flag();
+        let mut cx2 = Context::from_waker(&waker2);
+        req!(changed.as_mut().poll(&mut cx2).is_pending(), true);
+        req!(res!(tx.waiters()), 1);
+    }
+    req!(res!(tx.waiters()), 0);
+    Ok(())
+}
+
+#[test]
+fn watch_closes_when_sender_drops() -> Outcome<()> {
+    let (tx, mut rx) = watch(1u8);
+    let (woken, waker) = flag();
+    let mut cx = Context::from_waker(&waker);
+    {
+        let mut changed = pin!(rx.changed());
+        req!(changed.as_mut().poll(&mut cx).is_pending(), true);
+        res!(tx.send(2));
+        drop(tx);
+        req!(woken.0.load(Ordering::SeqCst), true);
+        // The last value sent before the drop is still delivered.
+        match changed.as_mut().poll(&mut cx) {
+            Poll::Ready(r) => res!(r),
+            Poll::Pending => return Err(err!("changed() pending after send."; Test)),
+        }
+    }
+    req!(*res!(rx.borrow()), 2);
+    req!(res!(rx.is_closed()), true);
+    req!(block_on(rx.changed()).is_err(), true);
+    Ok(())
+}
+
+/// The actor runs single-threaded (spawn_local on wasm, LocalSet natively), so a watch must carry a
+/// value that is not `Send`.  This compiling and passing is why there is no separate non-`Send`
+/// variant.
+#[test]
+fn watch_carries_non_send_value() -> Outcome<()> {
+    let (tx, mut rx) = watch(Rc::new(0u8));
+    res!(tx.send(Rc::new(7)));
+    res!(block_on(rx.changed()));
+    req!(**res!(rx.borrow()), 7);
+    Ok(())
+}
+
+#[test]
+fn oneshot_delivers_value() -> Outcome<()> {
+    let (tx, rx) = oneshot::<u64>();
+    res!(tx.send(42));
+    let got = res!(block_on(rx.recv()));
+    req!(got, 42);
+    Ok(())
+}
+
+#[test]
+fn oneshot_dropped_sender_is_error() -> Outcome<()> {
+    let (tx, rx) = oneshot::<u64>();
+    drop(tx);
+    let got = block_on(rx.recv());
+    req!(got.is_err(), true);
+    Ok(())
+}
+
+#[test]
+fn oneshot_waits_for_sender_thread() -> Outcome<()> {
+    let (tx, rx) = oneshot::<&'static str>();
+    let handle = thread::spawn(move || tx.send("done"));
+    let got = res!(block_on(rx.recv()));
+    req!(got, "done");
+    match handle.join() {
+        Ok(r) => res!(r),
+        Err(_) => return Err(err!("Sender thread panicked."; Test)),
+    }
+    Ok(())
+}
