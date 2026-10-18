@@ -26,6 +26,7 @@ use crate::file::RequestPath;
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 
@@ -33,7 +34,9 @@ use std::fmt;
 ///
 /// # Fields
 /// * `path` - The validated request path component.
-/// * `data` - Map of parsed query parameters.
+/// * `data` - Map of parsed query parameters, each value read as a daticle.
+/// * `text` - Each query value's percent-decoded text, as sent, by its decoded
+///   key. `query_str` reads this, so `device=1234` is the text `1234`.
 /// * `query` - The raw, verbatim query substring (no leading `?`), kept so a
 ///   proxy can forward it byte-for-byte. The parse into `data` is convenient
 ///   for handlers but lossy (encoding, ordering, repeated keys), so it must not
@@ -43,6 +46,7 @@ use std::fmt;
 pub struct HttpLocator {
     pub path:  RequestPath,
     pub data:  DaticleMap,
+    pub text:  BTreeMap<String, String>,
     pub query: String,
     pub frag:  String,
 }
@@ -73,28 +77,31 @@ impl fmt::Display for HttpLocator {
 impl HttpLocator {
 
     pub fn new<S: Into<String>>(loc: S) -> Outcome<Self> {
-        let (path, data, query, frag) = res!(Self::parse_locator_string(&loc.into()));
+        let (path, data, text, query, frag) = res!(Self::parse_locator_string(&loc.into()));
         Ok(Self {
             path,
             data,
+            text,
             query,
             frag,
         })
     }
 
-    fn parse_locator_string(path: &str) -> Outcome<(RequestPath, DaticleMap, String, String)> {
+    fn parse_locator_string(path: &str)
+        -> Outcome<(RequestPath, DaticleMap, BTreeMap<String, String>, String, String)>
+    {
         let mut split = path.split('?');
         let path = RequestPath::new(split.next().unwrap_or_default().to_string());
         let rest = split.next().unwrap_or_default();
         let mut split_rest = rest.split('#');
         let query_string = split_rest.next().unwrap_or_default();
         let fragment = split_rest.next().unwrap_or_default();
-        let map = res!(Self::parse_query_string(query_string));
+        let (map, text) = res!(Self::parse_query_string(query_string));
 
         // Retain the raw query verbatim as well as the parsed map: a proxy must
         // forward it byte-for-byte, and the parsed map cannot be relied on to
         // reconstruct it faithfully.
-        Ok((path, map, query_string.to_string(), fragment.to_string()))
+        Ok((path, map, text, query_string.to_string(), fragment.to_string()))
     }
 
     /// The query's `key=value` pairs, each key and value percent-decoded (RFC 3986 §2.1, as a
@@ -104,20 +111,24 @@ impl HttpLocator {
     /// after the first `=`, so a padded base64 value keeps its `=`s.  An escape that is malformed,
     /// or that decodes to bytes which are not UTF-8, is left as written, as a browser's
     /// `URLSearchParams` does; and a value the daticle reader cannot read is the text it is.
-    fn parse_query_string(query: &str) -> Outcome<DaticleMap> {
+    /// Beside the daticle map, each decoded value is kept as the text it was sent as.
+    fn parse_query_string(query: &str) -> Outcome<(DaticleMap, BTreeMap<String, String>)> {
         let mut result = DaticleMap::new();
+        let mut text = BTreeMap::new();
         for pair in query.split('&') {
             if let Some((k, v)) = pair.split_once('=') {
-                let k = res!(Dat::from_str(&Self::pct_decoded(k)));
+                let ks = Self::pct_decoded(k);
+                let k = res!(Dat::from_str(&ks));
                 let v = Self::pct_decoded(v);
-                let v = match Dat::from_str(&v) {
+                let d = match Dat::from_str(&v) {
                     Ok(d)  => d,
-                    Err(_) => Dat::Str(v),
+                    Err(_) => Dat::Str(v.clone()),
                 };
-                result.insert(k, v);
+                result.insert(k, d);
+                text.insert(ks, v);
             }
         }
-        Ok(result)
+        Ok((result, text))
     }
 
     /// `s` with its percent escapes decoded, or as written when they will not decode to text.
@@ -131,25 +142,20 @@ impl HttpLocator {
         }
     }
 
-    /// A query parameter as a string, if it is present and is one.
+    /// A query parameter's percent-decoded text, exactly as sent, if it is present.
     ///
-    /// The parsed map holds daticles, because a query string is parsed with the
-    /// same reader as everything else, so a bare `view=geo` arrives as a
-    /// `Dat::Str` while `page=2` arrives as a number. Reading one out therefore
-    /// takes a match rather than a `get`, and every caller was writing the same
-    /// one.
+    /// A query string is text, so `device=1234`, `have=007` and `x=true` read
+    /// back as `1234`, `007` and `true`. Whether a value looks like a number is
+    /// the caller's business; `query_i64` reads one as such.
     pub fn query_str(&self, key: &str) -> Option<String> {
-        match self.data.get(&dat!(key)) {
-            Some(Dat::Str(s)) => Some(s.clone()),
-            _                 => None,
-        }
+        self.text.get(key).cloned()
     }
 
     /// A query parameter as an integer, coerced from any numeric or string
     /// value, falling back to `default` when it is absent or unreadable.
     ///
-    /// The coercion matters: whether `page=2` parses as a number or as a string
-    /// is a detail of the query reader, and no caller should have to care.
+    /// The coercion matters: `page=2` is read as a number from the daticle map,
+    /// and a value the daticle reader keeps as a string is parsed as one.
     pub fn query_i64(&self, key: &str, default: i64) -> i64 {
         match self.data.get(&dat!(key)) {
             Some(d) => d.get_i64().or_else(|| match d {
@@ -419,14 +425,26 @@ mod url_tests {
     fn test_query_parameters_read_out_by_name() -> Outcome<()> {
         let loc = res!(HttpLocator::new("/api/admin?view=geo&page=2"));
         assert_eq!(loc.query_str("view"), Some(fmt!("geo")));
-        // A numeric parameter is not a string, so query_str declines it rather
-        // than handing back a spelling of it.
-        assert_eq!(loc.query_str("page"), None);
+        // A numeric parameter reads back as the text it was sent as.
+        assert_eq!(loc.query_str("page"), Some(fmt!("2")));
         // query_i64 coerces either way, which is the point of having it.
         assert_eq!(loc.query_i64("page", 1), 2);
         assert_eq!(loc.query_i64("view", 7), 7,   "a non-numeric value falls back");
         assert_eq!(loc.query_i64("absent", 5), 5, "an absent parameter falls back");
         assert_eq!(loc.query_str("absent"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_str_reads_a_value_as_sent_whatever_it_looks_like() -> Outcome<()> {
+        // A query string is text: an all-digit device id, a leading zero and a
+        // boolean spelling all read back exactly as written (C9b3c).
+        let loc = res!(HttpLocator::new("/x?device=1234&have=007&x=true&n=%30%31"));
+        assert_eq!(loc.query_str("device"), Some(fmt!("1234")));
+        assert_eq!(loc.query_str("have"),   Some(fmt!("007")));
+        assert_eq!(loc.query_str("x"),      Some(fmt!("true")));
+        assert_eq!(loc.query_str("n"),      Some(fmt!("01")));
+        assert_eq!(loc.query_i64("device", 0), 1234);
         Ok(())
     }
 
