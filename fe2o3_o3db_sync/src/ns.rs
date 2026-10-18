@@ -30,7 +30,11 @@
 //!   makes live, so whatever deletes orphans must re-check each under the lane as it deletes.
 //!
 //! Meant for a single caller thread (the lane makes other threads safe, not fast). Nothing on a
-//! request path may scan; only [`orphans`] does, from `sweep`.
+//! request path may scan; only [`orphans`] and [`sweep_orphans`] do, from `sweep`.
+//! - **Retirement (the Ozone sweep).** `delete_range` deletes a directory's entries whose names
+//!   fall in a range; `sweep_expired` deletes those older than a TTL on the caller's clock; both
+//!   read index records only. [`sweep_orphans`] deletes what [`orphans`] finds, re-checking each
+//!   under the lane as it deletes.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -159,6 +163,7 @@ pub struct Orphans {
 }
 
 pub use crate::sweep::ns_orphans as orphans;
+pub use crate::sweep::ns_sweep_orphans as sweep_orphans;
 
 type Index = BTreeMap<String, Entry>;
 
@@ -397,6 +402,71 @@ impl<
 		res!(check_path(path, false));
 		let _hold = res!(self.db.ns_lane().hold());
 		self.delete_tree_held(path)
+	}
+
+	/// Deletes every entry of directory `dir` whose name `n` has `from <= n < to`, each as
+	/// `delete_tree` does (a subdirectory with all under it), in one hold of the lane. It reads
+	/// the directory's index, never the store, so it may run on a request path. The number of
+	/// values gone; nothing when `dir` is absent or the range is empty.
+	pub fn delete_range(&self, dir: &str, from: &str, to: &str) -> Outcome<usize> {
+		res!(check_path(dir, true));
+		let _hold = res!(self.db.ns_lane().hold());
+		let idx = match res!(self.read_index(dir)) {
+			Some(idx)	=> idx,
+			None		=> return Ok(0),
+		};
+		let mut gone = 0;
+		for name in idx.keys().filter(|n| n.as_str() >= from && n.as_str() < to) {
+			gone += res!(self.delete_tree_held(&Self::join(dir, name)));
+		}
+		Ok(gone)
+	}
+
+	/// The TTL sweep of directory `dir`: deletes, as `delete_tree` does, every entry whose age at
+	/// `now_ms` is at least `ttl_ms`, in one hold of the lane. A value's age runs from its mtime;
+	/// a subdirectory's from the newest mtime of it and everything under it, so a run journal
+	/// written to yesterday stays however old its first round. A mtime after `now_ms` (the clock
+	/// stepped back) is age 0, so kept. The clock is the caller's, so a test can fake it. It
+	/// walks `dir`'s index records only, never the store. The number of values gone.
+	pub fn sweep_expired(&self, dir: &str, ttl_ms: u64, now_ms: u64) -> Outcome<usize> {
+		res!(check_path(dir, true));
+		let _hold = res!(self.db.ns_lane().hold());
+		let idx = match res!(self.read_index(dir)) {
+			Some(idx)	=> idx,
+			None		=> return Ok(0),
+		};
+		let mut gone = 0;
+		for (name, e) in &idx {
+			let path = Self::join(dir, name);
+			let newest = if e.is_dir {
+				res!(self.newest_mtime(&path, e.mtime_ms))
+			} else {
+				e.mtime_ms
+			};
+			if now_ms.saturating_sub(newest) >= ttl_ms {
+				gone += res!(self.delete_tree_held(&path));
+			}
+		}
+		Ok(gone)
+	}
+
+	// The newest mtime of directory `path`'s entries, all the way down, and `floor`.
+	fn newest_mtime(&self, path: &str, floor: u64) -> Outcome<u64> {
+		let mut newest = floor;
+		let mut todo = vec![path.to_string()];
+		while let Some(dir) = todo.pop() {
+			let idx = match res!(self.read_index(&dir)) {
+				Some(idx)	=> idx,
+				None		=> continue,
+			};
+			for (name, e) in idx {
+				newest = newest.max(e.mtime_ms);
+				if e.is_dir {
+					todo.push(Self::join(&dir, &name));
+				}
+			}
+		}
+		Ok(newest)
 	}
 
 	/// Moves the value or tree at `from` to `to`, which must be absent and not inside `from`.
@@ -644,9 +714,28 @@ impl<
 	/// Of the keys a walk of the store found, those of this space no live chain reaches, judged
 	/// under the lane so that no put is part way through.
 	pub(crate) fn confirm_orphans(&self, keys: Vec<Dat>) -> Outcome<Orphans> {
+		let _hold = res!(self.db.ns_lane().hold());
+		self.confirm_orphans_held(keys)
+	}
+
+	/// Confirms the orphans among `keys` as `confirm_orphans` does and deletes them, values
+	/// first, all in one hold of the lane, so no put can make one live between the check and its
+	/// delete. What was deleted.
+	pub(crate) fn delete_orphans(&self, keys: Vec<Dat>) -> Outcome<Orphans> {
+		let _hold = res!(self.db.ns_lane().hold());
+		let found = res!(self.confirm_orphans_held(keys));
+		for path in &found.values {
+			res!(self.remove_key(&self.value_key(path)));
+		}
+		for dir in &found.dirs {
+			res!(self.remove_key(&self.index_key(dir)));
+		}
+		Ok(found)
+	}
+
+	fn confirm_orphans_held(&self, keys: Vec<Dat>) -> Outcome<Orphans> {
 		let vpre = fmt!("ns:{}:v:", self.space);
 		let dpre = fmt!("ns:{}:d:", self.space);
-		let _hold = res!(self.db.ns_lane().hold());
 		let mut seen: BTreeMap<String, Option<Index>> = BTreeMap::new();
 		let mut out = Orphans::default();
 		for key in keys {
