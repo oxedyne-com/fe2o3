@@ -51,3 +51,27 @@ fn a_replacement_counts_its_own_size_once_03() {
 	assert_eq!(m.bytes(), 0);
 	assert!(m.is_empty());
 }
+
+#[test]
+fn retain_removes_without_counting_an_eviction_04() {
+	let mut m: SizedLru<String, u32> = SizedLru::new(3);
+	assert!(m.insert("/a".to_string(), 1, 1));
+	assert!(m.insert("/a/b".to_string(), 2, 1));
+	assert!(m.insert("/ab".to_string(), 3, 1));
+	// Every key at or under "/a", but not the sibling "/ab".
+	let gone = m.retain(|k, _| k != "/a" && !k.starts_with("/a/"));
+	assert_eq!(gone, 2);
+	assert_eq!(m.len(), 1);
+	assert_eq!(m.bytes(), 1);
+	assert_eq!(m.evicted(), 0);
+	assert_eq!(m.peek("/ab"), Some(&3));
+	// The order forgot the removed keys too: two inserts fill the room left without evicting "/ab"
+	// early, and a third evicts it as the oldest.
+	assert!(m.insert("/c".to_string(), 4, 1));
+	assert!(m.insert("/d".to_string(), 5, 1));
+	assert_eq!(m.evicted(), 0);
+	assert!(m.insert("/e".to_string(), 6, 1));
+	assert_eq!(m.evicted(), 1);
+	assert!(!m.contains("/ab"));
+	assert!(m.contains("/c"));
+}

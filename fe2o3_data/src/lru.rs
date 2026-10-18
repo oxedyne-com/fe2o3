@@ -6,7 +6,8 @@
 //! front of a store, where any entry can be decoded again at a cost and the bound is on memory.
 //!
 //! The caller states each entry's size, since the map cannot measure a value. An entry larger than
-//! the whole ceiling is not stored, and evicts nothing.
+//! the whole ceiling is not stored, and evicts nothing. A cap on the number of entries is the same
+//! map with every size stated as 1.
 
 use std::borrow::Borrow;
 use std::collections::{
@@ -115,6 +116,27 @@ impl<K: Eq + Hash + Clone, V> SizedLru<K, V> {
 			},
 			None	=> None,
 		}
+	}
+
+	/// Keeps only the entries `keep` answers true for, and answers how many went. What goes is
+	/// removed, not evicted, so [`Self::evicted`] does not count it: a cache uses this to forget
+	/// entries made stale, such as every key under a prefix.
+	pub fn retain<F>(&mut self, mut keep: F) -> usize
+	where
+		F: FnMut(&K, &V) -> bool,
+	{
+		let before = self.map.len();
+		let order = &mut self.order;
+		let bytes = &mut self.bytes;
+		self.map.retain(|k, s| {
+			let kept = keep(k, &s.val);
+			if !kept {
+				order.remove(&s.tick);
+				*bytes -= s.size;
+			}
+			kept
+		});
+		before - self.map.len()
 	}
 
 	/// Stores an entry of `size` bytes as the most recently used, evicting the least recently used
