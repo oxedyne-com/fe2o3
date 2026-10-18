@@ -148,7 +148,7 @@ pub fn verify_assertion(
 )
     -> Outcome<VerifiedAssertion>
 {
-    // clientDataJSON: type, challenge and origin. Parsed as JSON via jdat, the
+    // clientDataJSON: type, challenge, origin and crossOrigin. Parsed as JSON via jdat, the
     // same decoder the app dialects use.
     let cfg = DecoderConfig::<(), ()>::json(None);
     let text = String::from_utf8_lossy(client_data_json).to_string();
@@ -186,6 +186,22 @@ pub fn verify_assertion(
             "WebAuthn assertion origin is {:?}, expected {:?} (anti-phishing bind).",
             other, expect_origin;
             Invalid, Input, Mismatch, Security)),
+    }
+
+    // crossOrigin: true means the ceremony ran in a frame whose origin differs
+    // from the page above it, while `origin` still names the relying party. That
+    // is how another site steers a user into an approval, so it is refused.
+    // Absent (older browsers) or false passes; any other value is malformed.
+    match cd.get(&dat!("crossOrigin")) {
+        None | Some(Dat::Bool(false)) => (),
+        Some(Dat::Bool(true)) => return Err(err!(
+            "WebAuthn clientDataJSON crossOrigin is true for origin {:?}: the \
+            ceremony ran in a cross-origin frame.", expect_origin;
+            Invalid, Input, Security)),
+        Some(other) => return Err(err!(
+            "WebAuthn clientDataJSON crossOrigin for origin {:?} is not a boolean, \
+            got {:?}.", expect_origin, other.kind();
+            Invalid, Input, Decode)),
     }
 
     // authenticatorData: rpIdHash, flags and the signature counter.
@@ -479,6 +495,51 @@ mod tests {
             .is_err(),
             "the wrong credential key must be rejected");
 
+        Ok(())
+    }
+
+    /// A ceremony run inside a cross-origin frame says so in `crossOrigin`. An
+    /// assertion carrying `"crossOrigin":true` is refused even though every other
+    /// check and the signature pass; `false`, or no member at all, still verifies.
+    #[test]
+    fn test_verify_assertion_refuses_cross_origin() -> Outcome<()> {
+        let key = res!(Es256Key::new());
+        let challenge = b"cross-origin-challenge";
+        let ad = make_auth_data(RP_ID, FLAG_UP | FLAG_UV, 5);
+        let sign_over = |cdj: &[u8]| -> Outcome<Vec<u8>> {
+            let mut signed = ad.clone();
+            signed.extend_from_slice(&sha256(cdj));
+            key.sign(&signed)
+        };
+        let with_cross = |cross: &str| fmt!(
+            "{{\"type\":\"webauthn.get\",\"challenge\":\"{}\",\"origin\":\"{}\",\
+            \"crossOrigin\":{}}}",
+            base64url_encode(challenge), ORIGIN, cross,
+        ).into_bytes();
+
+        let cdj = with_cross("true");
+        let sig = res!(sign_over(&cdj));
+        match verify_assertion(
+            CoseAlg::Es256, &key.pubkey, challenge, ORIGIN, RP_ID, &ad, &cdj, &sig)
+        {
+            Ok(_) => return Err(err!(
+                "An assertion with crossOrigin true verified."; Test, Security)),
+            Err(e) => {
+                let msg = fmt!("{}", e);
+                assert!(msg.contains("crossOrigin") && msg.contains(ORIGIN),
+                    "the refusal names the field and the origin: {}", msg);
+            }
+        }
+
+        let cdj = with_cross("false");
+        let sig = res!(sign_over(&cdj));
+        res!(verify_assertion(
+            CoseAlg::Es256, &key.pubkey, challenge, ORIGIN, RP_ID, &ad, &cdj, &sig));
+
+        let cdj = client_data("webauthn.get", challenge, ORIGIN);
+        let sig = res!(sign_over(&cdj));
+        res!(verify_assertion(
+            CoseAlg::Es256, &key.pubkey, challenge, ORIGIN, RP_ID, &ad, &cdj, &sig));
         Ok(())
     }
 
