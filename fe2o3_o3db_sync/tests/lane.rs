@@ -96,6 +96,8 @@ fn run() -> Outcome<()> {
         res!(trim_never_passes_the_ask(&db, user));
         res!(steps_bound_a_page(&db, user));
         res!(measured_pages(&db, user));
+        res!(a_trim_keeps_live_ephemerals(&db, user));
+        res!(the_sweep_is_bounded(&db, user));
         res!(db.shutdown());
     }
     {
@@ -488,4 +490,88 @@ fn measured_pages(db: &TestDb, user: setup::Uid) -> Outcome<()> {
     res!(check(seqs(&p) == vec![1, 2] && p.more, fmt!("250 of 100s: {:?}", p)));
     let p = lane.read_after_measured(0, 250, usize::MAX, NOW, |_| None);
     check(p.is_err(), fmt!("an unmeasurable entry answered {:?}", p))
+}
+
+// A trim drops durable entries only: an ephemeral at or below the floor (a Stop, a consent) stays
+// at its own sequence and reads to a reader below it until it expires, before and after the
+// sweep (Daimond C8 check F1, amendment 10).
+fn a_trim_keeps_live_ephemerals(db: &TestDb, user: setup::Uid) -> Outcome<()> {
+    let locks = LaneLocks::default();
+    let g = locks.lock("t/keep");
+    let lane: TestLane = Lane::new(db, user, &g);
+    for i in 1..=10u64 {
+        let exp = if i == 4 || i == 7 { Some(NOW + 60_000) } else { None };
+        res!(lane.append(val(i, 16), None, exp));
+    }
+    res!(check(res!(lane.trim_through(8)) == 8, fmt!("trim through 8")));
+    // Before any sweep: the floor is up, nothing deleted, durables below it read absent.
+    let p = res!(lane.read_after(3, 1 << 20, usize::MAX, NOW));
+    res!(check(seqs(&p) == vec![4, 7, 9, 10] && p.gap && p.through == 10,
+        fmt!("unswept, from 3: {:?}", p)));
+    res!(check(res!(lane.trim_pending(NOW)), fmt!("nothing pending after a trim")));
+    // Swept in steps of 3: three steps reach the floor, the two ephemerals listed.
+    let mut n = 0;
+    while res!(lane.sweep_trimmed(3, NOW)) {
+        n += 1;
+        res!(check(n < 10, fmt!("the sweep never ends")));
+    }
+    res!(check(n == 2, fmt!("swept in {} pending steps", n)));
+    let held: Vec<u64> = (1..=8u64).filter(|s| matches!(
+        db.get(&dat!(fmt!("t/keep/e/{}", s)), None), Ok(Some(_)))).collect();
+    res!(check(held == vec![4, 7], fmt!("held below the floor after the sweep: {:?}", held)));
+    let p = res!(lane.read_after(0, 1 << 20, usize::MAX, NOW));
+    res!(check(seqs(&p) == vec![4, 7, 9, 10] && p.gap && p.steps == 4,
+        fmt!("swept, from 0: {:?}", p)));
+    let p = res!(lane.read_after(5, 1 << 20, usize::MAX, NOW));
+    res!(check(seqs(&p) == vec![7, 9, 10], fmt!("swept, from 5: {:?}", p)));
+    let p = res!(lane.read_after(8, 1 << 20, usize::MAX, NOW));
+    res!(check(seqs(&p) == vec![9, 10] && !p.gap, fmt!("from the floor: {:?}", p)));
+    // A page of one entry from 0 goes on from the kept one it stopped at.
+    let p = res!(lane.read_after(0, 1, usize::MAX, NOW));
+    res!(check(seqs(&p) == vec![4] && p.more && p.through == 4, fmt!("a one-entry page: {:?}", p)));
+    let p = res!(lane.read_after(p.through, 1, usize::MAX, NOW));
+    res!(check(seqs(&p) == vec![7] && p.more, fmt!("the next one-entry page: {:?}", p)));
+    // Expired: unread at once, deleted by the next sweep step, which then has nothing left.
+    let later = NOW + 60_000;
+    let p = res!(lane.read_after(0, 1 << 20, usize::MAX, later));
+    res!(check(seqs(&p) == vec![9, 10] && p.dropped == 0, fmt!("after expiry: {:?}", p)));
+    res!(check(res!(lane.trim_pending(later)), fmt!("an expired kept entry is not pending")));
+    res!(check(!res!(lane.sweep_trimmed(8, later)), fmt!("work left after dropping the kept")));
+    let held = (1..=8u64).any(|s| matches!(db.get(&dat!(fmt!("t/keep/e/{}", s)), None), Ok(Some(_))));
+    res!(check(!held && !res!(lane.trim_pending(later)), fmt!("an expired kept entry is still stored")));
+    // An expired entry above the floor is reported in `dropped`.
+    res!(lane.append(val(11, 16), None, Some(NOW + 1)));
+    let p = res!(lane.read_after(8, 1 << 20, usize::MAX, later));
+    res!(check(seqs(&p) == vec![9, 10] && p.dropped == val(11, 16).byte_len().unwrap_or(0) as u64,
+        fmt!("dropped above the floor: {:?}", p)));
+    Ok(())
+}
+
+// Each sweep step visits at most its budget, and a reader below an unswept floor walks the
+// slots itself, bounded by its own steps.
+fn the_sweep_is_bounded(db: &TestDb, user: setup::Uid) -> Outcome<()> {
+    let locks = LaneLocks::default();
+    let g = locks.lock("t/sweep");
+    let lane: TestLane = Lane::new(db, user, &g);
+    for i in 1..=100u64 {
+        res!(lane.append(val(i, 16), Some(&i.to_be_bytes()), None));
+    }
+    res!(lane.trim_through(100));
+    res!(check(res!(lane.sweep_trimmed(10, NOW)), fmt!("ten of a hundred left nothing")));
+    let held = (1..=100u64).filter(|s| matches!(
+        db.get(&dat!(fmt!("t/sweep/e/{}", s)), None), Ok(Some(_)))).count();
+    res!(check(held == 90, fmt!("one step of 10 left {} held", held)));
+    let p = res!(lane.read_after(0, 1 << 20, 25, NOW));
+    // The swept ten are passed at no step (nothing is kept there), then 25 slots walked.
+    res!(check(p.entries.is_empty() && p.more && p.through == 35 && p.steps == 25,
+        fmt!("a reader below the unswept floor: {:?}", p)));
+    // A replay of a trimmed, unswept entry is held; once swept it appends anew.
+    let a = res!(lane.append(val(50, 16), Some(&50u64.to_be_bytes()), None));
+    res!(check(a.replay && a.seq == 50, fmt!("unswept replay: {:?}", a)));
+    while res!(lane.sweep_trimmed(10, NOW)) {}
+    let a = res!(lane.append(val(5, 16), Some(&5u64.to_be_bytes()), None));
+    res!(check(!a.replay && a.seq == 101, fmt!("swept replay: {:?}", a)));
+    let p = res!(lane.read_after(0, 1 << 20, 3, NOW));
+    res!(check(seqs(&p) == vec![101] && p.steps == 1, fmt!("swept, from 0: {:?}", p)));
+    Ok(())
 }
