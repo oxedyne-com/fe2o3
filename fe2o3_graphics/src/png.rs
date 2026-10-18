@@ -36,7 +36,8 @@
 //! of order; a palette index beyond the palette; a chunk whose CRC does not match; and image data
 //! that decompresses to anything other than the exact size the header implies.
 //!
-//! The encoder writes one form only: eight-bit truecolour with alpha, not interlaced.
+//! The encoder writes the narrowest of three forms that holds the pixmap exactly, not interlaced:
+//! one-bit grey, eight-bit grey, or eight-bit truecolour with alpha.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -235,9 +236,15 @@ pub fn dimensions(buf: &[u8]) -> Outcome<(usize, usize)> {
 // │ ENCODING                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Encodes a pixmap as a PNG: eight-bit truecolour with alpha, no interlacing.
+/// Encodes a pixmap as a PNG, not interlaced, in the narrowest of three forms that holds it
+/// exactly: one-bit grey for opaque black and white, eight-bit grey for opaque grey, and
+/// eight-bit truecolour with alpha for anything else.
 pub fn encode(pm: &Pixmap) -> Outcome<Vec<u8>> {
 	let (w, h) = (pm.width(), pm.height());
+	// A scanned letter is black and white: as RGBA its PNG was over twice the size (UNBLOCK-25).
+	let grey = w > 0 && h > 0 && pm.data().chunks_exact(4)
+		.all(|c| c[3] == 255 && c[0] == c[1] && c[1] == c[2]);
+	let bilevel = grey && pm.data().chunks_exact(4).all(|c| c[0] == 0 || c[0] == 255);
 	let mut out = Vec::with_capacity(w * h + 1024);
 	out.extend_from_slice(&SIG);
 
@@ -245,19 +252,48 @@ pub fn encode(pm: &Pixmap) -> Outcome<Vec<u8>> {
 	let mut ihdr = Vec::with_capacity(13);
 	ihdr.extend_from_slice(&(w as u32).to_be_bytes());
 	ihdr.extend_from_slice(&(h as u32).to_be_bytes());
-	ihdr.push(8); // Bit depth.
-	ihdr.push(6); // Colour type: truecolour with alpha.
+	ihdr.push(if bilevel { 1 } else { 8 });	// bit depth
+	ihdr.push(if grey { 0 } else { 6 });	// colour type: grey, or truecolour with alpha
 	ihdr.push(0); // Compression method: DEFLATE, the only one there is.
 	ihdr.push(0); // Filter method: the only one there is.
 	ihdr.push(0); // Interlace method: none.
 	write_chunk(&mut out, b"IHDR", &ihdr);
 
 	// The image data: each scanline filtered, then the lot deflated.
-	let idat = res!(deflate_region(pm, 0, 0, w, h));
+	let idat = if grey {
+		res!(deflate_grey(pm, bilevel))
+	} else {
+		res!(deflate_region(pm, 0, 0, w, h))
+	};
 	write_chunk(&mut out, b"IDAT", &idat);
 
 	write_chunk(&mut out, b"IEND", &[]);
 	Ok(out)
+}
+
+/// Filters and deflates an opaque grey pixmap as one grey sample a pixel: eight bits, or one bit
+/// packed from the most significant end where every pixel is black or white.
+fn deflate_grey(pm: &Pixmap, bilevel: bool) -> Outcome<Vec<u8>> {
+	let w = pm.width();
+	let stride = if bilevel { (w + 7) / 8 } else { w };
+	let mut raw = Vec::with_capacity(pm.height() * (stride + 1));
+	let mut prev = vec![0u8; stride];
+	let mut line = vec![0u8; stride];
+	for row in pm.data().chunks_exact(w * 4) {
+		line.fill(0);
+		for (x, c) in row.chunks_exact(4).enumerate() {
+			if !bilevel {
+				line[x] = c[0];
+			} else if c[0] == 255 {
+				line[x / 8] |= 0x80 >> (x % 8);
+			}
+		}
+		filter_scanline(&line, &prev, 1, &mut raw);
+		prev.copy_from_slice(&line);
+	}
+	let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
+	res!(z.write_all(&raw));
+	Ok(res!(z.finish()))
 }
 
 /// Filters and deflates a rectangle of a pixmap, giving the bytes an `IDAT` or an `fdAT` carries.
@@ -1145,6 +1181,29 @@ mod tests {
 		assert_eq!(back.width(), 17);
 		assert_eq!(back.height(), 9);
 		assert_eq!(back, pm, "the decoded pixmap must equal the one encoded");
+		Ok(())
+	}
+
+	/// A black and white page is written one bit a pixel and a grey one eight, and each reads
+	/// back exactly; a width off a byte boundary pads the last byte of each row.
+	#[test]
+	fn test_grey_and_bilevel_pictures_take_the_narrow_forms_00() -> Outcome<()> {
+		let mut bw = res!(Pixmap::filled(13, 5, Rgba::new(255, 255, 255, 255)));
+		bw.set_pixel(0, 0, Rgba::new(0, 0, 0, 255));
+		bw.set_pixel(12, 4, Rgba::new(0, 0, 0, 255));
+		let p = res!(encode(&bw));
+		assert_eq!((p[24], p[25]), (1, 0), "bit depth and colour type");
+		assert_eq!(res!(decode(&p)), bw);
+		let mut grey = bw.clone();
+		grey.set_pixel(5, 2, Rgba::new(128, 128, 128, 255));
+		let p = res!(encode(&grey));
+		assert_eq!((p[24], p[25]), (8, 0));
+		assert_eq!(res!(decode(&p)), grey);
+		let mut colour = grey.clone();
+		colour.set_pixel(6, 2, Rgba::new(128, 0, 0, 255));
+		let p = res!(encode(&colour));
+		assert_eq!((p[24], p[25]), (8, 6));
+		assert_eq!(res!(decode(&p)), colour);
 		Ok(())
 	}
 

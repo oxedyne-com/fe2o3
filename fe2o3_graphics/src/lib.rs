@@ -1,5 +1,5 @@
 //! A 2D graphics library: paths, affine transforms, an anti-aliased rasteriser, pixmaps with
-//! alpha compositing, blur and drop shadows, and PNG and JPEG codecs.
+//! alpha compositing, blur and drop shadows, PNG and JPEG codecs, and BMP, GIF and TIFF decoders.
 //!
 //! Painting is not geometry, which is why this crate sits beside `fe2o3_geom` rather than inside
 //! it. `fe2o3_geom` serves integer layout, where a rectangle is a cell of a terminal or a widget
@@ -17,6 +17,12 @@
 //! caller that reads pictures need not care which it was handed. JPEG adds two entry points a
 //! photograph library wants and PNG has no use for: a size probe that stops at the frame header, and
 //! a decode at an eighth scale that reads one coefficient a block and never runs a transform.
+//!
+//! [`bmp`] (with icons), [`gif`] (its first frame) and [`tiff`] (strips, tiles, planar,
+//! PackBits, LZW, Deflate, JPEG and CCITT fax, every page) decode to the same pixmap, and
+//! [`convert`] turns any picture the crate reads into PNG or JPEG, a page at a time, for the
+//! callers that take only those. Each decoder is checked against ImageMagick's reading of the
+//! fixtures in `tests/raster` (UNBLOCK-25, 18 Oct 2026).
 //!
 //! # Animation
 //!
@@ -97,12 +103,17 @@
 
 pub mod avi;
 pub mod blur;
+pub mod bmp;
+pub mod ccitt;
 pub mod colour;
+pub mod convert;
+pub mod gif;
 pub mod h264;
 pub mod heif;
 pub mod hevc;
 pub mod icc;
 pub mod jpeg;
+pub mod lzw;
 pub mod matroska;
 pub mod mp4;
 pub mod path;
@@ -118,6 +129,7 @@ pub mod sniff;
 pub mod stroke;
 pub mod svg;
 pub mod svg_doc;
+pub mod tiff;
 pub mod transform;
 pub mod yuv;
 

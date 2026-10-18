@@ -40,6 +40,7 @@ pub mod html;
 #[cfg(feature = "hyphenation")]
 pub mod hyphen;
 pub mod lines;
+pub mod lineset;
 pub mod doc;
 pub mod pattern;
 pub mod regex;

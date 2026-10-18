@@ -4,12 +4,13 @@ version = "0.5.0"
 authors = ["h00gs <hello@oxedyne.io>"]
 edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
-description = "Hematite 2D graphics library: paths, an anti-aliased rasteriser, pixmaps and PNG."
+description = "Hematite 2D graphics library: paths, an anti-aliased rasteriser, pixmaps, PNG and JPEG codecs, BMP, GIF and TIFF decoders, and conversion to PNG or JPEG."
 repository = "https://github.com/oxedyne-io/fe2o3"
 
 [dependencies]
 oxedyne_fe2o3_core 		= { path = "../fe2o3_core" }
 oxedyne_fe2o3_hash 		= { path = "../fe2o3_hash" }
+oxedyne_fe2o3_stds 		= { path = "../fe2o3_stds" }
 oxedyne_fe2o3_text 		= { path = "../fe2o3_text" }
 flate2 				= "1.0"
 
