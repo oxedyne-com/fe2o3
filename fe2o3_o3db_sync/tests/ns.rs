@@ -177,6 +177,48 @@ fn round_trip() -> Outcome<()> {
 }
 
 #[test]
+fn ns_make_dirs_makes_folders_only() -> Outcome<()> {
+	log_set_level!("warn");
+	wrap(make_dirs())
+}
+
+fn make_dirs() -> Outcome<()> {
+	let root = res!(fresh_dir("make_dirs"));
+	let db = res!(open(&root, true));
+	let ns = res!(TestNs::new(db.clone(), Uid::default(), "t"));
+
+	// Every folder down to the path is made, each listing as an empty directory.
+	res!(ns.make_dirs("a/b/c"));
+	for p in ["a", "a/b", "a/b/c"] {
+		match res!(ns.stat(p)) {
+			Some(st)	=> assert!(st.is_dir, "{} is not a directory", p),
+			None		=> return Err(err!("make_dirs did not make '{}'.", p; Test, Missing)),
+		}
+	}
+	assert!(res!(names(&ns, "a/b/c")).is_empty());
+
+	// Again, over what stands: nothing in it is lost.
+	res!(ns.put("a/b/c/f", b"kept"));
+	res!(ns.make_dirs("a/b/c"));
+	res!(ns.make_dirs("a/b"));
+	assert_eq!(res!(names(&ns, "a/b/c")), vec!["f".to_string()]);
+	assert_eq!(res!(ns.get("a/b/c/f")), Some(b"kept".to_vec()));
+
+	// A value in the way is a conflict, and nothing is made beneath it.
+	res!(ns.put("v", b"x"));
+	match ns.make_dirs("v/w") {
+		Ok(())	=> return Err(err!("make_dirs made a folder under a value."; Test, Mismatch)),
+		Err(e)	=> assert!(e.tags().contains(&ErrTag::Conflict), "{}", e),
+	}
+	assert!(ns.make_dirs("a/b/c/f").is_err());
+	assert_eq!(res!(ns.get("v")), Some(b"x".to_vec()));
+	assert!(ns.make_dirs("").is_err());
+
+	res!(db.close());
+	Ok(())
+}
+
+#[test]
 fn ns_list_after_reopen() -> Outcome<()> {
 	log_set_level!("warn");
 	wrap(list_after_reopen())

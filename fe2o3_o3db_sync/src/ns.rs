@@ -346,6 +346,28 @@ impl<
 		Ok(true)
 	}
 
+	/// Makes the directory `path` and every directory above it that is not there, as a filesystem
+	/// makes a file's folders on its way down. What stands is kept: a directory already there,
+	/// and all in it, is left as it is. A value at `path` or above it is a `Conflict`, and then
+	/// nothing is made.
+	pub fn make_dirs(&self, path: &str) -> Outcome<()> {
+		res!(check_path(path, false));
+		let _hold = res!(self.db.ns_lane().hold());
+		match res!(self.stat(path)) {
+			Some(e) if e.is_dir	=> return Ok(()),
+			Some(_)				=> return Err(err!(
+				"The ns path '{}' is a value, so it cannot be made a directory.", path;
+			Conflict, Path)),
+			None				=> (),
+		}
+		res!(self.link_held(path, Entry { is_dir: true, size: 0, mtime_ms: now_ms() }));
+		// Its own record last, top-down: a crash before it leaves an entry that reads as absent.
+		if res!(self.read_index(path)).is_none() {
+			res!(self.write_index(path, &Index::new()));
+		}
+		Ok(())
+	}
+
 	/// Deletes the value at `path`, or the empty directory there. Whether an entry was listed.
 	pub fn delete(&self, path: &str) -> Outcome<bool> {
 		res!(check_path(path, false));
