@@ -8,6 +8,7 @@ use crate::{
     prelude::*,
     bdat::limits::DecodeLimits,
     note::NoteConfig,
+    string::canon::canonical_divergence,
     int::{
         DatInt,
         DatIntKind,
@@ -77,6 +78,7 @@ pub struct DecoderConfig<
     pub omap_start:             u64,
     pub omap_delta:             u64,
     pub limits:                 DecodeLimits,
+    pub canonical:              bool, // Refuse any text Dat::json_canonical would not write.
 }
 
 impl<
@@ -101,6 +103,7 @@ impl<
             omap_start:             Dat::OMAP_ORDER_START_DEFAULT,
             omap_delta:             Dat::OMAP_ORDER_DELTA_DEFAULT,
             limits:                 DecodeLimits::text(),
+            canonical:              false,
         }
     }
 }
@@ -124,6 +127,17 @@ impl<
             trailing_comma_allowed: false,
             ukinds_opt,
             ..Default::default()
+        }
+    }
+
+    /// JSON in the canonical form of RFC 8785, exactly as [`Dat::json_canonical`] writes it.
+    /// Anything else is refused, among it `\/`, `\u0041` and other escapes the writer never
+    /// uses, keys out of order, whitespace outside strings, and numbers such as `-0`, `1.0` or
+    /// `1e2`, so that a value a signature or a hash covers has exactly one text.
+    pub fn json_canonical(ukinds_opt: Option<UsrKinds<M1, M2>>) -> Self {
+        Self {
+            canonical: true,
+            ..Self::json(ukinds_opt)
         }
     }
 
@@ -953,12 +967,30 @@ impl Dat {
         let s = s.into();
         res!(cfg.limits.check_len(s.len()));
         let mut iter = s.chars().collect::<Vec<_>>().into_iter().enumerate();
-        Self::recursive_decode(
+        let dat = res!(Self::recursive_decode(
             &mut iter,
             cfg,
             DecoderState::default(),
             &RefCell::new(Cursor::default()),
-        )
+        ));
+        if cfg.canonical {
+            let div = match canonical_divergence(&s, &dat) {
+                Ok(div) => div,
+                Err(e)  => return Err(err!(e,
+                    "Canonical JSON decode: the value read has no canonical form, so \
+                    Dat::json_canonical cannot have written this text.";
+                    String, Input, Decode, Invalid)),
+            };
+            if let Some(pos) = div {
+                return Err(err!(
+                    "Canonical JSON decode: the text leaves the canonical form (RFC 8785, as \
+                    Dat::json_canonical writes it) at character {}. Refused there is an escape \
+                    the writer does not use, a key out of order, whitespace outside a string, \
+                    a number not as the writer spells it, or a JDAT form.", pos;
+                    String, Input, Decode, Invalid));
+            }
+        }
+        Ok(dat)
     }
 
     /// Decodes a value at one level of nesting, recursing at each `(k|`, `[` and `{`.

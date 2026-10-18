@@ -52,6 +52,21 @@ impl Dat {
     }
 }
 
+/// The character at which `text` leaves the canonical JSON of `dat`, the value it decoded to, or
+/// `None` when `text` is exactly the bytes [`Dat::json_canonical`] writes for it.
+///
+/// Comparing with the writer's own output, rather than restating its rules in the decoder, keeps
+/// the two from drifting: the decoder accepts precisely the texts the writer produces.
+pub(crate) fn canonical_divergence(text: &str, dat: &Dat) -> Outcome<Option<usize>> {
+    let canon = res!(dat.json_canonical());
+    if canon == text {
+        return Ok(None);
+    }
+    Ok(Some(text.chars().zip(canon.chars())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| std::cmp::min(text.chars().count(), canon.chars().count()))))
+}
+
 /// Append the canonical JSON encoding of `dat` to `out`.
 fn write_canonical(dat: &Dat, out: &mut String) -> Outcome<()> {
     match dat {
