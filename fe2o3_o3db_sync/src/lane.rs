@@ -20,14 +20,23 @@
 //! A replay whose entry has gone (trimmed, removed or expired) appends anew; refusing a replayed
 //! ephemeral record after its expiry is the caller's (Daimond's C8), not the lane's.
 //!
+//! TRIMS. [`Lane::trim_through`] raises the floor in one write and deletes nothing: a durable
+//! entry at or below the floor reads absent at once, and an ephemeral one (with an expiry) stays
+//! at its own sequence and reads to every reader below it until it expires, so a reader behind a
+//! trim still gets a live Stop or consent.  [`Lane::sweep_trimmed`] then deletes the trimmed
+//! slots a bounded number at a time, so the caller can release the lane's lock between steps;
+//! the ephemerals it meets are listed (`p/k`) so a reader below the floor reaches them without
+//! walking the holes.  [`Lane::trim_pending`] says whether a step has work.
+//!
 //! Keys, under the caller's prefix `p`:
 //!
 //! | key | holds |
 //! |---|---|
-//! | `p/m` | `[head, floor]`: the last sequence handed out, and the highest trimmed |
+//! | `p/m` | `[head, floor, swept, due]`: the last sequence handed out, the highest trimmed, how far the trim's deletion has reached (≤ floor), and the earliest expiry in `p/k` (0 for none) |
 //! | `p/e/<seq>` | `[exp_ms, id, value]`, `exp_ms` 0 for never, `id` empty for none |
 //! | `p/i/<hex id>` | the sequence the entry with that id was appended at |
 //! | `p/r` | the reader table, `{name: [cursor, live]}`, one value, bounded by the caller's readers |
+//! | `p/k` | the ephemerals at or below `swept` kept by the sweep, `[[seq, exp_ms]…]` in sequence order; bound: the lane's ephemerals still in their life; shed: each is dropped by the sweep once it expires |
 //!
 //! Built for Daimond's sync carrier (design (2), 16 Oct 2026, §7; the U2 delta of 10 Oct, §3.1,
 //! row G1).  Steel's paced outbox keeps the same shape by hand.
@@ -159,6 +168,17 @@ pub struct Page {
 	pub more:		bool,	// entries above `through` were left for the next page
 	pub floor:		u64,	// the highest sequence trimmed when the page was read
 	pub gap:		bool,	// `after` was below the floor, so trimmed entries were never answered
+	pub steps:		usize,	// the slots this read visited (kept ephemerals, entries, holes)
+	pub dropped:	u64,	// encoded bytes of the expired entries above the floor it deleted
+}
+
+/// The lane's head record as stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Meta {
+	head:	u64,
+	floor:	u64,
+	swept:	u64,	// every durable entry at or below it is deleted; never above `floor`
+	due:	u64,	// the earliest expiry among the kept ephemerals, 0 for none
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,18 +234,18 @@ impl<
 
 	/// The last sequence handed out, 0 for a lane never appended to.
 	pub fn head(&self) -> Outcome<u64> {
-		Ok(res!(self.meta()).0)
+		Ok(res!(self.meta()).head)
 	}
 
 	/// The highest sequence trimmed; reads start above it.
 	pub fn floor(&self) -> Outcome<u64> {
-		Ok(res!(self.meta()).1)
+		Ok(res!(self.meta()).floor)
 	}
 
 	/// The sequences above the floor, entries and holes alike: an upper bound on the entries held.
 	pub fn depth(&self) -> Outcome<u64> {
-		let (head, floor) = res!(self.meta());
-		Ok(head - floor)
+		let m = res!(self.meta());
+		Ok(m.head - m.floor)
 	}
 
 	/// Appends `val` at the next sequence.  With an `id` the lane already holds, nothing is written
@@ -252,8 +272,8 @@ impl<
 				}
 			}
 		}
-		let (head, floor) = res!(self.meta());
-		let seq = match head.checked_add(1) {
+		let mut m = res!(self.meta());
+		let seq = match m.head.checked_add(1) {
 			Some(s)	=> s,
 			None	=> return Err(err!("lane {}: the sequence is spent.", self.prefix; Overflow)),
 		};
@@ -270,7 +290,8 @@ impl<
 		if let Some(id) = id {
 			res!(self.db.insert(self.id_key(id), Dat::U64(seq), self.user, None));
 		}
-		res!(self.put_meta(seq, floor));
+		m.head = seq;
+		res!(self.put_meta(&m));
 		Ok(Appended { seq, replay: false })
 	}
 
@@ -280,8 +301,9 @@ impl<
 	/// entries counting as entries do; either way `more` is set and `through` is the last slot
 	/// visited, so the next page goes on from there.  Holes are skipped.  An entry whose `exp_ms` is at or before `now_ms`
 	/// reads absent and is deleted, for every reader, so `now_ms` must be the gateway's receipt
-	/// clock, the one `exp_ms` was set on, never a device's.  A cursor below the floor answers from
-	/// the floor with `gap` set: the entries between were trimmed and the reader must re-base.
+	/// clock, the one `exp_ms` was set on, never a device's.  A cursor below the floor is answered
+	/// the live ephemerals between it and the floor, then on above the floor, with `gap` set: the
+	/// durable entries between were trimmed and the reader must re-base.
 	pub fn read_after(
 		&self,
 		after:		u64,
@@ -297,6 +319,9 @@ impl<
 	/// As [`read_after`](Self::read_after), with each entry's size taken from `measure` rather
 	/// than its encoded length, so a caller can page by what it will send (a wire form) rather
 	/// than by what is stored.  `None` from `measure` is an error.
+	///
+	/// Below the floor only ephemerals read: first the kept ones above `after` (a step each),
+	/// then the slots the sweep has not reached, then on above the floor.
 	pub fn read_after_measured<F: Fn(&Dat) -> Option<usize>>(
 		&self,
 		after:		u64,
@@ -307,14 +332,49 @@ impl<
 	)
 		-> Outcome<Page>
 	{
-		let (head, floor) = res!(self.meta());
-		let mut through = after.max(floor).min(head);
+		let m = res!(self.meta());
+		let mut through = after.min(m.head);
 		let mut entries = Vec::new();
 		let mut used = 0usize;
 		let mut more = false;
 		let mut steps = 0usize;
+		let mut dropped = 0u64;
+		// The kept ephemerals at or below `swept`: nothing else there is held.
+		if through < m.swept {
+			for (k, _) in res!(self.kept()) {
+				if k <= through {
+					continue;
+				}
+				if steps >= max_steps {
+					more = true;
+					break;
+				}
+				steps += 1;
+				if let Some((Some(exp), _, val)) = res!(self.entry_at(k)) {
+					// An expired one is left to the sweep, which drops it from the list.
+					if exp > now_ms {
+						let size = match measure(&val) {
+							Some(n)	=> n,
+							None	=> return Err(err!(
+								"lane {}: entry {} cannot be measured.", self.prefix, k;
+							Invalid, Input)),
+						};
+						if !entries.is_empty() && used.saturating_add(size) > max_bytes {
+							more = true;
+							break;
+						}
+						used = used.saturating_add(size);
+						entries.push(Entry { seq: k, exp_ms: Some(exp), val });
+					}
+				}
+				through = k;
+			}
+			if !more {
+				through = m.swept;
+			}
+		}
 		let mut seq = through;
-		while seq < head {
+		while !more && seq < m.head {
 			if steps >= max_steps {
 				more = true;
 				break;
@@ -328,12 +388,21 @@ impl<
 					continue;
 				},
 			};
-			if let Some(exp) = exp_ms {
-				if exp <= now_ms {
+			match exp_ms {
+				// Trimmed: the sweep deletes it.
+				None if seq <= m.floor => {
+					through = seq;
+					continue;
+				},
+				Some(exp) if exp <= now_ms => {
+					if seq > m.floor {
+						dropped = dropped.saturating_add(val.byte_len().unwrap_or(0) as u64);
+					}
 					res!(self.drop_entry(seq, id.as_deref()));
 					through = seq;
 					continue;
-				}
+				},
+				_ => (),
 			}
 			let size = match measure(&val) {
 				Some(n)	=> n,
@@ -349,7 +418,7 @@ impl<
 			entries.push(Entry { seq, exp_ms, val });
 			through = seq;
 		}
-		Ok(Page { entries, through, more, floor, gap: after < floor })
+		Ok(Page { entries, through, more, floor: m.floor, gap: after < m.floor, steps, dropped })
 	}
 
 	/// Deletes the entry at `seq`, leaving a hole reads skip.  Answers whether there was one.
@@ -363,21 +432,83 @@ impl<
 		}
 	}
 
-	/// Deletes every entry up to `seq` (never above the head) and raises the floor there.  Never
-	/// lowers the floor.  Answers the floor.
+	/// Raises the floor to `seq` (never above the head, never lower), in one write: every durable
+	/// entry up to it reads absent from now on, and every ephemeral one stays readable, at its own
+	/// sequence, until it expires.  Deletes nothing; [`sweep_trimmed`](Self::sweep_trimmed) does,
+	/// in bounded steps.  Answers the floor.
 	pub fn trim_through(&self, seq: u64) -> Outcome<u64> {
-		let (head, floor) = res!(self.meta());
-		let to = seq.min(head);
-		if to <= floor {
-			return Ok(floor);
+		let mut m = res!(self.meta());
+		let to = seq.min(m.head);
+		if to <= m.floor {
+			return Ok(m.floor);
 		}
-		for s in (floor + 1)..=to {
-			if let Some((_, id, _)) = res!(self.entry_at(s)) {
-				res!(self.drop_entry(s, id.as_deref()));
-			}
-		}
-		res!(self.put_meta(head, to));
+		m.floor = to;
+		res!(self.put_meta(&m));
 		Ok(to)
+	}
+
+	/// Whether [`sweep_trimmed`](Self::sweep_trimmed) has work by `now_ms`: trimmed slots not yet
+	/// deleted, or a kept ephemeral past its expiry.  One read.
+	pub fn trim_pending(&self, now_ms: u64) -> Outcome<bool> {
+		let m = res!(self.meta());
+		Ok(m.swept < m.floor || (m.due != 0 && m.due <= now_ms))
+	}
+
+	/// One bounded step of the trim's deletion: drops the kept ephemerals expired by `now_ms`,
+	/// then walks on from where the last step stopped towards the floor, deleting each durable
+	/// and expired entry and listing each live ephemeral, visiting at most `max_steps` slots in
+	/// all.  Answers whether work is left ([`trim_pending`](Self::trim_pending)).
+	pub fn sweep_trimmed(&self, max_steps: usize, now_ms: u64) -> Outcome<bool> {
+		let mut m = res!(self.meta());
+		let expired = m.due != 0 && m.due <= now_ms;
+		if !expired && m.swept >= m.floor {
+			return Ok(false);
+		}
+		let was = m;
+		let mut steps = 0usize;
+		let mut kept = Vec::new();
+		let mut listed = false;
+		if expired {
+			let all = res!(self.kept());
+			let n = all.len();
+			for (k, exp) in all {
+				if exp <= now_ms && steps < max_steps {
+					steps += 1;
+					if let Some((_, id, _)) = res!(self.entry_at(k)) {
+						res!(self.drop_entry(k, id.as_deref()));
+					}
+				} else {
+					kept.push((k, exp));
+				}
+			}
+			listed = kept.len() != n;
+		} else {
+			kept = res!(self.kept());
+		}
+		while m.swept < m.floor && steps < max_steps {
+			steps += 1;
+			let s = m.swept + 1;
+			if let Some((exp, id, _)) = res!(self.entry_at(s)) {
+				match exp {
+					Some(e) if e > now_ms	=> {
+						kept.push((s, e));
+						listed = true;
+					},
+					_						=> res!(self.drop_entry(s, id.as_deref())),
+				}
+			}
+			m.swept = s;
+		}
+		m.due = kept.iter().map(|(_, e)| *e).min().unwrap_or(0);
+		// The list before the head record that counts it, so a cut-short step leaves every
+		// kept ephemeral listed (one listed twice at worst, which reads skip).
+		if listed {
+			res!(self.put_kept(&kept));
+		}
+		if m != was {
+			res!(self.put_meta(&m));
+		}
+		Ok(m.swept < m.floor || (m.due != 0 && m.due <= now_ms))
 	}
 
 	/// Records that `name` has read through `cursor` (held at the head), and marks it live.  A
@@ -500,22 +631,72 @@ impl<
 		dat!(s)
 	}
 
-	fn meta(&self) -> Outcome<(u64, u64)> {
+	fn kept_key(&self) -> Dat			{ dat!(fmt!("{}/k", self.prefix)) }
+
+	// `[head, floor]` is a lane no trim has swept since: swept at the floor, nothing kept.
+	fn meta(&self) -> Outcome<Meta> {
+		let bad = |d: &dyn std::fmt::Debug| err!("lane {}: the head record holds {:?}.", self.prefix, d;
+			Invalid, Input, Mismatch);
 		match res!(self.db.get(&self.meta_key(), None)) {
-			None => Ok((0, 0)),
-			Some((Dat::List(l), _)) if l.len() == 2 => match (number(&l[0]), number(&l[1])) {
-				(Some(h), Some(f)) if f <= h => Ok((h, f)),
-				_ => Err(err!("lane {}: the head record holds {:?}.", self.prefix, l;
-					Invalid, Input, Mismatch)),
+			None => Ok(Meta { head: 0, floor: 0, swept: 0, due: 0 }),
+			Some((Dat::List(l), _)) => {
+				let n: Vec<Option<u64>> = l.iter().map(number).collect();
+				let m = match n.as_slice() {
+					[Some(h), Some(f)]						=> Meta { head: *h, floor: *f, swept: *f, due: 0 },
+					[Some(h), Some(f), Some(s), Some(d)]	=> Meta { head: *h, floor: *f, swept: *s, due: *d },
+					_										=> return Err(bad(&l)),
+				};
+				if m.floor > m.head || m.swept > m.floor {
+					return Err(bad(&l));
+				}
+				Ok(m)
 			},
-			Some((d, _)) => Err(err!("lane {}: the head record holds {:?}.", self.prefix, d;
-				Invalid, Input, Mismatch)),
+			Some((d, _)) => Err(bad(&d)),
 		}
 	}
 
-	fn put_meta(&self, head: u64, floor: u64) -> Outcome<()> {
-		let v = Dat::List(vec![Dat::U64(head), Dat::U64(floor)]);
+	fn put_meta(&self, m: &Meta) -> Outcome<()> {
+		let v = Dat::List(vec![Dat::U64(m.head), Dat::U64(m.floor), Dat::U64(m.swept), Dat::U64(m.due)]);
 		res!(self.db.insert(self.meta_key(), v, self.user, None));
+		Ok(())
+	}
+
+	// The kept ephemerals, `(seq, exp_ms)` in sequence order.
+	fn kept(&self) -> Outcome<Vec<(u64, u64)>> {
+		let l = match res!(self.db.get(&self.kept_key(), None)) {
+			None					=> return Ok(Vec::new()),
+			Some((Dat::List(l), _))	=> l,
+			Some((d, _))			=> return Err(err!(
+				"lane {}: the kept list is a {:?}.", self.prefix, d.kind();
+			Invalid, Input, Mismatch)),
+		};
+		let mut out = Vec::with_capacity(l.len());
+		for d in &l {
+			match d {
+				Dat::List(p) if p.len() == 2 => match (number(&p[0]), number(&p[1])) {
+					(Some(k), Some(e))	=> out.push((k, e)),
+					_					=> return Err(err!(
+						"lane {}: a kept entry holds {:?}.", self.prefix, p;
+					Invalid, Input, Mismatch)),
+				},
+				_ => return Err(err!("lane {}: a kept entry holds {:?}.", self.prefix, d;
+					Invalid, Input, Mismatch)),
+			}
+		}
+		out.sort();
+		out.dedup();
+		Ok(out)
+	}
+
+	fn put_kept(&self, kept: &[(u64, u64)]) -> Outcome<()> {
+		if kept.is_empty() {
+			res!(self.db.delete(&self.kept_key(), self.user, None));
+			return Ok(());
+		}
+		let v = Dat::List(kept.iter()
+			.map(|(k, e)| Dat::List(vec![Dat::U64(*k), Dat::U64(*e)]))
+			.collect());
+		res!(self.db.insert(self.kept_key(), v, self.user, None));
 		Ok(())
 	}
 
