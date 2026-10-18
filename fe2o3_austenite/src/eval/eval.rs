@@ -110,6 +110,18 @@ pub fn library() -> Arc<Scope> {
 	LIBRARY.with(|l| l.clone())
 }
 
+/// The standard library a compile given `inputs` evaluates against: the shared one when there are none,
+/// else a copy whose `sys.inputs` holds them, as Typst's library is built with the inputs of its world.
+pub fn library_with_inputs(inputs: &[(String, String)]) -> Arc<Scope> {
+	let base = library();
+	if inputs.is_empty() {
+		return base;
+	}
+	let mut scope = (*base).clone();
+	scope.define("sys", Value::Module(Arc::new(lib::foundations::sys_module(inputs))));
+	Arc::new(scope)
+}
+
 /// Evaluates a loaded source: its top-level bindings become the module's scope, its markup (with every
 /// `set`/`show` applied to the rest of its scope) the module's content.
 pub fn eval_module(engine: &mut Engine, id: FileId) -> Outcome<Module> {
@@ -120,7 +132,7 @@ pub fn eval_module(engine: &mut Engine, id: FileId) -> Outcome<Module> {
 	if report_syntax_errors(engine, &root, None) {
 		return Err(err!("{} does not parse.", path.display(); Input, Invalid));
 	}
-	let lib = library();
+	let lib = engine.world.library.clone();
 	let (content, frame) = {
 		let mut vm = Vm::new(engine, &lib, lib.clone(), id, false, Span::detached());
 		let content = res!(vm.eval_markup(root.children()));
@@ -151,7 +163,7 @@ pub fn eval_string(
 	if report_syntax_errors(engine, &root, Some(span)) {
 		return Err(err!("The string passed to eval does not parse."; Input, Invalid));
 	}
-	let lib = library();
+	let lib = engine.world.library.clone();
 	let base = Scope { map: scope.map, parent: Some(lib.clone()) };
 	// The string's own nodes have no file; a path in it resolves from the file that called `eval`.
 	let mut vm = Vm::new(engine, &base, lib.clone(), span.file, false, span);
@@ -239,7 +251,7 @@ impl Engine {
 
 fn call_closure(engine: &mut Engine, c: &Arc<Closure>, func: &Func, args: Args) -> Outcome<Value> {
 	res!(engine.enter_call(args.span));
-	let lib = library();
+	let lib = engine.world.library.clone();
 	let out = {
 		let mut vm = Vm::new(engine, c.captured(), lib, c.span().file, true, Span::detached());
 		if let Some(name) = c.name() {

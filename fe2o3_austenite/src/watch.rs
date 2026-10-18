@@ -139,6 +139,7 @@ pub struct Spec {
 	pub timings:		Option<PathBuf>,	// the file the phase timings go to
 	pub timings_fine:	bool,
 	pub pdf:			PdfOptions,
+	pub inputs:			Vec<(String, String)>,	// the document's `sys.inputs`, from `--input key=value`
 }
 
 /// What a compile reports of itself once its PDF is written.
@@ -183,6 +184,7 @@ pub fn compile_pdf(
 	read.push(spec.main.clone());
 	crate::compile::supply_typst_package_cache();
 	let mut sink = res!(PdfSink::with_options(spec.pdf.clone()));
+	session.set_inputs(spec.inputs.clone());
 	let mut done = res!(session.compile(&spec.main, &spec.root, &mut sink, timings, None, cold));
 	*read = done.files_read();
 	let mut report = done.report();
@@ -316,8 +318,8 @@ pub struct Plan {
 }
 
 /// What `austenite --eval --watch` is given, in place of a settings file: the source, the directory the PDF
-/// goes into as `document.pdf`, `--root`, each `--font-path`, `--strict`, `--diag-summary`, `--timings FILE`
-/// and `--timings-fine`.
+/// goes into as `document.pdf`, `--root`, each `--font-path`, `--strict`, `--diag-summary`, `--timings FILE`,
+/// `--timings-fine` and each `--input key=value`.
 #[derive(Clone, Debug)]
 pub struct Bare {
 	pub source:			PathBuf,
@@ -328,6 +330,7 @@ pub struct Bare {
 	pub diag_summary:	bool,
 	pub timings:		Option<PathBuf>,
 	pub timings_fine:	bool,
+	pub inputs:			Vec<(String, String)>,
 }
 
 impl Plan {
@@ -383,6 +386,7 @@ impl Plan {
 		settings.output	= cwd.join(&bare.out_dir).join("document.pdf").display().to_string();
 		let mut plan = res!(Self::settle(settings, None, cwd.to_path_buf(), main, bare.timings.as_deref()));
 		plan.spec.timings_fine	= bare.timings_fine;
+		plan.spec.inputs		= bare.inputs.clone();
 		plan.bare				= true;
 		Ok(plan)
 	}
@@ -414,6 +418,7 @@ impl Plan {
 			timings:		timings.map(|t| t.to_path_buf()),
 			timings_fine:	false,
 			pdf:			res!(settings.pdf_options(&base)),
+			inputs:			Vec::new(),
 		};
 		Ok(Self { settings, file, spec, warned, base, bare: false })
 	}
@@ -437,15 +442,31 @@ impl Plan {
 }
 
 /// `austenite build`: one cold compile of `source`, or of the document the settings or the selection rule
-/// name when there is none, under the settings.
-pub fn build(source: Option<&Path>, sets: &[String], timings: Option<&Path>) -> Outcome<(Plan, Report)> {
+/// name when there is none, under the settings, the document reading `inputs` as `sys.inputs`.
+pub fn build(
+	source:		Option<&Path>,
+	sets:		&[String],
+	inputs:		&[(String, String)],
+	timings:	Option<&Path>,
+)
+	-> Outcome<(Plan, Report)>
+{
 	let cwd = res!(std::env::current_dir());
-	build_at(&cwd, source, sets, timings)
+	build_at(&cwd, source, sets, inputs, timings)
 }
 
 /// As [`build`], with `cwd` the working directory the settings file is looked for from when there is no source.
-pub fn build_at(cwd: &Path, source: Option<&Path>, sets: &[String], timings: Option<&Path>) -> Outcome<(Plan, Report)> {
-	let plan = res!(Plan::at(cwd, source, sets, timings));
+pub fn build_at(
+	cwd:		&Path,
+	source:		Option<&Path>,
+	sets:		&[String],
+	inputs:		&[(String, String)],
+	timings:	Option<&Path>,
+)
+	-> Outcome<(Plan, Report)>
+{
+	let mut plan = res!(Plan::at(cwd, source, sets, timings));
+	plan.spec.inputs = inputs.to_vec();
 	let mut session = plan.session();
 	let mut read = Vec::new();
 	let report = res!(compile_pdf(&plan.spec, &mut session, true, false, &mut read));
@@ -466,6 +487,7 @@ pub enum Tick {
 pub struct Run {
 	source:		Option<PathBuf>,
 	sets:		Vec<String>,
+	inputs:		Vec<(String, String)>,	// kept across a reload of the settings
 	timings:	Option<PathBuf>,
 	cold:		bool,			// every compile cold, as `--cold` asks
 	plan:		Plan,
@@ -478,22 +500,40 @@ pub struct Run {
 }
 
 impl Run {
-	pub fn new(source: Option<PathBuf>, sets: Vec<String>, cold: bool, timings: Option<PathBuf>) -> Outcome<Self> {
-		let plan = res!(Plan::new(source.as_deref(), &sets, timings.as_deref()));
-		Ok(Self::over(plan, source, sets, cold, timings))
+	pub fn new(
+		source:		Option<PathBuf>,
+		sets:		Vec<String>,
+		inputs:		Vec<(String, String)>,
+		cold:		bool,
+		timings:	Option<PathBuf>,
+	)
+		-> Outcome<Self>
+	{
+		let mut plan = res!(Plan::new(source.as_deref(), &sets, timings.as_deref()));
+		plan.spec.inputs = inputs.clone();
+		Ok(Self::over(plan, source, sets, inputs, cold, timings))
 	}
 
 	/// The loop of `austenite --eval --watch`: the plan of [`Plan::bare`], which no settings file shapes or
 	/// reloads.
 	pub fn bare(cwd: &Path, bare: &Bare) -> Outcome<Self> {
 		let plan = res!(Plan::bare(cwd, bare));
-		Ok(Self::over(plan, None, Vec::new(), false, None))
+		Ok(Self::over(plan, None, Vec::new(), bare.inputs.clone(), false, None))
 	}
 
-	fn over(plan: Plan, source: Option<PathBuf>, sets: Vec<String>, cold: bool, timings: Option<PathBuf>) -> Self {
+	fn over(
+		plan:		Plan,
+		source:		Option<PathBuf>,
+		sets:		Vec<String>,
+		inputs:		Vec<(String, String)>,
+		cold:		bool,
+		timings:	Option<PathBuf>,
+	)
+		-> Self
+	{
 		let session = plan.session();
 		Self {
-			source, sets, timings, cold, plan, session,
+			source, sets, inputs, timings, cold, plan, session,
 			set:		Vec::new(),
 			seen:		BTreeMap::new(),
 			first:		true,
@@ -513,8 +553,9 @@ impl Run {
 		if let Some(sf) = self.plan.settings_path() {
 			if !self.first && before.get(&sf) != self.seen.get(&sf) {
 				match Plan::new(self.source.as_deref(), &self.sets, self.timings.as_deref()) {
-					Ok(plan)	=> {
+					Ok(mut plan)	=> {
 						self.session.set_fonts(plan.session().fonts().clone());
+						plan.spec.inputs = self.inputs.clone();
 						self.plan = plan;
 						self.cold_next = true;
 					},

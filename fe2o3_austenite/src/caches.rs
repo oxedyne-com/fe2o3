@@ -12,13 +12,11 @@
 //! takes them back. The paragraph memo and the page ledger each add a [`GenMap`](oxedyne_fe2o3_data::gen_map::GenMap)
 //! here, stepped by [`Caches::begin`], swept by [`Caches::end`] and emptied by [`Caches::clear`].
 
-use crate::eval::eval::library;
 #[cfg(feature = "plugin")]
 use crate::eval::plugin::{
 	Plugin,
 	PluginFunc,
 };
-use crate::eval::value::Value;
 use crate::flow::par::ParMemo;
 use crate::fonts::ShapeStats;
 
@@ -113,41 +111,19 @@ pub struct Counters {
 
 /// The fingerprint of everything outside the source that decides what a compile makes: the face set
 /// (`faces`, [`FontBook::fingerprint`](crate::fonts::FontBook::fingerprint)), the `sys.inputs` pairs, and
-/// the engine, by the commit it was built from. The inputs go in sorted, so their order is not a change.
+/// the engine, by the commit it was built from. The inputs go in as given, since their order is the order of
+/// the dictionary a document reads; [`Session::set_inputs`](crate::compile::Session::set_inputs) has already
+/// folded a repeated key.
 pub fn configuration(faces: Fingerprint, inputs: &[(String, String)], engine: &str) -> Fingerprint {
-	let mut sorted: Vec<&(String, String)> = inputs.iter().collect();
-	sorted.sort();
 	let mut f = Fingerprinter::new();
 	f.write_fingerprint(faces);
-	f.write_usize(sorted.len());
-	for (key, val) in sorted {
+	f.write_usize(inputs.len());
+	for (key, val) in inputs {
 		f.write_str(key);
 		f.write_str(val);
 	}
 	f.write_str(engine);
 	f.finish()
-}
-
-/// The pairs of the `sys.inputs` the evaluator presents to a document. A host has no route to set them
-/// yet, so the dictionary is empty; reading it from the library keeps the fingerprint on whatever the
-/// document would see.
-pub fn sys_inputs() -> Vec<(String, String)> {
-	let lib = library();
-	let sys = match lib.get("sys") {
-		Some(Value::Module(m))	=> m.clone(),
-		_						=> return Vec::new(),
-	};
-	let dict = match sys.scope.get("inputs") {
-		Some(Value::Dict(d))	=> d.clone(),
-		_						=> return Vec::new(),
-	};
-	dict.iter().map(|(k, v)| {
-		let text = match v {
-			Value::Str(s)	=> s.as_str().to_string(),
-			other			=> fmt!("{:?}", other),
-		};
-		(k.to_string(), text)
-	}).collect()
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐

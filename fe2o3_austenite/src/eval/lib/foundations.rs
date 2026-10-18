@@ -131,15 +131,21 @@ pub fn define(scope: &mut Scope) {
 	{
 		scope.define(f.name(), native(f));
 	}
-	scope.define("sys", Value::Module(Arc::new(sys_module())));
+	scope.define("sys", Value::Module(Arc::new(sys_module(&[]))));
 }
 
 fn native(f: FoundFn) -> Value { Value::Func(Func::Native(NativeFunc::Found(f))) }
 
-fn sys_module() -> Module {
+/// The `sys` module, whose `inputs` holds `inputs` as strings in the order given. A key given twice keeps
+/// the place it first took and the value it was last given, as Typst's dictionary collects them.
+pub fn sys_module(inputs: &[(String, String)]) -> Module {
 	let mut s = Scope::new();
+	let mut dict = Dict::new();
+	for (key, val) in inputs {
+		dict.insert(key, Value::str(val.as_str()));
+	}
 	define_nth(&mut s, 0, "version", Value::Version(Arc::new(TYPST_VERSION.to_vec())));
-	define_nth(&mut s, 1, "inputs", Value::dict(Dict::new()));
+	define_nth(&mut s, 1, "inputs", Value::dict(dict));
 	Module::new("sys", s)
 }
 

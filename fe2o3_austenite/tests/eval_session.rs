@@ -235,13 +235,14 @@ fn noto() -> Vec<u8> {
 fn pair(k: &str, v: &str) -> (String, String) { (k.to_string(), v.to_string()) }
 
 #[test]
-fn the_configuration_is_the_faces_the_inputs_and_the_engine_and_the_order_of_inputs_is_not_a_change() {
+fn the_configuration_is_the_faces_the_inputs_and_the_engine_and_the_order_of_inputs_is_a_change() {
 	let faces = Fingerprint::of(b"faces");
 	let one = [pair("lang", "en"), pair("draft", "yes")];
 	let swapped = [pair("draft", "yes"), pair("lang", "en")];
 	let base = caches::configuration(faces, &one, "abc");
 	assert_eq!(base, caches::configuration(faces, &one, "abc"), "the same configuration is the same fingerprint");
-	assert_eq!(base, caches::configuration(faces, &swapped, "abc"), "the order the inputs come in is not a change");
+	// A document reads `sys.inputs` in the order given (`keys()`, a `for` loop), so the order is a change.
+	assert_ne!(base, caches::configuration(faces, &swapped, "abc"), "the order the inputs come in is a change");
 	assert_ne!(base, caches::configuration(faces, &[pair("lang", "en")], "abc"), "an input dropped is a change");
 	assert_ne!(base, caches::configuration(faces, &[pair("lang", "en"), pair("draft", "no")], "abc"),
 		"an input's value changed is a change");
@@ -289,7 +290,7 @@ fn a_new_face_empties_the_caches_and_the_same_faces_do_not() {
 	assert_eq!((s.caches().config(), s.caches().resets()), (Some(first), 0), "the same faces leave the caches");
 	// The configuration is the one the parts name, read where the compile read them.
 	let faces = s.fonts().clone().book().expect("a book").fingerprint();
-	assert_eq!(first, caches::configuration(faces, &caches::sys_inputs(), compile::engine_git_hash()));
+	assert_eq!(first, caches::configuration(faces, s.inputs(), compile::engine_git_hash()));
 	assert!(s.caches().pars.len() > 0, "the paragraphs were kept under the first faces");
 	let mut store = FontStore::default();
 	store.add_bytes(noto());

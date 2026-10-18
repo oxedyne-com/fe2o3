@@ -19,7 +19,6 @@ use crate::caches::{
 	Caches,
 	Counters,
 	configuration,
-	sys_inputs,
 };
 use crate::doc::{
 	self,
@@ -428,13 +427,14 @@ pub fn assemble_eval_timed<S: PageSink>(
 )
 	-> Outcome<Evaluated>
 {
-	assemble_eval_from(main_path, root, fonts, sink, timings, fuel, None, &mut Caches::default())
+	assemble_eval_from(main_path, root, fonts, sink, timings, fuel, None, &[], &mut Caches::default())
 }
 
 // As `assemble_eval_timed`, the first pass reading `warm` where there is one. It is set after the
 // evaluation, so that the evaluation sees what a cold compile's sees; what a warm start can change is the
 // first pass, whose reads the fixpoint checks as it checks every pass's. The engine holds `caches` for the
-// evaluation and gives them back, so that a compile that fails still leaves the session what it made.
+// evaluation and gives them back, so that a compile that fails still leaves the session what it made. The
+// world's library presents `inputs` as `sys.inputs`.
 fn assemble_eval_from<S: PageSink>(
 	main_path:	&Path,
 	root:		&Path,
@@ -443,13 +443,14 @@ fn assemble_eval_from<S: PageSink>(
 	timings:	Option<Timings>,
 	fuel:		Option<u64>,
 	warm:		Option<Arc<Introspector>>,
+	inputs:		&[(String, String)],
 	caches:		&mut Caches,
 )
 	-> Outcome<Evaluated>
 {
 	let canon = |p: &Path| vfs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
 	let main_path	= canon(main_path);
-	let mut world = World::new(canon(root));
+	let mut world = World::with_inputs(canon(root), inputs);
 	let id = res!(world.load(&main_path));
 	let mut engine = Engine::new(world);
 	engine.fonts = fonts;
@@ -507,12 +508,29 @@ pub struct Session {
 	stamp:	Vec<(PathBuf, Option<SystemTime>)>,	// the scanned fonts as they were when the book was built
 	intro:	Option<Arc<Introspector>>,
 	caches:	Caches,
+	inputs:	Vec<(String, String)>,				// what each compile presents as `sys.inputs`
 }
 
 impl Session {
 	pub fn new(fonts: FontStore) -> Self {
-		Self { fonts, stamp: Vec::new(), intro: None, caches: Caches::default() }
+		Self { fonts, stamp: Vec::new(), intro: None, caches: Caches::default(), inputs: Vec::new() }
 	}
+
+	/// Sets the `sys.inputs` of the next compile, as `typst compile --input key=value` does, each value a
+	/// string. A key given twice keeps the place it first took and the value it was last given, as Typst's
+	/// dictionary collects them, so what is kept is the dictionary a document reads, in its order.
+	pub fn set_inputs(&mut self, inputs: Vec<(String, String)>) {
+		let mut kept: Vec<(String, String)> = Vec::with_capacity(inputs.len());
+		for (key, val) in inputs {
+			match kept.iter_mut().find(|(k, _)| *k == key) {
+				Some(entry)	=> entry.1 = val,
+				None		=> kept.push((key, val)),
+			}
+		}
+		self.inputs = kept;
+	}
+
+	pub fn inputs(&self) -> &[(String, String)] { &self.inputs }
 
 	/// A session over `fonts` with the cache budgets the host has set.
 	pub fn with_budgets(fonts: FontStore, budgets: Budgets) -> Self {
@@ -573,9 +591,9 @@ impl Session {
 			Err(_)		=> Fingerprint::default(),
 		};
 		self.stamp = stamps(&self.fonts);
-		self.caches.begin(configuration(faces, &sys_inputs(), engine_git_hash()));
+		self.caches.begin(configuration(faces, &self.inputs, engine_git_hash()));
 		let warm = if cold { None } else { self.intro.clone() };
-		let done = assemble_eval_from(main_path, root, self.fonts.clone(), sink, timings, fuel, warm, &mut self.caches);
+		let done = assemble_eval_from(main_path, root, self.fonts.clone(), sink, timings, fuel, warm, &self.inputs, &mut self.caches);
 		self.caches.end();
 		let mut done = res!(done);
 		if let Ok(book) = self.fonts.book() {
@@ -591,6 +609,22 @@ impl Session {
 		}
 		Ok(done)
 	}
+}
+
+/// Reads one `--input key=value` argument as `typst compile` reads it: split at the first `=`, so the value
+/// may hold more, with the space around the key and the value trimmed. A missing `=` or an empty key is refused.
+pub fn parse_input(arg: &str) -> Outcome<(String, String)> {
+	let (key, val) = match arg.split_once('=') {
+		Some(kv)	=> kv,
+		None		=> return Err(err!(
+			"--input '{}' must be a key and a value separated by an equals sign, key=value.", arg;
+			Input, Invalid, Missing)),
+	};
+	let key = key.trim();
+	if key.is_empty() {
+		return Err(err!("--input '{}' has an empty key; it must be key=value.", arg; Input, Invalid, Missing));
+	}
+	Ok((key.to_string(), val.trim().to_string()))
 }
 
 /// Supplies the packages in Typst's own cache, where `typst` keeps those it has fetched: the directory

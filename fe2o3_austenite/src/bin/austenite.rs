@@ -498,6 +498,7 @@ struct EvalJob {
 	diag_summary:	bool,
 	timings_out:	Option<String>,
 	timings_fine:	bool,
+	inputs:		Vec<(String, String)>,	// each `--input key=value`, as `sys.inputs`
 }
 
 /// Compiles through the evaluator (`--eval`) and writes `OUT_DIR/document.pdf`. `--root` is what a leading
@@ -547,6 +548,7 @@ fn compile_eval(
 		timings:		job.timings_out.as_ref().map(PathBuf::from),
 		timings_fine:	job.timings_fine,
 		pdf:			emit::pdf::PdfOptions::default(),
+		inputs:			job.inputs.clone(),
 	};
 	watch::compile_pdf(&spec, session, cold, fold, read)
 }
@@ -585,15 +587,35 @@ fn watch_eval(job: EvalJob) -> Outcome<()> {
 		diag_summary:	job.diag_summary,
 		timings:		job.timings_out.as_ref().map(PathBuf::from),
 		timings_fine:	job.timings_fine,
+		inputs:			job.inputs.clone(),
 	};
 	let run = res!(watch::Run::bare(&cwd, &bare));
 	run.run()
 }
 
-/// Reads the arguments of `watch` and `build`: the source, each `--set key=value`, `--cold` and `--timings FILE`.
-fn command_args(name: &str, args: &[String]) -> Outcome<(Option<PathBuf>, Vec<String>, bool, Option<PathBuf>)> {
-	let mut source:	Option<PathBuf>	= None;
-	let mut sets:	Vec<String>		= Vec::new();
+// The arguments of `watch` and `build`.
+struct CommandArgs {
+	source:		Option<PathBuf>,
+	sets:		Vec<String>,			// each `--set key=value`, for the settings
+	inputs:		Vec<(String, String)>,	// each `--input key=value`, for `sys.inputs`
+	cold:		bool,
+	timings:	Option<PathBuf>,
+}
+
+// Reads one `--input`'s argument, the flag having been taken.
+fn input_arg(next: Option<&String>) -> Outcome<(String, String)> {
+	match next {
+		Some(kv)	=> compile::parse_input(kv),
+		None		=> Err(err!("--input needs key=value."; Input, Invalid, Missing)),
+	}
+}
+
+/// Reads the arguments of `watch` and `build`: the source, each `--set key=value`, each `--input key=value`,
+/// `--cold` and `--timings FILE`.
+fn command_args(name: &str, args: &[String]) -> Outcome<CommandArgs> {
+	let mut source:	Option<PathBuf>			= None;
+	let mut sets:	Vec<String>				= Vec::new();
+	let mut inputs:	Vec<(String, String)>	= Vec::new();
 	let mut cold	= false;
 	let mut timings	= None;
 	let mut it = args.iter();
@@ -603,33 +625,35 @@ fn command_args(name: &str, args: &[String]) -> Outcome<(Option<PathBuf>, Vec<St
 				Some(kv)	=> kv.clone(),
 				None		=> return Err(err!("--set needs key=value."; Input, Invalid, Missing)),
 			}),
+			"--input"	=> inputs.push(res!(input_arg(it.next()))),
 			"--cold"	=> cold = true,
 			"--timings"	=> timings = Some(match it.next() {
 				Some(p)	=> PathBuf::from(p),
 				None	=> return Err(err!("--timings needs a file argument."; Input, Invalid, Missing)),
 			}),
 			flag if flag.starts_with("--")	=> return Err(err!(
-				"austenite {} does not take {}. It takes [SOURCE.typ] [--set key=value]... [--cold] [--timings FILE].", name, flag;
+				"austenite {} does not take {}. It takes [SOURCE.typ] [--set key=value]... [--input key=value]... [--cold] \
+				[--timings FILE].", name, flag;
 				Input, Invalid)),
 			_			=> if source.replace(PathBuf::from(a)).is_some() {
 				return Err(err!("austenite {} takes one source, and a second was given: {}.", name, a; Input, Invalid));
 			},
 		}
 	}
-	Ok((source, sets, cold, timings))
+	Ok(CommandArgs { source, sets, inputs, cold, timings })
 }
 
-/// `austenite watch [SOURCE.typ] [--set k=v]... [--cold] [--timings FILE]`.
+/// `austenite watch [SOURCE.typ] [--set k=v]... [--input k=v]... [--cold] [--timings FILE]`.
 fn command_watch(args: &[String]) -> Outcome<()> {
-	let (source, sets, cold, timings) = res!(command_args("watch", args));
-	watch::Run::new(source, sets, cold, timings).and_then(|run| run.run())
+	let a = res!(command_args("watch", args));
+	watch::Run::new(a.source, a.sets, a.inputs, a.cold, a.timings).and_then(|run| run.run())
 }
 
-/// `austenite build [SOURCE.typ] [--set k=v]... [--timings FILE]`: one cold compile under the settings, of the
-/// source or, with none named, of the document the settings or the selection rule name.
+/// `austenite build [SOURCE.typ] [--set k=v]... [--input k=v]... [--timings FILE]`: one cold compile under the
+/// settings, of the source or, with none named, of the document the settings or the selection rule name.
 fn command_build(args: &[String]) -> Outcome<()> {
-	let (source, sets, _cold, timings) = res!(command_args("build", args));
-	let (plan, stats) = res!(watch::build(source.as_deref(), &sets, timings.as_deref()));
+	let a = res!(command_args("build", args));
+	let (plan, stats) = res!(watch::build(a.source.as_deref(), &a.sets, &a.inputs, a.timings.as_deref()));
 	println!(
 		"austenite: {} -> {} page(s) in {} pass(es); {} byte(s); {:.2}s; written to {}",
 		plan.spec.main.display(), stats.pages, stats.passes, stats.bytes, stats.secs, plan.spec.out.display());
@@ -695,11 +719,12 @@ fn explain_sites(sites: &[oxedyne_fe2o3_austenite::compile::Diagnostic]) -> Stri
 	out
 }
 
-const USAGE: &str = "Usage: austenite watch|build ... or austenite [--watch] [--explain] [--engine evaluator|curated] \
-	[--strict] [--diag-summary] [--timings FILE.json [--timings-fine]] [--root DIR] [--font-path DIR]... <SOURCE.typ> [OUTPUT_DIR]. \
+const USAGE: &str = "Usage: austenite --version, austenite watch|build ... or austenite [--watch] [--explain] [--engine evaluator|curated] \
+	[--strict] [--diag-summary] [--timings FILE.json [--timings-fine]] [--root DIR] [--font-path DIR]... [--input KEY=VALUE]... \
+	<SOURCE.typ> [OUTPUT_DIR]. Each --input is a string of sys.inputs, as typst compile --input gives it. \
 	A .typ source compiles through the evaluator; --eval is accepted and changes nothing. A book whose austenite.jdat \
 	holds \"engine\": \"curated\" (or a run given --engine curated) compiles through the frozen curated reader instead, \
-	which alone takes --pearl and --ledger-out PATH and none of --strict, --diag-summary, --timings, --root or --font-path. \
+	which alone takes --pearl and --ledger-out PATH and none of --strict, --diag-summary, --timings, --root, --font-path or --input. \
 	A flag the chosen engine would not read is refused by name.";
 
 fn main() -> Outcome<()> {
@@ -709,6 +734,10 @@ fn main() -> Outcome<()> {
 		Some("build")	=> return command_build(&argv[1..]),
 		Some("--help") | Some("-h")	=> {
 			println!("{}", USAGE);
+			return Ok(());
+		},
+		Some("--version") | Some("-V")	=> {
+			println!("austenite {} ({})", env!("CARGO_PKG_VERSION"), compile::engine_git_hash());
 			return Ok(());
 		},
 		_				=> (),
@@ -726,6 +755,7 @@ fn main() -> Outcome<()> {
 	let mut fine		= false;
 	let mut root:		Option<String>	= None;
 	let mut font_paths:	Vec<String>		= Vec::new();
+	let mut inputs:		Vec<(String, String)>	= Vec::new();
 	let mut ledger_out:	Option<String>	= None;
 	let mut pos:	Vec<String>	= Vec::new();
 	let mut args = std::env::args().skip(1);
@@ -754,6 +784,7 @@ fn main() -> Outcome<()> {
 				Some(p)	=> p,
 				None	=> return Err(err!("--font-path needs a directory argument."; Input, Invalid, Missing)),
 			}),
+			"--input"			=> inputs.push(res!(input_arg(args.next().as_ref()))),
 			"--ledger-out"		=> {
 				ledger_out = Some(match args.next() {
 					Some(p)	=> p,
@@ -809,6 +840,7 @@ fn main() -> Outcome<()> {
 				(fine,					"--timings-fine"),
 				(root.is_some(),		"--root"),
 				(!font_paths.is_empty(),	"--font-path"),
+				(!inputs.is_empty(),		"--input"),
 			] {
 				if given {
 					return Err(refuse(flag, engine, &chosen, back));
@@ -835,7 +867,9 @@ fn main() -> Outcome<()> {
 				}
 			}
 		}
-		let job = EvalJob { source, out_dir, root, font_paths, strict, diag_summary, timings_out: timings, timings_fine: fine };
+		let job = EvalJob {
+			source, out_dir, root, font_paths, strict, diag_summary, timings_out: timings, timings_fine: fine, inputs,
+		};
 		if watching {
 			return watch_eval(job);
 		}

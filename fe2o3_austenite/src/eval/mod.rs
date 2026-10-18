@@ -70,6 +70,7 @@ use crate::eval::locate::{
 	Locator,
 	Place,
 };
+use crate::eval::scope::Scope;
 use crate::eval::styles::StyleChain;
 use crate::eval::value::Module;
 use crate::flow::text::FontStore;
@@ -100,18 +101,37 @@ pub const MAX_LAYOUT_DEPTH:	usize	= 72;			// ditto, for nested layout
 
 /// The sources of one compilation and the modules evaluated from them. Loading a path is here;
 /// resolving an import spec to a path, caching and cycle detection are `import.rs` (U10).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct World {
 	pub root:		PathBuf,						// the project root a leading `/` resolves against
 	pub sources:	Vec<Source>,					// indexed by `FileId.0`
 	pub modules:	HashMap<PathBuf, Arc<Module>>,	// evaluated once, by canonical path
 	pub route:		Vec<PathBuf>,					// modules being evaluated, outermost first, for cycles
 	pub files:		BTreeSet<PathBuf>,				// every vfs path the compile asked for, found or not
+	pub library:	Arc<Scope>,						// the standard library, `sys.inputs` included
+}
+
+impl Default for World {
+	fn default() -> Self {
+		Self {
+			root:		PathBuf::new(),
+			sources:	Vec::new(),
+			modules:	HashMap::new(),
+			route:		Vec::new(),
+			files:		BTreeSet::new(),
+			library:	eval::library(),
+		}
+	}
 }
 
 impl World {
 	pub fn new(root: PathBuf) -> Self {
 		Self { root, ..Self::default() }
+	}
+
+	/// A world whose documents read `inputs` as `sys.inputs`, as `typst compile --input` gives them.
+	pub fn with_inputs(root: PathBuf, inputs: &[(String, String)]) -> Self {
+		Self { root, library: eval::library_with_inputs(inputs), ..Self::default() }
 	}
 
 	/// Parses `text` as a new source and returns its id; a path already loaded returns its existing id.
