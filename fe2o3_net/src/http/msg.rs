@@ -626,7 +626,19 @@ impl HttpMessage {
         // The answer to a `HEAD` is the header the matching `GET` would have sent, and nothing
         // after it. `Content-Length` above still counts the body that was built, which is what
         // the field is for -- a caller asking how big a thing is deserves the true answer.
-        if !self.head_only {
+        // A `1xx`, `204` or `304` ends at its header (RFC 9110 6.4.1, 15.3.5, 15.4.5). Bytes
+        // written after it carry no `Content-Length` to frame them, so the peer reads them as the
+        // start of whatever comes next on the connection, or a proxy between misreads the reply
+        // itself. The body is held back, as for a `HEAD`, and the handler that built it is named
+        // in the log so it can be put right.
+        let bodiless = self.is_bodiless_status();
+        if bodiless && self.body_len() > 0 {
+            if let HttpHeadline::Response { status } = &self.header.headline {
+                warn!("A {} response was built with a body of {} bytes; the body is withheld, \
+                    as the status forbids one.", *status as u16, self.body_len());
+            }
+        }
+        if !self.head_only && !bodiless {
             match &self.file {
                 // A body on disk goes to the socket a chunk at a time and is
                 // never gathered into memory, which is the whole point of
@@ -1168,6 +1180,21 @@ mod body_tests {
         assert!(wire.starts_with("HTTP/1.1 200 "), "{}", wire);
         assert!(wire.contains("content-length: 2\r\n"), "{}", wire);
         assert!(wire.ends_with("hi"), "{}", wire);
+        Ok(())
+    }
+
+    /// A `204`, `304` or `1xx` built with a body still ends at its header: no `Content-Length` and
+    /// not a byte after the blank line, whichever handler made the mistake. RFC 9110 6.4.1.
+    #[test]
+    fn test_a_bodiless_status_sends_no_body_even_when_given_one() -> Outcome<()> {
+        for status in [HttpStatus::NoContent, HttpStatus::NotModified, HttpStatus::Continue] {
+            let msg = HttpMessage::new_response(status).with_body(b"{\"ok\":true}".to_vec());
+            let wire = res!(on_the_wire(msg));
+            assert!(!wire.to_lowercase().contains("content-length"),
+                "a {} carried a length: {:?}", status as u16, wire);
+            assert!(wire.ends_with("\r\n\r\n"),
+                "a {} wrote past its headers: {:?}", status as u16, wire);
+        }
         Ok(())
     }
 
