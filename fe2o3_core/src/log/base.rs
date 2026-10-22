@@ -70,7 +70,7 @@ impl<ETAG: GenTag> Logger<ETAG>
 
     #[cfg(target_arch = "wasm32")]
     pub fn send_in(&self, msg: Msg<ETAG>) {
-        if let Msg::Log { level, src, erropt, msg, stream: _ } = msg {
+        if let Msg::Log { at, level, src, erropt, msg, stream: _ } = msg {
             let current = match self.cfg.read() {
                 Ok(cfg) => cfg.level,
                 Err(_)  => LogLevel::Trace,
@@ -81,6 +81,7 @@ impl<ETAG: GenTag> Logger<ETAG>
                     None    => msg,
                 };
                 let (_console, file) = LogBot::<ETAG>::format_msg(
+                    at,
                     level,
                     &src,
                     Ok(text),

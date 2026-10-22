@@ -11,6 +11,7 @@ use oxedyne_fe2o3_core::{
             FileConfig,
             LogBot,
             Msg,
+            stamp,
         },
     },
 };
@@ -54,6 +55,7 @@ fn test_a_backlog_is_written_and_finished_within_five_seconds() -> Outcome<()> {
 
     for i in 0..BACKLOG {
         res!(chan.send(Msg::Log {
+            at:     stamp(),
             level:  LogLevel::Debug,
             src:    src(),
             erropt: None,
