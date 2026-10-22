@@ -13,6 +13,7 @@ use oxedyne_fe2o3_core::{
     },
     log::{
         bot::{
+            stamp,
             LogBot,
             Msg,
         },
@@ -83,6 +84,7 @@ impl<ETAG: GenTag + fmt::Debug + Send + Sync + 'static> AppLoggerConsole<ETAG>
                 Msg::Finish(src) => {
                     let msg = fmt!("Finish message received, logger console thread finishing now.");
                     if let (Some(msg), _) = LogBot::format_msg(
+                        stamp(),
                         LogLevel::Warn,
                         &src,
                         Ok(msg),

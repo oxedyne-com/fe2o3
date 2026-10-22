@@ -22,10 +22,12 @@ use std::{
 };
 
 pub use flume::{
+    bounded,
     unbounded,
     Sender,
     Receiver,
     TryRecvError,
+    TrySendError,
     RecvTimeoutError,
 };
 
@@ -38,6 +40,17 @@ pub fn full_duplex<M>() -> FullDuplex<M> {
 
 pub fn simplex<M>() -> Simplex<M> {
     let (tx, rx) = unbounded();
+    Simplex {
+        tx: tx,
+        rx: rx,
+        open: Arc::new(RwLock::new(true)),
+    }
+}
+
+/// A simplex holding at most `cap` messages: a send to a full one waits, and
+/// `try_send` reports it full instead.
+pub fn simplex_bounded<M>(cap: usize) -> Simplex<M> {
+    let (tx, rx) = bounded(cap);
     Simplex {
         tx: tx,
         rx: rx,
@@ -123,6 +136,18 @@ impl<M: 'static + Debug + Send + Sync> Simplex<M> {
     pub fn send(&self, msg: M) -> Outcome<()> {
         res!(self.tx().send(msg));
         Ok(())
+    }
+
+    /// Sends without waiting. Was the message accepted? A full bounded
+    /// channel answers `false` and hands nothing on.
+    pub fn try_send(&self, msg: M) -> Outcome<bool> {
+        match self.tx().try_send(msg) {
+            Ok(())                              => Ok(true),
+            Err(TrySendError::Full(_))          => Ok(false),
+            Err(TrySendError::Disconnected(_))  => Err(err!(
+                "While trying to send without waiting: the channel is disconnected.";
+            Channel, Write)),
+        }
     }
 
     /// Waits until a message is available.

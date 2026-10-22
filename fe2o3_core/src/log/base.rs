@@ -8,7 +8,6 @@
 //!
 use crate::{
     prelude::*,
-    channels::simplex,
     log::{
         bot::{
             Config,
@@ -31,6 +30,11 @@ use crate::log::console::{
 
 use crate::term::Term;
 
+// The native log channel is bounded; the wasm logger's channels are not.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::channels::simplex_bounded;
+#[cfg(target_arch = "wasm32")]
+use crate::channels::simplex;
 use std::{
     fmt,
     str::FromStr,
@@ -38,6 +42,7 @@ use std::{
         Arc,
         Mutex,
         RwLock,
+        atomic::AtomicU64,
     },
 };
 // Thread spawning backs the native logger only.
@@ -46,6 +51,10 @@ use std::thread;
 
 use once_cell::sync::Lazy;
 
+/// Messages the global logger's channel holds before a sender must wait (warn
+/// and error) or drop the line (info and below).
+pub const LOG_CHANNEL_CAPACITY: usize = 65_536;
+
 
 pub struct Logger<ETAG: GenTag>
     where oxedyne_fe2o3_core::error::Error<ETAG>: std::error::Error
@@ -53,6 +62,7 @@ pub struct Logger<ETAG: GenTag>
     pub chan_in:    ThreadController<Msg<ETAG>>,
     pub chan_out:   Arc<RwLock<ThreadController<Msg<ETAG>>>>,
     pub cfg:        Arc<RwLock<Config<ETAG>>>,
+    pub dropped:    Arc<AtomicU64>, // lines dropped on a full channel, until the bot reports them
 }
 
 impl<ETAG: GenTag> Logger<ETAG>
@@ -60,8 +70,30 @@ impl<ETAG: GenTag> Logger<ETAG>
 {
     /// Unfortunately there is no obvious way to retain a printable version of `msg` up our sleeve to
     /// show on the off chance that `send` fails, without cloning.
+    ///
+    /// A line at info or below is dropped and counted when the channel is
+    /// full, so a flood of chatter cannot stall the code that logs it; the bot
+    /// reports the count at its next sync. Warnings, errors and control
+    /// messages wait for room instead.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn send_in(&self, msg: Msg<ETAG>) {
+        if let Msg::Log { level, .. } = &msg {
+            // A line the level filters out is not queued at all, so it cannot
+            // take room from one that is kept.
+            if let Ok(cfg) = self.cfg.read() {
+                if *level > cfg.level {
+                    return;
+                }
+            }
+            if *level > LogLevel::Warn {
+                match self.chan_in.chan.try_send(msg) {
+                    Ok(true)  => (),
+                    Ok(false) => { self.dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                    Err(e)    => msg!("Error!: {} for a log message.", e),
+                }
+                return;
+            }
+        }
         match self.chan_in.chan.send(msg.clone()) {
             Err(e) => msg!("Error!: {} for message: {:?}", e, msg),
             Ok(()) => (),
@@ -70,7 +102,7 @@ impl<ETAG: GenTag> Logger<ETAG>
 
     #[cfg(target_arch = "wasm32")]
     pub fn send_in(&self, msg: Msg<ETAG>) {
-        if let Msg::Log { level, src, erropt, msg, stream: _ } = msg {
+        if let Msg::Log { at, level, src, erropt, msg, stream: _ } = msg {
             let current = match self.cfg.read() {
                 Ok(cfg) => cfg.level,
                 Err(_)  => LogLevel::Trace,
@@ -81,6 +113,7 @@ impl<ETAG: GenTag> Logger<ETAG>
                     None    => msg,
                 };
                 let (_console, file) = LogBot::<ETAG>::format_msg(
+                    at,
                     level,
                     &src,
                     Ok(text),
@@ -120,7 +153,8 @@ pub static LOG: Lazy<Logger<ErrTag>> = Lazy::new(|| {
         level:      LogLevel::Trace,
         console:    Some(chan_out),
     }));
-    let chan_in = simplex::<Msg<ErrTag>>();
+    let chan_in = simplex_bounded::<Msg<ErrTag>>(LOG_CHANNEL_CAPACITY);
+    let dropped = logbot.drop_counter();
     let (semaphore, _sentinel) = thread_channel();
     match logbot.init(cfg.clone(), chan_in.clone()) {
         Ok(()) => (),
@@ -146,6 +180,7 @@ pub static LOG: Lazy<Logger<ErrTag>> = Lazy::new(|| {
         ),
         chan_out: Arc::new(RwLock::new(chan_out)),
         cfg,
+        dropped,
     }
 });
 
@@ -171,6 +206,7 @@ pub static LOG: Lazy<Logger<ErrTag>> = Lazy::new(|| {
             semaphore,
         ))),
         cfg,
+        dropped:  Arc::default(),
     }
 });
 
