@@ -169,7 +169,7 @@ async fn test_forged_x_forwarded_for_is_stripped_00() -> Outcome<()> {
     let head = res!(relay_and_capture(raw, "203.0.113.7:51000", ForwardedPolicy::none()).await);
 
     let seen = values_of(&head, "x-forwarded-for");
-    assert_eq!(seen, vec![fmt!("203.0.113.7:51000")],
+    assert_eq!(seen, vec![fmt!("203.0.113.7")],
         "the upstream must see one X-Forwarded-For, this hop's; got {:?} in head:\n{}",
         seen, head);
     for forged in ["9.9.9.9", "8.8.8.8", "7.7.7.7", "6.6.6.6"] {
@@ -246,7 +246,7 @@ async fn test_trusted_peer_chain_is_preserved_00() -> Outcome<()> {
     let head = res!(relay_and_capture(raw, "203.0.113.7:51003", policy).await);
 
     let seen = values_of(&head, "x-forwarded-for");
-    assert_eq!(seen, vec![fmt!("198.51.100.34"), fmt!("203.0.113.7:51003")],
+    assert_eq!(seen, vec![fmt!("198.51.100.34"), fmt!("203.0.113.7")],
         "a trusted peer's chain is kept and this hop appended to it; got {:?} in head:\n{}",
         seen, head);
     let seen = values_of(&head, "x-forwarded-proto");
@@ -268,7 +268,7 @@ async fn test_this_hop_names_itself_when_the_caller_said_nothing_00() -> Outcome
         \r\n";
     let head = res!(relay_and_capture(raw, "198.51.100.200:51004", ForwardedPolicy::none()).await);
 
-    assert_eq!(values_of(&head, "x-forwarded-for"), vec![fmt!("198.51.100.200:51004")]);
+    assert_eq!(values_of(&head, "x-forwarded-for"), vec![fmt!("198.51.100.200")]);
     assert_eq!(values_of(&head, "x-forwarded-proto"), vec![fmt!("https")]);
     assert_eq!(values_of(&head, "x-forwarded-host"), vec![fmt!("app.example")]);
     assert_eq!(values_of(&head, "forwarded"),

@@ -9,10 +9,21 @@
 //!
 //! `user::UserGuard` is the per-user counterpart: a sharded map of trust state (Unknown /
 //! Blacklist / Whitelist) with a caller-supplied data payload, likewise lifted out of
-//! `fe2o3_shield` so any protocol can classify users, not only addresses.
+//! `fe2o3_shield` so any protocol can classify users, not only addresses. Its
+//! `admit_item` holds each user to a number of distinct items per window of the
+//! caller's clock, a repeat inside the window being free.
+//!
+//! `nonce::NonceTracker` refuses a nonce shown twice inside a window, for a
+//! signed command whose signer chose the nonce; it came from `fe2o3_steel`'s
+//! signed admin login.
+//!
+//! `floor::KeyFloor` is a minimum interval between two accepted calls under one string key, the
+//! rate rule of Daimond's diagnostic trace endpoint.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod addr;
+pub mod floor;
+pub mod nonce;
 pub mod user;

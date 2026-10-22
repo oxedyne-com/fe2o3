@@ -1,5 +1,5 @@
-//! Inline structure: the pass that reads a line of prose into text, emphasis, links, images, code
-//! spans, attributed spans and hard breaks.
+//! Inline structure: the pass that reads a line of prose into text, emphasis, superscript and
+//! subscript, links, images, code spans, attributed spans and hard breaks.
 //!
 //! This is the second of the two passes described in [`crate::doc::djot::block`]. It is given the text
 //! of one block, along with the document's reference definitions, and returns the run of inlines it is
@@ -12,6 +12,11 @@
 //! reflex. A run of a marker either side opens and closes by whitespace alone -- a marker may sit
 //! against a word on the inside and not on the outside -- which is what lets emphasis fall inside a
 //! word without the intraword rule Markdown carries for its underscore.
+//!
+//! A brace against a marker forces it: `{_` opens and `_}` closes whatever whitespace stands beside
+//! them, which is how emphasis is written around a space, or inside emphasis of its own kind. The
+//! same goes for `*`, and for `^` and `~`, which mark superscript and subscript and pair off by the
+//! same rules: `x^2^`, `H~2~O`.
 //!
 //! A bracket that is not a link may be a span. `[text]{.c}` is an [`Inline::Span`] carrying the
 //! attributes in the braces, the inline counterpart of a `:::` division; `[text](url)` is a link as
@@ -56,7 +61,22 @@ enum Node {
 		open:	bool,
 		/// Whether the run may close emphasis.
 		close:	bool,
+		/// Whether a brace forced the run, and on which side it stands.
+		brace:	Brace,
 	},
+}
+
+/// The brace that forces a delimiter, as `{_` forces an opener and `_}` a closer.
+#[derive(Clone, Copy, PartialEq)]
+enum Brace {
+	None,
+	Open,	// `{` before the marker
+	Close,	// `}` after the marker
+}
+
+/// Whether the byte marks emphasis, superscript or subscript.
+fn is_mark(c: u8) -> bool {
+	c == b'*' || c == b'_' || c == b'^' || c == b'~'
 }
 
 /// Reads a run of text into inlines, at the given nesting depth.
@@ -168,12 +188,26 @@ fn scan(src: &str, depth: usize, refs: &HashMap<String, String>) -> Outcome<Vec<
 					}
 				}
 			}
-			b'*' | b'_'	=> {
-				let ch = b[i];
-				let len = run_len(b, i, ch);
-				let (open, close) = flank(src, i, i + len);
+			b'{' if i + 1 < b.len() && is_mark(b[i + 1]) => {
+				// A forced opener, whatever follows it.
 				flush(&mut out, &mut buf);
-				out.push(Node::Delim { ch, len, open, close });
+				out.push(Node::Delim { ch: b[i + 1], len: 1, open: true, close: false, brace: Brace::Open });
+				i += 2;
+			}
+			c if is_mark(c)	=> {
+				let len = run_len(b, i, c);
+				// A closing brace against the run forces its last character to close.
+				let forced = i + len < b.len() && b[i + len] == b'}';
+				let free = if forced { len - 1 } else { len };
+				flush(&mut out, &mut buf);
+				if free > 0 {
+					let (open, close) = flank(src, i, i + free);
+					out.push(Node::Delim { ch: c, len: free, open, close, brace: Brace::None });
+				}
+				if forced {
+					out.push(Node::Delim { ch: c, len: 1, open: false, close: true, brace: Brace::Close });
+					i += 1;
+				}
 				i += len;
 			}
 			_	=> {
@@ -201,9 +235,10 @@ fn flush(out: &mut Vec<Node>, buf: &mut String) {
 ///
 /// Each run that could close is offered to the nearest run before it that could open. A run that
 /// finds no partner is not markup at all, and comes out as the characters it is made of -- which is
-/// why a stray asterisk is an asterisk. A pairing spends one character of each run, and the character
-/// decides the kind: a `*` makes strong emphasis and a `_` ordinary emphasis, the Djot reading rather
-/// than the Markdown one.
+/// why a stray asterisk is an asterisk, and an unanswered `{_` is a brace and an underscore. A pairing
+/// spends one character of each run, and the character decides the kind: a `*` makes strong emphasis
+/// and a `_` ordinary emphasis, the Djot reading rather than the Markdown one, and a `^` or `~` makes
+/// superscript or subscript.
 ///
 /// Returns the inlines, and how deep the deepest of them runs. The depth is carried rather than
 /// measured afterwards because a run of emphasis characters nests one level per pair without the
@@ -259,7 +294,12 @@ fn resolve(mut nodes: Vec<Node>, depth: usize) -> Outcome<(Vec<Inline>, usize)> 
 		if let Node::Delim { len, .. } = &mut nodes[k + 1] {
 			*len -= 1;
 		}
-		nodes.insert(k + 1, Node::Done(Inline::Emph { strong: ch == b'*', content }, d));
+		let made = match ch {
+			b'^'	=> Inline::Sup(content),
+			b'~'	=> Inline::Sub(content),
+			_	=> Inline::Emph { strong: ch == b'*', content },
+		};
+		nodes.insert(k + 1, Node::Done(made, d));
 		// The closing run now sits past the emphasis it made. A run with characters left over may
 		// still make more, so it is looked at again.
 		let mut ci = k + 2;
@@ -282,11 +322,16 @@ fn resolve(mut nodes: Vec<Node>, depth: usize) -> Outcome<(Vec<Inline>, usize)> 
 				}
 				push(&mut out, item);
 			}
-			Node::Delim { ch, len, .. }	=> {
+			Node::Delim { ch, len, brace, .. } => {
 				if len > 0 {
 					md = md.max(1);
-					push(&mut out, Inline::Text(
-						std::iter::repeat(ch as char).take(len).collect()));
+					let mut t: String = std::iter::repeat(ch as char).take(len).collect();
+					match brace {
+						Brace::Open	=> t.insert(0, '{'),
+						Brace::Close	=> t.push('}'),
+						Brace::None	=> {}
+					}
+					push(&mut out, Inline::Text(t));
 				}
 			}
 		}
@@ -432,6 +477,9 @@ fn bracket(src: &str, i: usize, depth: usize, refs: &HashMap<String, String>)
 
 /// What a `![` at the offset settles to, and the offset just past it, or nothing where it is not an
 /// image at all.
+///
+/// An attribute block against the image's end names it, as `![alt](src){.diagram width=568}` does,
+/// whichever of the three forms gave the source.
 fn image(src: &str, i: usize, depth: usize, refs: &HashMap<String, String>)
 	-> Option<(Outcome<Inline>, usize)>
 {
@@ -442,23 +490,35 @@ fn image(src: &str, i: usize, depth: usize, refs: &HashMap<String, String>)
 	};
 	let inner = &src[i + 2..close];
 	let after = close + 1;
+	let mut found = None;
 	if after < b.len() && b[after] == b'(' {
-		if let Some((to, end)) = dest(src, after) {
-			return Some((img(to, inner, depth, refs), end));
-		}
+		found = dest(src, after);
 	}
-	if after < b.len() && b[after] == b'[' {
+	if found.is_none() && after < b.len() && b[after] == b'[' {
 		if let Some((label, end)) = ref_label(src, after) {
 			let key = if label.trim().is_empty() { normalise(inner) } else { normalise(&label) };
 			if let Some(to) = refs.get(&key) {
-				return Some((img(to.clone(), inner, depth, refs), end));
+				found = Some((to.clone(), end));
 			}
 		}
 	}
-	if let Some(to) = refs.get(&normalise(inner)) {
-		return Some((img(to.clone(), inner, depth, refs), after));
+	if found.is_none() {
+		if let Some(to) = refs.get(&normalise(inner)) {
+			found = Some((to.clone(), after));
+		}
 	}
-	None
+	let (to, end) = match found {
+		Some(f)	=> f,
+		None	=> return None,
+	};
+	let (attrs, end) = match end < b.len() && b[end] == b'{' {
+		true	=> match attrs_of(&src[end..]) {
+			Some((attrs, used))	=> (attrs, end + used),
+			None			=> (Attrs::default(), end),
+		},
+		false	=> (Attrs::default(), end),
+	};
+	Some((img(to, inner, attrs, depth, refs), end))
 }
 
 /// A link to `to`, its text read as prose in its own right.
@@ -468,10 +528,12 @@ fn link(to: String, inner: &str, depth: usize, refs: &HashMap<String, String>) -
 }
 
 /// An image at `src`, its alt text the flattened words of what stood for it.
-fn img(to: String, inner: &str, depth: usize, refs: &HashMap<String, String>) -> Outcome<Inline> {
+fn img(to: String, inner: &str, attrs: Attrs, depth: usize, refs: &HashMap<String, String>)
+	-> Outcome<Inline>
+{
 	// An image stands for itself in words, so its alt is flattened.
 	let alt = text_of(&res!(run(inner, depth + 1, refs)));
-	Ok(Inline::Image { src: to, alt })
+	Ok(Inline::Image { src: to, alt, attrs })
 }
 
 /// A span carrying the attributes in the braces, its content read as prose.
@@ -649,7 +711,21 @@ pub fn attrs_of(src: &str) -> Option<(Attrs, usize)> {
 /// `key="quoted value"` adds a pair. The reading is lenient, since an attribute block is the author's
 /// note to a stylesheet and not a program: what does not parse is passed over rather than refused.
 pub fn parse_attrs(inner: &str) -> Attrs {
+	attrs_read(inner).0
+}
+
+/// Does every item of a brace group's interior parse as an id, a class or a pair?
+///
+/// A standalone attributes line must, or a paragraph that happens to sit in braces -- `{_a phrase_}`,
+/// forced emphasis -- would vanish into an attribute nobody wrote.
+pub fn attrs_clean(inner: &str) -> bool {
+	attrs_read(inner).1
+}
+
+/// The attributes a brace group's interior names, and whether nothing in it was passed over.
+fn attrs_read(inner: &str) -> (Attrs, bool) {
 	let mut a = Attrs::default();
+	let mut clean = true;
 	let b = inner.as_bytes();
 	let mut i = 0;
 	while i < b.len() {
@@ -663,6 +739,8 @@ pub fn parse_attrs(inner: &str) -> Attrs {
 				}
 				if j > s {
 					a.classes.push(inner[s..j].to_string());
+				} else {
+					clean = false;
 				}
 				i = j;
 			}
@@ -675,6 +753,8 @@ pub fn parse_attrs(inner: &str) -> Attrs {
 				if j > s {
 					// The last id written wins, as Djot has it.
 					a.id = Some(inner[s..j].to_string());
+				} else {
+					clean = false;
 				}
 				i = j;
 			}
@@ -693,8 +773,10 @@ pub fn parse_attrs(inner: &str) -> Attrs {
 						while m < b.len() && b[m] != b'"' {
 							m += 1;
 						}
-						if !key.is_empty() {
+						if !key.is_empty() && m < b.len() {
 							a.pairs.push((key.to_string(), inner[vs..m].to_string()));
+						} else {
+							clean = false;
 						}
 						i = if m < b.len() { m + 1 } else { m };
 					} else {
@@ -705,18 +787,21 @@ pub fn parse_attrs(inner: &str) -> Attrs {
 						}
 						if !key.is_empty() {
 							a.pairs.push((key.to_string(), inner[vs..m].to_string()));
+						} else {
+							clean = false;
 						}
 						i = m;
 					}
 				} else {
 					// A bare word with no value names nothing this tree carries, so it is passed
 					// over. The offset still advances, so a stray character cannot loop.
+					clean = false;
 					i = if j > s { j } else { i + 1 };
 				}
 			}
 		}
 	}
-	a
+	(a, clean)
 }
 
 /// Whether the byte ends an attribute item.
@@ -892,11 +977,11 @@ mod tests {
 	#[test]
 	fn test_a_bang_before_a_link_makes_an_image_08() -> Outcome<()> {
 		assert_eq!(res!(parse0("![a picture](p.png)")), vec![
-			Inline::Image { src: "p.png".to_string(), alt: "a picture".to_string() },
+			Inline::Image { src: "p.png".to_string(), alt: "a picture".to_string(), attrs: Attrs::default() },
 		]);
 		// The alt is flattened, so emphasis within it does not lose its words.
 		assert_eq!(res!(parse0("![an _italic_ picture](p.png)")), vec![
-			Inline::Image { src: "p.png".to_string(), alt: "an italic picture".to_string() },
+			Inline::Image { src: "p.png".to_string(), alt: "an italic picture".to_string(), attrs: Attrs::default() },
 		]);
 		Ok(())
 	}
@@ -987,11 +1072,10 @@ mod tests {
 	/// Syntax the reader does not yet read survives as the text it is, and does not crash it.
 	#[test]
 	fn test_deferred_syntax_survives_as_text_15() -> Outcome<()> {
-		// Inline maths, a symbol, a footnote reference and a superscript are all not yet read.
+		// Inline maths, a symbol and a footnote reference are all not yet read.
 		assert_eq!(res!(parse0("an equation $x$ here")), vec![t("an equation $x$ here")]);
 		assert_eq!(res!(parse0("a smile :smile: here")), vec![t("a smile :smile: here")]);
 		assert_eq!(res!(parse0("a note[^1] here")), vec![t("a note[^1] here")]);
-		assert_eq!(res!(parse0("H~2~O and x^2^")), vec![t("H~2~O and x^2^")]);
 		Ok(())
 	}
 
@@ -1013,6 +1097,24 @@ mod tests {
 	#[test]
 	fn test_a_verbatim_span_outranks_what_is_in_it_17() -> Outcome<()> {
 		assert_eq!(res!(parse0("`[a](b)`")), vec![Inline::Code("[a](b)".to_string())]);
+		Ok(())
+	}
+
+	/// An attribute block against an image names it, whichever form gave the source.
+	#[test]
+	fn test_an_image_carries_the_attributes_after_it_18() -> Outcome<()> {
+		let named = Attrs {
+			id:		None,
+			classes:	vec!["diagram".to_string()],
+			pairs:		vec![
+				("width".to_string(), "568".to_string()),
+				("height".to_string(), "260".to_string()),
+			],
+		};
+		assert_eq!(res!(parse0("![a skull](s.png){.diagram width=568 height=260} b")), vec![
+			Inline::Image { src: "s.png".to_string(), alt: "a skull".to_string(), attrs: named },
+			t(" b"),
+		]);
 		Ok(())
 	}
 }

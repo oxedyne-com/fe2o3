@@ -71,8 +71,8 @@ fn assemble_full(sources: &[(&str, &str)]) -> Outcome<(Vec<Block>, Vec<String>)>
 	let fonts	= Arc::new(res!(fonts::libertinus()));
 	let outcome	= compile::assemble(&PathBuf::from("/__vfs__/main.typ"), || Ok(fonts.clone()));
 	let _		= vfs::clear();
-	let (assembled, refusals, _skip) = res!(outcome);
-	let names = refusals.entries().into_iter().map(|(n, _)| n).collect();
+	let assembled = res!(outcome);
+	let names = assembled.refusals.entries().into_iter().map(|(n, _)| n).collect();
 	Ok((assembled.blocks, names))
 }
 
@@ -184,19 +184,152 @@ fn content_binding_cycle_is_refused_and_terminates() -> Outcome<()> {
 
 /// An inline-shaped content function used mid-line -- `#em[Note] the rest.` -- must not discard the trailing
 /// prose: the only-whitespace-after rule keeps the reference from being taken as a standalone splice, so the
-/// sentence's tail survives in the paragraph. (Risk 3 -- silent word loss.)
+/// sentence's tail survives in the paragraph. (Risk 3 -- silent word loss.) The binding body wraps its
+/// parameter in an `#emph[ ... ]` call: a bare `_#x_` reads its trailing `_` as part of the identifier `x_`
+/// (`_` is a valid identifier character), which Typst 0.15.1 itself rejects as an unclosed delimiter -- so
+/// the emphasis is expressed the way Typst accepts, now that the inline path genuinely expands the body.
 #[test]
 fn inline_shaped_content_fn_keeps_trailing_prose() -> Outcome<()> {
 	let blocks = res!(assemble_blocks(&[
 		("/__vfs__/main.typ",
 			"#import \"e.typ\": em\n\n#em[Note] the rest of this sentence survives.\n"),
 		("/__vfs__/e.typ",
-			"#let em(x) = [_#x_]\n"),
+			"#let em(x) = [#emph[#x]]\n"),
 	]));
 	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
 	assert!(joined.contains("the rest of this sentence survives."),
 		"the trailing prose after `#em[Note]` must survive, got: {:?}", blocks);
 	res!(assert_no_hash_leak(&blocks));
+	Ok(())
+}
+
+/// A content-binding reference used INLINE within a running paragraph -- prose before AND after it on the
+/// same line -- splices its argument-substituted body into the sentence at the position it stood, keeping
+/// both stretches of surrounding prose. This is reader-completeness item 3: before it, an inline reference
+/// leaked its raw `#name` (a bare reference) or folded only a `[...]` body while dropping paren arguments,
+/// never expanding the binding the way an own-line reference does.
+#[test]
+fn inline_mid_prose_content_call_splices_with_prose_either_side() -> Outcome<()> {
+	// An argument-taking call mid-sentence: prose before, the call, prose after.
+	let blocks = res!(assemble_blocks(&[
+		("/__vfs__/main.typ",
+			"#import \"s.typ\": stamp\n\nText before #stamp(\"v2\") and text after.\n"),
+		("/__vfs__/s.typ",
+			"#let stamp(ver) = [version #ver]\n"),
+	]));
+	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+	assert!(joined.contains("Text before version v2 and text after."),
+		"the inline `#stamp(\"v2\")` must expand to `version v2` between its surrounding prose, got: {:?}",
+		blocks);
+	res!(assert_no_hash_leak(&blocks));
+
+	// A bare (no-argument) reference wedged between two words with no spaces -- the `M#oxe` shape -- must
+	// expand in place, keeping the character before and the words after.
+	let blocks = res!(assemble_blocks(&[
+		("/__vfs__/main.typ",
+			"#import \"m.typ\": mark\n\nWritten as pre#mark and read aloud.\n"),
+		("/__vfs__/m.typ",
+			"#let mark = [OK]\n"),
+	]));
+	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+	assert!(joined.contains("Written as preOK and read aloud."),
+		"the bare inline `#mark` must expand to `OK` in place, keeping `pre` before and the words after, \
+		got: {:?}", blocks);
+	res!(assert_no_hash_leak(&blocks));
+	Ok(())
+}
+
+/// An UNKNOWN call used inline mid-prose -- a name no binding defines -- stays a VISIBLE refusal, recorded by
+/// name, with the surrounding prose kept: the inline expander must not swallow it silently, and it must not
+/// leak its raw `#name` onto the page.
+#[test]
+fn inline_unknown_call_is_refused_and_prose_kept() -> Outcome<()> {
+	// A bound binding is in scope, so the inline expander runs, but the unknown call is not it.
+	let (blocks, names) = res!(assemble_full(&[
+		("/__vfs__/main.typ",
+			"#import \"s.typ\": stamp\n\nSee #widget(3) between the words here.\n"),
+		("/__vfs__/s.typ",
+			"#let stamp(ver) = [version #ver]\n"),
+	]));
+	assert!(names.iter().any(|n| n == "#widget"),
+		"the unknown inline `#widget(3)` must be recorded as a refusal, got refusals: {:?}", names);
+	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+	assert!(joined.contains("See") && joined.contains("between the words here."),
+		"the prose around the refused inline call must survive, got: {:?}", blocks);
+	res!(assert_no_hash_leak(&blocks));
+	Ok(())
+}
+
+/// A self-referential binding referenced INLINE (not own-line) must be refused as a cycle and terminate, with
+/// the surrounding prose kept -- the inline path carries the same name-stack guard the own-line path does.
+#[test]
+fn inline_content_call_cycle_is_refused_and_terminates() -> Outcome<()> {
+	let (blocks, names) = res!(assemble_full(&[
+		("/__vfs__/main.typ",	"#import \"a.typ\": a\n\nPrefix #a suffix here.\n"),
+		("/__vfs__/a.typ",		"#let a = [loop #a end]\n"),
+	]));
+	assert!(names.iter().any(|n| n.contains("cycle")),
+		"an inline self-referential binding must record a cycle refusal, got refusals: {:?}", names);
+	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+	assert!(joined.contains("Prefix") && joined.contains("suffix here."),
+		"the prose around the refused inline cycle must survive, got: {:?}", blocks);
+	res!(assert_no_hash_leak(&blocks));
+	Ok(())
+}
+
+/// A content function whose body is wrapped in a STYLED BOX -- `#let stamp(s) = box(fill: ..)[*v: #s*]` --
+/// must SET its inner text, never drop it silently: the box's styling this reader cannot draw is recorded as
+/// a visible skip, but "v: v2" appears on the page. This is the silent-content-loss SEV: before the fix the
+/// definition was captured by neither the furniture nor the content reader, so the call rendered an empty
+/// gap. Both the inline call (prose either side) and the own-line call are proved, for `box`, `rect` and
+/// `block` wrappers alike. NON-VACUOUS at render level: the assertions read the SET text, not merely "no
+/// error" -- reverting the fix leaves the text absent and reddens them.
+#[test]
+fn styled_box_content_fn_sets_its_text_and_flags_the_styling() -> Outcome<()> {
+	// INLINE, `box`: prose before, the call, prose after. The inner `*v: #s*` sets bold "v: v2" in place.
+	let (blocks, names) = res!(assemble_full(&[
+		("/__vfs__/main.typ",
+			"#import \"s.typ\": stamp\n\nText before #stamp(\"v2\") and text after.\n"),
+		("/__vfs__/s.typ",
+			"#let stamp(s) = box(fill: luma(240), outset: 2pt, radius: 3pt)[*v: #s*]\n"),
+	]));
+	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+	assert!(joined.contains("Text before v: v2 and text after."),
+		"the inline styled-box `#stamp(\"v2\")` must set `v: v2` between its surrounding prose, got: {:?}",
+		blocks);
+	assert!(names.iter().any(|n| n.contains("#box")),
+		"the dropped box styling must record a visible skip, got refusals: {:?}", names);
+	res!(assert_no_hash_leak(&blocks));
+
+	// OWN-LINE, `box`: the call stands alone on its line and still sets its inner text.
+	let (blocks, names) = res!(assemble_full(&[
+		("/__vfs__/main.typ",
+			"#import \"s.typ\": stamp\n\n#stamp(\"v2\")\n"),
+		("/__vfs__/s.typ",
+			"#let stamp(s) = box(fill: luma(240), outset: 2pt, radius: 3pt)[*v: #s*]\n"),
+	]));
+	assert!(has_block_text(&blocks, "v: v2"),
+		"the own-line styled-box `#stamp(\"v2\")` must set `v: v2` as a block, got: {:?}", blocks);
+	assert!(names.iter().any(|n| n.contains("#box")),
+		"the own-line dropped box styling must record a visible skip, got refusals: {:?}", names);
+	res!(assert_no_hash_leak(&blocks));
+
+	// `rect` and `block` wrappers behave the same: the text is kept, the wrapper flagged.
+	for (wrap, defn) in [
+		("#rect", "#let stamp(s) = rect(stroke: 1pt)[*v: #s*]\n"),
+		("#block", "#let stamp(s) = block(inset: 6pt)[*v: #s*]\n"),
+	] {
+		let (blocks, names) = res!(assemble_full(&[
+			("/__vfs__/main.typ", "#import \"s.typ\": stamp\n\nSee #stamp(\"v2\") here.\n"),
+			("/__vfs__/s.typ", defn),
+		]));
+		let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+		assert!(joined.contains("See v: v2 here."),
+			"the {} wrapper must keep its inner text, got: {:?}", wrap, blocks);
+		assert!(names.iter().any(|n| n.contains(wrap)),
+			"the {} wrapper's dropped styling must record a visible skip, got refusals: {:?}", wrap, names);
+		res!(assert_no_hash_leak(&blocks));
+	}
 	Ok(())
 }
 
@@ -220,5 +353,21 @@ fn code_mode_form_in_expanded_body_is_refused_not_leaked() -> Outcome<()> {
 	assert!(names.iter().any(|n| n.starts_with("#for")),
 		"an expanded body's `#for` must be recorded as a refusal, got refusals: {:?}", names);
 	res!(assert_no_hash_leak(&blocks));
+	Ok(())
+}
+
+/// A call to a content binding takes a raw span as one argument, a comma inside it no part of the list, as in
+/// Typst (`N x, y`): a splitter that did not know raw text cut ``#note(`x, y`)`` at the comma and handed the
+/// binding two broken halves.
+#[test]
+fn a_comma_in_raw_text_parts_no_binding_argument() -> Outcome<()> {
+	let (blocks, refused) = res!(assemble_full(&[
+		("/__vfs__/main.typ",
+			"#import \"tmpl.typ\": note\n\n#note(`x, y`)\n\nInline #note(`p, q`) end.\n"),
+		("/__vfs__/tmpl.typ", "#let note(a) = [N #a]\n"),
+	]));
+	assert!(!refused.iter().any(|n| n.starts_with("#note")), "no call is refused: {:?}", refused);
+	assert!(has_block_text(&blocks, "N x, y"), "the raw span is the one argument, got: {:?}", blocks);
+	assert!(has_block_text(&blocks, "Inline N p, q end."), "an inline call takes it the same way, got: {:?}", blocks);
 	Ok(())
 }

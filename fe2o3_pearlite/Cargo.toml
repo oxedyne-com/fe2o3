@@ -14,10 +14,29 @@ path = "src/lib.rs"
 name = "pearlite"
 path = "src/bin/pearlite.rs"
 
+# The windowed reader as a GUI application with no console: on Windows the binary is linked for the
+# GUI subsystem, so a double-click or a file association opens the window and nothing else. Elsewhere
+# it is the same launcher the bare `pearlite` runs.
+[[bin]]
+name = "pearlite-reader"
+path = "src/bin/pearlite-reader.rs"
+required-features = ["gui"]
+
+[features]
+# The native windowed reader (Phase 3), default-off so `render`, `png`, the loopback shell and every
+# other consumer of the crate pull in neither winit nor softbuffer. It is the sole gate on those two
+# dependencies -- verify with `cargo tree -p oxedyne_fe2o3_pearlite -e normal | grep -E 'winit|softbuffer'`
+# (empty without `--features gui`). The same gate carries the native open-file dialog (rfd) and the
+# shaper the contents sidebar sets its titles with.
+gui = ["dep:winit", "dep:softbuffer", "dep:rfd", "dep:oxedyne_fe2o3_font"]
+
 [dependencies]
 oxedyne_fe2o3_austenite	= { path = "../fe2o3_austenite" }
 oxedyne_fe2o3_graphics	= { path = "../fe2o3_graphics" }
 oxedyne_fe2o3_core		= { path = "../fe2o3_core" }
+# base64 decode for the pixmap sink's embedded rasters -- the same wasm-clean decoder `svg_doc` rests on,
+# already in the tree, so no new external crate.
+oxedyne_fe2o3_text		= { path = "../fe2o3_text" }
 # Collaboration backend: signed operation history (ore), the neutral serialisation
 # it and the store speak (jdat), the wasm-clean P-256 verifier (crypto, p256
 # feature only), the hub store (o3db) and the thin blocking database trait it is
@@ -31,12 +50,28 @@ oxedyne_fe2o3_iop_db	= { path = "../fe2o3_iop_db" }
 # SHA-256 for binding a signer's key to its replica identity; the same wasm-clean
 # hasher fe2o3_crypto's p256 verifier already rests on.
 oxedyne_fe2o3_hash		= { path = "../fe2o3_hash" }
-# The loopback browser-shell's static server (`http::local`), and the ring-backed
-# P-256 verifier (`ecdsa`) the integration test uses as a stand-in for a browser's
-# WebCrypto key. Both are tokio-free, so `default-features = false` keeps the whole
-# async/TLS half of the crate -- and tokio -- out of this reader entirely.
+# The loopback browser-shell's static server (`http::local`), which is tokio-free,
+# so `default-features = false` keeps the whole async/TLS half of the crate -- and
+# tokio and ring -- out of this reader entirely.
 oxedyne_fe2o3_net		= { path = "../fe2o3_net", default-features = false }
+
+# Phase 3, the native windowed reader: a true OS window (winit) presenting the CPU-rendered pixmap via a
+# raw framebuffer blit (softbuffer). Owner-ruled: no webview. Both are optional and reached only through
+# the default-off `gui` feature, so the reader's non-window paths and every downstream consumer stay free
+# of them. Cross-OS by construction (x11/wayland, macOS, Windows); only Linux is runtime-verified here.
+winit		= { version = "0.30", optional = true }
+softbuffer	= { version = "0.4", optional = true }
+# The native open-file dialog a no-argument launch shows: the XDG desktop portal (zenity when no
+# portal answers) on Linux, the common item dialog on Windows. The portal backend is pure Rust over
+# D-Bus, so the reader links no GTK and still cross-links against an older glibc.
+rfd			= { version = "0.17", optional = true, default-features = false, features = ["xdg-portal"] }
+# The embedded reading faces' shaper, for the contents sidebar's titles; already in the tree through
+# fe2o3_austenite.
+oxedyne_fe2o3_font	= { path = "../fe2o3_font", optional = true }
 
 [dev-dependencies]
 # The checksum scheme an o3db instance is parameterised over comes from
 # fe2o3_hash, which is now a normal dependency (see above).
+# The ring-backed P-256 signer (`ecdsa`) the integration tests use as a stand-in
+# for a browser's WebCrypto key; tests only, so the reader itself stays ring-free.
+oxedyne_fe2o3_net		= { path = "../fe2o3_net", default-features = false, features = ["ring"] }

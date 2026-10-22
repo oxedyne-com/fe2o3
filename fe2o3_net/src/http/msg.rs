@@ -329,6 +329,27 @@ impl HttpMessage {
         self.header.fields.insert(nam, val, ord)
     }
 
+    /// The header fields as `log` writes them, one line per value. A credential's value
+    /// (`Cookie`, `Set-Cookie`, `Authorization` and their kin) is never written, at any level:
+    /// only its length, so a log still shows that one was sent.
+    pub fn header_log_lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (k, header_field_values) in self.header.fields.iter() {
+            for header_field_value in header_field_values {
+                let prefix = match header_field_value {
+                    HeaderFieldValue::Generic(_) => "   ",
+                    _ => " > ",
+                };
+                match k.is_credential() {
+                    true    => out.push(fmt!("{}{}: [redacted, {} bytes]",
+                        prefix, k, header_field_value.to_string().len())),
+                    false   => out.push(fmt!("{}{}: {}", prefix, k, header_field_value)),
+                }
+            }
+        }
+        out
+    }
+
     pub fn log(&self, log_level: LogLevel) {
         if log_level >= LogLevel::Trace {
             //Header.
@@ -344,14 +365,8 @@ impl HttpMessage {
                     false
                 },
             };
-            for (k, header_field_values) in self.header.fields.iter() {
-                for header_field_value in header_field_values {
-                    let prefix = match header_field_value {
-                        HeaderFieldValue::Generic(_) => "   ",
-                        _ => " > ",
-                    };
-                    trace!("{}{}: {}", prefix, k, header_field_value);
-                }
+            for line in self.header_log_lines() {
+                trace!("{}", line);
             }
 
             // Body. A body on disk is never read to be logged: the point of
@@ -408,10 +423,52 @@ impl HttpMessage {
         const BODY_CHUNK_SIZE: usize,
         R: AsyncRead + Unpin,
     >(
+        stream:     Pin<&mut R>,
+        remnant:    &Vec<u8>,
+        is_request: Option<bool>,
+        limits:     Option<&ReadLimits>,
+    )
+        -> Outcome<(Option<Self>, Vec<u8>)>
+    {
+        Self::read_framed::<HEADER_CHUNK_SIZE, BODY_CHUNK_SIZE, R>(
+            stream, remnant, is_request, limits, false).await
+    }
+
+    /// Reads the reply to a request this side made. Unlike [`HttpMessage::read`], a reply that
+    /// states no `Content-Length` and is not chunked has its body read to the end of the
+    /// connection (RFC 9112 6.3), which is how an HTTP/1.0 server ends what it cannot measure;
+    /// `read` takes such a message to have none, which is right for a request. A reply to a `HEAD`
+    /// (`to_head`), and a `1xx`, `204` or `304`, have no body whatever the framing says.
+    #[cfg(feature = "async")]
+    pub async fn read_reply<
+        'a,
+        const HEADER_CHUNK_SIZE: usize,
+        const BODY_CHUNK_SIZE: usize,
+        R: AsyncRead + Unpin,
+    >(
+        stream:     Pin<&mut R>,
+        remnant:    &Vec<u8>,
+        to_head:    bool,
+        limits:     Option<&ReadLimits>,
+    )
+        -> Outcome<(Option<Self>, Vec<u8>)>
+    {
+        Self::read_framed::<HEADER_CHUNK_SIZE, BODY_CHUNK_SIZE, R>(
+            stream, remnant, Some(false), limits, !to_head).await
+    }
+
+    #[cfg(feature = "async")]
+    async fn read_framed<
+        'a,
+        const HEADER_CHUNK_SIZE: usize,
+        const BODY_CHUNK_SIZE: usize,
+        R: AsyncRead + Unpin,
+    >(
         mut stream: Pin<&mut R>,
         remnant:    &Vec<u8>,
         is_request: Option<bool>,
         limits:     Option<&ReadLimits>,
+        until_close: bool,
     )
         -> Outcome<(Option<Self>, Vec<u8>)>
     {
@@ -434,7 +491,7 @@ impl HttpMessage {
                 if let Some(lim) = limits.and_then(|l| l.max_body_bytes) {
                     if content_length > lim {
                         return Err(err!(
-                            "HTTP request body of {} bytes exceeds the \
+                            "HTTP body of {} bytes exceeds the \
                             configured limit of {}.", content_length, lim;
                             IO, Network, Input, TooBig));
                     }
@@ -516,7 +573,7 @@ impl HttpMessage {
                                 {
                                     if bytes_read > lim {
                                         return Err(err!(
-                                            "HTTP request body overflowed \
+                                            "HTTP body overflowed \
                                             the configured limit of {} \
                                             bytes during read.", lim;
                                             IO, Network, Input, TooBig));
@@ -535,6 +592,14 @@ impl HttpMessage {
 
                     msg.body = body[..content_length].to_vec();
                     Ok((Some(msg), remnant))
+                } else if until_close
+                    && msg.header.fields.get_one(&HeaderName::ContentLength).is_none()
+                    && !msg.is_bodiless_status()
+                {
+                    // Decided here, not by the caller, because by now a chunked body has had its
+                    // `Transfer-Encoding` removed and would look like one with no framing at all.
+                    msg.body = res!(read_to_close(stream.as_mut(), remnant, limits).await);
+                    Ok((Some(msg), Vec::new()))
                 } else {
                     Ok((Some(msg), remnant))
                 }
@@ -553,14 +618,23 @@ impl HttpMessage {
     )
         -> Outcome<()>
     {
+        // A message read from an HTTP/1.0 peer and passed on is written here with this
+        // module's framing, a `Content-Length` below, which is HTTP/1.1's. Saying `HTTP/1.0`
+        // over it would tell a client the connection ends with the body, and Steel keeps it
+        // open for the next request.
+        if self.header.version == HttpVersion::Http1_0 {
+            self.header.version = HttpVersion::Http1_1;
+        }
         // `HeaderFields::insert` refuses a `Content-Length` while a
         // `Transfer-Encoding` stands, so a message that really is chunked keeps
         // its own framing and does not acquire a second, contradictory one.
-        let _ = self.insert(
-            HeaderName::ContentLength,
-            HeaderFieldValue::ContentLength(self.body_len()),
-            Some(HeaderFieldCategory::Entity as u16),
-        );
+        if !self.is_bodiless_status() {
+            let _ = self.insert(
+                HeaderName::ContentLength,
+                HeaderFieldValue::ContentLength(self.body_len()),
+                Some(HeaderFieldCategory::Entity as u16),
+            );
+        }
         self.log(log_get_level!());
         let result = stream.write_all(&self.header.as_vec()).await;
         res!(result);
@@ -597,6 +671,21 @@ impl HttpMessage {
         match &self.file {
             Some(window)    => window.len as usize,
             None            => self.body.len(),
+        }
+    }
+
+    /// Is this a response whose status forbids a `Content-Length` of zero?
+    ///
+    /// RFC 9110 §8.6 forbids the field on a `1xx` or `204`, and on a `304` it
+    /// would have to state the length of the representation not sent, which a
+    /// zero here would misstate.
+    pub fn is_bodiless_status(&self) -> bool {
+        match &self.header.headline {
+            HttpHeadline::Response { status } => {
+                let code = *status as u16;
+                code < 200 || code == 204 || code == 304
+            }
+            HttpHeadline::Request { .. } => false,
         }
     }
 
@@ -645,15 +734,19 @@ impl HttpMessage {
         }
     }
 
+    /// Does the message ask for its connection to end after the reply? RFC 9112 section 9.3:
+    /// `Connection: close` asks for it in any version, and a message in HTTP/1.0 asks for it
+    /// unless it carries `Connection: keep-alive`, since only HTTP/1.1 assumes persistence.
     pub fn get_connection_close(&self) -> bool {
         if let Some(hfv) = self.header.get_a_field_value(&HeaderName::Connection) {
             if let HeaderFieldValue::Connection(Some(ct), _) = hfv {
-                if let ConnectionType::Close = ct {
-                    return true;
-                }
+                return match ct {
+                    ConnectionType::Close       => true,
+                    ConnectionType::KeepAlive   => false,
+                };
             }
         }
-        false
+        self.header.version == HttpVersion::Http1_0
     }
 
     pub fn set_connection_close(&mut self, close: bool) -> bool {
@@ -723,41 +816,83 @@ impl HttpMessage {
         trace!("is_websocket_request = {}", is_websocket_request);
         trace!("key_present = {}", key_present);
 
-        if self.has_websocket_headers() && key_present {
+        if is_websocket_request && self.has_websocket_headers() && key_present {
             true
         } else {
             false
         }
     }
 
+    /// Is this the `101` response that completes a websocket handshake whose key derives
+    /// `expected_accept_key`?
     pub fn is_websocket_handshake(&self, expected_accept_key: &str) -> bool {
+        self.check_websocket_handshake(expected_accept_key).is_ok()
+    }
 
-        let is_websocket_response = match self.header.headline {
-            HttpHeadline::Response { status } => {
-                match status {
-                    HttpStatus::SwitchingProtocols => {
-                        true
-                    }
-                    _ => false,
-                }
+    /// Checks that this response completes a websocket handshake, in the order a client needs to
+    /// hear about failure: the status first, since a refusal carries no accept key at all, then the
+    /// upgrade fields, then `Sec-WebSocket-Accept` against `expected_accept_key` (see
+    /// [`crate::ws::core::accept_key`]).
+    pub fn check_websocket_handshake(&self, expected_accept_key: &str) -> Outcome<()> {
+        match self.header.headline {
+            HttpHeadline::Response { status: HttpStatus::SwitchingProtocols } => (),
+            HttpHeadline::Response { status } => return Err(err!(
+                "The server answered the websocket upgrade with status {}, not 101.",
+                status;
+            IO, Network, Wire, Invalid, Input)),
+            _ => return Err(err!(
+                "Expected a response to the websocket upgrade request, found a request.";
+            IO, Network, Wire, Invalid, Input)),
+        }
+        if !self.has_websocket_headers() {
+            return Err(err!(
+                "The server's 101 response lacks 'Connection: Upgrade' or 'Upgrade: websocket'.";
+            IO, Network, Wire, Invalid, Input, Missing));
+        }
+        match self.header.get_the_field_value(&HeaderName::SecWebSocketAccept) {
+            Ok(HeaderFieldValue::SecWebSocketKey(key)) if key == expected_accept_key => Ok(()),
+            Ok(HeaderFieldValue::SecWebSocketKey(key)) => Err(err!(
+                "The server's Sec-WebSocket-Accept key '{}' is not '{}', the value derived from \
+                the key this client sent.", key, expected_accept_key;
+            IO, Network, Wire, Invalid, Input, Mismatch)),
+            _ => Err(err!(
+                "The server's 101 response has no Sec-WebSocket-Accept key.";
+            IO, Network, Wire, Invalid, Input, Missing)),
+        }
+    }
+}
+
+
+/// Reads the rest of a body that ends where the connection does, from the bytes already in hand.
+/// A TLS peer that closes without a close notify is read as closing, as the header reader treats
+/// it: for a body with no length there is nothing else to tell the end by.
+#[cfg(feature = "async")]
+async fn read_to_close<R: AsyncRead + Unpin>(
+    mut stream: Pin<&mut R>,
+    mut body:   Vec<u8>,
+    limits:     Option<&ReadLimits>,
+)
+    -> Outcome<Vec<u8>>
+{
+    let max = limits.and_then(|l| l.max_body_bytes);
+    let mut chunk = [0u8; constant::HTTP_DEFAULT_BODY_CHUNK_SIZE];
+    loop {
+        if let Some(max) = max {
+            if body.len() > max {
+                return Err(err!(
+                    "An HTTP body that states no length and ends with the connection overflowed \
+                    the configured limit of {} bytes.", max;
+                    IO, Network, Input, TooBig));
             }
-            _ => false,
-        };
-
-        let key_correct = match self.header.get_the_field_value(&HeaderName::SecWebSocketAccept) { 
-            Ok(HeaderFieldValue::SecWebSocketKey(key)) => { 
-                key == expected_accept_key
-            },
-            _ => false,
-        };
-
-        trace!("is_websocket_response = {}", is_websocket_response);
-        trace!("key_correct = {}", key_correct);
-
-        if self.has_websocket_headers() && key_correct {
-            true
-        } else {
-            false
+        }
+        match stream.as_mut().read(&mut chunk).await {
+            Ok(0) => return Ok(body),
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                warn!("UnexpectedEof treated as connection closure.");
+                return Ok(body);
+            }
+            Err(e) => return Err(e.into()),
         }
     }
 }
@@ -800,12 +935,16 @@ async fn read_chunked<
     -> Outcome<(Vec<u8>, Vec<u8>)>
 {
     let max = limits.and_then(|l| l.max_body_bytes);
+    let max_trailer = limits.and_then(|l| l.max_header_bytes); // Same bound as the header block.
     let mut raw: Vec<u8> = remnant;   // Undecoded bytes not yet consumed.
     let mut out: Vec<u8> = Vec::new(); // The decoded body.
 
     loop {
-        // The chunk size line.
-        let line = match res!(take_line::<BODY_CHUNK_SIZE, _>(stream.as_mut(), &mut raw).await) {
+        // The chunk size line. Capped independently of any configured limits --
+        // see `HTTP_CHUNK_LINE_MAX`.
+        let line = match res!(take_line::<BODY_CHUNK_SIZE, _>(
+            stream.as_mut(), &mut raw, Some(constant::HTTP_CHUNK_LINE_MAX), "chunk-size",
+        ).await) {
             Some(l) => l,
             None => return Err(err!(
                 "The peer closed the connection in the middle of a chunked \
@@ -829,7 +968,9 @@ async fn read_chunked<
         // message begins, and are then discarded.
         if size == 0 {
             loop {
-                match res!(take_line::<BODY_CHUNK_SIZE, _>(stream.as_mut(), &mut raw).await) {
+                match res!(take_line::<BODY_CHUNK_SIZE, _>(
+                    stream.as_mut(), &mut raw, max_trailer, "trailer",
+                ).await) {
                     Some(l) if l.is_empty() => break,
                     Some(_)                 => continue,
                     // A peer that hangs up rather than closing off its
@@ -877,6 +1018,15 @@ async fn read_chunked<
 
 /// Take the next CRLF-terminated line off the buffer, reading more from the
 /// stream until there is one. `None` means the peer closed first.
+///
+/// `max_len` rejects a line -- `TooBig` -- once `raw` passes it with no CRLF
+/// found; `None` leaves the line unbounded. `what` names the line kind (e.g.
+/// "chunk-size", "trailer") in that error.
+///
+/// Only the bytes not yet searched, plus one byte behind them for a CRLF
+/// split across a read boundary, are scanned on each pass -- rescanning the
+/// whole buffer from the front on every fill is quadratic in a peer that
+/// trickles one byte at a time.
 #[cfg(feature = "async")]
 async fn take_line<
     const BODY_CHUNK_SIZE: usize,
@@ -884,15 +1034,29 @@ async fn take_line<
 >(
     mut stream: Pin<&mut R>,
     raw:        &mut Vec<u8>,
+    max_len:    Option<usize>,
+    what:       &str,
 )
     -> Outcome<Option<String>>
 {
+    let mut scanned = 0; // How much of `raw` has already turned up no CRLF.
     loop {
-        if let Some(i) = raw.windows(2).position(|w| w == b"\r\n") {
+        if let Some(i) = raw[scanned..].windows(2).position(|w| w == b"\r\n") {
+            let i = scanned + i;
             let line = String::from_utf8_lossy(&raw[..i]).to_string();
             raw.drain(..i + 2);
             return Ok(Some(line));
         }
+        if let Some(lim) = max_len {
+            if raw.len() > lim {
+                return Err(err!(
+                    "A chunked HTTP {} line ran to {} bytes with no \
+                    terminating CRLF, over the {}-byte limit.",
+                    what, raw.len(), lim;
+                    IO, Network, Input, TooBig));
+            }
+        }
+        scanned = raw.len().saturating_sub(1);
         if !res!(fill::<BODY_CHUNK_SIZE, _>(stream.as_mut(), raw).await) {
             return Ok(None);
         }
@@ -946,6 +1110,28 @@ mod body_tests {
         Ok(msg)
     }
 
+    /// Like `read_reply`, but with caller-chosen `ReadLimits` rather than none.
+    fn read_reply_with_limits(
+        wire:       &str,
+        is_request: Option<bool>,
+        limits:     &ReadLimits,
+    ) -> Outcome<Option<HttpMessage>> {
+        let bytes = wire.as_bytes();
+        let mut stream = std::io::Cursor::new(bytes);
+        let rt = res!(tokio::runtime::Runtime::new());
+        let (msg, _rest) = res!(rt.block_on(HttpMessage::read::<
+            { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
+            { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
+            _,
+        >(
+            Pin::new(&mut stream),
+            &Vec::new(),
+            is_request,
+            Some(limits),
+        )));
+        Ok(msg)
+    }
+
     /// Write a response to a buffer, as the server writing to a socket does.
     fn on_the_wire_bytes(msg: HttpMessage) -> Outcome<Vec<u8>> {
         let mut out: Vec<u8> = Vec::new();
@@ -956,6 +1142,48 @@ mod body_tests {
 
     fn on_the_wire(msg: HttpMessage) -> Outcome<String> {
         Ok(String::from_utf8_lossy(&res!(on_the_wire_bytes(msg))).to_string())
+    }
+
+    /// RFC 9112 section 9.3: HTTP/1.1 is persistent unless it says `close`; HTTP/1.0 is not
+    /// persistent unless it says `keep-alive`. Steel acted on a request's close request only
+    /// where the field said so outright, so an HTTP/1.0 request without a `Connection` field was
+    /// held open as if it were HTTP/1.1.
+    #[test]
+    fn test_a_message_asks_to_close_by_its_version_and_connection_field() -> Outcome<()> {
+        let cases = [
+            ("GET / HTTP/1.1\r\nHost: a\r\n\r\n",                              false),
+            ("GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n",        true),
+            ("GET / HTTP/1.1\r\nHost: a\r\nConnection: Keep-Alive\r\n\r\n",   false),
+            ("GET / HTTP/1.0\r\n\r\n",                                         true),
+            ("GET / HTTP/1.0\r\nHost: a\r\nConnection: close\r\n\r\n",        true),
+            ("GET / HTTP/1.0\r\nHost: a\r\nConnection: Keep-Alive\r\n\r\n",   false),
+        ];
+        for (wire, closes) in cases {
+            let msg = match res!(read_reply(wire, Some(true))) {
+                Some(m) => m,
+                None => return Err(err!("{:?} was read as no request at all.", wire; Test, Missing)),
+            };
+            assert_eq!(msg.get_connection_close(), closes, "{:?}", wire);
+        }
+        Ok(())
+    }
+
+    /// A reply from an HTTP/1.0 upstream is passed on with a `Content-Length` this module adds,
+    /// which is HTTP/1.1's framing, so it must not go out still saying `HTTP/1.0`: that tells the
+    /// client the connection ends with the body, and Steel holds it open for the next request.
+    #[test]
+    fn test_a_reply_read_as_http_1_0_is_written_as_http_1_1() -> Outcome<()> {
+        let msg = match res!(read_reply(
+            "HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nhi", Some(false))) {
+            Some(m) => m,
+            None => return Err(err!("An HTTP/1.0 reply was read as no reply at all."; Test, Missing)),
+        };
+        assert_eq!(msg.header.version, HttpVersion::Http1_0);
+        let wire = res!(on_the_wire(msg));
+        assert!(wire.starts_with("HTTP/1.1 200 "), "{}", wire);
+        assert!(wire.contains("content-length: 2\r\n"), "{}", wire);
+        assert!(wire.ends_with("hi"), "{}", wire);
+        Ok(())
     }
 
     /// A `HEAD` answer is the headers the matching `GET` would have sent, and nothing after them
@@ -1176,6 +1404,53 @@ mod body_tests {
             \r\n\
             ffffffffffffffff\r\n";
         assert!(read_reply(wire, Some(false)).is_err());
+        Ok(())
+    }
+
+    /// A chunk-size line is a hex length and maybe an extension: a few dozen
+    /// bytes. A peer that keeps extending it with no CRLF is not describing a
+    /// real chunk, it is growing the reader's buffer without limit, and gets
+    /// `TooBig` well short of the whole message ever landing in memory.
+    #[test]
+    fn test_an_endless_chunk_size_line_is_capped() -> Outcome<()> {
+        let junk = "a".repeat(constant::HTTP_CHUNK_LINE_MAX + 4_000);
+        let wire = fmt!("HTTP/1.1 200 OK\r\n\
+            Transfer-Encoding: chunked\r\n\
+            \r\n\
+            {}", junk);
+        match read_reply(&wire, Some(false)) {
+            Err(e) => assert!(e.tags().contains(&ErrTag::TooBig),
+                "an endless chunk-size line raised the wrong error: {}", e),
+            Ok(_) => return Err(err!(
+                "An endless chunk-size line was read as if it had a CRLF.";
+                Test, Unreachable)),
+        }
+        Ok(())
+    }
+
+    /// A trailer is one more header-like field, so it is bounded the same way
+    /// the header block is: by `max_header_bytes`. Without the cap this loops
+    /// forever on the never-terminated line above `read_chunked`'s zero chunk.
+    #[test]
+    fn test_an_endless_trailer_line_is_capped() -> Outcome<()> {
+        // Comfortably above `HTTP_DEFAULT_HEADER_CHUNK_SIZE` (1,500), so the header
+        // phase's own bulk-read check never trips on a read that happens to reach
+        // past the header terminator into this body; comfortably below the junk
+        // length below, so it is this trailer cap, not that one, doing the work.
+        let limits = ReadLimits { max_header_bytes: Some(2_000), ..Default::default() };
+        let junk = "a".repeat(5_000);
+        let wire = fmt!("HTTP/1.1 200 OK\r\n\
+            Transfer-Encoding: chunked\r\n\
+            \r\n\
+            0\r\n\
+            {}", junk);
+        match read_reply_with_limits(&wire, Some(false), &limits) {
+            Err(e) => assert!(e.tags().contains(&ErrTag::TooBig),
+                "an endless trailer line raised the wrong error: {}", e),
+            Ok(_) => return Err(err!(
+                "An endless trailer line was read as if it had a CRLF.";
+                Test, Unreachable)),
+        }
         Ok(())
     }
 }

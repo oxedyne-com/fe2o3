@@ -608,7 +608,7 @@ pub async fn handle_post<
 	};
 	// Whether the caller is the site's own front-end asking over fetch, which wants a plain JSON
 	// answer, or a browser posting a form, which wants a redirect. The app says so with its Accept.
-	let json = wants_json(headers);
+	let json = headers.wants_json();
 
 	let sent = form_field(body, "csrf").unwrap_or_default();
 	if !csrf_ok(&seed, &sent) {
@@ -629,15 +629,6 @@ pub async fn handle_post<
 		publish, &admin, db, tls_client, mail, request_path, body, json, id,
 	).await);
 	Ok(Some(resp))
-}
-
-/// Whether the caller wants JSON rather than a page -- the site's own front-end, over fetch, asking
-/// with `Accept: application/json`. A browser form carries no such Accept and gets a redirect.
-fn wants_json(headers: &Arc<HeaderFields>) -> bool {
-	match headers.get_one(&HeaderName::Accept) {
-		Some(HeaderFieldValue::Generic(v))	=> v.contains("application/json"),
-		_					=> false,
-	}
 }
 
 /// The self-bootstrap: a signed-in member becomes the site's first admin.
@@ -661,7 +652,7 @@ fn do_claim<
 )
 	-> Outcome<HttpMessage>
 {
-	let json = wants_json(headers);
+	let json = headers.wants_json();
 
 	// A claim is a member's, so an anonymous caller has nothing to claim with.
 	let username = match res!(member_username(db, headers)) {
@@ -729,7 +720,7 @@ fn do_admins<
 )
 	-> Outcome<HttpMessage>
 {
-	let json = wants_json(headers);
+	let json = headers.wants_json();
 
 	let admin = match res!(site_admin(site_admins, admin_state, db, headers)) {
 		Some(a)	=> a,
@@ -813,7 +804,7 @@ fn do_login(
 	-> HttpMessage
 {
 	let theme = Theme::of(publish);
-	let json = wants_json(headers);
+	let json = headers.wants_json();
 
 	// A site whose vhost has no admin state configured cannot verify a wallet
 	// passphrase, so it has no passphrase sign-in to offer.
@@ -882,7 +873,7 @@ fn do_logout(
 )
 	-> HttpMessage
 {
-	let json = wants_json(headers);
+	let json = headers.wants_json();
 	let cookie = build_manage_cookie(String::new(), true);
 	if json {
 		json_ok().set_cookie(cookie)

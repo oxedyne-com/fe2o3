@@ -31,6 +31,13 @@ use crate::srv::publish::{
 		Destination,
 		Rendition,
 	},
+	outbox::{
+		self,
+		Courier,
+		Entry,
+		Kind,
+		Pacer,
+	},
 	store,
 	subscribe,
 };
@@ -71,8 +78,8 @@ use oxedyne_fe2o3_net::{
 		msg::HttpMessage,
 	},
 	smtp::client::{
+		Dial,
 		OutboundClient,
-		is_permanent,
 	},
 };
 use oxedyne_fe2o3_text::doc::html::{
@@ -82,6 +89,8 @@ use oxedyne_fe2o3_text::doc::html::{
 
 use std::{
 	collections::BTreeMap,
+	future::Future,
+	net::IpAddr,
 	path::Path,
 	sync::{
 		Arc,
@@ -807,6 +816,9 @@ pub struct MailSender {
 	// The address the newsletter is from where a site's `publish` block names none, derived from
 	// the mail configuration's signing domain, e.g. `news@<domain>`.
 	default_from:	String,
+	// The host's outbound ceiling and its place in the schedule. Shared by every clone, and so by
+	// every vhost's drainer, because the address and the domain carry one reputation.
+	pacer:		Arc<Pacer>,
 }
 
 impl std::fmt::Debug for MailSender {
@@ -816,6 +828,7 @@ impl std::fmt::Debug for MailSender {
 		f.debug_struct("MailSender")
 			.field("default_from", &self.default_from)
 			.field("dkim", &self.dkim.len())
+			.field("outbound_hourly", &self.pacer.hourly())
 			.finish()
 	}
 }
@@ -839,7 +852,19 @@ impl MailSender {
 			client:	Arc::new(client),
 			dkim,
 			default_from,
+			pacer:	Arc::new(Pacer::new(outbox::HOURLY_DEFAULT)),
 		})
+	}
+
+	/// This sender with an outbound ceiling of `hourly` sends an hour, where `0` holds every send in
+	/// the queue. Set before the sender is cloned into the vhosts.
+	pub fn with_outbound_hourly(mut self, hourly: u32) -> Self {
+		self.pacer = Arc::new(Pacer::new(hourly));
+		self
+	}
+
+	pub fn pacer(&self) -> &Arc<Pacer> {
+		&self.pacer
 	}
 
 	pub fn default_from(&self) -> &str {
@@ -851,12 +876,14 @@ impl MailSender {
 	/// The one door every piece of newsletter mail goes through, the confirmation included. Each signer
 	/// prepends its own `DKIM-Signature`; a key that will not sign is skipped with a warning rather than
 	/// failing the send, since an unsigned message that arrives beats a signed one that does not.
-	/// Returns the remote's queue id.
+	/// Returns the remote's queue id. `dial` names the exchanges to keep away from and notes the ones
+	/// dialled.
 	async fn deliver_signed(
 		&self,
 		from:	&str,
 		to:	&str,
 		msg:	&str,
+		dial:	&Dial,
 	)
 		-> Outcome<String>
 	{
@@ -881,7 +908,7 @@ impl MailSender {
 		// `MAIL FROM:<README <news@example.com>>` refuses it with a 5xx -- which this module reads as
 		// a permanent failure and suppresses the subscriber for good. So the documented shape of
 		// `newsletter_from` would have quietly bounced every address it was ever used with.
-		self.client.deliver(envelope_of(from), &rcpt, &bytes).await
+		self.client.deliver_with(envelope_of(from), &rcpt, &bytes, dial).await
 	}
 
 	/// The signers this message should carry, given the domain its From speaks for.
@@ -929,7 +956,7 @@ impl MailSender {
 		-> Outcome<String>
 	{
 		let msg = build_confirmation_email(from, to, confirm_url, site_name);
-		self.deliver_signed(from, to, &msg).await
+		self.deliver_signed(from, to, &msg, &Dial::default()).await
 	}
 
 	/// Tells an operator that a comment is waiting for a person.
@@ -948,7 +975,7 @@ impl MailSender {
 		-> Outcome<String>
 	{
 		let msg = build_moderation_alert_email(from, to, site_name, post_slug);
-		self.deliver_signed(from, to, &msg).await
+		self.deliver_signed(from, to, &msg, &Dial::default()).await
 	}
 }
 
@@ -960,11 +987,33 @@ impl MailSender {
 /// the DKIM signing domain so the signature authenticates.
 impl PublishConfig {
 	pub fn newsletter_from(&self, sender: &MailSender) -> String {
+		self.from_or(sender.default_from())
+	}
+
+	/// As [`newsletter_from`](Self::newsletter_from), for a sender that is known only by its default.
+	pub fn from_or(&self, default: &str) -> String {
 		if self.newsletter_from.trim().is_empty() {
-			sender.default_from().to_string()
+			default.to_string()
 		} else {
 			self.newsletter_from.clone()
 		}
+	}
+}
+
+impl Courier for MailSender {
+
+	fn default_from(&self) -> &str {
+		&self.default_from
+	}
+
+	fn exchanges(&self, to: &str) -> impl Future<Output = Outcome<Vec<IpAddr>>> + Send {
+		self.client.exchanges(to)
+	}
+
+	fn deliver(&self, from: &str, to: &str, msg: &str, dial: &Dial)
+		-> impl Future<Output = Outcome<String>> + Send
+	{
+		self.deliver_signed(from, to, msg, dial)
 	}
 }
 
@@ -982,20 +1031,22 @@ pub struct SendReport {
 	pub suppressed:	usize,		// permanent failures, suppressed as bounced
 }
 
-/// Sends a live post to every confirmed subscriber, best-effort, one message each.
+/// Queues a live post for every confirmed subscriber, one message each, and answers at once.
 ///
 /// The [`Destination::Email`](super::dest::Destination::Email) delivery, but not through the per-remote
 /// retry queue: a newsletter is a fan-out to many addresses with no single permalink to return, so it
-/// is its own path rather than a [`Delivery`] on the post. Each subscriber gets a message carrying
-/// their own unsubscribe link -- built from their token, so the person who clicks it removes themselves
-/// and nobody else -- and delivery is per recipient, since [`OutboundClient::deliver`] is one MX per
-/// call. A recipient the send fails for is logged (redacted) and counted; the send does not stop.
+/// is its own path rather than a [`Delivery`] on the post. Nothing is sent here. Each subscriber gets
+/// an entry in the outbox's newsletter lane, and the drainer sends them at the host's hourly ceiling,
+/// behind every confirmation, so a newsletter to thousands cannot spend the host's sending reputation
+/// in an afternoon. The drainer builds each message from the subscriber's own token, so the person who
+/// clicks the unsubscribe link removes themselves and nobody else, and it counts how each ended on the
+/// [`SendEntry`] this records first, so the history shows the send as it goes.
 ///
-/// A **permanent** failure -- a 5xx, an unknown mailbox, told apart by [`is_permanent`] -- suppresses
+/// A **permanent** failure -- a 5xx, an unknown mailbox, told apart by `is_permanent` -- suppresses
 /// the address: it is marked [`SubState::Bounced`](super::subscribe::SubState::Bounced) so no later send
-/// reaches it. A **transient** failure is merely counted, and the address stays confirmed for the next
-/// send. Returns the [`SendReport`] the caller records as history.
-pub async fn send_newsletter<
+/// reaches it. A **transient** failure is tried again with backoff, and counted failed once it is given
+/// up; the address stays confirmed for the next send. The report carries the number queued.
+pub fn send_newsletter<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
 	ENC:	Encrypter,
@@ -1004,8 +1055,6 @@ pub async fn send_newsletter<
 >(
 	sender:	&MailSender,
 	db:	&(Arc<RwLock<DB>>, UID),
-	cfg:	&PublishConfig,
-	from:	&str,
 	slug:	&str,
 	id:	&str,
 )
@@ -1024,41 +1073,24 @@ pub async fn send_newsletter<
 			"publish: '{}' is a draft; a draft is sent to no subscriber.", slug;
 			Invalid, Input));
 	}
-	let post = res!(rec.render());
+	// Rendered once here so a post that will not render is refused to the operator, not to each
+	// subscriber in turn.
+	let _ = res!(rec.render());
 	let subs = res!(subscribe::confirmed(db, id));
-	let online = cfg.url_of(&cfg.path_of(slug));
 
-	let mut report = SendReport { attempted: subs.len(), ..Default::default() };
-	for sub in &subs {
-		let unsub = cfg.url_of(&cfg.unsubscribe_path(&sub.token));
-		let msg = build_newsletter_email(from, &sub.email, &post, &online, &unsub, &cfg.site_name);
-		match sender.deliver_signed(from, &sub.email, &msg).await {
-			Ok(qid)	=> {
-				report.sent += 1;
-				debug!("{}: publish: newsletter '{}' to {} ({})",
-					id, slug, subscribe::redact(&sub.email), qid);
-			}
-			// A permanent failure suppresses the address so no future send reaches it; a transient one is
-			// counted and the address stays confirmed. The suppression is best-effort: if the mark itself
-			// will not write, the send still finishes and logs, rather than fail the whole run.
-			Err(e) if is_permanent(&e)	=> {
-				report.suppressed += 1;
-				warn!("{}: publish: newsletter '{}' to {} failed permanently; suppressing: {}",
-					id, slug, subscribe::redact(&sub.email), e);
-				if let Err(e2) = subscribe::mark_bounced(db, &sub.email, id) {
-					warn!("{}: publish: could not suppress {}: {}",
-						id, subscribe::redact(&sub.email), e2);
-				}
-			}
-			Err(e)	=> {
-				report.failed += 1;
-				warn!("{}: publish: newsletter '{}' to {} failed: {}",
-					id, slug, subscribe::redact(&sub.email), e);
-			}
-		}
-	}
-	info!("{}: publish: newsletter '{}' sent to {} of {} confirmed subscriber(s), {} failed, {} suppressed",
-		id, slug, report.sent, report.attempted, report.failed, report.suppressed);
+	// The history entry goes first: the drainer may reach the first subscriber before the last is
+	// queued, and it counts on the entry the queued ones name.
+	let report = SendReport { attempted: subs.len(), ..Default::default() };
+	let at = iso_now().unwrap_or_default();
+	let index = res!(record_send(db, &SendEntry::of(slug, &at, &report)));
+	let now = outbox::now_ms() / 1000;
+	let entries: Vec<Entry> = subs.iter()
+		.map(|s| Entry::new(Kind::News, &s.email, slug, now).for_send(index as u64))
+		.collect();
+	res!(outbox::push(db, &entries));
+	sender.pacer().wake();
+	info!("{}: publish: newsletter '{}' queued for {} confirmed subscriber(s), at {} an hour",
+		id, slug, report.attempted, sender.pacer().hourly());
 	Ok(report)
 }
 
@@ -1108,7 +1140,7 @@ pub async fn send_test<
 	// it lands on the bad-token page and nobody is unsubscribed.
 	let unsub = cfg.url_of(&cfg.unsubscribe_path(&subscribe::mint_token()));
 	let msg = build_newsletter_email(from, &to, &post, &online, &unsub, &cfg.site_name);
-	let qid = res!(sender.deliver_signed(from, &to, &msg).await);
+	let qid = res!(sender.deliver_signed(from, &to, &msg, &Dial::default()).await);
 	info!("{}: publish: test of '{}' sent to {} ({})", id, slug, subscribe::redact(&to), qid);
 	Ok(())
 }
@@ -1135,7 +1167,32 @@ pub struct SendEntry {
 	pub suppressed:	usize,		// permanent failures, suppressed
 }
 
+/// How one queued newsletter message ended, as the send's entry counts it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Fate {
+	Sent,		// accepted by the receiving server
+	Failed,		// given up after its tries, staying on the list
+	Suppressed,	// refused for good, marked bounced
+	Left,		// the subscriber or the post went before the message did, so none was owed
+}
+
 impl SendEntry {
+
+	/// Counts one message's end. A message no longer owed leaves the send set, so the messages still
+	/// waiting are always `attempted` less the three counts.
+	pub fn count(&mut self, fate: Fate) {
+		match fate {
+			Fate::Sent		=> self.sent += 1,
+			Fate::Failed		=> self.failed += 1,
+			Fate::Suppressed	=> self.suppressed += 1,
+			Fate::Left		=> self.attempted = self.attempted.saturating_sub(1),
+		}
+	}
+
+	/// The messages queued and not yet ended.
+	pub fn waiting(&self) -> usize {
+		self.attempted.saturating_sub(self.sent + self.failed + self.suppressed)
+	}
 
 	pub fn of(slug: &str, at: &str, report: &SendReport) -> Self {
 		Self {
@@ -1197,6 +1254,12 @@ fn as_usize(d: Option<&Dat>) -> usize {
 }
 
 /// Appends one send to the history, reading the list and writing it back with the entry on the end.
+/// Answers the entry's place in the history, which the queued messages name.
+///
+/// Refused where the post's latest send still has messages waiting while the newsletter lane holds any,
+/// since a second send would mail every one of them twice. The test and the write are one step under the
+/// write guard, so two sends begun together cannot both pass. A tally that disagrees with an empty lane
+/// (a queue lost to a fault) is not waited on.
 ///
 /// Index-driven, no scan: the whole history is one list under [`SENDS_KEY`], read, pushed to, and
 /// written -- the same shape the subscriber index takes. Newest is last on disk; [`send_history`] hands
@@ -1211,15 +1274,76 @@ pub fn record_send<
 	db:	&(Arc<RwLock<DB>>, UID),
 	entry:	&SendEntry,
 )
+	-> Outcome<usize>
+{
+	store::exclusive(db, |dbr, user| -> Outcome<usize> {
+		store::edit_in(dbr, user, &dat!(SENDS_KEY), |old| -> Outcome<(store::Edit, usize)> {
+			let mut items = res!(sends_of(old));
+			let latest = items.iter().rev()
+				.map(SendEntry::from_dat)
+				.find(|e| e.slug == entry.slug);
+			if let Some(prev) = latest {
+				if prev.waiting() > 0 && res!(outbox::queued_in(dbr, Kind::News)) > 0 {
+					return Err(err!(
+						"publish: '{}' is still being sent, with {} message(s) waiting, so it is not \
+						queued again.", entry.slug, prev.waiting();
+						Exists, Input));
+				}
+			}
+			items.push(entry.to_dat());
+			let at = items.len() - 1;
+			Ok((store::Edit::Set(Dat::List(items)), at))
+		})
+	})
+}
+
+/// Counts how one queued message ended on the send entry at `index`.
+pub fn tally_send<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	index:	usize,
+	fate:	Fate,
+)
 	-> Outcome<()>
 {
-	let (db_arc, user) = db;
-	let mut items = res!(sends_list(db));
-	items.push(entry.to_dat());
-	let list = Dat::List(items);
-	let guard = lock_read!(db_arc);
-	res!(guard.insert(dat!(SENDS_KEY), list, *user, None));
-	Ok(())
+	store::exclusive(db, |dbr, user| tally_in(dbr, user, index, fate))
+}
+
+/// As [`tally_send`], on a database already write-locked, so a message can end and be counted under
+/// one guard.
+pub fn tally_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	user:	UID,
+	index:	usize,
+	fate:	Fate,
+)
+	-> Outcome<()>
+{
+	store::edit_in(dbr, user, &dat!(SENDS_KEY), |old| -> Outcome<(store::Edit, ())> {
+		let mut items = res!(sends_of(old));
+		match items.get_mut(index) {
+			Some(item)	=> {
+				let mut e = SendEntry::from_dat(item);
+				e.count(fate);
+				*item = e.to_dat();
+				Ok((store::Edit::Set(Dat::List(items)), ()))
+			}
+			None		=> Err(err!(
+				"publish: the send history has no entry {} to count a message on.", index;
+				Invalid, Input, Missing)),
+		}
+	})
 }
 
 /// The raw history list, or an empty one where nothing has been sent.
@@ -1236,10 +1360,19 @@ fn sends_list<
 {
 	let (db_arc, _) = db;
 	let guard = lock_read!(db_arc);
-	let val = match res!(guard.get(&dat!(SENDS_KEY), None)) {
-		Some((v, _))	=> v,
-		// No history is a site that has sent nothing, not an error -- the empty log it never wrote.
-		None		=> return Ok(Vec::new()),
+	let old = match res!(guard.get(&dat!(SENDS_KEY), None)) {
+		Some((v, _))	=> Some(v),
+		None		=> None,
+	};
+	sends_of(old)
+}
+
+// The history list a stored value holds. No value is a site that has sent nothing, not an error -- the
+// empty log it never wrote.
+fn sends_of(val: Option<Dat>) -> Outcome<Vec<Dat>> {
+	let val = match val {
+		Some(v)	=> v,
+		None	=> return Ok(Vec::new()),
 	};
 	match &val {
 		Dat::List(items)	=> Ok(items.clone()),
@@ -1349,7 +1482,7 @@ fn message_id(from: &str) -> String {
 ///
 /// Pure over its strings, so what a subscriber is sent can be tested without a socket. The body is
 /// deliberately spare -- an address that never opted in gets a link and an explanation, no more.
-fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: &str) -> String {
+pub fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: &str) -> String {
 	let who = if site_name.trim().is_empty() {
 		fmt!("this site")
 	} else {
@@ -1392,7 +1525,7 @@ fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: 
 /// The HTML part is the post's own rendering, the same HTML a reader gets on the site, wrapped in a
 /// minimal document and followed by the footer. The plain-text part is the title, the opening, and the
 /// two links, for a reader whose client shows text. The Subject is the post's own title.
-fn build_newsletter_email(
+pub fn build_newsletter_email(
 	from:		&str,
 	to:		&str,
 	post:		&Post,

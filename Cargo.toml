@@ -119,6 +119,15 @@ rand = "0.7.2"
 rand_core = { version = "0.5.1", features = ["std"] }
 cap = "0.1.0"
 
+# The browser build (Austenite's wasm recipe): size-tuned code, whole-program inlining and one codegen unit.
+# "s", not "z": z was 0.6 MB smaller raw but 58% slower on syn300, s within 2% of `release`. The native
+# `release` profile keeps its defaults, since the CLI wants speed.
+[profile.wasm-release]
+inherits		= "release"
+opt-level		= "s"
+lto				= true
+codegen-units	= 1
+
 [[bench]]
 name = "maps"
 harness = false

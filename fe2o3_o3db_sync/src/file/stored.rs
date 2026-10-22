@@ -28,6 +28,32 @@ use std::{
     },
 };
 
+/// Names one record, by a digest of its key and the stamp it was written with.  An offset names a
+/// record only within one generation of its file: a collection moves the records it keeps, and
+/// with records of one size a new offset can equal an old one still in use elsewhere, so a
+/// location matched by offset alone can be taken for another record (2026-09-23).
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RecordDigest(u64);
+
+impl RecordDigest {
+
+    pub fn new<
+        const UIDL: usize,
+        UID: NumIdDat<UIDL>,
+    >(
+        key:    &[u8],
+        meta:   &Meta<UIDL, UID>,
+    )
+        -> Outcome<Self>
+    {
+        // The key bytes are a daticle, which ends itself, so the stamp cannot run into it.
+        let mut buf = Vec::with_capacity(key.len() + Meta::<UIDL, UID>::BYTE_LEN);
+        buf.extend_from_slice(key);
+        buf = res!(meta.to_bytes(buf));
+        Ok(Self(seahash::hash(&buf)))
+    }
+}
+
 #[derive(Debug)]
 pub struct StoredKey<
     const UIDL: usize,
@@ -78,6 +104,34 @@ impl<
         // 2. Calculate checksum and append.
         (buf, _) = res!(csummer.append(buf));
         Ok(buf)
+    }
+
+    /// Do these stored key bytes, as they lie in a data file, hold this key with this stamp?
+    /// Read in place, since this is on every read from a file: the key follows the cache hash,
+    /// and the stamp comes just before the checksum.  Key bytes are a daticle, which ends itself,
+    /// so equal bytes at the head of the stored key are the whole of its key.
+    pub fn holds(
+        stored:     &[u8],
+        key:        &[u8],
+        meta:       &Meta<UIDL, UID>,
+        csum_len:   usize,
+    )
+        -> Outcome<bool>
+    {
+        let key_end = constant::CACHE_HASH_BYTES + key.len();
+        let meta_end = match stored.len().checked_sub(csum_len) {
+            Some(n) => n,
+            None    => return Ok(false),
+        };
+        let meta_start = match meta_end.checked_sub(Meta::<UIDL, UID>::BYTE_LEN) {
+            Some(n) => n,
+            None    => return Ok(false),
+        };
+        if key_end > meta_start || &stored[constant::CACHE_HASH_BYTES..key_end] != key {
+            return Ok(false);
+        }
+        let (stamp, _) = res!(Meta::<UIDL, UID>::from_bytes(&stored[meta_start..meta_end]));
+        Ok(stamp == *meta)
     }
 
     /// Returns the key bytes, the complete `StoredKey` bytes and the length.

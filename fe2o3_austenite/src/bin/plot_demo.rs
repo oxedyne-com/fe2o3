@@ -66,11 +66,11 @@ fn main() -> Outcome<()> {
 		Block::figure(bell, Some("The standard normal density.".to_string()), None),
 	];
 
-	let (document, heads) = res!(doc::author(fonts.clone(), geom, &style, &oxedyne_fe2o3_austenite::fonts::FaceResolver::default(), &blocks, None, None));
+	let (document, heads, _) = res!(doc::author(fonts.clone(), geom, &style, &oxedyne_fe2o3_austenite::fonts::FaceResolver::default(), &blocks, None, None));
 
 	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 	let mut out	= res!(driver::run(&document, &metrics, Config::default()));
-	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, &style, geom, "", None));
+	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, &style, geom, "", None, &mut Vec::new()));
 
 	res!(std::fs::create_dir_all(&out_dir));
 	let emitter = Emitter::Svg;

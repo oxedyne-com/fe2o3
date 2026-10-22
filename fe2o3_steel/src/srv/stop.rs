@@ -1,9 +1,9 @@
 //! Steel hearing the operating system ask it to stop.
 //!
 //! The listening itself belongs to [`oxedyne_fe2o3_core::stop::on_stop_request`],
-//! which answers `SIGINT` and `SIGTERM` on unix and the three console events on
-//! Windows. What is here is the other half: the state a caught signal leaves
-//! behind, and the two ways the rest of Steel reads it.
+//! which answers `SIGINT`, `SIGTERM` and `SIGHUP` on unix and the three console
+//! events on Windows. What is here is the other half: the state a caught signal
+//! leaves behind, and the two ways the rest of Steel reads it.
 //!
 //! # Why a flag is not enough
 //!
@@ -134,8 +134,17 @@ pub fn is_serving() -> bool {
 /// fatal to a server -- it will simply be killed rather than asked when the
 /// machine goes -- so the caller logs and carries on.
 pub fn listen() -> Outcome<()> {
-    res!(oxedyne_fe2o3_core::stop::on_stop_request(|| {
+    use oxedyne_fe2o3_core::stop::Stop;
+    res!(oxedyne_fe2o3_core::stop::on_stop_request(|which: Stop| {
         let n = ask();
+        // Named rather than folded away: a future Steel that wants to answer a
+        // hangup differently from a terminate has somewhere to start, and the
+        // log now says which one actually arrived.
+        let word = match which {
+            Stop::Interrupt	=> "an interrupt",
+            Stop::Terminate	=> "a terminate",
+            Stop::Hangup	=> "a hangup",
+        };
         if n > 1 {
             // Said, and not acted on. A program whose store is a cache can
             // read a second Ctrl-C as "now" and leave where it stands, because
@@ -144,12 +153,12 @@ pub fn listen() -> Outcome<()> {
             // would interrupt is a database part way through closing, and the
             // wait it is impatient with is bounded already -- see
             // `srv::server::DRAIN_SECS`.
-            warn!("Asked to stop {} times. The first ask is being obeyed and \
-                the wind-up is bounded; a store is not abandoned part way \
-                through closing.", n);
+            warn!("Asked to stop ({}) {} times. The first ask is being obeyed \
+                and the wind-up is bounded; a store is not abandoned part way \
+                through closing.", word, n);
             return;
         }
-        info!("Asked to stop.");
+        info!("Asked to stop ({}).", word);
         if !is_serving() {
             info!("Nothing is serving, so there is nothing to wind up.");
             if let Err(e) = flush_log() {

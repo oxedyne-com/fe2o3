@@ -115,7 +115,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_small_init(b: &mut Bencher) -> Result<()> {
+//fn bench_small_init(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            vec![FILL_U8; SMALL_LEN]
@@ -125,7 +125,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_large_init(b: &mut Bencher) -> Result<()> {
+//fn bench_large_init(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            vec![FILL_U8; LARGE_LEN]
@@ -135,7 +135,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_u8_to_bytes_small(b: &mut Bencher) -> Result<()> {
+//fn bench_u8_to_bytes_small(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            u8_to_bytes(FILL_U8, &mut vec![FILL_U8; SMALL_LEN])
@@ -145,7 +145,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_u8_to_bytes2_small(b: &mut Bencher) -> Result<()> {
+//fn bench_u8_to_bytes2_small(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            u8_to_bytes2(FILL_U8, vec![FILL_U8; SMALL_LEN])
@@ -155,7 +155,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_u64_to_bytes_small(b: &mut Bencher) -> Result<()> {
+//fn bench_u64_to_bytes_small(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            u64_to_bytes(FILL_U64, &mut vec![FILL_U8; SMALL_LEN])
@@ -165,7 +165,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_u64_to_bytes2_small(b: &mut Bencher) -> Result<()> {
+//fn bench_u64_to_bytes2_small(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            u64_to_bytes2(FILL_U64, vec![FILL_U8; SMALL_LEN])
@@ -175,7 +175,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_u8_to_bytes_large(b: &mut Bencher) -> Result<()> {
+//fn bench_u8_to_bytes_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            u8_to_bytes(FILL_U8, &mut vec![FILL_U8; LARGE_LEN])
@@ -185,7 +185,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_u8_to_bytes2_large(b: &mut Bencher) -> Result<()> {
+//fn bench_u8_to_bytes2_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            u8_to_bytes2(FILL_U8, vec![FILL_U8; LARGE_LEN])
@@ -195,7 +195,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_u64_to_bytes_large(b: &mut Bencher) -> Result<()> {
+//fn bench_u64_to_bytes_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            u64_to_bytes(FILL_U64, &mut vec![FILL_U8; LARGE_LEN])
@@ -205,7 +205,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_u64_to_bytes2_large(b: &mut Bencher) -> Result<()> {
+//fn bench_u64_to_bytes2_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            u64_to_bytes2(FILL_U64, vec![FILL_U8; LARGE_LEN])
@@ -215,7 +215,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_u64_to_bytes3_large(b: &mut Bencher) -> Result<()> {
+//fn bench_u64_to_bytes3_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            u64_to_bytes3(FILL_U64, &mut vec![FILL_U8; LARGE_LEN])
@@ -225,7 +225,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_u64_to_bytes4_large(b: &mut Bencher) -> Result<()> {
+//fn bench_u64_to_bytes4_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            u64_to_bytes4(FILL_U64, vec![FILL_U8; LARGE_LEN])
@@ -235,7 +235,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_daticle_bytes_small(b: &mut Bencher) -> Result<()> {
+//fn bench_daticle_bytes_small(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            daticle_bytes(&vec![FILL_U8; SMALL_LEN], &mut vec![FILL_U8; SMALL_LEN])
@@ -245,7 +245,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_daticle_bytes2_small(b: &mut Bencher) -> Result<()> {
+//fn bench_daticle_bytes2_small(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            daticle_bytes2(vec![FILL_U8; SMALL_LEN], vec![FILL_U8; SMALL_LEN])
@@ -255,7 +255,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_daticle_bytes3_small(b: &mut Bencher) -> Result<()> {
+//fn bench_daticle_bytes3_small(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            daticle_bytes3(&vec![FILL_U8; SMALL_LEN], &mut vec![FILL_U8; SMALL_LEN])
@@ -265,7 +265,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_daticle_bytes_large(b: &mut Bencher) -> Result<()> {
+//fn bench_daticle_bytes_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            daticle_bytes(&vec![FILL_U8; LARGE_LEN], &mut vec![FILL_U8; LARGE_LEN])
@@ -275,7 +275,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_daticle_bytes2_large(b: &mut Bencher) -> Result<()> {
+//fn bench_daticle_bytes2_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            daticle_bytes2(vec![FILL_U8; LARGE_LEN], vec![FILL_U8; LARGE_LEN])
@@ -285,7 +285,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_daticle_bytes3_large(b: &mut Bencher) -> Result<()> {
+//fn bench_daticle_bytes3_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            daticle_bytes3(&vec![FILL_U8; LARGE_LEN], &mut vec![FILL_U8; LARGE_LEN])
@@ -295,7 +295,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_wrap_bytes_small(b: &mut Bencher) -> Result<()> {
+//fn bench_wrap_bytes_small(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            wrap_bytes(&mut vec![FILL_U8; SMALL_LEN])
@@ -305,7 +305,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_wrap_bytes2_small(b: &mut Bencher) -> Result<()> {
+//fn bench_wrap_bytes2_small(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            wrap_bytes2(vec![FILL_U8; SMALL_LEN])
@@ -316,7 +316,7 @@ use test::Bencher;
 //
 //
 //#[bench]
-//fn bench_wrap_bytes_large(b: &mut Bencher) -> Result<()> {
+//fn bench_wrap_bytes_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            wrap_bytes(&mut vec![FILL_U8; LARGE_LEN])
@@ -326,7 +326,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_wrap_bytes2_large(b: &mut Bencher) -> Result<()> {
+//fn bench_wrap_bytes2_large(b: &mut Bencher) -> Outcome<()> {
 //    b.iter(|| {
 //        test::black_box(
 //            wrap_bytes2(vec![FILL_U8; LARGE_LEN])
@@ -357,7 +357,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_encode_list(b: &mut Bencher) -> Result<()> {
+//fn bench_encode_list(b: &mut Bencher) -> Outcome<()> {
 //    let v = vec![ listdat![
 //        vec![42;1000], // 1
 //        vec![42;1000], // 2
@@ -380,7 +380,7 @@ use test::Bencher;
 //}
 //
 //#[bench]
-//fn bench_encode_list2(b: &mut Bencher) -> Result<()> {
+//fn bench_encode_list2(b: &mut Bencher) -> Outcome<()> {
 //    let v = vec![ listdat![
 //        vec![42;1000], // 1
 //        vec![42;1000], // 2
@@ -406,7 +406,7 @@ fn test_vec() -> Vec<u8> {
 }
 
 #[bench]
-fn bench_wrap_bytes_placebo(b: &mut Bencher) -> Result<()> {
+fn bench_wrap_bytes_placebo(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box(
             test_vec()
@@ -416,27 +416,27 @@ fn bench_wrap_bytes_placebo(b: &mut Bencher) -> Result<()> {
 }
 
 #[bench]
-fn bench_wrap_bytes2(b: &mut Bencher) -> Result<()> {
+fn bench_wrap_bytes_u64(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box(
-            Dat::wrap_bytes2(test_vec())
+            Dat::wrap_bytes_u64(test_vec())
         );
     });
     Ok(())
 }
 
 #[bench]
-fn bench_wrap_bytes(b: &mut Bencher) -> Result<()> {
+fn bench_wrap_bytes_var(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box(
-            Dat::wrap_bytes(test_vec())
+            Dat::wrap_bytes_var(test_vec())
         );
     });
     Ok(())
 }
 
 #[bench]
-fn bench_wrap_bytes_c64(b: &mut Bencher) -> Result<()> {
+fn bench_wrap_bytes_c64(b: &mut Bencher) -> Outcome<()> {
     b.iter(|| {
         test::black_box(
             Dat::wrap_bytes_c64(test_vec())

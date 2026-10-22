@@ -17,13 +17,15 @@ use oxedyne_fe2o3_font::{
 	set::FontSet,
 	shape::{
 		Dir,
+		Feature,
 		Glyph,
 		Run,
 	},
 };
-use oxedyne_fe2o3_graphics::colour::Rgba;
+use oxedyne_fe2o3_graphics::colour::Ink;
 use oxedyne_fe2o3_graphics::path::Path;
 use oxedyne_fe2o3_graphics::transform::Transform;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::sync::Arc;
 
@@ -66,13 +68,29 @@ impl Metrics for FontMetrics {
 enum Source {
 	Set { fonts: Arc<FontSet>, role: Role },
 	Solo { font: Arc<Font> },
+	// Several fonts, each of one face, a glyph's `face` indexing the list: a run the evaluator shaped
+	// with Typst's per-family fallback, where each stretch may come from a different family.
+	Faces { head: Arc<Font>, fonts: Arc<Vec<Arc<Font>>> },
 }
 
 impl Source {
+	/// The font heading the source: the chain a set's role or a solo font is, or the first of a list.
 	fn font(&self) -> &Font {
 		match self {
 			Source::Set { fonts, role }	=> fonts.get(*role),
 			Source::Solo { font }		=> font,
+			Source::Faces { head, .. }	=> head,
+		}
+	}
+
+	/// The font that drew `glyph` and the face within it.
+	fn glyph_font(&self, glyph: &Glyph) -> (&Font, u8) {
+		match self {
+			Source::Faces { fonts, .. }	=> match fonts.get(glyph.face as usize) {
+				Some(f)	=> (f, 0),
+				None	=> (self.font(), glyph.face),
+			},
+			_						=> (self.font(), glyph.face),
 		}
 	}
 }
@@ -86,7 +104,7 @@ pub struct ShapedText {
 	run:	Run,
 	dims:	Dims,
 	text:	String,	// the shaped source string, so a glyph's cluster recovers its source scalar(s)
-	colour:	Rgba,	// the fill the glyphs draw in; black unless a `#set text(fill:)` sets it
+	colour:	Ink,	// the fill the glyphs draw in; black unless a `#set text(fill:)` sets it
 }
 
 impl ShapedText {
@@ -101,6 +119,21 @@ impl ShapedText {
 		-> Outcome<Self>
 	{
 		Self::shape(fonts, role, dir, size.to_pt() as f32, text)
+	}
+
+	/// As [`ShapedText::new`], with OpenType features applied across the run -- `smcp` for a
+	/// `#smallcaps[...]` run.
+	pub fn new_with_features(
+		fonts:		Arc<FontSet>,
+		role:		Role,
+		dir:		Dir,
+		size:		Sp,
+		text:		&str,
+		features:	&[Feature],
+	)
+		-> Outcome<Self>
+	{
+		Self::from_source_with(Source::Set { fonts, role }, dir, size.to_pt() as f32, text, features)
 	}
 
 	/// Shapes in the shaper's own unit, shared by measurement and placement.
@@ -129,50 +162,124 @@ impl ShapedText {
 		Self::from_source(Source::Solo { font }, dir, size.to_pt() as f32, text)
 	}
 
+	/// A run the caller has already shaped and positioned: glyphs of the one `font` (each glyph's `face`
+	/// indexing its chain), drawn at `size` points in `colour`, with the dimensions the caller measured.
+	/// The evaluator's inline layout builds its line runs this way, having justified them itself.
+	pub fn from_glyphs(
+		font:	Arc<Font>,
+		size:	f32,
+		glyphs:	Vec<Glyph>,
+		text:	String,
+		colour:	Ink,
+		dims:	Dims,
+	)
+		-> Self
+	{
+		let advance = glyphs.iter().map(|g| g.adv).sum();
+		Self {
+			src:	Source::Solo { font },
+			size,
+			run:	Run { glyphs, advance, size },
+			dims,
+			text,
+			colour,
+		}
+	}
+
+	/// As [`ShapedText::from_glyphs`], the glyphs drawn from several fonts, each glyph's `face` indexing
+	/// `fonts` (each a chain of one face).
+	pub fn from_faces(
+		fonts:	Vec<Arc<Font>>,
+		size:	f32,
+		glyphs:	Vec<Glyph>,
+		text:	String,
+		colour:	Ink,
+		dims:	Dims,
+	)
+		-> Outcome<Self>
+	{
+		let head = match fonts.first() {
+			Some(f)	=> f.clone(),
+			None	=> return Err(err!("A run drawn from several fonts was given none."; Input, Missing)),
+		};
+		let advance = glyphs.iter().map(|g| g.adv).sum();
+		Ok(Self {
+			src:	Source::Faces { head, fonts: Arc::new(fonts) },
+			size,
+			run:	Run { glyphs, advance, size },
+			dims,
+			text,
+			colour,
+		})
+	}
+
 	fn from_source(src: Source, dir: Dir, size: f32, text: &str) -> Outcome<Self> {
+		Self::from_source_with(src, dir, size, text, &[])
+	}
+
+	fn from_source_with(src: Source, dir: Dir, size: f32, text: &str, features: &[Feature]) -> Outcome<Self> {
 		let font	= src.font();
-		let run		= res!(font.shape(text, size, dir));
+		let run		= res!(font.shape_with(text, size, dir, features));
 		let vm		= res!(font.metrics(size));
 		let dims	= Dims::new(
 			Sp::from_pt(run.advance as f64),	// the width the shaper's advances sum to
 			Sp::from_pt(vm.ascent as f64),		// height above the baseline
 			Sp::from_pt(vm.descent as f64),		// depth below it
 		);
-		Ok(Self { src, size, run, dims, text: text.to_string(), colour: Rgba::BLACK })
+		Ok(Self { src, size, run, dims, text: text.to_string(), colour: Ink::BLACK })
 	}
 
 	/// The same run set to draw in `colour`. Consumes and returns `self` so a caller can colour a shaped
 	/// box inline without a second binding -- the line breaker paints every prose leaf this way.
-	pub fn with_colour(mut self, colour: Rgba) -> Self {
+	pub fn with_colour(mut self, colour: Ink) -> Self {
 		self.colour = colour;
 		self
 	}
 
 	/// The fill the glyphs draw in, black unless a `#set text(fill:)` set it.
-	pub fn colour(&self) -> Rgba { self.colour }
+	pub fn colour(&self) -> Ink { self.colour }
 
 	pub fn dims(&self) -> Dims { self.dims }
+
+	/// The font the run draws from, for telling whether two runs hold one face or a copy each.
+	pub fn font(&self) -> &Font { self.src.font() }
 	pub fn run(&self) -> &Run { &self.run }
 
 	/// The shaped source string, whose byte offsets a glyph's [`cluster`](Glyph::cluster) indexes.
 	pub fn source(&self) -> &str { &self.text }
 
+	/// The heap bytes the run holds of its own: its glyphs and its source string. The fonts it draws from
+	/// are shared with the session and every other run, so they are not counted.
+	pub fn heap_bytes(&self) -> usize {
+		self.run.glyphs.capacity() * std::mem::size_of::<Glyph>() + self.text.capacity()
+	}
+
+	/// The family, weight and slant of the face heading the run's font chain: the face the run was set in
+	/// wherever that face covered its characters.
+	pub fn face_info(&self) -> Outcome<oxedyne_fe2o3_font::face::FaceInfo> {
+		self.src.font().info()
+	}
+
 	/// The size the run was shaped at, in device points.
 	pub fn size(&self) -> f32 { self.size }
 
 	/// Folds this run's content into a page-emit key: its size, its fill, its source string and every
-	/// glyph's identity and placed position. This is what the page memo hashes to decide a body frame is
-	/// unchanged. The theme is not folded in as such -- it never needs to be, because it has already
+	/// glyph's identity (the face that draws it included) and placed position. This is what the page memo
+	/// hashes to decide a body frame is unchanged. The theme is not folded in as such -- it never needs to be, because it has already
 	/// decided these very glyph ids, their positions and the fill, so two runs that hash alike here draw
 	/// identically whatever theme produced them.
-	pub fn hash_into(&self, h: &mut crate::memo::Fnv) {
+	pub fn hash_into(&self, h: &mut Fingerprinter) {
 		h.write_f32(self.size);
-		h.write(&[self.colour.r, self.colour.g, self.colour.b, self.colour.a]);
+		h.write(&self.colour.key());
 		h.write_str(&self.text);
 		h.write_u64(self.run.glyphs.len() as u64);
 		for g in &self.run.glyphs {
 			h.write_u32(g.id);
 			h.write_u8(g.face);
+			// The face that draws a glyph is part of what is drawn. The faces of a family share glyph ids and,
+			// in a monospaced family, advances, so an id and a position cannot tell bold from regular.
+			let (font, face) = self.src.glyph_font(g);
+			h.write_u64(font.fingerprint(face));
 			h.write_f32(g.x);
 			h.write_f32(g.y);
 			h.write_f32(g.adv);
@@ -182,14 +289,23 @@ impl ShapedText {
 
 	/// One glyph's outline, in the font frame (origin at the glyph, y up); empty for a space.
 	pub fn outline(&self, glyph: &Glyph) -> Outcome<Path> {
-		self.src.font().outline(glyph.face, glyph.id, self.size)
+		let (font, face) = self.src.glyph_font(glyph);
+		font.outline(face, glyph.id, self.size)
+	}
+
+	/// The embeddable program of the face that shaped `glyph`, or `None` when that face must be drawn as
+	/// outlines instead.
+	pub fn program(&self, glyph: &Glyph) -> Outcome<Option<Arc<oxedyne_fe2o3_graphics::pdf_font::FontProgram>>> {
+		let (font, face) = self.src.glyph_font(glyph);
+		Ok(res!(font.face(face)).program().cloned())
 	}
 
 	/// One glyph's outline at a canonical thousand units per em, in the font frame (origin at the glyph, y
 	/// up); empty for a space. The PDF writer stores this once and shows it at any point size, so the same
 	/// glyph in body and in a heading shares a single stored outline.
 	pub fn outline_canonical(&self, glyph: &Glyph) -> Outcome<Path> {
-		self.src.font().outline(glyph.face, glyph.id, 1000.0)
+		let (font, face) = self.src.glyph_font(glyph);
+		font.outline(face, glyph.id, 1000.0)
 	}
 
 	/// The source text each glyph stands for, one entry per glyph in [`run`](Self::run)'s order: from

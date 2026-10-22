@@ -68,7 +68,7 @@ pub fn test_db() -> Outcome<(Arc<RwLock<TestDb>>, id::Uid, TmpDir)> {
 
     // Any key will do: the test is about what comes back out, not about what it looks like at rest.
     let enc_key = [0u8; 32];
-    let mut db = res!(new_db(&root, &enc_key));
+    let mut db = res!(new_db(&root, &enc_key, false));
     // The same sequence the server runs. Starting without the rest of it leaves the bots up but not
     // answering, and every read then fails on a five-second responder timeout rather than saying the
     // database is not ready -- so mirror it exactly rather than guess which parts matter.

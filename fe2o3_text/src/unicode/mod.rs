@@ -13,7 +13,8 @@
 //!   visual order of a paragraph.
 //!
 //! Beside them, [`property`] answers which General_Category, Script, Script_Extensions and binary
-//! properties a character has, and resolves the `\p{...}` names a regular expression uses.
+//! properties a character has, and resolves the `\p{...}` names a regular expression uses, and [`math`] gives
+//! the mathematical class of UTR #25 that formula layout spaces a character by.
 //!
 //! The tables in [`tables`] are generated and committed, never fetched at build or run time. The
 //! Unicode version they come from is [`UCD_VERSION`]; the generator is
@@ -33,6 +34,7 @@
 pub mod bidi;
 pub mod linebreak;
 pub mod lookup;
+pub mod math;
 pub mod norm;
 pub mod property;
 pub mod segment;

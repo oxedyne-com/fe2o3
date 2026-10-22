@@ -2,8 +2,8 @@
 //! form it will be rendered to.
 //!
 //! A document is a sequence of [`Block`]s, and a line of prose a sequence of [`Inline`]s. The
-//! vocabulary is small and closed: a heading, a paragraph, a list, a quotation, a table, a run of
-//! text, a link. That is the whole of it.
+//! vocabulary is small and closed: a heading, a paragraph, a list, a quotation, a table, a figure, a
+//! definition list, a run of text, a link. That is the whole of it.
 //!
 //! # The tree names nothing at either end
 //!
@@ -192,6 +192,7 @@ pub enum Block {
 		rows:	Vec<Row>,
 		/// The columns, one entry to each, so a row's nth cell is aligned by the nth entry.
 		cols:	Vec<Align>,
+		caption: Vec<Inline>,	// empty where the table has none
 	},
 	/// A thematic break: a division between passages.
 	Rule,
@@ -207,6 +208,67 @@ pub enum Block {
 		/// The blocks the division holds.
 		content:	Vec<Block>,
 	},
+	/// A figure: content set apart from the run of the prose -- an image, a diagram, a listing --
+	/// and the caption that says what it is.
+	///
+	/// The caption is the figure's own, not a paragraph beside it, which is what lets a consumer keep
+	/// the two together across a page break or a re-layout.
+	Figure {
+		attrs:		Attrs,		// names the figure; empty unless a reader was asked to keep them
+		content:	Vec<Block>,
+		caption:	Vec<Inline>,	// empty where the figure has none
+	},
+	/// A definition list: terms, each with what defines it.
+	Terms {
+		attrs:	Attrs,		// as for `Figure`
+		items:	Vec<Term>,
+	},
+}
+
+impl Block {
+
+	/// The blocks a consumer with no figure and no definition list writes in this one's place.
+	///
+	/// A figure becomes its content followed by its caption as a paragraph; a definition list
+	/// becomes each term as a strong paragraph followed by its definitions. Every other block is
+	/// itself. The words all stand, in reading order, and only the grouping is given up -- which is
+	/// the honest degradation for a format that has no such grouping, and stated once here so that
+	/// every such format degrades alike.
+	pub fn as_plain(&self) -> Vec<Block> {
+		match self {
+			Block::Figure { content, caption, .. }	=> {
+				let mut out = content.clone();
+				if !caption.is_empty() {
+					out.push(Block::Para(caption.clone()));
+				}
+				out
+			}
+			Block::Terms { items, .. }		=> {
+				let mut out = Vec::new();
+				for t in items {
+					if !t.term.is_empty() {
+						out.push(Block::Para(vec![Inline::Emph { strong: true, content: t.term.clone() }]));
+					}
+					for d in &t.defs {
+						out.extend(d.iter().cloned());
+					}
+				}
+				out
+			}
+			_					=> vec![self.clone()],
+		}
+	}
+}
+
+/// One entry of a [`Block::Terms`]: a term and its definitions.
+///
+/// A term may carry several definitions, each a sequence of blocks as a list item is, and a term
+/// with none is one that shares the definitions of the term after it -- the way HTML writes two names
+/// for one thing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Term {
+	pub term:	Vec<Inline>,
+	pub defs:	Vec<Vec<Block>>,
 }
 
 /// One row of a [`Block::Table`]: the cells it holds, in reading order.
@@ -228,20 +290,32 @@ impl Row {
 	}
 }
 
-/// One cell of a [`Row`]: the inline content it holds.
+/// One cell of a [`Row`]: the inline content it holds, and whether it heads its row or column.
 ///
 /// A cell holds inlines and not blocks. A cell is a phrase -- a name, a figure, a link -- and a tree
 /// that admitted a list or a quotation here would promise every consumer a cell it must lay out as a
 /// document of its own. That is a promise no front-end this tree has can keep, and a tree should not
 /// make one on their behalf.
+///
+/// A header cell in a body row names that row, as the first cell of each row of a table of facts
+/// does. A header row's cells head their columns by being in it, and every reader leaves the flag
+/// `false` there, so that one table reads to one tree whichever syntax it came in.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Cell(pub Vec<Inline>);
+pub struct Cell {
+	pub content:	Vec<Inline>,
+	pub header:	bool,
+}
 
 impl Cell {
 
+	/// An ordinary cell holding the given content.
+	pub fn new(content: Vec<Inline>) -> Self {
+		Self { content, header: false }
+	}
+
 	/// The cell's plain text, its every inline flattened. See [`text_of`].
 	pub fn text_of(&self) -> String {
-		text_of(&self.0)
+		text_of(&self.content)
 	}
 }
 
@@ -294,6 +368,7 @@ pub enum Inline {
 		src:		String,
 		/// The text that stands in for the image.
 		alt:		String,
+		attrs:		Attrs,		// names and sizes the image; empty unless a reader was asked to keep them
 	},
 	/// A span of code within a line.
 	Code(String),
@@ -314,6 +389,8 @@ pub enum Inline {
 	/// and never emits this. A consumer may therefore honour this as a break unconditionally, and
 	/// needs no rule of its own about whitespace.
 	Break,
+	Sup(Vec<Inline>),	// superscript
+	Sub(Vec<Inline>),	// subscript
 }
 
 /// The plain text of a run of inlines, with every element flattened to its words.
@@ -332,6 +409,8 @@ pub fn text_of(content: &[Inline]) -> String {
 			Inline::Code(c)			=> s.push_str(c),
 			Inline::Span { content, .. }	=> s.push_str(&text_of(content)),
 			Inline::Break			=> s.push(' '),
+			Inline::Sup(content)		=> s.push_str(&text_of(content)),
+			Inline::Sub(content)		=> s.push_str(&text_of(content)),
 		}
 	}
 	s
@@ -347,8 +426,12 @@ fn count_blocks(blocks: &[Block]) -> usize {
 			Block::List { items, .. }	=> items.iter().map(|item| count_blocks(item)).sum(),
 			Block::Quote(content)		=> count_blocks(content),
 			Block::Div { content, .. }	=> count_blocks(content),
-			Block::Table { head, rows, .. }	=> head.iter().chain(rows)
-				.map(|row| row.0.iter().map(|cell| count_inlines(&cell.0)).sum::<usize>())
+			Block::Table { head, rows, caption, .. } => count_inlines(caption) + head.iter().chain(rows)
+				.map(|row| row.0.iter().map(|cell| count_inlines(&cell.content)).sum::<usize>())
+				.sum::<usize>(),
+			Block::Figure { content, caption, .. } => count_blocks(content) + count_inlines(caption),
+			Block::Terms { items, .. }	=> items.iter()
+				.map(|t| count_inlines(&t.term) + t.defs.iter().map(|d| count_blocks(d)).sum::<usize>())
 				.sum(),
 			// A listing is scanned rather than read, and a rule holds no words. See `Doc::word_count`.
 			Block::Code { .. } | Block::Rule	=> 0,
@@ -399,17 +482,17 @@ mod tests {
 	#[test]
 	fn test_a_table_contributes_the_words_of_its_cells_01() -> Outcome<()> {
 		let head = Row(vec![
-			Cell(vec![Inline::Text("Name".to_string())]),
-			Cell(vec![Inline::Text("Age".to_string())]),
+			Cell::new(vec![Inline::Text("Name".to_string())]),
+			Cell::new(vec![Inline::Text("Age".to_string())]),
 		]);
 		let row = Row(vec![
-			Cell(vec![
+			Cell::new(vec![
 				Inline::Emph {
 					strong:		true,
 					content:	vec![Inline::Text("Alice".to_string())],
 				},
 			]),
-			Cell(vec![Inline::Text("30".to_string())]),
+			Cell::new(vec![Inline::Text("30".to_string())]),
 		]);
 		// A cell flattens as any other run of inlines does, and a row is its cells.
 		assert_eq!(head.0[0].text_of(), "Name");
@@ -419,9 +502,10 @@ mod tests {
 			head:	Some(head),
 			rows:	vec![row],
 			cols:	vec![Align::Start, Align::End],
+			caption: Vec::new(),
 		};
 		match &table {
-			Block::Table { head, rows, cols }	=> {
+			Block::Table { head, rows, cols, .. }	=> {
 				match head {
 					Some(head)	=> assert_eq!(head.text_of(), "Name Age"),
 					None		=> panic!("the table lost its header row"),

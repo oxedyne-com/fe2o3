@@ -150,13 +150,15 @@ pub fn save_single_file<
     for (msg, _zind) in msgs {
         match msg {
             OzoneMsg::Write{kstored, vstored, ..} => {
+                // An index entry names where its record starts, as the writer's does.
+                let rstart = datsize;
                 datsize += res!(file.write(&kstored));
                 datsize += res!(file.write(&vstored));
                 
                 res!(file.write(&kstored));
                 let sfloc = res!(StoredFileLocation::new(
                     0,
-                    datsize as u64,
+                    rstart as u64,
                     kstored.len() as u64,
                     vstored.len() as u64,
                     ChecksumScheme::new_crc32(),
@@ -228,6 +230,9 @@ pub fn save_multiple_files<
                     test!(sync_log::stream(), "Creating file {:?}", path);
                     indfile = Some(res!(ZoneDir::open_file(&path, &FileAccess::Writing)));
                 }
+                // An index entry names where its record starts, as the writer's does, and a start
+                // up refuses an index whose entries do not each begin where the one before ended.
+                let rstart = datsize;
                 if let Some(file) = &mut datfile {
                     datsize += res!(file.write(&kstored));
                     datsize += res!(file.write(&vstored));
@@ -236,7 +241,7 @@ pub fn save_multiple_files<
                     res!(file.write(&kstored));
                     let sfloc = res!(StoredFileLocation::new(
                         fnum,
-                        datsize as u64,
+                        rstart as u64,
                         kstored.len() as u64,
                         vstored.len() as u64,
                         ChecksumScheme::new_crc32(),

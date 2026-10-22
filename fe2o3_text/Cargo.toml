@@ -6,6 +6,9 @@ edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite text library."
 repository = "https://github.com/oxedyne-io/fe2o3"
+# The CSL styles and locales under data/csl are CC BY-SA 3.0 (alphanumeric.csl MIT/Apache-2.0),
+# not covered by the crate's licence; data/csl/LICENSE.txt carries the notices.
+include = ["Cargo.toml", "README.md", "LICENSE*", "src/**", "tests/**", "ref/**", "tools/**", "data/**", "data/csl/LICENSE.txt"]
 
 [[bin]]
 name = "annealer"
@@ -15,10 +18,30 @@ path = "src/bin/annealer.rs"
 name = "gen_unicode"
 path = "src/bin/gen_unicode.rs"
 
+[[test]]
+name = "csl"
+required-features = ["csl"]
+
+[[test]]
+name = "csl_archive"
+required-features = ["csl-archive"]
+
+[[test]]
+name = "csl_render"
+required-features = ["csl"]
+
 [dependencies]
 oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
 oxedyne_fe2o3_geom 				= { path = "../fe2o3_geom" }
 oxedyne_fe2o3_stds 				= { path = "../fe2o3_stds" }
+
+[features]
+# Liang hyphenation for 35 languages (the `hyphen` module); its pattern automata add about 1.1 MiB.
+hyphenation = []
+# Citation Style Language styles, locales and processor (the `csl` module).
+csl = []
+# The 80 built-in CSL styles and 63 locales Typst serves, embedded (about 4.0 MB; `csl::archive`).
+csl-archive = ["csl"]
 
 [dev-dependencies]
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }

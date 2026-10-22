@@ -9,6 +9,7 @@ use crate::{
 	SCHEMA_CARD,
 	SCHEMA_CHROME,
 	SCHEMA_DOC,
+	SCHEMA_DOC_1,
 	SCHEMA_POST,
 };
 
@@ -35,6 +36,7 @@ pub enum FieldType {
 	/// A non-empty list of nodes, walked and validated like any other, and carried in a field rather
 	/// than in `children`. It is what a `surface` names its semantic alternative by (§4.2).
 	Nodes,
+	Strs,	// a non-empty list of str, omitted when it would be empty
 }
 
 /// The schema a payload declares, and with it the vocabulary the payload is held to (`SPEC.md` §4.2).
@@ -57,6 +59,9 @@ pub enum Schema {
 	/// An oxeweb document: the kinds 1 to 13, neither reserved kind, and the seven document style
 	/// properties.
 	Doc,
+	/// An oxeweb document of `oxeweb/doc/1`: everything `oxeweb/doc/0` admits, and the page kinds 17
+	/// to 33 that let a tree hold every construct of `fe2o3_text::doc` without loss.
+	Doc1,
 	/// The browser's own chrome: the document kinds and style properties, the `edit` node, and the
 	/// interface style properties.
 	Chrome,
@@ -70,6 +75,7 @@ impl Schema {
 	pub fn name(&self) -> &'static str {
 		match self {
 			Self::Doc	=> SCHEMA_DOC,
+			Self::Doc1	=> SCHEMA_DOC_1,
 			Self::Chrome	=> SCHEMA_CHROME,
 			Self::App	=> SCHEMA_APP,
 		}
@@ -87,13 +93,14 @@ impl Schema {
 	pub fn from_name(name: &str) -> Outcome<Self> {
 		match name {
 			SCHEMA_DOC	=> Ok(Self::Doc),
+			SCHEMA_DOC_1	=> Ok(Self::Doc1),
 			SCHEMA_CHROME	=> Ok(Self::Chrome),
 			SCHEMA_APP	=> Ok(Self::App),
 			_	=> Err(err!(
 				"Schema '{}' is none of the node-tree schemas this validator reads: '{}', '{}', \
-				and '{}'. A payload that is a record rather than a tree, such as '{}' or '{}', is \
-				read through `doc::read_artefact` and written through `doc::write_artefact`.",
-				name, SCHEMA_DOC, SCHEMA_CHROME, SCHEMA_APP, SCHEMA_POST, SCHEMA_CARD;
+				'{}' and '{}'. A payload that is a record rather than a tree, such as '{}' or '{}', \
+				is read through `doc::read_artefact` and written through `doc::write_artefact`.",
+				name, SCHEMA_DOC, SCHEMA_DOC_1, SCHEMA_CHROME, SCHEMA_APP, SCHEMA_POST, SCHEMA_CARD;
 			Invalid, Input, Mismatch)),
 		}
 	}
@@ -106,6 +113,7 @@ impl Schema {
 	pub fn admits(&self, reserved: ReservedKind) -> bool {
 		match (self, reserved) {
 			(Self::Doc,	_)	=> false,
+			(Self::Doc1,	_)	=> false,
 			(Self::Chrome,	ReservedKind::Edit)	=> true,
 			(Self::Chrome,	ReservedKind::Icon)	=> true,
 			(Self::Chrome,	ReservedKind::Surface)	=> false,
@@ -126,6 +134,8 @@ impl Schema {
 		match (self, prop.scope) {
 			(Self::Doc,	StyleScope::Doc)	=> true,
 			(Self::Doc,	StyleScope::Interface)	=> false,
+			(Self::Doc1,	StyleScope::Doc)	=> true,
+			(Self::Doc1,	StyleScope::Interface)	=> false,
 			(Self::Chrome,	_)	=> true,
 			(Self::App,	_)	=> true,
 		}
@@ -143,10 +153,24 @@ impl Schema {
 		}
 	}
 
+	/// Does this schema carry the given document kind?
+	///
+	/// The page kinds belong to `oxeweb/doc/1` alone. A chrome or an application tree is built from
+	/// the thirteen kinds and its reserved ones, and a tree published under `oxeweb/doc/0` keeps the
+	/// vocabulary it was published under, so a reader of either never meets a table it was not told
+	/// to expect.
+	pub fn knows(&self, kind: NodeKind) -> bool {
+		match self {
+			Self::Doc1	=> true,
+			Self::Doc | Self::Chrome | Self::App	=> !kind.is_page_kind(),
+		}
+	}
+
 	/// The tree this schema describes, as an error message names it.
 	pub fn tree_label(&self) -> &'static str {
 		match self {
 			Self::Doc	=> "a document",
+			Self::Doc1	=> "a document",
 			Self::Chrome	=> "a chrome tree",
 			Self::App	=> "an application tree",
 		}
@@ -156,6 +180,7 @@ impl Schema {
 	pub fn admits_label(&self) -> &'static str {
 		match self {
 			Self::Doc	=> "the kinds 1 to 13 and no others",
+			Self::Doc1	=> "the kinds 1 to 13 and 17 to 33 and no others",
 			Self::Chrome	=> "the kinds 1 to 13 and the reserved kinds 'edit' and 'icon', and no \
 				others",
 			Self::App	=> "the kinds 1 to 13 and the reserved kinds 'edit', 'surface' and 'icon', \
@@ -166,8 +191,8 @@ impl Schema {
 	/// The style vocabulary this schema admits, as an error message spells it.
 	pub fn style_admits_label(&self) -> &'static str {
 		match self {
-			Self::Doc	=> "the eight document properties 'fill', 'size', 'lang', 'dir', 'bg', \
-				'pad', 'align' and 'radius', and no others",
+			Self::Doc | Self::Doc1	=> "the eight document properties 'fill', 'size', 'lang', \
+				'dir', 'bg', 'pad', 'align' and 'radius', and no others",
 			Self::Chrome	=> "the eight document properties and the interface properties 'grid', \
 				'pack', 'grow', 'max', 'border', 'shadow', 'nowrap' and 'ends', and no others",
 			Self::App	=> "the eight document properties and the interface properties 'grid', \
@@ -198,9 +223,15 @@ pub enum Content {
 	Inline,
 	/// List items only.
 	Items,
+	Cells,		// a row's cells
+	TableParts,	// a caption, then rows
+	FigureParts,	// flow content, then a caption
+	Terms,		// a definition list's terms
+	TermParts,	// a label, then definitions
 }
 
-/// The v0 node kinds. Deliberately small; growth is a versioned decision.
+/// The node kinds: the thirteen of `oxeweb/doc/0`, and the page kinds `oxeweb/doc/1` adds (codes 17 to
+/// 33). Growth is a versioned decision, so which of them a tree may carry is [`Schema::knows`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeKind {
 	/// Root of a document.
@@ -229,6 +260,24 @@ pub enum NodeKind {
 	Code,
 	/// A block quotation.
 	Quote,
+	// The page kinds of `oxeweb/doc/1`.
+	Rule,
+	Table,
+	Row,
+	Cell,
+	Caption,
+	Figure,
+	Terms,
+	Term,
+	Label,
+	Def,
+	Div,
+	Span,
+	Sup,
+	Sub,
+	Tt,		// inline code
+	Break,
+	Img,		// inline image, by source string or by hash
 }
 
 impl NodeKind {
@@ -249,13 +298,31 @@ impl NodeKind {
 			Self::Link	=> 11,
 			Self::Code	=> 12,
 			Self::Quote	=> 13,
+			Self::Rule	=> 17,
+			Self::Table	=> 18,
+			Self::Row	=> 19,
+			Self::Cell	=> 20,
+			Self::Caption	=> 21,
+			Self::Figure	=> 22,
+			Self::Terms	=> 23,
+			Self::Term	=> 24,
+			Self::Label	=> 25,
+			Self::Def	=> 26,
+			Self::Div	=> 27,
+			Self::Span	=> 28,
+			Self::Sup	=> 29,
+			Self::Sub	=> 30,
+			Self::Tt	=> 31,
+			Self::Break	=> 32,
+			Self::Img	=> 33,
 		}
 	}
 
-	/// The kind for a wire code, or an error naming the code the document schema does not admit.
+	/// The kind for a wire code, or an error naming the code no document schema admits.
 	///
 	/// A reserved code (§4.2) is not a document kind, so it is an error here like any other code
-	/// outside 1..=13. The error says which of the two it is, because the two are refused for
+	/// outside 1..=13 and 17..=33. Whether a known kind is one the declared schema carries is
+	/// [`Schema::knows`]. The error says which of the two it is, because the two are refused for
 	/// opposite reasons: an unknown code may be admitted by a fallback (§4.5), and a reserved code
 	/// never is.
 	pub fn from_code(code: u16) -> Outcome<Self> {
@@ -273,14 +340,31 @@ impl NodeKind {
 			11	=> Ok(Self::Link),
 			12	=> Ok(Self::Code),
 			13	=> Ok(Self::Quote),
+			17	=> Ok(Self::Rule),
+			18	=> Ok(Self::Table),
+			19	=> Ok(Self::Row),
+			20	=> Ok(Self::Cell),
+			21	=> Ok(Self::Caption),
+			22	=> Ok(Self::Figure),
+			23	=> Ok(Self::Terms),
+			24	=> Ok(Self::Term),
+			25	=> Ok(Self::Label),
+			26	=> Ok(Self::Def),
+			27	=> Ok(Self::Div),
+			28	=> Ok(Self::Span),
+			29	=> Ok(Self::Sup),
+			30	=> Ok(Self::Sub),
+			31	=> Ok(Self::Tt),
+			32	=> Ok(Self::Break),
+			33	=> Ok(Self::Img),
 			_	=> match ReservedKind::from_code(code) {
 				Some(reserved) => Err(err!(
 					"Node kind code {} is the reserved kind '{}', which is legal in {} and never \
 					in a document (SPEC.md §4.2).", code, reserved.label(), reserved.legal_in();
 				Invalid, Input)),
 				None => Err(err!(
-					"Unknown node kind code {}, the v0 document vocabulary runs from 1 to 13, and \
-					the codes 14 to 16 are reserved.", code;
+					"Unknown node kind code {}: the document vocabulary runs from 1 to 13 and 17 \
+					to 33, and the codes 14 to 16 are reserved.", code;
 				Invalid, Input)),
 			},
 		}
@@ -302,6 +386,23 @@ impl NodeKind {
 			Self::Link	=> "link",
 			Self::Code	=> "code",
 			Self::Quote	=> "quote",
+			Self::Rule	=> "rule",
+			Self::Table	=> "table",
+			Self::Row	=> "row",
+			Self::Cell	=> "cell",
+			Self::Caption	=> "caption",
+			Self::Figure	=> "figure",
+			Self::Terms	=> "terms",
+			Self::Term	=> "term",
+			Self::Label	=> "label",
+			Self::Def	=> "def",
+			Self::Div	=> "div",
+			Self::Span	=> "span",
+			Self::Sup	=> "sup",
+			Self::Sub	=> "sub",
+			Self::Tt	=> "tt",
+			Self::Break	=> "break",
+			Self::Img	=> "img",
 		}
 	}
 
@@ -347,6 +448,32 @@ impl NodeKind {
 			Self::Quote => &[
 				Field { name: "cite",	typ: FieldType::Str,	opt: true },
 			],
+			Self::Rule | Self::Caption | Self::Term | Self::Label | Self::Def | Self::Sup
+			| Self::Sub | Self::Break => &[],
+			Self::Table => &[
+				Field { name: KEY_COLS,	typ: FieldType::Strs,	opt: true },
+			],
+			Self::Row => &[
+				Field { name: KEY_HEAD,	typ: FieldType::Bool,	opt: true },
+			],
+			Self::Cell => &[
+				Field { name: KEY_HEADER,	typ: FieldType::Bool,	opt: true },
+			],
+			// Attributes are names the tree carries and does not interpret (fe2o3_text::doc).
+			Self::Figure | Self::Terms | Self::Div | Self::Span => &ATTR_FIELDS,
+			Self::Tt => &[
+				Field { name: "text",	typ: FieldType::Str,	opt: false },
+			],
+			// An inline image carries the attribute names too, so a page's `class`, `width` and
+			// `height` survive. Added to `oxeweb/doc/1` in place, before any store held a `/1` tree.
+			Self::Img => &[
+				Field { name: ADDR_HASH,	typ: FieldType::Hash32,	opt: true },
+				Field { name: "alt",	typ: FieldType::Str,	opt: false },
+				Field { name: KEY_SRC,	typ: FieldType::Str,	opt: true },
+				Field { name: KEY_CLASSES,	typ: FieldType::Strs,	opt: true },
+				Field { name: KEY_ID,	typ: FieldType::Str,	opt: true },
+				Field { name: KEY_PAIRS,	typ: FieldType::Strs,	opt: true },
+			],
 		}
 	}
 
@@ -366,6 +493,23 @@ impl NodeKind {
 			Self::Link	=> Content::Inline,
 			Self::Code	=> Content::None,
 			Self::Quote	=> Content::Flow,
+			Self::Rule	=> Content::None,
+			Self::Table	=> Content::TableParts,
+			Self::Row	=> Content::Cells,
+			Self::Cell	=> Content::Inline,
+			Self::Caption	=> Content::Inline,
+			Self::Figure	=> Content::FigureParts,
+			Self::Terms	=> Content::Terms,
+			Self::Term	=> Content::TermParts,
+			Self::Label	=> Content::Inline,
+			Self::Def	=> Content::Flow,
+			Self::Div	=> Content::Flow,
+			Self::Span	=> Content::Inline,
+			Self::Sup	=> Content::Inline,
+			Self::Sub	=> Content::Inline,
+			Self::Tt	=> Content::None,
+			Self::Break	=> Content::None,
+			Self::Img	=> Content::None,
 		}
 	}
 
@@ -373,12 +517,20 @@ impl NodeKind {
 	pub fn is_flow(&self) -> bool {
 		matches!(self,
 			Self::Section | Self::Para | Self::Heading | Self::List | Self::Boxx | Self::Image
-			| Self::Code | Self::Quote)
+			| Self::Code | Self::Quote | Self::Rule | Self::Table | Self::Figure | Self::Terms
+			| Self::Div)
 	}
 
 	/// Whether this kind is inline content, permitted inside a paragraph.
 	pub fn is_inline(&self) -> bool {
-		matches!(self, Self::Text | Self::Emph | Self::Link)
+		matches!(self,
+			Self::Text | Self::Emph | Self::Link | Self::Span | Self::Sup | Self::Sub | Self::Tt
+			| Self::Break | Self::Img)
+	}
+
+	/// Is this one of the page kinds `oxeweb/doc/1` added to the thirteen of `oxeweb/doc/0`?
+	pub fn is_page_kind(&self) -> bool {
+		self.code() >= 17
 	}
 
 	/// Whether a child of the given kind may appear inside this one.
@@ -388,6 +540,11 @@ impl NodeKind {
 			Content::Flow	=> child.is_flow(),
 			Content::Inline	=> child.is_inline(),
 			Content::Items	=> matches!(child, Self::Item),
+			Content::Cells	=> matches!(child, Self::Cell),
+			Content::TableParts	=> matches!(child, Self::Caption | Self::Row),
+			Content::FigureParts	=> child.is_flow() || matches!(child, Self::Caption),
+			Content::Terms	=> matches!(child, Self::Term),
+			Content::TermParts	=> matches!(child, Self::Label | Self::Def),
 		}
 	}
 
@@ -401,8 +558,11 @@ impl NodeKind {
 	/// A list with no items is a construction error rather than intent, so the format refuses it. A
 	/// document or section may be empty, since a stub with only a title is a legitimate thing to
 	/// publish.
+	///
+	/// A caption and a term's label exist only to hold words, so an empty one is the same page as
+	/// none at all, which would give one page two addresses.
 	pub fn requires_child(&self) -> bool {
-		matches!(self, Self::List)
+		matches!(self, Self::List | Self::Caption | Self::Label)
 	}
 }
 
@@ -622,6 +782,25 @@ pub const KEY_TO: &'static str = "to";
 pub const ADDR_NAME: &'static str = "name";
 /// The address-map key selecting a content hash.
 pub const ADDR_HASH: &'static str = "hash";
+
+// Page kind fields (`oxeweb/doc/1`)
+pub const KEY_ID:	&'static str = "id";
+pub const KEY_CLASSES:	&'static str = "classes";
+pub const KEY_PAIRS:	&'static str = "pairs";	// key, value, key, value, ...
+pub const KEY_COLS:	&'static str = "cols";
+pub const KEY_HEAD:	&'static str = "head";
+pub const KEY_HEADER:	&'static str = "header";
+pub const KEY_SRC:	&'static str = "src";
+
+/// The attribute fields a `figure`, `terms`, `div` and `span` carry, each omitted when empty.
+pub const ATTR_FIELDS: [Field; 3] = [
+	Field { name: KEY_CLASSES,	typ: FieldType::Strs,	opt: true },
+	Field { name: KEY_ID,	typ: FieldType::Str,	opt: true },
+	Field { name: KEY_PAIRS,	typ: FieldType::Strs,	opt: true },
+];
+
+/// The column alignments a `table`'s `cols` may name, `none` for a column with no alignment.
+pub const COL_ALIGNMENTS: [&'static str; 4] = ["none", "start", "center", "end"];
 
 /// Returns the children of a node payload, or an empty slice if it declares none.
 pub fn children_of(payload: &Dat) -> Outcome<Vec<Dat>> {

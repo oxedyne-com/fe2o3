@@ -26,6 +26,8 @@ use std::{
     },
 };
 
+use std::time::Duration;
+
 use tokio::{
     io::{
         AsyncRead,
@@ -33,9 +35,11 @@ use tokio::{
         ReadBuf,
     },
     net::TcpStream,
+    sync::Semaphore,
 };
 use tokio_rustls::{
     rustls::{
+        AlertDescription,
         ClientConfig,
         pki_types::{
             CertificateDer,
@@ -43,8 +47,235 @@ use tokio_rustls::{
         },
         RootCertStore,
     },
+    TlsAcceptor,
     TlsConnector,
 };
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ BOUNDED SERVER-SIDE TLS ACCEPTOR                                          │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The result of a bounded handshake, distinguishing the ways it can fail.
+///
+/// A `TimedOut` is an admission event -- the permit wait or the handshake ran
+/// past the deadline -- and a caller that keeps admission counters records it as
+/// a drop. A `PeerFailed` is a handshake that the peer ended or could not make
+/// work: a client that hung up, spoke nonsense, or offered no protocol version,
+/// cipher suite or application protocol this server serves. Every scanner and
+/// old client on a public port produces one, so a caller should log it below
+/// `ERROR`. A `Failed` is everything else, which may be the server's own fault
+/// -- no certificate to serve, a peer rejecting the certificate it was shown --
+/// and is the one to log loudly. A cause that cannot be told is a `Failed`, so
+/// reading it as the peer's fault never hides a fault of ours.
+pub enum Handshake<IO> {
+    Ok(tokio_rustls::server::TlsStream<IO>),
+    TimedOut,
+    PeerFailed(Error<ErrTag>),
+    Failed(Error<ErrTag>),
+}
+
+/// Did the peer, and not this server, end the handshake?
+///
+/// An `io::Error` that wraps a rustls error is judged by that error; any other
+/// is judged by its kind, a transport that went away. The rustls match is an
+/// allowlist of the peer's own faults, so a variant added to that non-exhaustive
+/// enum is treated as ours until someone says otherwise.
+fn peer_ended(e: &std::io::Error) -> bool {
+    use tokio_rustls::rustls::Error as Tls;
+    match e.get_ref().and_then(|inner| inner.downcast_ref::<Tls>()) {
+        Some(Tls::PeerIncompatible(_))
+        | Some(Tls::PeerMisbehaved(_))
+        | Some(Tls::InvalidMessage(_))
+        | Some(Tls::InappropriateMessage { .. })
+        | Some(Tls::InappropriateHandshakeMessage { .. })
+        | Some(Tls::PeerSentOversizedRecord)
+        | Some(Tls::NoApplicationProtocol)
+        | Some(Tls::UnsupportedNameType)
+        | Some(Tls::DecryptError)           => true,
+        // An alert is the peer's word, and a rejected certificate is the one it
+        // can say about us: an expired or mismatched certificate reaches the
+        // server only this way, so it is never read as a scanner's doing.
+        Some(Tls::AlertReceived(a))         => !rejects_certificate(a),
+        Some(_)                             => false,
+        None                                => is_dropped(e),
+    }
+}
+
+/// Did the transport go away under us -- reset, aborted, or ended mid-exchange -- rather than
+/// carry a fault either end could name? A fresh connection may well succeed where this one did
+/// not. An error wrapping a rustls error is a protocol or certificate fault, and never a drop.
+pub fn is_dropped(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    use tokio_rustls::rustls::Error as Tls;
+    if e.get_ref().and_then(|inner| inner.downcast_ref::<Tls>()).is_some() {
+        return false;
+    }
+    matches!(e.kind(),
+        ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe
+        | ErrorKind::UnexpectedEof)
+}
+
+/// Did a connection attempt find nothing that would take it -- refused, or no route to the host?
+pub fn is_unreachable(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(e.kind(),
+        ErrorKind::ConnectionRefused
+        | ErrorKind::HostUnreachable
+        | ErrorKind::NetworkUnreachable
+        | ErrorKind::AddrNotAvailable)
+}
+
+/// A failed dial, tagged by cause: `Unreachable` where nothing would take the connection,
+/// `Interrupted` where it dropped as it was made.
+pub fn dial_fault(e: std::io::Error, what: String) -> Error<ErrTag> {
+    if is_unreachable(&e) {
+        err!(e, "{}: nothing would take the connection.", what; IO, Network, Unreachable)
+    } else if is_dropped(&e) {
+        err!(e, "{}: the connection dropped.", what; IO, Network, Interrupted)
+    } else {
+        err!(e, "{}.", what; IO, Network)
+    }
+}
+
+/// A transport fault on the open connection, tagged `Interrupted` where the connection went away.
+pub fn wire_fault(e: std::io::Error, what: String, write: bool) -> Error<ErrTag> {
+    match (is_dropped(&e), write) {
+        (true,  false) => err!(e, "{}: the connection dropped.", what; IO, Network, Read, Interrupted),
+        (true,  true)  => err!(e, "{}: the connection dropped.", what; IO, Network, Write, Interrupted),
+        (false, false) => err!(e, "{}.", what; IO, Network, Read),
+        (false, true)  => err!(e, "{}.", what; IO, Network, Write),
+    }
+}
+
+/// Did a client handshake fail because a certificate was not accepted, whether ours by the peer
+/// or the peer's by us?
+fn refuses_certificate(e: &std::io::Error) -> bool {
+    use tokio_rustls::rustls::Error as Tls;
+    match e.get_ref().and_then(|inner| inner.downcast_ref::<Tls>()) {
+        Some(Tls::InvalidCertificate(_))
+        | Some(Tls::NoCertificatesPresented)    => true,
+        Some(Tls::AlertReceived(a))             => rejects_certificate(a),
+        _                                       => false,
+    }
+}
+
+/// Does an alert from the peer say that it will not accept our certificate?
+fn rejects_certificate(a: &AlertDescription) -> bool {
+    matches!(a,
+        AlertDescription::BadCertificate
+        | AlertDescription::UnsupportedCertificate
+        | AlertDescription::CertificateRevoked
+        | AlertDescription::CertificateExpired
+        | AlertDescription::CertificateUnknown
+        | AlertDescription::UnknownCA
+        | AlertDescription::BadCertificateStatusResponse
+        | AlertDescription::BadCertificateHashValue)
+}
+
+/// Sorts a failed handshake by whose fault it was.
+fn failed<IO>(e: std::io::Error) -> Handshake<IO> {
+    if peer_ended(&e) {
+        Handshake::PeerFailed(err!(e, "TLS handshake failed."; IO, Network, Init))
+    } else {
+        Handshake::Failed(err!(e, "TLS handshake failed."; IO, Network, Init))
+    }
+}
+
+/// A `TlsAcceptor` with a shared cap on how many handshakes run at once and a
+/// deadline on each.
+///
+/// The same rustls server configuration serves HTTPS and the mail listeners
+/// (SMTP STARTTLS, implicit-TLS IMAP), so the bound lives here, once, and every
+/// listener shares one `BoundedTlsAcceptor` rather than each carrying its own.
+/// Two shapes are closed together: a flood of concurrent handshakes exhausting
+/// the CPU on a single-vCPU box (the semaphore), and a drip-fed handshake that
+/// pins a permit indefinitely and turns the semaphore itself into a slowloris
+/// amplifier (the deadline, which covers both the wait for a permit and the
+/// handshake it guards). Both bounds are optional: a zero permit count or an
+/// absent deadline disables that half, which is the inert default.
+#[derive(Clone)]
+pub struct BoundedTlsAcceptor {
+    acceptor:   TlsAcceptor,
+    sem:        Option<std::sync::Arc<Semaphore>>,  // None disables the concurrency bound
+    deadline:   Option<Duration>,                    // None disables the handshake deadline
+}
+
+impl BoundedTlsAcceptor {
+
+    /// `max_handshakes` of 0 leaves handshake concurrency unbounded; a `None`
+    /// deadline leaves each handshake untimed. Both are the inert defaults, so a
+    /// caller that opts into neither gets exactly a bare `TlsAcceptor`'s behaviour.
+    pub fn new(
+        acceptor:       TlsAcceptor,
+        max_handshakes: usize,
+        deadline:       Option<Duration>,
+    )
+        -> Self
+    {
+        let sem = if max_handshakes == 0 {
+            None
+        } else {
+            Some(std::sync::Arc::new(Semaphore::new(max_handshakes)))
+        };
+        Self { acceptor, sem, deadline }
+    }
+
+    /// An acceptor with neither bound, for a caller that wants the plain thing.
+    pub fn unbounded(acceptor: TlsAcceptor) -> Self {
+        Self { acceptor, sem: None, deadline: None }
+    }
+
+    /// The per-handshake deadline, so a caller can time an adjacent step (a peek
+    /// before the handshake, say) to the same bound.
+    pub fn deadline(&self) -> Option<Duration> {
+        self.deadline
+    }
+
+    /// Complete one server-side handshake within the shared concurrency cap and
+    /// the deadline.
+    ///
+    /// A permit is taken immediately before the handshake and released the moment
+    /// it returns, so it bounds only the expensive handshake and never the whole
+    /// session that follows. The deadline wraps both the wait for a permit and
+    /// the handshake, so no single connection can hold a slot open indefinitely.
+    pub async fn accept<IO>(&self, stream: IO) -> Handshake<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        // A permit, bounded by the deadline. Held across the handshake below and
+        // dropped when this function returns.
+        let _permit = match &self.sem {
+            Some(sem) => match self.deadline {
+                Some(d) => match tokio::time::timeout(d, sem.acquire()).await {
+                    Ok(Ok(p))  => Some(p),
+                    Ok(Err(_)) => return Handshake::Failed(err!(
+                        "The TLS handshake semaphore was closed."; Bug, Network)),
+                    Err(_)     => return Handshake::TimedOut,
+                },
+                None => match sem.acquire().await {
+                    Ok(p)  => Some(p),
+                    Err(_) => return Handshake::Failed(err!(
+                        "The TLS handshake semaphore was closed."; Bug, Network)),
+                },
+            },
+            None => None,
+        };
+        match self.deadline {
+            Some(d) => match tokio::time::timeout(d, self.acceptor.accept(stream)).await {
+                Ok(Ok(tls)) => Handshake::Ok(tls),
+                Ok(Err(e))  => failed(e),
+                Err(_)      => Handshake::TimedOut,
+            },
+            None => match self.acceptor.accept(stream).await {
+                Ok(tls) => Handshake::Ok(tls),
+                Err(e)  => failed(e),
+            },
+        }
+    }
+}
 
 
 /// Either a plain TCP stream or a client-side TLS-wrapped TCP stream.
@@ -125,11 +356,14 @@ impl AsyncWrite for ClientStream {
     }
 }
 
-/// The peer certificate is validated against `cfg` for the name `host`.
+/// The peer certificate is validated against `cfg` for the name `host`, and the handshake must
+/// finish within `deadline`. A peer that takes the connection and never answers the hello would
+/// otherwise hold the caller for as long as the socket lived.
 pub async fn upgrade(
-    plain:  TcpStream,
-    host:   &str,
-    cfg:    Arc<ClientConfig>,
+    plain:      TcpStream,
+    host:       &str,
+    cfg:        Arc<ClientConfig>,
+    deadline:   Duration,
 )
     -> Outcome<ClientStream>
 {
@@ -140,11 +374,23 @@ pub async fn upgrade(
             Invalid, Input)),
     };
     let connector = TlsConnector::from(cfg);
-    match connector.connect(name, plain).await {
-        Ok(s)  => Ok(ClientStream::Tls(Box::new(s))),
-        Err(e) => Err(err!(e,
+    match tokio::time::timeout(deadline, connector.connect(name, plain)).await {
+        Ok(Ok(s))  => Ok(ClientStream::Tls(Box::new(s))),
+        // Sorted by cause, because a caller explaining the failure to a person must not tell them
+        // a certificate was refused when the connection merely dropped (D-20261006-09). The
+        // words of both mention TLS and the handshake, so only the tags can tell them apart.
+        Ok(Err(e)) if refuses_certificate(&e) => Err(err!(e,
+            "TLS handshake to {}: the certificate was not accepted.", host;
+            IO, Network, Init, Security)),
+        Ok(Err(e)) if is_dropped(&e) => Err(err!(e,
+            "TLS handshake to {}: the connection dropped.", host;
+            IO, Network, Init, Interrupted)),
+        Ok(Err(e)) => Err(err!(e,
             "TLS handshake to {}.", host;
             IO, Network, Init)),
+        Err(_)     => Err(err!(
+            "The TLS handshake to {} did not finish within {:?}.", host, deadline;
+            IO, Network, Init, Timeout)),
     }
 }
 
@@ -524,6 +770,62 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+
+    use tokio::net::TcpListener;
+    use tokio_rustls::rustls::{
+        ServerConfig,
+        pki_types::{
+            CertificateDer,
+            PrivateKeyDer,
+            PrivatePkcs8KeyDer,
+        },
+    };
+
+    /// A server whose certificate no public root vouches for. The client must call that a refused
+    /// certificate, and not a dropped connection.
+    #[tokio::test]
+    async fn test_a_refused_certificate_is_tagged_security_not_interrupted_00() -> Outcome<()> {
+        ensure_crypto_provider();
+        let cert = res!(rcgen::generate_simple_self_signed(vec![fmt!("localhost")])
+            .map_err(|e| err!(e, "Making a test certificate."; Test, Init)));
+        let der  = res!(cert.serialize_der()
+            .map_err(|e| err!(e, "Serialising the test certificate."; Test, Encode)));
+        let key  = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.serialize_private_key_der()));
+        let scfg = res!(ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![CertificateDer::from(der)], key)
+            .map_err(|e| err!(e, "Building the test server config."; Test, Init)));
+        let acceptor = TlsAcceptor::from(Arc::new(scfg));
+
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the test server."; Test, IO)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading its address."; Test, IO)));
+        tokio::spawn(async move {
+            if let Ok((sock, _)) = listener.accept().await {
+                let _ = acceptor.accept(sock).await;
+            }
+        });
+
+        let plain = res!(TcpStream::connect(addr).await
+            .map_err(|e| err!(e, "Dialling the test server."; Test, IO)));
+        let ccfg  = Arc::new(res!(default_client_config()));
+        match upgrade(plain, "localhost", ccfg, Duration::from_secs(10)).await {
+            Ok(_)  => return Err(err!("A self-signed certificate was accepted."; Test, Invalid)),
+            Err(e) => {
+                req!(true, e.tags().contains(&ErrTag::Security),
+                    "a refused certificate was not tagged Security: {:?}", e.tags());
+                req!(false, e.tags().contains(&ErrTag::Interrupted),
+                    "a refused certificate read as a dropped connection: {:?}", e.tags());
+            },
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod cert_tests {

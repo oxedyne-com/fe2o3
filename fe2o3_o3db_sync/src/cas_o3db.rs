@@ -8,13 +8,16 @@
 //!   with [`ScanOpts::with_str_prefix`] enumerate every chunk for
 //!   [`Cas::ids`], which garbage collection needs. `{hex_addr}` is the
 //!   lowercase-hex [`ContentId`].
-//! - Value: `Dat::BU8(chunk.bytes)`. The address is recoverable from the key,
+//! - Value: `Dat::wrap_dat(chunk.bytes)`, the narrowest byte variant whose
+//!   length field holds the chunk. The address is recoverable from the key,
 //!   so the value carries only the opaque chunk bytes -- ciphertext, when the
-//!   caller has encrypted before storing.
+//!   caller has encrypted before storing. Before 2026-10-08 the value was always
+//!   `Dat::BU8`, whose one-byte length cut a chunk of more than 255 bytes.
 //!
-//! Deletes are tombstones flowing through the ordinary store path, matching
-//! `O3dbStorage`, behind the `dist` feature, so a subsequent `get` sees the
-//! tombstone on its first read rather than racing a direct-to-disk delete. The
+//! Deletes go through `OzoneApi::delete_using_responder`, which writes the one
+//! unencrypted tombstone that the key index and a scan recognise. Until
+//! 2026-10-16 they wrote it with `store`, which encrypts it on an encrypted
+//! store, so `has` called a deleted chunk present and `ids` listed it. The
 //! log-structured engine reclaims the space on compaction.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
@@ -27,11 +30,6 @@ use crate::cas::{
 };
 
 use crate::O3db;
-use crate::base::{
-	constant,
-	id::usr_kind_id_deleted,
-};
-use crate::comm::msg::OzoneMsg;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
@@ -109,34 +107,19 @@ impl<
 		ContentId::from_hex(&s[CHUNK_PREFIX.len()..])
 	}
 
-	/// Drains the two-message acknowledgement a successful store emits.
+	/// Waits for the store's acknowledgement: its record count, each record written and
+	/// then durable.  Whether the key existed is not needed here.
 	fn drain_store_ack(
 		resp:	&crate::comm::response::Responder<UIDL, UID, ENC, KH>,
 	)
 		-> Outcome<()>
 	{
-		match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-			OzoneMsg::Chunks(_) => {},
-			OzoneMsg::Error(e) => return Err(err!(e,
-				"O3dbCas: store ack failed at Chunks phase.";
-				IO, Write)),
-			other => return Err(err!(
-				"O3dbCas: unexpected message at Chunks phase: {:?}.", other;
-				Unexpected, Channel)),
-		}
-		match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-			OzoneMsg::KeyExists(_) => Ok(()),
-			OzoneMsg::Error(e) => Err(err!(e,
-				"O3dbCas: store ack failed at KeyExists phase.";
-				IO, Write)),
-			other => Err(err!(
-				"O3dbCas: unexpected message at KeyExists phase: {:?}.", other;
-				Unexpected, Channel)),
-		}
+		res!(resp.recv_store_ack());
+		Ok(())
 	}
 
-	/// Accepts the whole unsigned-bytes family; the store path always writes
-	/// `Dat::BU8`.
+	/// Accepts the whole unsigned-bytes family; the store path writes the variant
+	/// `Dat::wrap_dat` chooses for the chunk's length.
 	fn extract_bytes(dat: &Dat) -> Outcome<Vec<u8>> {
 		match dat {
 			Dat::BU8(b) | Dat::BU16(b) | Dat::BU32(b) | Dat::BU64(b) =>
@@ -147,21 +130,14 @@ impl<
 		}
 	}
 
-	/// `None` for an absent key or a deletion tombstone.
+	// A deleted key reads as absent from `get_wait`.
 	fn read(&self, id: &ContentId)
 		-> Outcome<Option<Vec<u8>>>
 	{
 		let key = Self::encode_key(id);
 		match res!(self.db.api().get_wait(&key, None)) {
-			None => Ok(None),
-			Some((dat, _meta)) => {
-				if let Dat::Usr(kind, _) = &dat {
-					if *kind == usr_kind_id_deleted() {
-						return Ok(None);
-					}
-				}
-				Ok(Some(res!(Self::extract_bytes(&dat))))
-			}
+			None				=> Ok(None),
+			Some((dat, _meta))	=> Ok(Some(res!(Self::extract_bytes(&dat)))),
 		}
 	}
 }
@@ -184,7 +160,7 @@ impl<
 			Invalid, Input, Mismatch));
 		}
 		let key = Self::encode_key(&chunk.id);
-		let value = Dat::BU8(chunk.bytes.clone());
+		let value = Dat::wrap_dat(chunk.bytes.clone());
 		let resp = res!(self.db.api().store(key, value, self.user));
 		Self::drain_store_ack(&resp)
 	}
@@ -193,22 +169,20 @@ impl<
 		self.read(id)
 	}
 
+	// From the key index, reading no value (2026-10-16: a presence query read every chunk whole).
 	fn has(&self, id: &ContentId) -> Outcome<bool> {
-		Ok(res!(self.read(id)).is_some())
+		self.db.api().contains_wait(&Self::encode_key(id), None)
 	}
 
 	fn delete(&self, id: &ContentId) -> Outcome<bool> {
-		let existed = res!(self.read(id)).is_some();
-		if !existed {
+		let key = Self::encode_key(id);
+		if !res!(self.db.api().contains_wait(&key, None)) {
 			return Ok(false);
 		}
-		let key = Self::encode_key(id);
-		let tombstone = Dat::Usr(
-			usr_kind_id_deleted(),
-			Some(Box::new(Dat::Empty)),
-		);
-		let resp = res!(self.db.api().store(key, tombstone, self.user));
-		res!(Self::drain_store_ack(&resp));
+		// The delete path, not `store`, whose tombstone would be encrypted on an encrypted store.
+		let resp = self.db.api().responder();
+		res!(self.db.api().delete_using_responder(&key, self.user, None, resp.clone()));
+		res!(resp.recv_delete_ack());
 		Ok(true)
 	}
 
@@ -217,12 +191,8 @@ impl<
 		let entries = res!(self.db.api().scan(&opts, None));
 		let mut out = Vec::with_capacity(entries.len());
 		for (k, _v, _meta) in &entries {
-			let id = res!(Self::parse_key(k));
-			// Skip a key whose value is a tombstone: scan enumerates the key
-			// space, and a deleted chunk lingers until compaction.
-			if res!(self.read(&id)).is_some() {
-				out.push(id);
-			}
+			// The scan leaves deleted keys out.
+			out.push(res!(Self::parse_key(k)));
 		}
 		Ok(out)
 	}

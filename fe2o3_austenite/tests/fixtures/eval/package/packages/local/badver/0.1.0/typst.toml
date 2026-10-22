@@ -1,0 +1,4 @@
+[package]
+name = "badver"
+version = "0.1"
+entrypoint = "lib.typ"

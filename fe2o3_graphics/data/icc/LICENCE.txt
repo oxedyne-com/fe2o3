@@ -1,0 +1,12 @@
+FOGRA39L_coated.icc
+
+The ICC profile "FOGRA39L Coated" (FOGRA39L, ISO 12647-2:2004 paper types 1 and 2),
+made with ArgyllCMS and distributed in the colord-data package
+(/usr/share/color/icc/colord/FOGRA39L_coated.icc, colord-data 1.4.8-3).
+
+colord-data: data/profiles/*, copyright 2012 Richard Hughes <richard@hughsie.com>,
+licence CC0-1.0 (public domain dedication; https://creativecommons.org/publicdomain/zero/1.0/).
+The profile's own copyright tag reads: "This profile is free of known copyright restrictions".
+
+The file is copied byte for byte (sha256 19d6cd1de88bf48816a7d2bfea5b71e3fff65d09ba0bb4b26f58f76cb4840929). It is read by oxedyne_fe2o3_graphics::icc and is
+compiled into a build only when the `fogra39` feature is on.

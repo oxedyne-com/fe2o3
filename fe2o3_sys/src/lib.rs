@@ -6,6 +6,11 @@
 //! relevant pseudo-file under `/proc` on Linux; support for
 //! BSD and macOS will slot in via the same [`Sampler`] trait.
 //!
+//! The optional `inotify` feature adds a watcher for directory trees on Linux, built on
+//! `nix`, the optional `clock` feature the boot clock and a check for the machine
+//! having slept, and the optional `signal` feature signals to a process group; without
+//! them the crate has no third-party dependency at all.
+//!
 //! Intended consumers include admin dashboards, long-running
 //! service processes that want to record their own resource
 //! use, and test harnesses that need to confirm a workload's
@@ -18,14 +23,23 @@
 //! ```
 #![forbid(unsafe_code)]
 
+#[cfg(all(target_os = "linux", feature = "clock"))]
+pub mod clock;
 pub mod cpu;
 pub mod disk;
+#[cfg(all(target_os = "linux", feature = "inotify"))]
+pub mod inotify;
 pub mod load;
 pub mod mem;
 pub mod net;
 pub mod parse;
 pub mod proc_self;
+pub mod resident;
+#[cfg(all(target_os = "linux", feature = "signal"))]
+pub mod signal;
 pub mod snapshot;
+#[cfg(all(target_os = "linux", feature = "supervise"))]
+pub mod supervise;
 pub mod uptime;
 
 /// Root under which every Linux metric source lives.

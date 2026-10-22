@@ -1,0 +1,5 @@
+[package]
+name = "okc"
+version = "0.1.0"
+entrypoint = "lib.typ"
+compiler = "0.15"

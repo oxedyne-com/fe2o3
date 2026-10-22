@@ -1,5 +1,6 @@
 use crate::{
     prelude::*,
+    test::hooks,
     base::{
         constant,
         id::{
@@ -15,7 +16,10 @@ use crate::{
         bot_zone::ZoneState,
         worker::{
             bot::WorkerType,
-            bot_file::GcControl,
+            bot_file::{
+                Hold,
+                GcControl,
+            },
             bot_reader::ReadResult,
         },
     },
@@ -23,6 +27,7 @@ use crate::{
         channels::{
             BotChannels,
             ChooseBot,
+            FaultReport,
             OzoneMsgCount,
         },
         msg::OzoneMsg,
@@ -33,8 +38,12 @@ use crate::{
     },
     data::{
         cache::{
+            Cache,
             CacheEntry,
             KeyVal,
+            PinnedHeads,
+            Presence,
+            is_chunk_key,
         },
         choose::ChooseCache,
         core::{
@@ -45,11 +54,21 @@ use crate::{
         },
     },
     file::{
-        state::FileStateMap,
+        core::FileEntry,
+        floc::FileNum,
+        state::{
+            FileState,
+            FileStateMap,
+        },
         zdir::ZoneDir,
     },
 };
 
+use oxedyne_fe2o3_core::{
+    channels::Recv,
+    rand::Rand,
+};
+use oxedyne_fe2o3_data::time::Timestamp;
 use oxedyne_fe2o3_jdat::{
     prelude::*,
     chunk::PartKey,
@@ -74,10 +93,17 @@ use oxedyne_fe2o3_namex::id::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     path::{
         Path,
         PathBuf,
+    },
+    sync::atomic::{
+        AtomicU64,
+        Ordering,
     },
     time::{
         Duration,
@@ -85,6 +111,76 @@ use std::{
     },
 };
 
+
+// What `OzoneApi::compact_now` did.
+mod pending;
+
+pub use pending::{
+    next_event,
+    Event,
+    PendingStore,
+};
+pub(crate) use pending::SetHold;
+
+// How a store began: complete, or with answers still to come.
+pub enum Begun<const UIDL: usize, UID: NumIdDat<UIDL>, ENC: Encrypter, KH: Hasher> {
+    Done(usize),                                // records in all
+    Pending(PendingStore<UIDL, UID, ENC, KH>),
+}
+
+static LAST_STAMP: AtomicU64 = AtomicU64::new(0); // nanoseconds since the epoch, latest write stamp
+
+/// The stamp of a record: a hybrid logical clock, the wall clock or one nanosecond past the
+/// latest stamp this process gave or replayed, whichever is later.  Replay raises the floor to
+/// every stamp it reads (`raise_stamp_floor`) before `start` returns, so no record written after
+/// an open is stamped at or below one already on disk, even when the clock stepped back across
+/// the restart.  Every record, tombstones included, is stamped here.  Two records of one key
+/// with one stamp are still ordered, by `data::cache::supersedes`.
+pub(crate) fn write_stamp() -> Outcome<Timestamp> {
+    if let Some(t) = hooks::stale_stamp() {
+        return Ok(Timestamp::new(t.as_secs(), t.subsec_nanos()));
+    }
+    retire_stamp()
+}
+
+/// The stamp of a retire's tombstones, which follow the head that displaced their set and so
+/// every record of it.  The stale-stamp hook models a write stamped before it landed, not the
+/// retire sent after it landed: stamped stale too, a tombstone tied its chunk's stamp and lost
+/// or won by file place, so the losing put's chunks were retired only some of the time.
+pub(crate) fn retire_stamp() -> Outcome<Timestamp> {
+    let clock = match hooks::fixed_stamp() {
+        Some(t) => t,
+        None    => *res!(Timestamp::now()),
+    };
+    let now = try_into!(u64, clock.as_nanos());
+    let prev = match LAST_STAMP.fetch_update(Ordering::SeqCst, Ordering::SeqCst,
+        |last| Some(now.max(last.saturating_add(1))))
+    {
+        Ok(p) | Err(p) => p,
+    };
+    let n = now.max(prev.saturating_add(1));
+    Ok(Timestamp::new(n / 1_000_000_000, (n % 1_000_000_000) as u32))
+}
+
+/// Raise the stamp floor to a replayed record's stamp, so the next `write_stamp` is later.
+pub(crate) fn raise_stamp_floor(t: &Timestamp) -> Outcome<()> {
+    let n = try_into!(u64, t.as_nanos());
+    LAST_STAMP.fetch_max(n, Ordering::SeqCst);
+    Ok(())
+}
+
+/// The latest stamp this process has given or replayed, in nanoseconds since the epoch.
+pub(crate) fn stamp_floor() -> u64 {
+    LAST_STAMP.load(Ordering::SeqCst)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CompactReport {
+    pub files_collected:    usize,  // files a collection was started on
+    pub files_deleted:      usize,  // files removed for holding only old records
+    pub bytes_before:       u64,    // length of the zone directories before the call rolled the live files
+    pub bytes_after:        u64,    // the same once nothing sealed held an old byte
+}
 
 #[derive(Clone, Debug)]
 pub struct OzoneApi<
@@ -167,26 +263,26 @@ impl<
         self.ozone_key(res!(k.as_bytes()), schms2)
     }
     
-    /// Derives the chunk set identifier for a value from its key bytes.  A chunked value's chunk
-    /// records are addressed by `Tup5u64([set_id, index, ..])`; deriving `set_id` from the key --
-    /// rather than from a fresh random ticket per operation -- makes a later overwrite of the same
-    /// key write its chunks under the same addresses, so the ordinary supersession path flags the
-    /// superseded chunk records old and the collector reclaims them.  Seahash gives a stable
-    /// 64-bit value across runs and builds; the dedicated salt keeps it distinct from the routing
-    /// hash.  The collision probability matches the random ticket it replaces (~2^-64).
-    pub fn chunk_set_id(kbuf: &[u8]) -> u64 {
-        match HashScheme::new_seahash().hash(&[kbuf], constant::CHUNK_SET_ID_SALT).as_hashform() {
-            HashForm::U64(h)    => h,
-            // Seahash always yields a U64; fold any other form defensively into one.
-            other               => {
-                let v = other.as_vec();
-                let mut buf = [0u8; 8];
-                for (i, b) in v.iter().take(8).enumerate() {
-                    buf[i] = *b;
-                }
-                u64::from_be_bytes(buf)
-            },
-        }
+    /// The chunk set identifier of one chunked write: a hash of the key and a fresh random
+    /// nonce.  A chunk key is `Tup5u64([set_id, index, length, count, size])`, so no write ever
+    /// addresses a chunk an earlier write used, a value's chunks are immutable until retired, and
+    /// its bunch key changes on every write (B1, B2, 2026-10-09).  The nonce keeps two puts of one
+    /// key apart (~2^-64).  The stamp is left out (D3, 2026-10-10) so that the set is held before
+    /// the write is stamped, which the orphan sweep's epoch relies on.
+    pub fn chunk_set_id(kbuf: &[u8], nonce: u64) -> u64 {
+        let nonce = nonce.to_be_bytes();
+        fold_set_id(HashScheme::new_seahash()
+            .hash(&[kbuf, &nonce], constant::CHUNK_SET_ID_SALT)
+            .as_hashform())
+    }
+
+    /// The identifier the builds of 2026-09 derived from the key alone, under which every write
+    /// of one length reused one chunk set.  Values written so still read, since a reader takes
+    /// the identifier from the bunch key, and move to a set of their own on their next write.
+    /// Kept to reproduce such values in tests, and to find their heads at the open
+    /// (`lone_index`).
+    pub fn legacy_chunk_set_id(kbuf: &[u8]) -> u64 {
+        legacy_chunk_set_id(kbuf)
     }
 
     pub fn ozone_key(
@@ -243,10 +339,8 @@ impl<
     // Write API, for general public use.
     
     /// Insert key-value `Dat`icles using the given data scheme overrides.  A `Responder` channel
-    /// is returned.  If the value is not chunked, this will carry a single `OzoneMsg::KeyExists`
-    /// message indicating whether or not the key was already present.  When chunked, one
-    /// `OzoneMsg::KeyChunkExists` will be sent for each chunk.  Receipt of all expected messages
-    /// indicates operation completion.
+    /// is returned, carrying the answers `store_dat_using_responder` describes; wait on them with
+    /// `Responder::recv_store_ack`.
     ///
     /// # Arguments
     /// * `k` - key `Dat`cle.
@@ -420,12 +514,20 @@ impl<
     /// * `schms2` - `RestSchemesOverride` overrides database schemes (e.g. key hashing, encryption).
     /// * `resp` - a `Responder` channel.
     ///
+    /// The chunks of a chunked value are stored first, and the call waits until every one is
+    /// written, durable and readable before it sends the bunch key, so that no reader finds a
+    /// bunch key whose chunks are missing.  A chunk that fails stops the store there: the caller
+    /// is told it failed, and since the bunch key is never written the failure is not tagged
+    /// `Unconfirmed`.
+    ///
     /// Returns the number of chunks.  The first message in the `Responder` will be an
-    /// `OzoneMsg::Chunks` containing the number of chunks.  If there was no chunking this will be
-    /// followed by an `OzoneMsg::KeyExists` message indicating whether the key was present.  In
-    /// the case of chunking, an `OzoneMsg::KeyChunkExists` message will follow for the bunch key
-    /// (with index 0) and each chunk, in undefined order.  These messages indicate successful
-    /// completion of each operation.
+    /// `OzoneMsg::Chunks` containing the number of chunks.  Each record written is then answered
+    /// twice: `OzoneMsg::Written` once it is appended, and a final answer once it is durable under
+    /// the sync policy and readable.  Without chunking the final answer is an `OzoneMsg::KeyExists`
+    /// saying whether the key was present; with chunking it is an `OzoneMsg::KeyChunkExists` for
+    /// the bunch key (with index 0) and for each chunk.  The answers to different records arrive
+    /// in no particular order.  A writer that fails sends `OzoneMsg::Error` instead.
+    /// `Responder::recv_store_ack` waits on all of it, each stage to its own deadline.
     ///
     /// # Local errors
     /// * The key must be transformable into an Ozone key.
@@ -441,26 +543,74 @@ impl<
     )
         -> Outcome<usize>
     {
-        let msgs = res!(self.prepare_write_dat(
-            k,
-            v,
-            user,
-            schms2,
-            resp.clone(),
-            None,
-        ));
+        match res!(self.begin_store(k, v, user, schms2, resp)) {
+            Begun::Done(nchunks)        => Ok(nchunks),
+            Begun::Pending(pending)     => {
+                let nchunks = pending.nchunks();
+                res!(pending.run(self));
+                Ok(nchunks)
+            },
+        }
+    }
+
+    /// Begins a store as `store_dat_using_responder` describes, and returns without waiting for
+    /// the chunks of a chunked value to become readable.  A store that has more to wait for comes
+    /// back as a `PendingStore`, which the caller advances one answer at a time with
+    /// `PendingStore::advance`, so that a server bot can take other requests meanwhile.  The
+    /// caller's answers are sent as the store goes.
+    pub fn begin_store(
+        &self,
+        k:      Dat,
+        v:      Dat,
+        user:   UID,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+        resp:   Responder<UIDL, UID, ENC, KH>,
+    )
+        -> Outcome<Begun<UIDL, UID, ENC, KH>>
+    {
+        // Every write has a chunk set of its own, so a store over a chunked value leaves the old
+        // chunks live under keys of their own.  They are retired once the new head is durable,
+        // and not before: retired first, a crash would leave the old bunch key naming chunks that
+        // are gone, and a reader would find them gone while that key is still current.  What is
+        // retired is the set of the record the head displaced, as the cache bot answers it; the
+        // value read here stands in only for a displaced head whose bytes are not resident.  A
+        // store of the deleted marker, the road the distributed adapters erase by, is no
+        // different.
+        let old = res!(self.chunk_set_of(&k, schms2));
+        let (kbuf, vbuf) = res!(Encode::encode_dat(k.clone(), v));
+        let (msgs, datkeys, hold) = res!(self.prepare_write_keyed(kbuf, vbuf, user, schms2, resp.clone(), None));
         let nchunks = msgs.len();
+        // Every tombstone this store sends is stamped with the store's own time (see
+        // `tombstone_chunk_key_at`).
+        let meta = res!(Self::write_meta(&msgs));
         if resp.is_some() {
             res!(resp.send(OzoneMsg::Chunks(nchunks)));
         }
-        res!(self.store_bytes(msgs));
-        Ok(nchunks)
+        let (head, chunks) = res!(Self::head_and_chunks(msgs));
+        let mut pending = res!(PendingStore::new(
+            self, k, old, &datkeys, hold, true, meta, schms2, resp, head, chunks));
+        if res!(pending.start(self)) {
+            return Ok(Begun::Done(nchunks));
+        }
+        Ok(Begun::Pending(pending))
     }
 
-    /// Store forcing the chunk set identifier rather than deriving it from the key.  Test and
-    /// migration support: it reproduces a value as an earlier build wrote it (a random
-    /// per-operation set_id), so that reads of such a value can be exercised after the switch to
-    /// key-derived identifiers.  Production writes never take this path.
+    // The record that publishes a prepared write, which is the bunch key of a chunked value and
+    // the only record of any other, and the chunks that follow it.
+    fn head_and_chunks(
+        msgs: Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>,
+    )
+        -> Outcome<((OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd), Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>)>
+    {
+        let mut msgs = msgs.into_iter();
+        let head = res!(msgs.next().ok_or_else(|| err!(
+            "A prepared write holds no record."; Bug, Missing)));
+        Ok((head, msgs.collect()))
+    }
+
+    /// Store forcing the chunk set identifier.  Test support: it reproduces a value as an earlier
+    /// build wrote it, under a random or a key-derived (`legacy_chunk_set_id`) identifier, and
+    /// retires nothing.  Production writes never take this path.
     pub fn store_dat_using_responder_forcing_set_id(
         &self,
         k:      Dat,
@@ -473,7 +623,7 @@ impl<
         -> Outcome<usize>
     {
         let msgs = res!(self.prepare_write_dat(
-            k,
+            k.clone(),
             v,
             user,
             schms2,
@@ -481,16 +631,25 @@ impl<
             Some(set_id),
         ));
         let nchunks = msgs.len();
+        let meta = res!(Self::write_meta(&msgs));
+        let (head, chunks) = res!(Self::head_and_chunks(msgs));
         if resp.is_some() {
             res!(resp.send(OzoneMsg::Chunks(nchunks)));
         }
-        res!(self.store_bytes(msgs));
+        // Unticketed: its set is not its own, and a second legacy value of one length would
+        // otherwise retire the shared set under its own live head.
+        let hold = res!(SetHold::new(self.chans().pending_sets(), None));
+        let mut pending = res!(PendingStore::new(
+            self, k, None, &[], hold, false, meta, schms2, resp, head, chunks));
+        if !res!(pending.start(self)) {
+            res!(pending.run(self));
+        }
         Ok(nchunks)
     }
 
     /// The key and value `Dat`icles are serialised here and then sent for final processing.  A
-    /// `set_id_override` of `None` derives the chunk set identifier from the key (the ordinary
-    /// path); `Some` forces it, for reproducing an earlier build's random-keyed values.
+    /// `set_id_override` of `None` gives a chunked value a chunk set of its own (the ordinary
+    /// path); `Some` forces it, for reproducing an earlier build's values.
     pub fn prepare_write_dat(
         &self,
         k:              Dat,
@@ -521,13 +680,32 @@ impl<
     pub fn prepare_write(
         &self,
         k:          Vec<u8>,
-        mut vbuf:   Vec<u8>,
+        vbuf:       Vec<u8>,
         user:       UID,
         schms2:     Option<&RestSchemesOverride<ENC, KH>>,
         resp:       Responder<UIDL, UID, ENC, KH>,
         set_id_override: Option<u64>,
     )
         -> Outcome<Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>>
+    {
+        let (msgs, _, _) = res!(self.prepare_write_keyed(k, vbuf, user, schms2, resp, set_id_override));
+        Ok(msgs)
+    }
+
+    /// `prepare_write`, and with the messages the keys of the records they write beyond the main
+    /// key: the bunch key and then each chunk's, none for a value that is not chunked, and the
+    /// hold on a fresh chunk set.  The set is held before the write is stamped, so a chunk the
+    /// orphan sweep finds stamped before its epoch was held before it, and is spared.
+    fn prepare_write_keyed(
+        &self,
+        k:          Vec<u8>,
+        mut vbuf:   Vec<u8>,
+        user:       UID,
+        schms2:     Option<&RestSchemesOverride<ENC, KH>>,
+        resp:       Responder<UIDL, UID, ENC, KH>,
+        set_id_override: Option<u64>,
+    )
+        -> Outcome<(Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>, Vec<Dat>, SetHold)>
     {
         if vbuf.len() == 0 {
             return Err(err!(
@@ -558,22 +736,26 @@ impl<
         }
 
         let mut msgs = Vec::new();
+        let mut keys = Vec::new();
         let mut meta = Meta::new(user);
-        res!(meta.stamp_time_now());
 
         // 4. Package the value, breaking into chunks if it is too big.
         if vbuf.len() >= chunk_threshold {
             let chunker = OzoneConfig::chunker(chunk_config);
             // 4.1 Chunk data.
             let (chunks, chunk_state) = res!(chunker.chunk(&vbuf));
-            // Address the chunks by a key-derived identifier, not the per-operation ticket, so an
-            // overwrite of the same key supersedes the prior value's chunk records in place.  A
-            // forced identifier (test/migration only) reproduces an earlier build's random keys.
-            let set_id = match set_id_override {
-                Some(id)    => id,
-                None        => Self::chunk_set_id(&kbuf),
+            // A chunk set of the write's own, held and then stamped (Q1-5).  A forced identifier
+            // (tests only) reproduces an earlier build's values, and is not held.
+            let (set_id, hold) = match set_id_override {
+                Some(id)    => (id, res!(SetHold::new(self.chans().pending_sets(), None))),
+                None        => {
+                    let id = Self::chunk_set_id(&kbuf, Rand::rand_u64());
+                    (id, res!(SetHold::new(self.chans().pending_sets(), Some(id))))
+                },
             };
+            meta.time = res!(write_stamp());
             let datkeys = res!(chunker.keys(set_id, &chunk_state));
+            keys = datkeys.clone();
             
             // 4.2 Store main key -> bunch key.
             let mut bkbuf = res!(datkeys[0].as_bytes());
@@ -615,8 +797,10 @@ impl<
                     *ccbwind.zind(),
                 ));
             }
+            Ok((msgs, keys, hold))
         } else {
             // 3.1 No chunking, just a single block of data.
+            meta.time = res!(write_stamp());
             if encryption_on {
                 vbuf = res!(Dat::wrap_bytes_var(vbuf));
             }
@@ -634,12 +818,12 @@ impl<
                 )),
                 *cbwind.zind(),
             ));
+            Ok((msgs, keys, res!(SetHold::new(self.chans().pending_sets(), None))))
         }
-        Ok(msgs)
     }
 
     /// This is the write dispatch method, where `WriterBots` are chosen randomly.  Callers must
-    /// ensure the value is wrapped in a `Dat::BU64`.
+    /// ensure the value is wrapped in a `Dat::BU64`.  Returns the writer each message went to.
     ///
     /// # Local errors
     /// * The write request message cannot be sent via a `WriterBot` channel.
@@ -647,18 +831,52 @@ impl<
         &self,
         msgs: Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>,
     )
-        -> Outcome<()>
+        -> Outcome<Vec<WorkerInd>>
     {
+        let mut took = Vec::with_capacity(msgs.len());
         for (msg, zind) in msgs {
             let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, &zind));
             let (bot, bpind) = wbots.choose_bot(&ChooseBot::Randomly);
+            let wind = WorkerInd::new(zind, bpind);
             match bot.send(msg) {
                 Err(e) => return Err(err!(e,
-                    "{}: While sending write request to wbot {}.",
-                    self.ozid(), WorkerInd::new(zind, bpind);
+                    "{}: While sending write request to wbot {}.", self.ozid(), wind;
                     Channel, Write)),
-                _ => (),
+                _ => took.push(wind),
             }
+        }
+        Ok(took)
+    }
+
+    /// Asks each writer named for a barrier over what it has taken, answered to no one.  Each
+    /// request queues behind the records already sent to the writer, so a chunk is covered by
+    /// one fsync rather than by the policy's period (R1).
+    pub(crate) fn nudge(&self, winds: &[WorkerInd]) -> Outcome<()> {
+        let mut done: Vec<(usize, usize)> = Vec::with_capacity(winds.len());
+        for wind in winds {
+            if done.contains(&(wind.z(), wind.b())) {
+                continue;
+            }
+            done.push((wind.z(), wind.b()));
+            let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, wind.zind()));
+            if let Err(e) = res!(wbots.get_bot(wind.b())).send(OzoneMsg::SyncNow(Responder::none(Some(self.ozid())))) {
+                return Err(err!(e,
+                    "{}: Cannot ask writer {} for a barrier over a store's chunks.", self.ozid(), wind;
+                    Channel, Write));
+            }
+        }
+        Ok(())
+    }
+
+    /// Tells writer `b` of `zind` that a discard held on one of its files owes it a barrier
+    /// within `constant::HELD_BARRIER`, whatever its policy.
+    pub(crate) fn owe(&self, zind: &ZoneInd, b: usize) -> Outcome<()> {
+        let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, zind));
+        if let Err(e) = res!(wbots.get_bot(b)).send(OzoneMsg::SyncOwed) {
+            return Err(err!(e,
+                "{}: Cannot ask writer {} of zone {} for the barrier a held discard owes.",
+                self.ozid(), b, zind;
+                Channel, Write));
         }
         Ok(())
     }
@@ -670,6 +888,19 @@ impl<
     )
         -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>>
     {
+        // A whole key of the chunk form would be taken by a cache for a chunk tombstone, and
+        // forgotten once the chunk records it shadows are gone, so only a tombstone may use it.
+        if let Key::Complete(kbyts) = &kv.key {
+            if is_chunk_key(kbyts) {
+                let tomb = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
+                if kv.val != res!(tomb.as_bytes()) {
+                    return Err(err!(
+                        "The key {:?} has the form of a chunk key, a Dat::Tup5u64, which only \
+                        a chunk tombstone may be written under.", kbyts;
+                        Input, Invalid));
+                }
+            }
+        }
         let klen_cache = kv.key.len();
         let (kstored, vstored, cind, meta, cbpind, _, _) = res!(Encode::encode(kv, csummer));
 
@@ -681,9 +912,15 @@ impl<
             meta,
             cbpind,
             resp,
+            role: None,
         })
     }
 
+    /// Deletes `k` by writing a tombstone over it.  A delete is a store with no chunks: its
+    /// tombstone is the head, and once that is durable the delete retires the chunk set of the
+    /// record it displaced, if that record was a chunked value's bunch key.  A chunk tombstone
+    /// that fails after that is logged and its chunk left to the orphan sweep, as for a store,
+    /// and does not fail the delete.
     pub fn delete_using_responder(
         &self,
         k:          &Dat,
@@ -693,89 +930,108 @@ impl<
     )
         -> Outcome<()>
     {
-        // 1. Normalise the key.  The cache hash belongs to the stored record, not merely to the
+        // 0. The chunked value being deleted, if any, read before the delete is stamped, as a
+        //    store reads what it replaces.  It is used only when the displaced head's bytes are
+        //    not resident and its metadata agrees.
+        let pred = res!(self.chunk_set_of(k, schms2));
+
+        // 1. Stamp the delete once.  A delete removes what existed when it began: its tombstone,
+        //    and those of the chunks it retires, carry this time or later, and the cache keeps the
+        //    newer of two records of a key, so a value stored after the delete began survives it.
+        let mut meta = Meta::new(user);
+        meta.time = res!(write_stamp());
+
+        // 2. Normalise the key.  The cache hash belongs to the stored record, not merely to the
         //    routing decision, so it is carried through to the writer rather than dropped.
         let (kstored, cbwind, chash) = res!(self.ozone_key_dat(k, schms2));
 
-        // 1a. If the value is chunked, the tombstone on the user key below supersedes only the
-        //     bunch key; the chunk records live under their own keys and would leak forever (the
-        //     whole reason a chunked value's chunks are never rewritten on delete).  So read the
-        //     current bunch key, reconstruct each chunk key from the set_id it stores -- random
-        //     for a pre-upgrade value, key-derived for a new one, either way exactly what
-        //     `fetch_chunks` reconstructs to read them -- and tombstone each so the ordinary
-        //     supersession path reclaims them.  These carry no responder: the caller waits only
-        //     on the single bunch-key delete below.  The read is confined to the delete path,
-        //     which is rare relative to writes, and only chunked values pay the fan-out.
-        res!(self.reclaim_chunks_on_delete(k, user, schms2));
-
-        // 2. The value we use to indicate deletion is an unencrypted custom usr type.
+        // 3. The value we use to indicate deletion is an unencrypted custom usr type, framed
+        //    through the same encoder an insertion goes through.
         let v = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
         let vstored = res!(v.as_bytes());
-
-        // 3. Select a zone writer bot.
-        let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, cbwind.zind()));
-        let (bot, bpind) = wbots.choose_bot(&ChooseBot::Randomly);
-
-        // 4. Create the metadata.
-        let mut meta = Meta::new(user);
-        res!(meta.stamp_time_now());
-
-        // 5. Frame the tombstone through the same encoder an insertion goes through.
         let msg = res!(Self::package_write(
             KeyVal {
                 key:    Key::Complete(kstored),
                 val:    vstored,
                 chash,
-                meta,
+                meta:   meta.clone(),
                 cbpind: **cbwind.bpind(),
             },
-            resp,
+            resp.clone(),
             self.schemes().checksummer().clone(),
         ));
 
-        // 6. Send write request, with responder.
-        match bot.send(msg) {
-            Err(e) => return Err(err!(e,
-                "{}: While sending delete request to wbot {}.",
-                self.ozid(), WorkerInd::new(*cbwind.zind(), bpind);
-                Channel, Write)),
-            _ => Ok(()),
+        // 4. Publish it, then retire.  Every head waits here for the cache bot's answer of what
+        //    it displaced, chunked predecessor or not, and retires that record's set if it names
+        //    one.
+        hooks::trace(hooks::Step::Sent);
+        let hold = res!(SetHold::new(self.chans().pending_sets(), None));
+        let mut pending = res!(PendingStore::new(
+            self, k.clone(), pred, &[], hold, true, meta, schms2, resp, (msg, *cbwind.zind()), Vec::new()));
+        if !res!(pending.start(self)) {
+            res!(pending.run(self));
+        }
+        Ok(())
+    }
+
+    /// The part key of the value now at `k`, when that value is chunked, with the metadata of
+    /// its bunch key.  The read is a whole read, so a store pays it only where it must know.
+    pub(crate) fn chunk_set_of(
+        &self,
+        k:      &Dat,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Option<(PartKey, Meta<UIDL, UID>)>>
+    {
+        match res!(self.get_head_wait(k, schms2)) {
+            Some((Dat::Tup5u64(tup), meta)) => Ok(Some((PartKey(tup), meta))),
+            _ => Ok(None),
         }
     }
 
-    /// Reads the current value at `k` and, if it is chunked, tombstones every chunk record so the
-    /// collector reclaims them.  A no-op for an unchunked or absent value.  Chunk keys are
-    /// reconstructed from the part key exactly as `fetch_chunks` does, so this works for values
-    /// written under either the old random set_id or the new key-derived one.
-    fn reclaim_chunks_on_delete(
+    // The keys of a chunked value's chunk records, which `fetch_chunks` reconstructs likewise.
+    pub(crate) fn chunk_keys_of(pkey: &PartKey) -> Vec<Dat> {
+        let n = pkey.num_parts();
+        (1..(n + 1)).map(|i| Dat::Tup5u64([
+            pkey.set_id(),
+            i,
+            pkey.data_len(),
+            n,
+            pkey.part_size(),
+        ])).collect()
+    }
+
+    /// Sends a tombstone for each chunk record of the value `pkey` names, every one answering to
+    /// `resp`, and returns how many were sent.
+    pub(crate) fn send_retires(
         &self,
-        k:      &Dat,
-        user:   UID,
+        pkey:   &PartKey,
+        meta:   &Meta<UIDL, UID>,
         schms2: Option<&RestSchemesOverride<ENC, KH>>,
+        resp:   &Responder<UIDL, UID, ENC, KH>,
     )
-        -> Outcome<()>
+        -> Outcome<usize>
     {
-        let enc = self.schemes().encrypter();
-        let or_enc = schms2.map(|s| s.encrypter());
-
-        let resp = res!(self.fetch_using_schemes(k, schms2));
-        let pkey = match res!(resp.recv_daticle(enc, or_enc)) {
-            (Some((Dat::Tup5u64(tup), _)), _) => PartKey(tup),
-            _ => return Ok(()), // Not chunked, or the key is absent: nothing extra to reclaim.
-        };
-
-        for i in 1..(pkey.num_parts() + 1) {
-            let ck = Dat::Tup5u64([
-                pkey.set_id(),
-                i,
-                pkey.data_len(),
-                pkey.num_parts(),
-                pkey.part_size(),
-            ]);
-            // No responder: the caller waits only on the single bunch-key delete.
-            res!(self.tombstone_chunk_key(&ck, user, schms2, Self::no_responder()));
+        let cks = Self::chunk_keys_of(pkey);
+        for ck in &cks {
+            res!(self.tombstone_chunk_key_at(ck, meta.clone(), schms2, resp.clone()));
         }
-        Ok(())
+        Ok(cks.len())
+    }
+
+    // The metadata of a write prepared by `prepare_write_keyed`: every record of it carries the
+    // one time.
+    fn write_meta(
+        msgs: &[(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)],
+    )
+        -> Outcome<Meta<UIDL, UID>>
+    {
+        match msgs.first() {
+            Some((OzoneMsg::Write { meta, .. }, _)) => Ok(meta.clone()),
+            other => Err(err!(
+                "Expected a write message at the head of a prepared write, found {:?}.", other;
+                Bug, Unexpected)),
+        }
     }
 
     /// Writes an unencrypted deleted-kind tombstone at the `Key::Complete` form of a chunk-data
@@ -789,7 +1045,7 @@ impl<
     ///
     /// `ck` must be the chunk's `Dat::Tup5u64` part key.  The tombstone is left unencrypted,
     /// exactly as an ordinary key delete leaves it, so a reader recognises it without the at-rest
-    /// key.
+    /// key.  It is stamped now; `tombstone_chunk_key_at` takes the time of the write it belongs to.
     pub fn tombstone_chunk_key(
         &self,
         ck:     &Dat,
@@ -799,11 +1055,28 @@ impl<
     )
         -> Outcome<()>
     {
+        let mut cmeta = Meta::new(user);
+        cmeta.time = res!(write_stamp());
+        self.tombstone_chunk_key_at(ck, cmeta, schms2, resp)
+    }
+
+    /// A chunk tombstone with the metadata of the delete or store that retires the chunk.  The
+    /// cache keeps the newer of two records of a key, so a tombstone stamped with the time of the
+    /// write it belongs to takes the chunks that write found and no newer chunk of a value stored
+    /// since, where one stamped as it is sent could take a value begun after the write (QA A2-6).
+    pub fn tombstone_chunk_key_at(
+        &self,
+        ck:     &Dat,
+        cmeta:  Meta<UIDL, UID>,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+        resp:   Responder<UIDL, UID, ENC, KH>,
+    )
+        -> Outcome<()>
+    {
+        hooks::trace(hooks::Step::Sent);
         let (ckbuf, ccbwind, cchash) = res!(self.ozone_key_dat(ck, schms2));
         let tomb = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
         let tvstored = res!(tomb.as_bytes());
-        let mut cmeta = Meta::new(user);
-        res!(cmeta.stamp_time_now());
         let msg = res!(Self::package_write(
             KeyVal {
                 key:    Key::Complete(ckbuf),
@@ -874,12 +1147,8 @@ impl<
     )
         -> Outcome<Option<(Dat, Meta<UIDL, UID>)>>
     {
-        let enc = self.schemes().encrypter();
-        let or_enc = schms2.map(|s| s.encrypter());
-
-        let resp = res!(self.fetch_using_schemes(k, schms2));
-        match res!(resp.recv_daticle(enc, or_enc)) {
-            (None, _) => Ok(None), // The key was not found.
+        match res!(self.get_head_wait(k, schms2)) {
+            None => Ok(None), // The key was not found.
             // The value was too large for a single record, so what is stored under this key is a
             // part key naming its chunks.  `fetch_chunks` gathers them, rejoins the bytes,
             // decrypts them and decodes them, so what it hands back is already the caller's
@@ -892,11 +1161,134 @@ impl<
             // chunked was written perfectly well and could not be read: an accumulating value,
             // such as a ledger, worked until the day it crossed the chunk size and then failed
             // for good.
-            (Some((Dat::Tup5u64(tup), meta)), _) =>
-                Ok(Some((res!(self.fetch_chunks(&Dat::Tup5u64(tup), schms2)), meta))),
+            //
+            // A chunk found gone means a newer write retired this set between the head read and
+            // the chunk reads, so the head is read again: a new head is retried, an unchanged one
+            // is a torn value.
+            Some((Dat::Tup5u64(mut tup), mut meta)) => {
+                for _ in 0..constant::CHUNK_READ_RETRIES {
+                    if let Some(dat) = res!(self.fetch_chunks_or_gone(&Dat::Tup5u64(tup), schms2)) {
+                        return Ok(Some((dat, meta)));
+                    }
+                    match res!(self.get_head_wait(k, schms2)) {
+                        None => return Ok(None), // Deleted since.
+                        Some((Dat::Tup5u64(tup2), _)) if tup2 == tup => return Err(err!(
+                            "{}: For key {:?}, a chunk of the value with bunch key {:?} is \
+                            missing while that value is still the key's current one.",
+                            self.ozid(), k, tup;
+                            Missing, Data)),
+                        Some((Dat::Tup5u64(tup2), meta2)) => {
+                            tup = tup2;
+                            meta = meta2;
+                        },
+                        Some((dat, meta2)) => return Ok(Some((dat, meta2))),
+                    }
+                }
+                Err(err!(
+                    "{}: For key {:?}, the value changed under each of {} chunked reads.",
+                    self.ozid(), k, constant::CHUNK_READ_RETRIES;
+                    LimitReached, Read))
+            },
             // The data received was in a single piece.
-            (Some((dat, meta)), _) => Ok(Some((dat, meta))),
+            Some((dat, meta)) => Ok(Some((dat, meta))),
         }
+    }
+
+    /// `get_wait` without the chunks: what is stored under the key itself, which for a chunked
+    /// value is its bunch key, a `Dat::Tup5u64` that `fetch_chunks` takes.
+    pub fn get_head_wait(
+        &self,
+        k:      &Dat,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Option<(Dat, Meta<UIDL, UID>)>>
+    {
+        let enc = self.schemes().encrypter();
+        let or_enc = schms2.map(|s| s.encrypter());
+        let resp = res!(self.fetch_using_schemes(k, schms2));
+        let (got, _) = res!(resp.recv_daticle(enc, or_enc));
+        Ok(got)
+    }
+
+    /// Does the key hold a value?  `contains_many_wait` for one key.
+    pub fn contains_wait(
+        &self,
+        k:      &Dat,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<bool>
+    {
+        let held = res!(self.contains_many_wait(std::slice::from_ref(k), schms2));
+        Ok(held.first() == Some(&true))
+    }
+
+    /// Whether each key holds a value, in order, answered from the zone caches' key index without
+    /// reading or decrypting a value: one request to each cache bot that holds any of the keys,
+    /// all sent before any answer is awaited.  The answer is `get_wait(k).is_some()`'s, a deleted
+    /// key absent.  A key mid-write is answered as `get_wait` would answer at the same moment,
+    /// from the record the cache bot holds, so it is absent, or its prior value's, until the
+    /// cache bot has entered the write.  The one read made is of a record with a tombstone's
+    /// length whose bytes the cache no longer holds, a few dozen bytes.  A chunked value is
+    /// present by its head, its chunks unread, where `get_wait` would fail on a chunk lost from
+    /// under a current head.
+    pub fn contains_many_wait(
+        &self,
+        keys:   &[Dat],
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Vec<bool>>
+    {
+        let mut by_bot: BTreeMap<WorkerInd, (Vec<usize>, Vec<Vec<u8>>)> = BTreeMap::new();
+        for (i, k) in keys.iter().enumerate() {
+            let (kbuf, cbwind, _chash) = res!(self.ozone_key_dat(k, schms2));
+            let (inds, kbufs) = by_bot.entry(cbwind).or_default();
+            inds.push(i);
+            kbufs.push(kbuf);
+        }
+        let mut asked = Vec::with_capacity(by_bot.len());
+        for (cbwind, (inds, kbufs)) in by_bot {
+            let resp = self.responder();
+            let cbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Cache, cbwind.zind()));
+            let bot = res!(cbots.get_bot(**cbwind.bpind()));
+            if let Err(e) = bot.send(OzoneMsg::PresenceOf(kbufs, resp.clone())) {
+                return Err(err!(e,
+                    "{}: Asking cbot {} whether {} keys hold values.",
+                    self.ozid(), cbwind, inds.len();
+                    Channel, Write));
+            }
+            asked.push((cbwind, inds, resp));
+        }
+        let mut held = vec![false; keys.len()];
+        let mut unsure = Vec::new();
+        for (cbwind, inds, resp) in asked {
+            match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
+                OzoneMsg::Presences(got) if got.len() == inds.len() => {
+                    for (i, p) in inds.into_iter().zip(got) {
+                        match p {
+                            Presence::Present   => held[i] = true,
+                            Presence::Absent    => (),
+                            Presence::Unsure    => unsure.push(i),
+                        }
+                    }
+                },
+                OzoneMsg::Presences(got) => return Err(err!(
+                    "{}: Cbot {} answered {} presences for {} keys.",
+                    self.ozid(), cbwind, got.len(), inds.len();
+                    Bug, Mismatch, Size)),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: Cbot {} could not say whether {} keys hold values.",
+                    self.ozid(), cbwind, inds.len();
+                    Read)),
+                msg => return Err(err!(
+                    "{}: Unexpected answer from cbot {} to a presence request: {:?}",
+                    self.ozid(), cbwind, msg;
+                    Channel, Unexpected)),
+            }
+        }
+        for i in unsure {
+            held[i] = res!(self.get_head_wait(&keys[i], schms2)).is_some();
+        }
+        Ok(held)
     }
 
     // Read API, lower level.
@@ -1046,6 +1438,24 @@ impl<
     )
         -> Outcome<Dat>
     {
+        match res!(self.fetch_chunks_or_gone(k, schms2)) {
+            Some(dat) => Ok(dat),
+            None => Err(err!(
+                "{}: For bunch key {:?}, a chunk was not found or has been retired.",
+                self.ozid(), k;
+                Missing, Data)),
+        }
+    }
+
+    // `fetch_chunks`, with `None` when a chunk is absent or tombstoned, which a newer write
+    // retiring this chunk set produces.
+    fn fetch_chunks_or_gone(
+        &self,
+        k:      &Dat,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Option<Dat>>
+    {
         let self_id = self.ozid().clone();
         let enc = self.schemes().encrypter();
         let or_enc = schms2.map(|s| s.encrypter());
@@ -1155,10 +1565,9 @@ impl<
                             }
                             joined[start..end].copy_from_slice(&v[..]);
                         },
-                        Ok(OzoneMsg::Value(Value::Chunk(None, i, _))) => return Err(err!(
-                            "{}: For key {:?}, data chunk {} of {} was not found.",
-                            self_id, k, i, num_chunks;
-                            Missing, Data)),
+                        Ok(OzoneMsg::Value(Value::Chunk(None, _, _))) => return Ok(None),
+                        Ok(OzoneMsg::Value(Value::Chunk(Some((Dat::Usr(kind, _), _)), _, _)))
+                            if kind == id::usr_kind_id_deleted() => return Ok(None),
                         Ok(msg) => return Err(err!(
                             "{}: Unrecognised chunk request response: {:?}", self_id, msg;
                             Invalid, Input)),
@@ -1174,13 +1583,15 @@ impl<
                         encrypter, {}, differs from that used to store the original data.",
                         self_id, k, enc.or_debug(or_enc);
                         Decode, Bytes)),
-                    Ok((dat, _)) => return Ok(dat),
+                    Ok((dat, _)) => return Ok(Some(dat)),
                 }
             },
             _ => return Err(err!("{}: Key must be a PartKey.", self_id; Input, Invalid)),
         }
     }
 
+    /// Lists the keys with a live value; deleted keys are left out.  Values are not returned.
+    ///
     /// Walks every index file in every zone, so the cost is the size of the store rather than
     /// the size of the result.  The deadline is the ordinary user request one, which is what
     /// keeps "nothing on a request path may scan" enforceable rather than advisory: a walk big
@@ -1360,9 +1771,8 @@ impl<
         Ok(())
     }
 
-    /// Dump all cache contents to the log file.
-    pub fn dump_caches(&self, wait: Wait) -> Outcome<()> {
-        // Gather.
+    /// A copy of every cache, by the bot that holds it.
+    pub fn collect_caches(&self, wait: Wait) -> Outcome<BTreeMap<WorkerInd, Cache<UIDL, UID>>> {
         let resp = self.responder();
         if let Err(e) = self.chans().sup().send(
             OzoneMsg::DumpCacheRequest(resp.clone())
@@ -1387,6 +1797,12 @@ impl<
                     Channel)),
             }
         }
+        Ok(sorted)
+    }
+
+    /// Dump all cache contents to the log file.
+    pub fn dump_caches(&self, wait: Wait) -> Outcome<()> {
+        let sorted = res!(self.collect_caches(wait));
         // Display.
         info!(sync_log::stream(), "Cache dump summary");
         info!(sync_log::stream(), "+-----------+--------------+--------------+");
@@ -1398,6 +1814,10 @@ impl<
                 cache.map().len(),
                 cache.get_size(),
             ); 
+            let tt = cache.tomb_tracker();
+            info!(sync_log::stream(), "{}: {} chunk tombstones, {} keys with older records, \
+                ancillary {} bytes.", wind, tt.tombs().len(), tt.older().len(),
+                cache.get_ancillary_size());
         }
         info!(sync_log::stream(), "+-----------+--------------+--------------+");
         for (wind, cache) in sorted {
@@ -1407,22 +1827,21 @@ impl<
                 info!(sync_log::stream(), " No cache entries."); 
             } else {
                 for (kbyt, centry) in cache.map() {
-                    if let CacheEntry::LocatedValue(mloc, val) = centry {
-                        //let (k, _) = res!(Dat::from_bytes(&kbyt));
-                        let vlen = match val {
-                            Some(v) => v.len(),
-                            None => 0,
-                        };
-                        let size =
-                            kbyt.len() +
-                            vlen +
-                            cache.mloc_size();
+                    let CacheEntry::LocatedValue(mloc, val) = centry;
+                    //let (k, _) = res!(Dat::from_bytes(&kbyt));
+                    let vlen = match val {
+                        Some(v) => v.len(),
+                        None => 0,
+                    };
+                    let size =
+                        kbyt.len() +
+                        vlen +
+                        cache.mloc_size();
 
-                        info!(sync_log::stream(), " kbyt = {:02x?} vlen = {} floc = {:?}",
-                            kbyt, vlen, mloc.file_location(),
-                        );
-                        total_size += size;
-                    }
+                    info!(sync_log::stream(), " kbyt = {:02x?} vlen = {} floc = {:?}",
+                        kbyt, vlen, mloc.file_location(),
+                    );
+                    total_size += size;
                 }
             }
             info!(sync_log::stream(), "{} cache size estimate: {} [B]", wind, total_size);
@@ -1512,10 +1931,10 @@ impl<
                 info!(sync_log::stream(), " None"); 
             } else {
                 for (fnum, fstat) in fstates.map() {
-                    info!(sync_log::stream(), " {:10} {:?} old = {:.1}%",
+                    info!(sync_log::stream(), " {:10} {:?} old = {:.1}% of max, {:.1}% of own",
                         fnum, fstat,
-                        100.0 * (fstat.get_old_sum() as f64)
-                        / (self.cfg().data_file_max_bytes as f64),
+                        self.cfg().old_percent(fstat.get_old_sum()),
+                        OzoneConfig::old_share(fstat.get_old_sum(), fstat.get_data_file_size()),
                     );
                 }
             }
@@ -1551,6 +1970,23 @@ impl<
         }
     }
 
+    /// The heads pinned in every cache, summed over the zones, as last reported by each cache bot.
+    /// Set against the caches' limit, it is the headroom left before every insert with a value
+    /// jettisons the rest.  The figure travels two reporting hops, cache bot to zone bot to
+    /// supervisor, each of which can wait up to about two `zone_state_update_interval`s, so it can
+    /// lag by about four intervals, some 20 s at the default.  It counts resident head bytes only:
+    /// replay enters records without their bytes, so it reads 0 after every restart until heads
+    /// are written again, however many chunked values the store holds.
+    pub fn pinned_heads(&self, wait: Wait) -> Outcome<PinnedHeads> {
+        let mut sum = PinnedHeads::default();
+        for zs in res!(self.ozone_state(wait)) {
+            for h in &zs.heads {
+                sum.add(h);
+            }
+        }
+        Ok(sum)
+    }
+
     /// Ping the bots for proof of life.
     pub fn ping_bots(&self, wait: Wait) -> Outcome<(Instant, Vec<OzoneMsg<UIDL, UID, ENC, KH>>)> {
         let resp = self.responder();
@@ -1577,14 +2013,13 @@ impl<
         Ok((errs, nbots))
     }
 
-    pub fn list_files(&self, wait: Wait) -> Outcome<()> {
-
-        info!(sync_log::stream(), "Directory listing for {} zones, key:", self.cfg().num_zones());
-        info!(sync_log::stream(), " Typ: f File | d Directory | s Symlink");
-        info!(sync_log::stream(), " Size: in bytes");
-        info!(sync_log::stream(), " Mod: seconds since last modified");
-        info!(sync_log::stream(), " Name: object label");
-
+    /// Each zone's directory listing, read by its zone bot when the request arrives.
+    pub fn collect_files(
+        &self,
+        wait: Wait,
+    )
+        -> Outcome<BTreeMap<ZoneInd, BTreeMap<String, FileEntry>>>
+    {
         let emsg = "list files request";
         let resp = self.responder();
         if let Err(e) = self.chans().sup().send(
@@ -1607,6 +2042,87 @@ impl<
                     Channel)),
             };
         }
+        Ok(map)
+    }
+
+    /// The accounting barrier.  When it returns `Ok`, every `UpdateData` and `ScheduleOld` caused by
+    /// a write acknowledged before the call has reached its file bot, or its garbage buffer.  A cache
+    /// bot answers its caller before it tells the file bot of the new record's file, and that file
+    /// bot then tells the file bot of the old record's file, so each stage is asked in turn: the
+    /// cache bots forward the request to every file bot (behind their `UpdateData`), and each file
+    /// bot echoes it to every file bot (behind the `ScheduleOld` it forwarded).  Every file bot
+    /// answers each echo, so a zone owes cache bots times file bots times file bots answers.
+    fn settle(&self, deadline: Duration) -> Outcome<()> {
+        let emsg = "accounting barrier";
+        let resp = self.responder();
+        let mut owed = 0usize;
+        for z in 0..self.cfg().num_zones() {
+            let zind = ZoneInd::new(z);
+            let cbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Cache, &zind));
+            let fbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::File, &zind));
+            if let Err(e) = cbots.send_to_all(OzoneMsg::Settle(resp.clone())) {
+                return Err(err!(e,
+                    "{}: Cannot send the {} to the cache bots of zone {}.", self.ozid(), emsg, z;
+                    Channel, Write));
+            }
+            owed += cbots.len() * fbots.len() * fbots.len();
+        }
+        let wait = Wait {
+            max_wait:       deadline,
+            check_interval: constant::CHECK_INTERVAL.min(deadline),
+        };
+        let (_, msgs) = match resp.recv_number(owed, wait) {
+            Ok(v) => v,
+            Err(e) => return Err(err!(e,
+                "{}: The {} was not answered by all {} file bot echoes within {:?}.  A bot \
+                answers only when it reaches the request in its queue.",
+                self.ozid(), emsg, owed, deadline;
+                Channel, Timeout)),
+        };
+        for msg in msgs {
+            match msg {
+                OzoneMsg::Ok => (),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to the {}.", self.ozid(), emsg;
+                    Channel)),
+                msg => return Err(err!(
+                    "{}: Unexpected response to the {}: {:?}", self.ozid(), emsg, msg;
+                    Channel, Unexpected)),
+            }
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn settle_for_test(&self, deadline: Duration) -> Outcome<()> {
+        self.settle(deadline)
+    }
+
+    /// The physical length in bytes of every regular file in every zone directory, data, index and
+    /// collection temporary alike, read when asked.  It is not the figure [`Self::ozone_state`] gives,
+    /// the file bots' accounted size, which is pushed periodically and lags any write still draining.
+    pub fn size_bytes(&self, wait: Wait) -> Outcome<u64> {
+        let files = res!(self.collect_files(wait));
+        let mut total = 0u64;
+        for (_zind, zmap) in files {
+            for (_name, entry) in zmap {
+                if entry.typ == "f" {
+                    total = total.saturating_add(entry.size);
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    pub fn list_files(&self, wait: Wait) -> Outcome<()> {
+
+        info!(sync_log::stream(), "Directory listing for {} zones, key:", self.cfg().num_zones());
+        info!(sync_log::stream(), " Typ: f File | d Directory | s Symlink");
+        info!(sync_log::stream(), " Size: in bytes");
+        info!(sync_log::stream(), " Mod: seconds since last modified");
+        info!(sync_log::stream(), " Name: object label");
+
+        let map = res!(self.collect_files(wait));
         for (zind, zmap) in map {
             let mut total_size = 0;
             info!(sync_log::stream(), "{:?} directory", zind);
@@ -1659,9 +2175,217 @@ impl<
         Ok(map)
     }
 
+    /// Why the store stopped writing, if a failed sync or a failed cut back has stopped it.  Reads go on, but only of
+    /// records a barrier proved; a restart cuts the files in doubt and recovers.
+    pub fn fault(&self) -> Option<FaultReport> {
+        self.chans().fault().get()
+    }
+
+    /// The discards waiting on their winner's barrier, a gauge.  Under an interval policy it stays
+    /// near the write rate times the period; one that only grows says a syncer is not barriering.
+    pub fn held_effects(&self) -> usize {
+        self.chans().held_effects().load(Ordering::SeqCst)
+    }
+
+    /// A barrier over everything every writer of every zone took before the call, answered once
+    /// all have answered.  Each request queues behind the records already handed to its syncer.
+    /// Fails if any barrier fails, which stops the store, or at the wait.
+    pub fn sync_now(&self, wait: Wait) -> Outcome<()> {
+        if let Some(fault) = self.fault() {
+            return Err(err!(
+                "{}: {}, so no barrier can prove anything.  Restart the store; it recovers \
+                from the disk.", self.ozid(), fault.stopped();
+                Write, Fatal));
+        }
+        let resp = self.responder();
+        let mut n = 0;
+        for z in 0..self.cfg().num_zones() {
+            let zind = ZoneInd::new(z);
+            let wbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, &zind));
+            for b in 0..wbots.len() {
+                if let Err(e) = res!(wbots.get_bot(b)).send(OzoneMsg::SyncNow(resp.clone())) {
+                    return Err(err!(e,
+                        "{}: Cannot ask writer {} of zone {} for a barrier.", self.ozid(), b + 1, z + 1;
+                        Channel, Write));
+                }
+                n += 1;
+            }
+        }
+        let (_, msgs) = res!(resp.recv_number(n, wait));
+        for msg in msgs {
+            match msg {
+                OzoneMsg::Ok => (),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: A writer's barrier failed.", self.ozid();
+                    Write)),
+                msg => return Err(err!(
+                    "{}: Unexpected answer to a barrier request: {:?}", self.ozid(), msg;
+                    Channel, Unexpected)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Collects every old byte that a write acknowledged before the call left behind, and returns
+    /// once none is held by a sealed file, or fails at the deadline naming each file that still
+    /// holds one and why.
+    ///
+    /// The live files are rolled first, since a live file is never collected, then the accounting
+    /// barrier makes every supersession of an acknowledged write visible to the file bots.  Every
+    /// quarter of a second the file bots are ordered to collect what they hold, `Force::Yes`, which
+    /// waives the collector's trigger fraction and its switches and nothing that protects a read:
+    /// a file with a reader, a move in flight or a writer still draining is asked again, not
+    /// collected.  A zone bot that cannot pass the order on fails the call at once, not at the
+    /// deadline.
+    pub fn compact_now(&self, deadline: Duration) -> Outcome<CompactReport> {
+        let emsg = "compaction";
+        if let Some(fault) = self.fault() {
+            return Err(err!(
+                "{}: {}, so it is not compacted.  Restart the store; it recovers from the \
+                disk.", self.ozid(), fault.stopped();
+                Write, Fatal));
+        }
+        let start = Instant::now();
+        let left = |start: &Instant| deadline.saturating_sub(start.elapsed());
+        let wait = |d: Duration| Wait {
+            max_wait:       d,
+            check_interval: constant::CHECK_INTERVAL.min(d),
+        };
+        let bytes_before = res!(self.size_bytes(wait(deadline)));
+        res!(self.new_live_files_within(wait(left(&start).max(Duration::from_millis(1)))));
+        res!(self.settle(left(&start)));
+
+        let resp = self.responder();
+        let chan = res!(resp.channel().ok_or_else(|| err!(
+            "{}: The responder for {} has no channel.", self.ozid(), emsg; Channel, Missing)));
+        let mut collected = BTreeSet::new();
+        let mut deleted = BTreeSet::new();
+        let mut waiting: BTreeMap<WorkerInd, Vec<(FileNum, Hold)>> = BTreeMap::new();
+        let mut ordered: Option<Instant> = None;
+        loop {
+            if start.elapsed() > deadline {
+                // The files that still hold old bytes, from the state the last pass saw.
+                let states = res!(self.collect_file_states(constant::USER_REQUEST_WAIT));
+                let mut held = Vec::new();
+                for (wind, fmap) in &states {
+                    for (fnum, fstat) in fmap.map() {
+                        if Self::holds_old_bytes(fstat) {
+                            let why = match waiting.get(wind).and_then(|w| w.iter().find(|(f, _)| f == fnum)) {
+                                Some((_, hold)) => hold.why(),
+                                None if fstat.gc_active() => "collecting",
+                                None => "not yet ordered",
+                            };
+                            held.push(fmt!("file {} of zone {} ({})", fnum, wind.z() + 1, why));
+                        }
+                    }
+                }
+                return Err(err!(
+                    "{}: The {} did not finish within {:?}.  Sealed files still holding old bytes: {}.",
+                    self.ozid(), emsg, deadline, held.join(", ");
+                    Channel, Timeout));
+            }
+            if ordered.map_or(true, |t| t.elapsed() >= Duration::from_millis(250)) {
+                if let Err(e) = self.chans().sup().send(
+                    OzoneMsg::GcControl(GcControl::Compact, resp.clone())
+                ) {
+                    return Err(err!(e,
+                        "{}: Cannot send the {} order to supervisor.", self.ozid(), emsg;
+                        Channel, Write));
+                }
+                ordered = Some(Instant::now());
+            }
+            // Reports, until the file bots are quiet for a moment.  A failed order ends the wait.
+            while let Recv::Result(Ok(msg)) = chan.recv_timeout(Duration::from_millis(50)) {
+                match msg {
+                    OzoneMsg::CompactReport { wind, started, deleted: gone, waiting: held } => {
+                        for fnum in started {
+                            collected.insert((wind, fnum));
+                        }
+                        for fnum in gone {
+                            deleted.insert((wind, fnum));
+                        }
+                        waiting.insert(wind, held);
+                    },
+                    OzoneMsg::Error(e) => return Err(err!(e,
+                        "{}: In response to the {} order.", self.ozid(), emsg;
+                        Channel)),
+                    msg => return Err(err!(
+                        "{}: Unexpected response to the {} order: {:?}", self.ozid(), emsg, msg;
+                        Channel, Unexpected)),
+                }
+            }
+            let states = res!(self.collect_file_states(wait(left(&start).max(Duration::from_millis(1)))));
+            let mut pending = false;
+            for (_wind, fmap) in &states {
+                for (_fnum, fstat) in fmap.map() {
+                    pending |= Self::holds_old_bytes(fstat);
+                }
+            }
+            if !pending {
+                break;
+            }
+        }
+        // A deleted file's handle in a reader is dropped by a notice queued behind whatever the
+        // reader was doing, and the call is not done while that handle keeps the bytes allocated.
+        res!(self.readers_caught_up(wait(left(&start).max(Duration::from_millis(1)))));
+        let bytes_after = res!(self.size_bytes(wait(left(&start).max(Duration::from_millis(1)))));
+        Ok(CompactReport {
+            files_collected:    collected.len(),
+            files_deleted:      deleted.len(),
+            bytes_before,
+            bytes_after,
+        })
+    }
+
+    // Returns once every reader has handled all that was queued to it before the call.
+    fn readers_caught_up(&self, wait: Wait) -> Outcome<()> {
+        let emsg = "reader barrier";
+        let resp = self.responder();
+        let mut n = 0;
+        for pool in self.chans().get_all_workers_of_type(&WorkerType::Reader) {
+            for i in 0..pool.len() {
+                let bot = res!(pool.get_bot(i));
+                if let Err(e) = bot.send(OzoneMsg::Ping(self.ozid().clone(), resp.clone())) {
+                    return Err(err!(e,
+                        "{}: Cannot send the {} to reader {}.", self.ozid(), emsg, i;
+                        Channel, Write));
+                }
+                n += 1;
+            }
+        }
+        let (_, msgs) = res!(resp.recv_number(n, wait));
+        for msg in msgs {
+            match msg {
+                OzoneMsg::Pong(..) => (),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to the {}.", self.ozid(), emsg; Channel)),
+                msg => return Err(err!(
+                    "{}: Unexpected response to the {}: {:?}", self.ozid(), emsg, msg;
+                    Channel, Unexpected)),
+            }
+        }
+        Ok(())
+    }
+
+    // Does a sealed file hold bytes that a collection would remove, or is one at work on it?
+    fn holds_old_bytes(fstat: &FileState) -> bool {
+        !fstat.is_live() && (
+            fstat.gc_active() ||
+            fstat.get_old_sum() > 0 ||
+            (!fstat.data_map_empty() && fstat.is_all_old())
+        )
+    }
+
     /// Instruct the wbots to increment to their next live files, to provide a clean slate for
     /// testing.
     pub fn new_live_files(&self) -> Outcome<()> {
+        self.new_live_files_within(constant::CONTROL_REQUEST_WAIT)
+    }
+
+    // As `new_live_files`, for the writers to answer within the given wait.  A caller with a
+    // deadline of its own passes what is left of it, since the writers answer only once they
+    // reach the order in their queues.
+    fn new_live_files_within(&self, wait: Wait) -> Outcome<()> {
         let emsg = "new live files request";
         let resp = self.responder();
         if let Err(e) = self.chans().sup().send(
@@ -1673,9 +2397,17 @@ impl<
         }
         // A control operation like `activate_gc`, and queued behind the same zone bot work.
         let nw = self.cfg().num_wbots();
-        let (_, msgs) = match resp.recv_number(nw, constant::CONTROL_REQUEST_WAIT) {
+        let max_wait = wait.max_wait;
+        let (_, msgs) = match resp.recv_number(nw, wait) {
             Ok(v) => v,
-            Err(e) => return Err(self.control_failure(e, emsg, nw, "writer bots")),
+            Err(e) if max_wait >= constant::CONTROL_REQUEST_TIMEOUT => return Err(
+                self.control_failure(e, emsg, nw, "writer bots")),
+            Err(e) => return Err(err!(e,
+                "{}: The {} was not acknowledged by all {} writer bots within the {:?} that the \
+                caller's deadline left.  A writer acknowledges it only once it reaches the order \
+                in its queue.",
+                self.ozid(), emsg, nw, max_wait;
+                Channel, Timeout)),
         };
         for msg in msgs {
             match msg {
@@ -1704,5 +2436,28 @@ impl<
 {
     fn name_id(&self) -> Outcome<NamexId> {
         NamexId::try_from(constant::NAMEX_ID)
+    }
+}
+
+/// The chunk set identifier the builds of 2026-09 derived from the stored key alone (see
+/// `OzoneApi::legacy_chunk_set_id`).
+pub(crate) fn legacy_chunk_set_id(kbuf: &[u8]) -> u64 {
+    fold_set_id(HashScheme::new_seahash()
+        .hash(&[kbuf], constant::CHUNK_SET_ID_SALT)
+        .as_hashform())
+}
+
+fn fold_set_id(h: HashForm) -> u64 {
+    match h {
+        HashForm::U64(h)    => h,
+        // Seahash always yields a U64; fold any other form defensively into one.
+        other               => {
+            let v = other.as_vec();
+            let mut buf = [0u8; 8];
+            for (i, b) in v.iter().take(8).enumerate() {
+                buf[i] = *b;
+            }
+            u64::from_be_bytes(buf)
+        },
     }
 }

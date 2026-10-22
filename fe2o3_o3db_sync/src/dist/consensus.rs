@@ -61,6 +61,9 @@ pub struct CohortInstance {
 	pub members:		Vec<NodeId>,		// indexed by ReplicaId, as Cohort::members
 	// Some only after Decide, which makes a duplicate Decide a no-op.
 	pub decided_hash:	Option<BlockHash>,
+	// A decided record whose store failed. The replica is inert once it has
+	// emitted a Decide, so nothing else would bring the record back.
+	pub unstored:		Option<(BlockHash, Record)>,
 }
 
 impl CohortInstance {
@@ -90,6 +93,7 @@ impl CohortInstance {
 			replica,
 			members,
 			decided_hash:	None,
+			unstored:		None,
 		})
 	}
 
@@ -115,20 +119,24 @@ impl CohortInstance {
 		}
 	}
 
-	/// Idempotent: a duplicate Decide on the same hash is accepted silently; a
-	/// Decide on a different hash is a bug and is rejected.
-	pub fn mark_decided(&mut self, hash: BlockHash) -> Outcome<()> {
+	/// Would a Decide on this hash be accepted? A different hash from the one
+	/// already decided is a bug, so the caller asks before it stores the record.
+	pub fn check_decide(&self, hash: BlockHash) -> Outcome<()> {
 		match self.decided_hash {
-			Some(prev) if prev == hash => Ok(()),
-			Some(_) => Err(err!(
+			Some(prev) if prev != hash => Err(err!(
 				"CohortInstance decided twice on different blocks -- safety \
 				violation in upstream HotStuff.";
 				Bug, Invalid)),
-			None => {
-				self.decided_hash = Some(hash);
-				Ok(())
-			}
+			_ => Ok(()),
 		}
+	}
+
+	/// Idempotent: a duplicate Decide on the same hash is accepted silently; a
+	/// Decide on a different hash is a bug and is rejected.
+	pub fn mark_decided(&mut self, hash: BlockHash) -> Outcome<()> {
+		res!(self.check_decide(hash));
+		self.decided_hash = Some(hash);
+		Ok(())
 	}
 
 	/// New wire messages for a decided instance are dropped by the engine.

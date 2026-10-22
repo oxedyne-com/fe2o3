@@ -27,27 +27,32 @@
 //! # Error Handling Example
 //!
 //! ```
-//! use fe2o3_core::prelude::*;
+//! use oxedyne_fe2o3_core::prelude::*;
 //!
 //! fn validate_age(age: i32) -> Outcome<i32> {
 //!     if age < 0 {
 //!         return Err(err!(
-//!             "Age cannot be negative, got {}", age
-//!         ), Invalid, Input));
+//!             "Age cannot be negative, got {}", age;
+//!         Invalid, Input));
 //!     }
 //!     if age > 150 {
 //!         return Err(err!(
-//!             "Age seems unrealistic: {}", age
-//!         ), Invalid, Range));
+//!             "Age seems unrealistic: {}", age;
+//!         Invalid, Range));
 //!     }
 //!     Ok(age)
+//! }
+//!
+//! fn main() {
+//!     assert!(validate_age(42).is_ok());
+//!     assert!(validate_age(-1).is_err());
 //! }
 //! ```
 //!
 //! The [`New`] derive macro provides automatic constructor generation:
 //!
 //! ```
-//! use fe2o3_core::New;
+//! use oxedyne_fe2o3_core::New;
 //!
 //! #[derive(New)]
 //! struct Person {

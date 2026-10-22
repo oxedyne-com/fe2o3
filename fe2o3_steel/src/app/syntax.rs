@@ -80,7 +80,7 @@ pub fn new_shell_raw(
     });
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("dev"),
-        hyph1:  fmt!("d"),
+        hyph1:  Some(fmt!("d")),
         vals:   vec![],
         reqd:   false,
         help:   Some(fmt!("Run server in developer mode.")),
@@ -101,7 +101,7 @@ pub fn new_shell_raw(
     });
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("create-dev"),
-        hyph1:  fmt!("d"),
+        hyph1:  Some(fmt!("d")),
         vals:   vec![],
         reqd:   false,
         help:   Some(fmt!("Create self-signed certificates for development.")),
@@ -122,7 +122,7 @@ pub fn new_shell_raw(
     });
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("status"),
-        hyph1:  fmt!("s"),
+        hyph1:  Some(fmt!("s")),
         vals:   vec![],
         reqd:   false,
         help:   Some(fmt!("Print the configured ACME state and vhost hostnames.")),
@@ -130,7 +130,7 @@ pub fn new_shell_raw(
     });
     let a2 = Arg::from(ArgConfig {
         name:   fmt!("renew"),
-        hyph1:  fmt!("r"),
+        hyph1:  Some(fmt!("r")),
         vals:   vec![],
         reqd:   false,
         help:   Some(fmt!("Clear the ACME cache so certs are re-issued on next start-up.")),
@@ -154,16 +154,16 @@ pub fn new_shell_raw(
     });
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("create"),
-        hyph1:  fmt!("c"),
-        vals:   vec![(Kind::Str, fmt!("Name of secret for indexing"))],
+        hyph1:  Some(fmt!("c")),
+        vals:   vec![(Kind::Str, fmt!("Name of secret for indexing")).into()],
         reqd:   false,
         help:   Some(fmt!("Interactively create a new encrypted secret.")),
         ..Default::default()
     });
     let a2 = Arg::from(ArgConfig {
         name:   fmt!("recover"),
-        hyph1:  fmt!("r"),
-        vals:   vec![(Kind::Str, fmt!("Name of secret for indexing"))],
+        hyph1:  Some(fmt!("r")),
+        vals:   vec![(Kind::Str, fmt!("Name of secret for indexing")).into()],
         reqd:   false,
         help:   Some(fmt!("Interactively recover an encrypted secret.")),
         ..Default::default()
@@ -199,7 +199,7 @@ pub fn new_shell_raw(
     });
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("migrate"),
-        hyph1:  fmt!("m"),
+        hyph1:  Some(fmt!("m")),
         hyph2:  Some(fmt!("migrate")),
         vals:   vec![],
         reqd:   false,
@@ -224,9 +224,9 @@ pub fn new_shell_raw(
     });
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("add"),
-        hyph1:  fmt!("a"),
+        hyph1:  Some(fmt!("a")),
         hyph2:  Some(fmt!("add")),
-        vals:   vec![(Kind::Str, fmt!("New admin name"))],
+        vals:   vec![(Kind::Str, fmt!("New admin name")).into()],
         reqd:   false,
         help:   Some(fmt!("Add a new admin entry wrapping the wallet master \
             key under a freshly prompted password. The running session must \
@@ -235,9 +235,9 @@ pub fn new_shell_raw(
     });
     let a2 = Arg::from(ArgConfig {
         name:   fmt!("remove"),
-        hyph1:  fmt!("r"),
+        hyph1:  Some(fmt!("r")),
         hyph2:  Some(fmt!("remove")),
-        vals:   vec![(Kind::Str, fmt!("Admin name to remove"))],
+        vals:   vec![(Kind::Str, fmt!("Admin name to remove")).into()],
         reqd:   false,
         help:   Some(fmt!("Remove an existing admin entry by name. The last \
             remaining admin cannot be removed.")),
@@ -245,7 +245,7 @@ pub fn new_shell_raw(
     });
     let a3 = Arg::from(ArgConfig {
         name:   fmt!("list"),
-        hyph1:  fmt!("l"),
+        hyph1:  Some(fmt!("l")),
         hyph2:  Some(fmt!("list")),
         vals:   vec![],
         reqd:   false,
@@ -255,9 +255,9 @@ pub fn new_shell_raw(
     });
     let a4 = Arg::from(ArgConfig {
         name:   fmt!("scopes"),
-        hyph1:  fmt!("s"),
+        hyph1:  Some(fmt!("s")),
         hyph2:  Some(fmt!("scopes")),
-        vals:   vec![(Kind::Str, fmt!("Comma-separated verb list"))],
+        vals:   vec![(Kind::Str, fmt!("Comma-separated verb list")).into()],
         reqd:   false,
         help:   Some(fmt!("Scopes for a new admin, comma-separated. Well-known \
             scopes: 'admin' (manage other admin entries, in CLI and dashboard); \
@@ -269,9 +269,9 @@ pub fn new_shell_raw(
     });
     let a5 = Arg::from(ArgConfig {
         name:   fmt!("expires-in"),
-        hyph1:  fmt!("e"),
+        hyph1:  Some(fmt!("e")),
         hyph2:  Some(fmt!("expires-in")),
-        vals:   vec![(Kind::U64, fmt!("Seconds until expiry"))],
+        vals:   vec![(Kind::U64, fmt!("Seconds until expiry")).into()],
         reqd:   false,
         help:   Some(fmt!("Expire the new admin after N seconds from now. \
             A value of 0 (the default) means 'never expires'.")),
@@ -279,7 +279,7 @@ pub fn new_shell_raw(
     });
     let a6 = Arg::from(ArgConfig {
         name:   fmt!("passwd"),
-        hyph1:  fmt!("p"),
+        hyph1:  Some(fmt!("p")),
         hyph2:  Some(fmt!("passwd")),
         vals:   vec![],
         reqd:   false,
@@ -313,16 +313,16 @@ pub fn new_shell_raw(
     });
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("address"),
-        hyph1:  fmt!("a"),
-        vals:   vec![(Kind::Str, fmt!("Email address"))],
+        hyph1:  Some(fmt!("a")),
+        vals:   vec![(Kind::Str, fmt!("Email address")).into()],
         reqd:   true,
         help:   Some(fmt!("Email address (local@domain) the password belongs to.")),
         ..Default::default()
     });
     let a2 = Arg::from(ArgConfig {
         name:   fmt!("delivery-dir"),
-        hyph1:  fmt!("d"),
-        vals:   vec![(Kind::Str, fmt!("Relative directory under maildir_root"))],
+        hyph1:  Some(fmt!("d")),
+        vals:   vec![(Kind::Str, fmt!("Relative directory under maildir_root")).into()],
         reqd:   true,
         help:   Some(fmt!("Per-user mailbox directory, relative to maildir_root.")),
         ..Default::default()

@@ -1,5 +1,11 @@
 use crate::{
     prelude::*,
+    api::{
+        next_event,
+        Begun,
+        Event,
+        PendingStore,
+    },
     bots::base::bot_deps::*,
     comm::channels::BotChannels,
 };
@@ -10,6 +16,7 @@ use oxedyne_fe2o3_core::{
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
+    mem,
     sync::Arc,
 };
 
@@ -32,6 +39,7 @@ pub struct ServerBot<
     api:        OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
     // State
     inited:     bool,
+    pending:    Vec<PendingStore<UIDL, UID, ENC, KH>>, // chunked puts awaiting their chunks
 }
 
 impl<
@@ -60,20 +68,38 @@ impl<
 
     fn listen(&mut self) -> LoopBreak {
         // INTERNAL
-        // Block until a message arrives.  The server bot has no periodic maintenance of its
-        // own, so it must sleep rather than poll the channel, otherwise an idle database burns
-        // a CPU core.  A shutdown is delivered as an `OzoneMsg::Finish` on this same channel,
-        // which wakes the blocking receive immediately.
-        match self.chan_in().recv() {
+        // Block until something arrives.  The server bot has no periodic maintenance of its
+        // own, so it must sleep rather than poll its channels, otherwise an idle database burns
+        // a CPU core.  A shutdown is delivered as an `OzoneMsg::Finish` on the request channel,
+        // which wakes the blocking receive immediately.  Chunked puts under way are waited on
+        // beside it, each on the channel of its own responder, so that a put waiting for the
+        // disk does not hold up the requests behind it.
+        let event = if self.pending.is_empty() {
+            self.chan_in().recv().map(Event::Inbox)
+        } else {
+            next_event(self.chan_in.rx(), &self.pending)
+        };
+        match event {
             Err(e) => self.err_cannot_receive(err!(e,
                 "{}: Waiting for message on internal channel.", self.ozid();
                 IO, Channel)),
-            Ok(msg) => match msg {
+            Ok(Event::Answer(i, msg)) => {
+                let outcome = self.pending[i].advance(&self.api, msg);
+                self.settle(i, outcome);
+            },
+            Ok(Event::Quiet) => self.expire_pending(),
+            Ok(Event::Inbox(msg)) => match msg {
                 OzoneMsg::Get { key, schms2, resp } => {
                     match self.api().get_wait(&key, schms2.as_ref()) {
-                        Err(e) => self.error(err!(e,
-                            "{}: While trying to get value for key {:?}", self.ozid(), key;
-                            Data, Read)),
+                        Err(e) => {
+                            // The caller is waiting on this answer, and a failure only logged
+                            // reached it as a timeout that named no cause.
+                            let e = err!(e,
+                                "{}: While trying to get value for key {:?}", self.ozid(), key;
+                                Data, Read);
+                            self.error(e.clone());
+                            self.respond(Err(e), &resp);
+                        },
                         Ok(result) => match resp.send(OzoneMsg::GetResult(result)) {
                             Err(e) => self.err_cannot_send(err!(e,
                                 "{}: While sending an OzoneMsg::GetResult back via a responder.",
@@ -85,21 +111,35 @@ impl<
                 },
                 OzoneMsg::Put { key, val, user, schms2, resp } => {
                     debug!(sync_log::stream(), "Store key: {:?}",key);
-                    match self.api().store_dat_using_responder(
+                    let caller = resp.clone();
+                    match self.api().begin_store(
                         key,
                         val,
                         user,
                         schms2.as_ref(),
                         resp,
                     ) {
-                        Err(e) => self.error(err!(e,
-                            "{}: While trying to put value.", self.ozid();
-                            Data, Write)),
-                        Ok(_nchunks) => (),
+                        Err(e) => {
+                            // As for a get: the caller hears the cause, not a timeout.
+                            let e = err!(e,
+                                "{}: While trying to put value.", self.ozid();
+                                Data, Write);
+                            self.error(e.clone());
+                            self.respond(Err(e), &caller);
+                        },
+                        Ok(Begun::Done(_nchunks)) => (),
+                        Ok(Begun::Pending(pending)) => self.pending.push(pending),
                     }
                 },
-                _ => if self.listen_more(msg).must_end() {
-                    return LoopBreak(true);
+                _ => {
+                    // A put in hand is seen through before the bot finishes, as it was when the
+                    // bot waited on each one.
+                    if matches!(msg, OzoneMsg::Finish) {
+                        self.finish_pending();
+                    }
+                    if self.listen_more(msg).must_end() {
+                        return LoopBreak(true);
+                    }
                 },
                 // TODO one for OzoneMsg::Delete?
             },
@@ -209,8 +249,45 @@ impl<
             api:        args.api,
             // State    
             inited:     false,
+            pending:    Vec::new(),
         }
     }
-    
 
+    // A store has taken in an answer.  A finished one is dropped, and an error that could not
+    // be given to the caller, which has no responder, is the bot's to report.
+    fn settle(&mut self, i: usize, outcome: Outcome<bool>) {
+        match outcome {
+            Ok(false) => (),
+            Ok(true) => { self.pending.swap_remove(i); },
+            Err(e) => {
+                self.pending.swap_remove(i);
+                self.error(err!(e,
+                    "{}: While storing a chunked value.", self.ozid();
+                    Data, Write));
+            },
+        }
+    }
+
+    // Fails the stores that have waited out their silence.
+    fn expire_pending(&mut self) {
+        let mut i = self.pending.len();
+        while i > 0 {
+            i -= 1;
+            if self.pending[i].left().is_zero() {
+                let outcome = self.pending[i].expire(&self.api);
+                self.settle(i, outcome);
+            }
+        }
+    }
+
+    // Waits for every store in hand, each to the end.
+    fn finish_pending(&mut self) {
+        for pending in mem::take(&mut self.pending) {
+            if let Err(e) = pending.run(&self.api) {
+                self.error(err!(e,
+                    "{}: While finishing a chunked store at shutdown.", self.ozid();
+                    Data, Write));
+            }
+        }
+    }
 }

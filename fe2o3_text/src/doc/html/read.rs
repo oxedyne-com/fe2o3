@@ -4,16 +4,29 @@
 //! # The dialect
 //!
 //! The elements read are the ones the tree has a node for, and no others: the six headings,
-//! paragraphs, lists, `pre`, quotations, thematic breaks and tables, and the inline run of emphasis,
-//! links, images, code spans and breaks. Comments, `head`, `script` and `style` hold no prose and are
-//! dropped, content and all.
+//! paragraphs, lists, `pre`, quotations, thematic breaks, tables with their captions and header
+//! cells, figures with their captions, and definition lists (`dl`, `dt`, `dd`, the `div` HTML allows
+//! around each group); and the inline run of emphasis, links, images, code spans, breaks, `sup` and
+//! `sub`. Comments, `head`, `script` and `style` hold no prose and are dropped, content and all.
+//!
+//! A `td` or `th` in the class `num` aligns its column to [`Align::End`] when every body cell of that
+//! column carries it. A column only some of whose cells say `num` is aligned by nothing, because a
+//! column has one alignment and the tree has nowhere to put a cell's own.
 //!
 //! # Everything else is unwrapped
 //!
 //! A `div`, a `span`, and every element this has never heard of, contribute nothing themselves and are
-//! erased: the tag goes and the content is read exactly where the tag stood. There is no generic
-//! container in the tree to put them in, and inventing one would make every consumer learn HTML --
-//! which is the one thing the tree exists to prevent.
+//! erased: the tag goes and the content is read exactly where the tag stood. Erasing them is what
+//! [`parse`] does, and it suits prose a reader only wants the words of.
+//!
+//! The one exception is asked for. Under [`Opts::keep_classed`], read with [`parse_with`], a `span`
+//! or a `div` that carries a class or an id is kept, as an [`Inline::Span`] or a [`Block::Div`]
+//! holding its [`Attrs`], and so is the class or id of a `figure` or a `dl`, and the id, classes,
+//! `width` and `height` of an `img`. That is the reading a
+//! caller wants when the HTML is the prose's own store, and writing it back must give the page the
+//! classes its stylesheet names. A `span` or `div` that carries neither is still erased, since it
+//! names nothing the tree could carry. The tree still learns no HTML: what it keeps is a name, and
+//! the names are interpreted where the tree is rendered.
 //!
 //! Erasing rather than recursing is what makes this work in both directions at once. A `div` holding
 //! paragraphs is read as those paragraphs; a `div` holding bare words is read as the paragraph those
@@ -30,10 +43,12 @@
 
 use crate::doc::{
 	Align,
+	Attrs,
 	Block,
 	Cell,
 	Inline,
 	Row,
+	Term,
 };
 use crate::html::decode_entities;
 
@@ -52,10 +67,21 @@ use std::mem::take;
 /// document of a million nested `div`s is read as the flat prose it says rather than refused.
 pub const DEPTH_LIMIT: usize = 32;
 
+/// What a caller may vary about the reading.
+#[derive(Clone, Debug, Default)]
+pub struct Opts {
+	pub keep_classed: bool,	// keep a classed or id'd `span`/`div`, a `figure`'s or `dl`'s names, an `img`'s names and size
+}
+
 /// Reads HTML into the blocks it is made of.
 pub fn parse(src: &str) -> Outcome<Vec<Block>> {
-	let mut lex = Lex { src, i: 0, raw: None };
-	blocks(&mut lex, None, 0)
+	parse_with(src, &Opts::default())
+}
+
+/// Reads HTML into the blocks it is made of, varying what [`Opts`] allows.
+pub fn parse_with(src: &str, opts: &Opts) -> Outcome<Vec<Block>> {
+	let mut lex = Lex { src, i: 0, raw: None, keep: opts.keep_classed };
+	blocks(&mut lex, None, 0, None)
 }
 
 /// What an element is, which is what decides where its content goes.
@@ -82,9 +108,16 @@ enum Kind {
 	/// An image.
 	Image,
 	/// A code span within a line.
-	Span,
+	CodeSpan,
 	/// A break the author asked for.
 	Break,
+	Sup,		// superscript
+	Sub,		// subscript
+	Span,		// a `span`, kept only where named and asked for
+	Div,		// a `div`, likewise
+	Figure,
+	Terms,		// a `dl`
+	Caption,	// a `figcaption` or a table's `caption`, read only by what it captions
 	/// Content that is not prose, and goes nowhere.
 	Drop,
 	/// Anything else: the tag is erased and its content read in its place.
@@ -95,7 +128,9 @@ impl Kind {
 
 	/// Whether the element belongs within a line rather than standing on its own.
 	fn is_inline(&self) -> bool {
-		matches!(self, Self::Emph(_) | Self::Link | Self::Image | Self::Span | Self::Break)
+		matches!(self,
+			Self::Emph(_) | Self::Link | Self::Image | Self::CodeSpan | Self::Break |
+			Self::Sup | Self::Sub | Self::Span)
 	}
 }
 
@@ -122,10 +157,28 @@ fn kind(name: &str) -> Kind {
 		"strong" | "b"			=> Kind::Emph(true),
 		"a"				=> Kind::Link,
 		"img"				=> Kind::Image,
-		"code"				=> Kind::Span,
+		"code"				=> Kind::CodeSpan,
 		"br"				=> Kind::Break,
+		"sup"				=> Kind::Sup,
+		"sub"				=> Kind::Sub,
+		"span"				=> Kind::Span,
+		"div"				=> Kind::Div,
+		"figure"			=> Kind::Figure,
+		"dl"				=> Kind::Terms,
+		"figcaption" | "caption"	=> Kind::Caption,
 		"head" | "script" | "style"	=> Kind::Drop,
 		_				=> Kind::Bare,
+	}
+}
+
+/// What an element is, given what it carries and what the reader was asked to keep.
+///
+/// A `span` or a `div` is only kept where the reader was asked to keep names and the element carries
+/// one; anywhere else it is erased, exactly as it always was.
+fn kind_of(lex: &Lex, name: &str, attrs: &str) -> Kind {
+	match kind(name) {
+		Kind::Span | Kind::Div if !(lex.keep && is_named(attrs))	=> Kind::Bare,
+		k								=> k,
 	}
 }
 
@@ -167,7 +220,12 @@ fn is(name: &str, want: &str) -> bool {
 ///
 /// Loose inline content -- words that reach block level with no paragraph around them, which is what a
 /// `div` full of prose leaves behind once it is erased -- is gathered into the paragraph it is.
-fn blocks(lex: &mut Lex, until: Option<&str>, depth: usize) -> Outcome<Vec<Block>> {
+///
+/// Where `cap` is given, the element being read is a figure, and a `figcaption` within it is read
+/// into `cap` rather than among the blocks.
+fn blocks(lex: &mut Lex, until: Option<&str>, depth: usize, mut cap: Option<&mut Vec<Inline>>)
+	-> Outcome<Vec<Block>>
+{
 	if depth > DEPTH_LIMIT {
 		return Err(err!(
 			"HTML elements nest more than {} deep, which no document written to be read \
@@ -176,6 +234,7 @@ fn blocks(lex: &mut Lex, until: Option<&str>, depth: usize) -> Outcome<Vec<Block
 	}
 	let mut out = Vec::new();
 	let mut run = Run::default();	// Loose inline content, awaiting the paragraph it makes.
+	let mut nest = 0usize;		// Erased elements open of the name being read until.
 	while let Some(tok) = lex.next() {
 		match tok {
 			Tok::Text(t)		=> run.text(t),
@@ -183,16 +242,33 @@ fn blocks(lex: &mut Lex, until: Option<&str>, depth: usize) -> Outcome<Vec<Block
 				// A close tag that answers nothing closes nothing, and the document carries on.
 				if let Some(until) = until {
 					if is(name, until) {
-						break;
+						// An erased element of the same name closes itself and not this one: a
+						// kept `div` holding a bare one must not end at the bare one's close.
+						if nest > 0 {
+							nest -= 1;
+						} else {
+							break;
+						}
 					}
 				}
 			}
 			Tok::Open { name, attrs, void } => {
-				let k = kind(name);
+				let k = kind_of(lex, name, attrs);
 				match k {
 					Kind::Drop		=> skip(lex, name, void),
+					Kind::Caption if cap.is_some() && !void => {
+						flush(&mut out, &mut run);
+						let content = res!(inlines(lex, name, depth + 1));
+						if let Some(c) = cap.as_mut() {
+							c.extend(content);
+						}
+					}
 					// The tag is erased, and its content read as though it had never been there.
-					Kind::Bare		=> {}
+					Kind::Bare | Kind::Caption => {
+						if !void && until.map_or(false, |u| is(name, u)) {
+							nest += 1;
+						}
+					}
 					_ if k.is_inline()	=> {
 						res!(inline(lex, &mut run, k, name, attrs, void, depth));
 					}
@@ -233,12 +309,34 @@ fn block(lex: &mut Lex, k: Kind, name: &str, attrs: &str, void: bool, depth: usi
 			false	=> res!(list(lex, ordered, name, depth)),
 		},
 		Kind::Table		=> match void {
-			true	=> Block::Table { head: None, rows: Vec::new(), cols: Vec::new() },
+			true	=> Block::Table { head: None, rows: Vec::new(), cols: Vec::new(), caption: Vec::new() },
 			false	=> res!(table(lex, depth)),
 		},
 		Kind::Quote		=> match void {
 			true	=> Block::Quote(Vec::new()),
-			false	=> Block::Quote(res!(blocks(lex, Some(name), depth + 1))),
+			false	=> Block::Quote(res!(blocks(lex, Some(name), depth + 1, None))),
+		},
+		Kind::Div		=> Block::Div {
+			attrs:		attrs_from(attrs),
+			content:	match void {
+				true	=> Vec::new(),
+				false	=> res!(blocks(lex, Some(name), depth + 1, None)),
+			},
+		},
+		Kind::Figure		=> {
+			let mut caption = Vec::new();
+			let content = match void {
+				true	=> Vec::new(),
+				false	=> res!(blocks(lex, Some(name), depth + 1, Some(&mut caption))),
+			};
+			Block::Figure { attrs: kept_attrs(lex, attrs), content, caption }
+		}
+		Kind::Terms		=> Block::Terms {
+			attrs:	kept_attrs(lex, attrs),
+			items:	match void {
+				true	=> Vec::new(),
+				false	=> res!(terms(lex, name, depth)),
+			},
 		},
 		Kind::Heading(level)	=> Block::Heading {
 			level,
@@ -277,19 +375,30 @@ fn inlines(lex: &mut Lex, until: &str, depth: usize) -> Outcome<Vec<Inline>> {
 			Excessive, Input));
 	}
 	let mut run = Run::default();
+	let mut nest = 0usize;	// Erased elements open of the name being read until. See `blocks`.
 	while let Some(tok) = lex.next() {
 		match tok {
 			Tok::Text(t)		=> run.text(t),
 			Tok::Close(name)	=> {
 				if is(name, until) {
-					break;
+					if nest > 0 {
+						nest -= 1;
+					} else {
+						break;
+					}
 				}
 			}
 			Tok::Open { name, attrs, void } => {
-				let k = kind(name);
+				let k = kind_of(lex, name, attrs);
 				match k {
 					Kind::Drop		=> skip(lex, name, void),
-					Kind::Bare		=> {}
+					// A `div` within a line is erased as it always was, kept or not, since a line
+					// holds no blocks; and a caption means nothing outside what it captions.
+					Kind::Bare | Kind::Div | Kind::Caption => {
+						if !void && is(name, until) {
+							nest += 1;
+						}
+					}
 					_ if k.is_inline()	=> {
 						res!(inline(lex, &mut run, k, name, attrs, void, depth));
 					}
@@ -314,8 +423,9 @@ fn inline(lex: &mut Lex, run: &mut Run, k: Kind, name: &str, attrs: &str, void: 
 		Kind::Image	=> run.push(Inline::Image {
 			src:	attr(attrs, "src").unwrap_or_default(),
 			alt:	attr(attrs, "alt").unwrap_or_default(),
+			attrs:	img_attrs(lex, attrs),
 		}),
-		Kind::Span	=> {
+		Kind::CodeSpan	=> {
 			// A code span is not a `pre`: HTML collapses the whitespace within one exactly as it does
 			// anywhere else, and so does this. What is not trimmed is the space at either end, because
 			// a span sits in a line and the space beside it is the line's.
@@ -331,6 +441,17 @@ fn inline(lex: &mut Lex, run: &mut Run, k: Kind, name: &str, attrs: &str, void: 
 				false	=> res!(inlines(lex, name, depth + 1)),
 			};
 			run.push(Inline::Emph { strong, content });
+		}
+		Kind::Sup | Kind::Sub | Kind::Span => {
+			let content = match void {
+				true	=> Vec::new(),
+				false	=> res!(inlines(lex, name, depth + 1)),
+			};
+			run.push(match k {
+				Kind::Sup	=> Inline::Sup(content),
+				Kind::Sub	=> Inline::Sub(content),
+				_		=> Inline::Span { attrs: attrs_from(attrs), content },
+			});
 		}
 		Kind::Link	=> match attr(attrs, "href") {
 			Some(to) => {
@@ -374,7 +495,7 @@ fn list(lex: &mut Lex, ordered: bool, until: &str, depth: usize) -> Outcome<Bloc
 				if is(name, "li") {
 					items.push(match void {
 						true	=> Vec::new(),
-						false	=> res!(blocks(lex, Some(name), depth + 1)),
+						false	=> res!(blocks(lex, Some(name), depth + 1, None)),
 					});
 				} else if kind(name) == Kind::Drop {
 					skip(lex, name, void);
@@ -387,11 +508,68 @@ fn list(lex: &mut Lex, ordered: bool, until: &str, depth: usize) -> Outcome<Bloc
 	Ok(Block::List { ordered, items })
 }
 
+/// Reads a `dl` into the terms it defines.
+///
+/// A `div` around a `dt` and its `dd`s, which HTML allows so that a stylesheet can reach each group,
+/// is erased: the group is the term, whether or not anything wraps it.
+fn terms(lex: &mut Lex, until: &str, depth: usize) -> Outcome<Vec<Term>> {
+	let mut items: Vec<Term> = Vec::new();
+	while let Some(tok) = lex.next() {
+		match tok {
+			Tok::Text(t)		=> {
+				// Words with no `dt` or `dd` to sit in are still words, and stand as a definition
+				// rather than being dropped.
+				let s = collapse(&decode_entities(t));
+				let s = s.trim();
+				if !s.is_empty() {
+					let def = vec![Block::Para(vec![Inline::Text(s.to_string())])];
+					push_def(&mut items, def);
+				}
+			}
+			Tok::Close(name)	=> {
+				if is(name, until) {
+					break;
+				}
+			}
+			Tok::Open { name, void, .. } => {
+				if is(name, "dt") {
+					items.push(Term {
+						term:	match void {
+							true	=> Vec::new(),
+							false	=> res!(inlines(lex, name, depth + 1)),
+						},
+						defs:	Vec::new(),
+					});
+				} else if is(name, "dd") {
+					let def = match void {
+						true	=> Vec::new(),
+						false	=> res!(blocks(lex, Some(name), depth + 1, None)),
+					};
+					push_def(&mut items, def);
+				} else if kind(name) == Kind::Drop {
+					skip(lex, name, void);
+				}
+			}
+		}
+	}
+	Ok(items)
+}
+
+/// Gives a definition to the last term, or to a term of no words where none has come yet.
+fn push_def(items: &mut Vec<Term>, def: Vec<Block>) {
+	match items.last_mut() {
+		Some(t)	=> t.defs.push(def),
+		None	=> items.push(Term { term: Vec::new(), defs: vec![def] }),
+	}
+}
+
 /// Reads a `table` into the grid it is.
 fn table(lex: &mut Lex, depth: usize) -> Outcome<Block> {
 	let mut head: Option<Row> = None;
 	let mut rows: Vec<Row> = Vec::new();
 	let mut cols: Vec<Align> = Vec::new();
+	let mut caption: Vec<Inline> = Vec::new();
+	let mut num: Vec<bool> = Vec::new();	// Whether every body cell of a column so far is `num`.
 	let mut in_head = false;	// Whether the rows being read are the table's header.
 	while let Some(tok) = lex.next() {
 		match tok {
@@ -409,13 +587,27 @@ fn table(lex: &mut Lex, depth: usize) -> Outcome<Block> {
 			Tok::Open { name, void, .. } => {
 				if is(name, "thead") {
 					in_head = true;
+				} else if is(name, "caption") && !void {
+					caption.extend(res!(inlines(lex, name, depth + 1)));
 				} else if is(name, "tr") && !void {
-					let (r, all_th) = res!(row(lex, &mut cols, depth + 1));
+					let (mut r, all_th, nums) = res!(row(lex, &mut cols, depth + 1));
 					// A table names its columns in a `thead`, or in a first row of nothing but `th`.
 					// Both say the same thing, and an exporter picks whichever it likes.
 					if head.is_none() && rows.is_empty() && (in_head || all_th) {
+						// A header row's cells head their columns by being in it, and the flag is
+						// kept for the cell that heads a body row. See `Cell`.
+						for c in r.0.iter_mut() {
+							c.header = false;
+						}
 						head = Some(r);
 					} else {
+						// A column first met in a later row had a body cell without `num` above it.
+						while num.len() < nums.len() {
+							num.push(rows.is_empty());
+						}
+						for (i, n) in num.iter_mut().enumerate() {
+							*n = *n && nums.get(i).copied().unwrap_or(false);
+						}
 						rows.push(r);
 					}
 				} else if kind(name) == Kind::Drop {
@@ -426,15 +618,25 @@ fn table(lex: &mut Lex, depth: usize) -> Outcome<Block> {
 			}
 		}
 	}
-	Ok(Block::Table { head, rows, cols })
+	if !rows.is_empty() {
+		for (i, n) in num.iter().enumerate() {
+			if *n && i < cols.len() && cols[i] == Align::None {
+				cols[i] = Align::End;
+			}
+		}
+	}
+	Ok(Block::Table { head, rows, cols, caption })
 }
 
 /// Reads a `tr` into the row it is, filling in the alignment its cells declare for their columns.
 ///
 /// Whether every cell was a `th` comes back with the row, because a first row of nothing but `th` is a
-/// table naming its columns whether or not anyone wrapped it in a `thead`.
-fn row(lex: &mut Lex, cols: &mut Vec<Align>, depth: usize) -> Outcome<(Row, bool)> {
+/// table naming its columns whether or not anyone wrapped it in a `thead`. A `th scope="row"` names
+/// its row and not a column, so it does not count. Whether each cell is in the class `num` comes back
+/// too, for [`table`] to settle the column's alignment once it has seen every row.
+fn row(lex: &mut Lex, cols: &mut Vec<Align>, depth: usize) -> Outcome<(Row, bool, Vec<bool>)> {
 	let mut cells: Vec<Cell> = Vec::new();
+	let mut nums: Vec<bool> = Vec::new();
 	let mut all_th = true;
 	while let Some(tok) = lex.next() {
 		match tok {
@@ -447,9 +649,11 @@ fn row(lex: &mut Lex, cols: &mut Vec<Align>, depth: usize) -> Outcome<(Row, bool
 			Tok::Open { name, attrs, void } => {
 				let th = is(name, "th");
 				if th || is(name, "td") {
-					if !th {
+					let by_row = attr(attrs, "scope").map_or(false, |v| v.eq_ignore_ascii_case("row"));
+					if !th || by_row {
 						all_th = false;
 					}
+					nums.push(has_class(attrs, "num"));
 					let i = cells.len();
 					while cols.len() <= i {
 						cols.push(Align::None);
@@ -458,10 +662,13 @@ fn row(lex: &mut Lex, cols: &mut Vec<Align>, depth: usize) -> Outcome<(Row, bool
 					if cols[i] == Align::None {
 						cols[i] = align_of(attrs);
 					}
-					cells.push(Cell(match void {
-						true	=> Vec::new(),
-						false	=> res!(inlines(lex, name, depth + 1)),
-					}));
+					cells.push(Cell {
+						content:	match void {
+							true	=> Vec::new(),
+							false	=> res!(inlines(lex, name, depth + 1)),
+						},
+						header:		th,
+					});
 				} else if kind(name) == Kind::Drop {
 					skip(lex, name, void);
 				}
@@ -470,7 +677,7 @@ fn row(lex: &mut Lex, cols: &mut Vec<Align>, depth: usize) -> Outcome<(Row, bool
 	}
 	// A row of no cells names no columns, whatever its cells were not.
 	let named = all_th && !cells.is_empty();
-	Ok((Row(cells), named))
+	Ok((Row(cells), named, nums))
 }
 
 /// Reads a `pre` into the run of code it holds.
@@ -677,11 +884,21 @@ fn collapse(s: &str) -> String {
 
 /// The value of one attribute from a tag's unparsed run of them, where the tag carries it.
 ///
-/// Names are matched without regard to case, and a value is taken from double quotes, single quotes or
-/// no quotes at all, because all three are HTML and a generator picks whichever it likes. An attribute
-/// written with no value at all is present, and says the empty string. What comes back has its entities
-/// decoded, so a destination written `a&amp;b` is read as the `a&b` it names.
+/// Names are matched without regard to case. What comes back has its entities decoded, so a
+/// destination written `a&amp;b` is read as the `a&b` it names. See [`attr_list`] for the quoting.
 fn attr(attrs: &str, want: &str) -> Option<String> {
+	attr_list(attrs).into_iter()
+		.find(|(name, _)| name.eq_ignore_ascii_case(want))
+		.map(|(_, val)| decode_entities(val))
+}
+
+/// Every attribute in a tag's unparsed run of them, in the order written, values undecoded.
+///
+/// A value is taken from double quotes, single quotes or no quotes at all, because all three are
+/// HTML and a generator picks whichever it likes. An attribute written with no value at all is
+/// present, and says the empty string.
+fn attr_list(attrs: &str) -> Vec<(&str, &str)> {
+	let mut out = Vec::new();
 	let b = attrs.as_bytes();
 	let mut i = 0;
 	while i < b.len() {
@@ -721,15 +938,67 @@ fn attr(attrs: &str, want: &str) -> Option<String> {
 				val = &attrs[vs..i];
 			}
 		}
-		if !name.is_empty() && name.eq_ignore_ascii_case(want) {
-			return Some(decode_entities(val));
-		}
-		if name.is_empty() && val.is_empty() {
+		if !name.is_empty() {
+			out.push((name, val));
+		} else if val.is_empty() {
 			// Nothing was read, so nothing more will be: this is the end of the run.
 			break;
 		}
 	}
-	None
+	out
+}
+
+/// The tree's attributes for an element: its id, its classes, and every other attribute as a pair.
+fn attrs_from(attrs: &str) -> Attrs {
+	let mut out = Attrs::default();
+	for (name, val) in attr_list(attrs) {
+		let val = decode_entities(val);
+		if name.eq_ignore_ascii_case("id") {
+			if !val.is_empty() {
+				out.id = Some(val);
+			}
+		} else if name.eq_ignore_ascii_case("class") {
+			out.classes.extend(val.split_ascii_whitespace().map(|c| c.to_string()));
+		} else {
+			out.pairs.push((name.to_string(), val));
+		}
+	}
+	out
+}
+
+/// The element's attributes where the reader keeps names, and none where it does not.
+fn kept_attrs(lex: &Lex, attrs: &str) -> Attrs {
+	match lex.keep {
+		true	=> attrs_from(attrs),
+		false	=> Attrs::default(),
+	}
+}
+
+/// An `img`'s names where the reader keeps them: its id, its classes, and its `width` and `height` as
+/// pairs. The source and the alt text are the image's own fields, and anything else on the tag
+/// (`loading`, `style`, a handler) is presentation the tree does not carry.
+fn img_attrs(lex: &Lex, attrs: &str) -> Attrs {
+	let mut out = kept_attrs(lex, attrs);
+	out.pairs.retain(|(k, _)| k.eq_ignore_ascii_case("width") || k.eq_ignore_ascii_case("height"));
+	for (k, _) in out.pairs.iter_mut() {
+		k.make_ascii_lowercase();
+	}
+	out
+}
+
+/// Does the element carry a class or an id?
+fn is_named(attrs: &str) -> bool {
+	attr_list(attrs).iter().any(|(name, val)| {
+		(name.eq_ignore_ascii_case("id") || name.eq_ignore_ascii_case("class")) && !val.trim().is_empty()
+	})
+}
+
+/// Is the element in the given class?
+fn has_class(attrs: &str, want: &str) -> bool {
+	match attr(attrs, "class") {
+		Some(c)	=> c.split_ascii_whitespace().any(|w| w == want),
+		None	=> false,
+	}
 }
 
 /// The language a `class="language-x"` names, where the class names one.
@@ -808,6 +1077,7 @@ struct Lex<'a> {
 	i:	usize,
 	/// The raw text element being read, where one is.
 	raw:	Option<&'a str>,
+	keep:	bool,	// See `Opts::keep_classed`.
 }
 
 impl<'a> Lex<'a> {
@@ -1182,7 +1452,7 @@ mod tests {
 			vec!["Bob", "4"],
 		]);
 		match &b[0] {
-			Block::Table { head, rows, cols }	=> {
+			Block::Table { head, rows, cols, .. }	=> {
 				assert!(head.is_some(), "the table lost its header row");
 				assert_eq!(rows.len(), 2);
 				// A column nobody aligned is aligned by nothing.
@@ -1282,12 +1552,14 @@ mod tests {
 		assert_eq!(b, vec![Block::Para(vec![Inline::Image {
 			src:	"fig.png".to_string(),
 			alt:	"a figure".to_string(),
+			attrs:	Attrs::default(),
 		}])]);
 		// An image that stands for nothing says nothing, and is still an image.
 		let b = res!(parse("<p><img src=\"fig.png\"></p>"));
 		assert_eq!(b, vec![Block::Para(vec![Inline::Image {
 			src:	"fig.png".to_string(),
 			alt:	String::new(),
+			attrs:	Attrs::default(),
 		}])]);
 		Ok(())
 	}
@@ -1368,7 +1640,7 @@ mod tests {
 		let b = res!(parse("<p>a <mark>b</mark> <custom-tag attr=\"x\">c</custom-tag> d</p>"));
 		assert_eq!(said(&b), vec!["a b c d"]);
 		// Even one carrying blocks, and one that stands where a block would.
-		let b = res!(parse("<figure><figcaption>A caption.</figcaption></figure>"));
+		let b = res!(parse("<aside><header>A caption.</header></aside>"));
 		assert_eq!(said(&b), vec!["A caption."]);
 		Ok(())
 	}
@@ -1401,6 +1673,7 @@ mod tests {
 		assert_eq!(b, vec![Block::Para(vec![Inline::Image {
 			src:	"a.png".to_string(),
 			alt:	String::new(),
+			attrs:	Attrs::default(),
 		}])]);
 		Ok(())
 	}

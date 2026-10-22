@@ -5,6 +5,7 @@
 //! of one block and returns the run of inlines it is made of.
 
 use crate::doc::{
+	Attrs,
 	Inline,
 	text_of,
 	markdown::block::DEPTH_LIMIT,
@@ -131,7 +132,7 @@ fn scan(src: &str, depth: usize) -> Outcome<Vec<Node>> {
 						flush(&mut out, &mut buf);
 						// An image stands for itself in words, so its alt is flattened.
 						let alt = text_of(&res!(run(&alt, depth + 1)));
-						out.push(Node::Done(Inline::Image { src: to, alt }, 1));
+						out.push(Node::Done(Inline::Image { src: to, alt, attrs: Attrs::default() }, 1));
 						i = end;
 					}
 					None			=> {
@@ -703,11 +704,11 @@ mod tests {
 	#[test]
 	fn test_a_bang_before_a_link_makes_an_image_12() -> Outcome<()> {
 		assert_eq!(res!(parse("![a picture](p.png)")), vec![
-			Inline::Image { src: "p.png".to_string(), alt: "a picture".to_string() },
+			Inline::Image { src: "p.png".to_string(), alt: "a picture".to_string(), attrs: Attrs::default() },
 		]);
 		// The alt is flattened, so emphasis within it does not lose its words.
 		assert_eq!(res!(parse("![a *loud* picture](p.png)")), vec![
-			Inline::Image { src: "p.png".to_string(), alt: "a loud picture".to_string() },
+			Inline::Image { src: "p.png".to_string(), alt: "a loud picture".to_string(), attrs: Attrs::default() },
 		]);
 		// A bang before anything else is a bang.
 		assert_eq!(res!(parse("Look! [here](x)")), vec![

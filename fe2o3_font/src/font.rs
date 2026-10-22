@@ -9,8 +9,10 @@ use crate::face::{
 };
 use crate::shape::{
 	Dir,
+	Feature,
 	Glyph,
 	Run,
+	ShapeSpec,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -75,13 +77,27 @@ impl Font {
 		}
 	}
 
-	/// The face at a place in the chain.
-	fn face(&self, i: u8) -> Outcome<&Face> {
+	/// The face at a place in the chain, as a glyph's `face` names it.
+	pub fn face(&self, i: u8) -> Outcome<&Face> {
 		match self.faces.get(i as usize) {
 			Some(face) => Ok(face),
 			None => Err(err!(
 				"A glyph names face {} of a chain of {}.", i, self.faces.len(); Bug)),
 		}
+	}
+
+	/// The fingerprint of the face at a place in the chain, as a glyph's `face` names it; zero for a place
+	/// the chain does not hold.
+	pub fn fingerprint(&self, i: u8) -> u64 {
+		match self.faces.get(i as usize) {
+			Some(face)	=> face.fingerprint(),
+			None		=> 0,
+		}
+	}
+
+	/// The family, weight and slant of the face at the head of the chain -- the one the reader reads.
+	pub fn info(&self) -> Outcome<crate::face::FaceInfo> {
+		res!(self.first()).info()
 	}
 
 	/// The vertical metrics at a size, in pixels. They are the FIRST face's, never the tallest used:
@@ -139,6 +155,12 @@ impl Font {
 	/// Shapes a string, each face in the chain drawing what the one before it could not. The common
 	/// case by far is a string one face draws the whole of: one shaping call.
 	pub fn shape(&self, text: &str, size: f32, dir: Dir) -> Outcome<Run> {
+		self.shape_with(text, size, dir, &[])
+	}
+
+	/// As [`Font::shape`], with OpenType features applied across the whole string. A face down the chain
+	/// that lacks a feature simply draws without it, as every shaper does.
+	pub fn shape_with(&self, text: &str, size: f32, dir: Dir, features: &[Feature]) -> Outcome<Run> {
 		if text.is_empty() {
 			return Ok(Run {
 				glyphs:		Vec::new(),
@@ -148,7 +170,7 @@ impl Font {
 		}
 		let segs = self.segment(text);
 		if let [seg] = segs[..] {
-			return res!(self.face(seg.face)).shape(text, size, dir, seg.face, 0);
+			return res!(self.face(seg.face)).shape_with(text, size, dir, seg.face, 0, features);
 		}
 
 		// More than one face is needed, so each stretch is shaped by its own and the results are laid
@@ -163,7 +185,7 @@ impl Font {
 					seg.start, seg.end;
 				Bug)),
 			};
-			runs.push(res!(res!(self.face(seg.face)).shape(sub, size, dir, seg.face, seg.start)));
+			runs.push(res!(res!(self.face(seg.face)).shape_with(sub, size, dir, seg.face, seg.start, features)));
 		}
 
 		// The stretches are laid out in VISUAL order, which for right-to-left text is the reverse of
@@ -190,6 +212,12 @@ impl Font {
 			advance: pen,
 			size,
 		})
+	}
+
+	/// As [`Font::shape_with`], in a named script (an ISO 15924 tag such as `Zmth` for mathematics),
+	/// by the head face alone: a maths run is one grapheme, and its script's forms are the head face's.
+	pub fn shape_in(&self, text: &str, size: f32, dir: Dir, features: &[Feature], script: [u8; 4]) -> Outcome<Run> {
+		res!(self.first()).shape_spec(text, size, dir, 0, 0, &ShapeSpec { features, script: Some(script), ..ShapeSpec::default() })
 	}
 
 	/// The outline of one glyph, drawn by the face that shaped it.

@@ -11,7 +11,7 @@
 //! `(sbj_heading|{..})`. Nothing of this reaches the wire: BDAT carries the `u16` kind code and no
 //! label at all, and a `UsrKindId` compares by code, so the label is the text form's business alone.
 //!
-//! A node of a kind the v0 vocabulary does not know (§4.5) is written `(sbj_k<code>|{..})`, e.g.
+//! A node of a kind the vocabulary does not know (§4.5) is written `(sbj_k<code>|{..})`, e.g.
 //! `(sbj_k99|{..})`, since a decoder must be told which code a label names before it reads a byte of
 //! the document. A document may instead declare a label of its own choosing through [`KindDecl`],
 //! which is what the `--kind` option of the compiler passes.
@@ -69,14 +69,14 @@ pub fn decode_limits() -> DecodeLimits {
 /// The prefix every node label carries in the text form.
 pub const LABEL_PREFIX: &'static str = "sbj_";
 
-/// The prefix a node of a kind the v0 vocabulary does not know carries, followed by its code.
+/// The prefix a node of a kind the vocabulary does not know carries, followed by its code.
 pub const UNKNOWN_LABEL_PREFIX: &'static str = "sbj_k";
 
 /// The indent one level of the text form is written with.
 pub const INDENT: &'static str = "    ";
 
-/// Every v0 node kind, in code order.
-pub const KINDS: [NodeKind; 13] = [
+/// Every node kind, in code order.
+pub const KINDS: [NodeKind; 30] = [
 	NodeKind::Doc,
 	NodeKind::Section,
 	NodeKind::Para,
@@ -90,9 +90,26 @@ pub const KINDS: [NodeKind; 13] = [
 	NodeKind::Link,
 	NodeKind::Code,
 	NodeKind::Quote,
+	NodeKind::Rule,
+	NodeKind::Table,
+	NodeKind::Row,
+	NodeKind::Cell,
+	NodeKind::Caption,
+	NodeKind::Figure,
+	NodeKind::Terms,
+	NodeKind::Term,
+	NodeKind::Label,
+	NodeKind::Def,
+	NodeKind::Div,
+	NodeKind::Span,
+	NodeKind::Sup,
+	NodeKind::Sub,
+	NodeKind::Tt,
+	NodeKind::Break,
+	NodeKind::Img,
 ];
 
-/// One node kind the v0 vocabulary does not know: the label the text names it by, and its code.
+/// One node kind the vocabulary does not know: the label the text names it by, and its code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KindDecl {
 	/// The label the text form uses, e.g. `sbj_k99`.
@@ -140,13 +157,13 @@ pub fn ukid(kind: NodeKind) -> UsrKindId {
 	UsrKindId::new(kind.code(), Some(&label(kind)), Some(payload))
 }
 
-/// The user kind id of a kind the v0 vocabulary does not know, whose payload §4.5 requires to be a
+/// The user kind id of a kind the vocabulary does not know, whose payload §4.5 requires to be a
 /// map.
 pub fn unknown_ukid(decl: &KindDecl) -> UsrKindId {
 	UsrKindId::new(decl.code, Some(&decl.label), Some(Kind::Map))
 }
 
-/// Builds the registry: the thirteen v0 kinds, and the unknown kinds the caller declares.
+/// Builds the registry: every known kind, and the unknown kinds the caller declares.
 ///
 /// A declaration naming a code the vocabulary already knows is refused, since a node of a known kind
 /// is written under its own label and a second label for it would give one document two texts.
@@ -158,7 +175,7 @@ pub fn ukinds(decls: &[KindDecl]) -> Outcome<Ukinds> {
 	for decl in decls {
 		if let Ok(known) = NodeKind::from_code(decl.code) {
 			return Err(err!(
-				"The kind declaration '{}' names the code {}, which is the v0 kind '{}'. A known \
+				"The kind declaration '{}' names the code {}, which is the known kind '{}'. A known \
 				kind is written under its own label, '{}'.",
 				decl.label, decl.code, known.label(), label(known);
 			Invalid, Input, Conflict));
@@ -195,7 +212,7 @@ pub fn decode(
 		Err(e) => Err(err!(e,
 			"The source is not readable JDAT. A node is written as its kind label and its payload, \
 			e.g. (sbj_para|{{ (str|\"children\"): (list|[(sbj_text|(str|\"...\"))]) }}), and a kind \
-			the v0 vocabulary does not know is written (sbj_k<code>|{{..}}).";
+			the vocabulary does not know is written (sbj_k<code>|{{..}}).";
 		Invalid, Input, Decode)),
 	}
 }
@@ -393,7 +410,7 @@ mod tests {
 }))
 ";
 
-	/// A document whose one child is a kind the v0 vocabulary does not know, carrying a fallback.
+	/// A document whose one child is a kind the vocabulary does not know, carrying a fallback.
 	const UNKNOWN_KIND: &'static str = "\
 (sbj_doc|(map|{
     (str|\"children\"): (list|[

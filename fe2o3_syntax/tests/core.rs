@@ -29,11 +29,11 @@ pub fn test_core(filter: &'static str) -> Outcome<()> {
     res!(test_it(filter, &["Arg value", "all", "arg"], || {
         let arg = Arg::from(ArgConfig {
             name:   fmt!("test"),
-            vals:   vec![(Kind::C64, fmt!("A test kind."))],
+            vals:   vec![(Kind::C64, fmt!("A test kind.")).into()],
             ..Default::default()
         });
         req!(arg.config().vals.len(), 1);
-        req!(arg.config().vals[0].0, Kind::C64);
+        req!(arg.config().vals[0].kind, Kind::C64);
         Ok(())
     }));
 
@@ -51,7 +51,7 @@ pub fn test_core(filter: &'static str) -> Outcome<()> {
         });
         let a = Arg::from(ArgConfig {
             name:   fmt!("colour"),
-            hyph1:  fmt!("c"),
+            hyph1:  Some(fmt!("c")),
             hyph2:  Some(fmt!("c")),
             reqd:   false,
             help:   Some(fmt!("Use colour")),
@@ -66,7 +66,7 @@ pub fn test_core(filter: &'static str) -> Outcome<()> {
 
         if let Some(cmd) = p.cmds.get_recursive(&Key::from("print")) {
             if let Some(arg) = cmd.args.get_recursive(&Key::from("colour")) {
-                req!(arg.config().hyph1, fmt!("c"));
+                req!(arg.config().hyph1, Some(fmt!("c")));
             } else {
                 panic!("Could not find the argument 'colour'");
             }

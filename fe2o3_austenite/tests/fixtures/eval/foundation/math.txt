@@ -1,0 +1,68 @@
+// The `math` module: its own functions, and the `sym` symbols a maths-mode name reaches.
+str(type(math))
+repr(math.alpha)
+repr(math.pi)
+math.arrow
+math.arrow.r.double
+math.chevron.l
+math.sum
+math.dots.h
+type(math.equation)
+type(math.frac)
+type(math.vec)
+math.equation.where(block: true)
+repr(math.mat)
+!math.sym
+!math.nothing_here
+// A call in maths mode: a function, a symbol that is an accent or a delimiter, anything else.
+repr($ sqrt(x) $)
+repr($ root(3, x) $)
+repr($ vec(a, b) $)
+repr($ mat(1, 2; 3, 4) $)
+repr($ mat(delim: "[", 1, 2; 3, 4) $)
+repr($ mat(1, delim: "[", 2; 3, 4) $)
+repr($ frac(a, b) $)
+repr($ binom(n, k, m) $)
+repr($ cases(a "if" b, c) $)
+repr($ hat(x) $)
+repr($ arrow(v) $)
+repr($ floor(x) $)
+repr($ abs(x) $)
+repr($ lr(( x )) $)
+repr($ f(x) $)
+repr($ alpha(x, y) $)
+repr($ sin(x) $)
+repr($ lim(a; b) $)
+repr($ arrow.r $)
+repr($ arrow.r.double(x) $)
+repr($ vec(..#(([a], [b]))) $)
+repr($ f'(x) + g''(x) $)
+repr($ x^2_i' $)
+!$ frac(a) $
+!$ foo(x) $
+!$ alpha(x: 1) $
+!$ alpha(..x) $
+!$ arrow.nothing $
+// The elements a call builds, with their fields as Typst stores them.
+repr($ frac(a, b, style: "skewed") $)
+repr($ cancel(x, angle: #45deg, length: #50%) $)
+repr($ accent(a, "^", size: #50%) $)
+repr($ accent(a, arrow) $)
+repr($ overline(x) + underline(y) + overbrace(x, "t") + underbracket(y) $)
+repr($ attach(a, tl: 1, tr: 2, t: 3, b: 4, bl: 5, br: 6) $)
+repr($ scripts(sum) + limits(lim) $)
+repr($ stretch(arrow.r, size: #200%) $)
+repr($ op("x", limits: #true) $)
+repr($ class("relation", x) $)
+repr($ cases(delim: "[", a, b) $)
+repr($ cases(reverse: #true, a, b) $)
+repr($ vec(delim: #none, a, b) $)
+repr($ mat(delim: #("[", none), 1; 2) $)
+repr($ bold(x) + upright(y) + italic(z) + cal(A) + scr(B) + frak(C) + mono(D) + bb(E) + sans(F) + serif(G) $)
+repr($ display(x) + inline(y) + script(z) + sscript(w) $)
+repr($ round(x) + abs(x) + norm(y) + ceil(z) $)
+repr($ lr(a + b, size: #50%) $)
+repr($ mat(augment: #1, 1, 2; 3, 4) $)
+repr($ mat(augment: #(vline: 1, stroke: red), 1, 2; 3, 4) $)
+repr($ mat(gap: #2pt, 1, 2; 3, 4) $)
+repr($ vec(gap: #2pt, align: #left, a, b) $)

@@ -17,7 +17,7 @@
 //! # Examples
 //! ```
 //! use std::collections::HashMap;
-//! use crate::map::Map;
+//! use oxedyne_fe2o3_core::map::Map;
 //! 
 //! let mut map = HashMap::new();
 //! map.insert("key".to_string(), 42);

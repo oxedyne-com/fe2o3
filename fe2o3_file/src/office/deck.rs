@@ -164,12 +164,20 @@ fn gather(block: &Block, level: usize, out: &mut Vec<Bullet>) {
 		}
 		// A table on a slide would need a table on a slide, which is layout. Its rows go on as lines,
 		// which says what it says and is honest about not being a table.
-		Block::Table { head, rows, .. }	=> {
+		Block::Table { head, rows, caption, .. } => {
+			if !caption.is_empty() {
+				out.push(Bullet { level, content: caption.clone() });
+			}
 			for row in head.iter().chain(rows) {
 				out.push(Bullet {
 					level,
 					content: vec![Inline::Text(row.text_of())],
 				});
+			}
+		}
+		Block::Figure { .. } | Block::Terms { .. } => {
+			for b in block.as_plain() {
+				gather(&b, level, out);
 			}
 		}
 		Block::Rule	=> {}

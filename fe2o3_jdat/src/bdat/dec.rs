@@ -17,13 +17,40 @@ use oxedyne_fe2o3_num::float::{
     Float64,
 };
 
-use std::convert::TryFrom;
+use std::{
+    cell::Cell,
+    convert::TryFrom,
+};
 
 use bigdecimal::{
     BigDecimal,
     Zero,
 };
 use num_bigint::BigInt;
+
+
+// The limits one decode works under, and the count of values it has built so far. The count is
+// a `Cell` so that it threads through the recursion beside the depth, which is passed by value.
+struct Walk<'a> {
+    lims:   &'a DecodeLimits,
+    items:  Cell<usize>,
+}
+
+impl<'a> Walk<'a> {
+
+    fn new(lims: &'a DecodeLimits) -> Self {
+        Self { lims, items: Cell::new(0) }
+    }
+
+    // Admits the value that starts at `pos`, at nesting depth `depth`: it is refused when it is too
+    // deep, or when it is the first past the cap on values, so the decoder stops building at the cap.
+    fn enter(&self, depth: usize, pos: usize) -> Outcome<()> {
+        res!(self.lims.check_depth(depth, pos));
+        let items = self.items.get().saturating_add(1);
+        self.items.set(items);
+        self.lims.check_items(items, pos)
+    }
+}
 
 
 impl FromBytes for Dat {
@@ -34,7 +61,7 @@ impl FromBytes for Dat {
     /// The bytes are trusted, so a hostile encoding can nest deeply enough to exhaust the stack.
     /// Read anything you did not encode yourself with [`Dat::from_bytes_limited`] instead.
     fn from_bytes(buf: &[u8]) -> Outcome<(Self, usize)> {
-        Self::from_bytes_depth(buf, &DecodeLimits::UNLIMITED, 1, 0)
+        Self::from_bytes_depth(buf, &Walk::new(&DecodeLimits::UNLIMITED), 1, 0)
     }
 }
 
@@ -47,31 +74,31 @@ impl Dat {
         -> Outcome<(Self, usize)>
     {
         res!(lims.check_len(buf.len()));
-        Self::from_bytes_depth(buf, lims, 1, 0)
+        Self::from_bytes_depth(buf, &Walk::new(lims), 1, 0)
     }
 
     fn from_bytes_depth(
         buf:    &[u8],
-        lims:   &DecodeLimits,
+        walk:   &Walk,
         depth:  usize,
         pos:    usize,
     )
         -> Outcome<(Self, usize)>
     {
-        res!(lims.check_depth(depth, pos));
+        res!(walk.enter(depth, pos));
         if buf.len() == 0 {
             return Err(err!("No bytes to decode."; Input, Invalid));
         }
         match buf[0] {
             // Molecular Kinds ========================
             // Unitary
-            Self::USR_CODE      => return Self::from_bytes_usr(buf, lims, depth, pos),
-            Self::BOX_CODE      => return Self::from_bytes_box(buf, lims, depth, pos),
-            Self::OPT_SOME_CODE => return Self::from_bytes_opt_some(buf, lims, depth, pos),
-            Self::ABOX_CODE     => return Self::from_bytes_abox(buf, lims, depth, pos),
+            Self::USR_CODE      => return Self::from_bytes_usr(buf, walk, depth, pos),
+            Self::BOX_CODE      => return Self::from_bytes_box(buf, walk, depth, pos),
+            Self::OPT_SOME_CODE => return Self::from_bytes_opt_some(buf, walk, depth, pos),
+            Self::ABOX_CODE     => return Self::from_bytes_abox(buf, walk, depth, pos),
             // Heterogenous
             Self::LIST_CODE     |
-            Self::VEK_CODE      => return Self::from_bytes_list(buf, lims, depth, pos),
+            Self::VEK_CODE      => return Self::from_bytes_list(buf, walk, depth, pos),
             Self::TUP2_CODE     |
             Self::TUP3_CODE     |
             Self::TUP4_CODE     |
@@ -80,9 +107,9 @@ impl Dat {
             Self::TUP7_CODE     |
             Self::TUP8_CODE     |
             Self::TUP9_CODE     |
-            Self::TUP10_CODE    => return Self::from_bytes_tuple(buf, lims, depth, pos),
-            Self::MAP_CODE      => return Self::from_bytes_map(buf, lims, depth, pos),
-            Self::OMAP_CODE     => return Self::from_bytes_ordmap(buf, lims, depth, pos),
+            Self::TUP10_CODE    => return Self::from_bytes_tuple(buf, walk, depth, pos),
+            Self::MAP_CODE      => return Self::from_bytes_map(buf, walk, depth, pos),
+            Self::OMAP_CODE     => return Self::from_bytes_ordmap(buf, walk, depth, pos),
             // Every other kind is atomic, enclosing no other value.  Those arms carry the
             // bulk of the decoder's stack frame, so they too are decoded in a frame of their
             // own, leaving the frame that nesting repeats a small one.
@@ -93,7 +120,7 @@ impl Dat {
     #[inline(never)]
     fn from_bytes_usr(
         buf:    &[u8],
-        lims:   &DecodeLimits,
+        walk:   &Walk,
         depth:  usize,
         pos:    usize,
     )
@@ -128,7 +155,7 @@ impl Dat {
                     2 + CODE_LEN,
                 )),
                 Self::OPT_SOME_CODE => {
-                    let (inner, n) = res!(Self::from_bytes_depth(&buf[2 + CODE_LEN..], lims, depth + 1, pos + 2 + CODE_LEN));
+                    let (inner, n) = res!(Self::from_bytes_depth(&buf[2 + CODE_LEN..], walk, depth + 1, pos + 2 + CODE_LEN));
                     return Ok((
                         Dat::Usr(
                             UsrKindId::from(ukid_code),
@@ -152,7 +179,7 @@ impl Dat {
     #[inline(never)]
     fn from_bytes_box(
         buf:    &[u8],
-        lims:   &DecodeLimits,
+        walk:   &Walk,
         depth:  usize,
         pos:    usize,
     )
@@ -170,7 +197,7 @@ impl Dat {
         // Dat::BOX_CODE
         //
         if buf.len() > 1 {
-            let (inner, n) = res!(Self::from_bytes_depth(&buf[1..], lims, depth + 1, pos + 1));
+            let (inner, n) = res!(Self::from_bytes_depth(&buf[1..], walk, depth + 1, pos + 1));
             return Ok((Dat::Box(Box::new(inner)), 1 + n));
         } else {
             return Err(<Dat as FromBytes>::too_few(
@@ -181,7 +208,7 @@ impl Dat {
     #[inline(never)]
     fn from_bytes_opt_some(
         buf:    &[u8],
-        lims:   &DecodeLimits,
+        walk:   &Walk,
         depth:  usize,
         pos:    usize,
     )
@@ -199,7 +226,7 @@ impl Dat {
         // with Dat::OPT_SOME_CODE
         //
         if buf.len() > 1 {
-            let (inner, n) = res!(Self::from_bytes_depth(&buf[1..], lims, depth + 1, pos + 1));
+            let (inner, n) = res!(Self::from_bytes_depth(&buf[1..], walk, depth + 1, pos + 1));
             return Ok((Dat::Opt(Box::new(Some(inner))), 1 + n));
         } else {
             return Err(<Dat as FromBytes>::too_few(
@@ -210,7 +237,7 @@ impl Dat {
     #[inline(never)]
     fn from_bytes_abox(
         buf:    &[u8],
-        lims:   &DecodeLimits,
+        walk:   &Walk,
         depth:  usize,
         pos:    usize,
     )
@@ -230,7 +257,7 @@ impl Dat {
             let (ncfg, n) = res!(NoteConfig::from_bytes(&buf[start..]));
             start += n;
             let (boxd, n) = if buf.len() > start {
-                let (inner, n) = res!(Self::from_bytes_depth(&buf[start..], lims, depth + 1, pos + start));
+                let (inner, n) = res!(Self::from_bytes_depth(&buf[start..], walk, depth + 1, pos + start));
                 (Box::new(inner), n)
             } else {
                 return Err(<Dat as FromBytes>::too_few(
@@ -253,7 +280,7 @@ impl Dat {
                         ));
                     }
                     let v = v as usize;
-                    if buf.len() > start - 1 + n + v {
+                    if v <= buf.len().saturating_sub(start + n) {
                         let owned = &buf[start + n .. start + n + v].to_vec();
                         return Ok((
                             Self::ABox(
@@ -266,7 +293,7 @@ impl Dat {
                     } else {
                         return Err(<Dat as FromBytes>::too_few(
                             buf.len(),
-                            start + n + v,
+                            (start + n).saturating_add(v),
                             &Self::code_name(buf[0]),
                             file!(),
                             line!(),
@@ -289,7 +316,7 @@ impl Dat {
     #[inline(never)]
     fn from_bytes_list(
         buf:    &[u8],
-        lims:   &DecodeLimits,
+        walk:   &Walk,
         depth:  usize,
         pos:    usize,
     )
@@ -320,7 +347,7 @@ impl Dat {
                         let mut list = Vec::new();
                         let mut i = 1 + n;
                         while i < byt_len {
-                            let (dat, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            let (dat, n) = res!(Dat::from_bytes_depth(&buf[i..byt_len], walk, depth + 1, pos + i));
                             i += n;
                             list.push(dat);
                         }
@@ -359,7 +386,7 @@ impl Dat {
     #[inline(never)]
     fn from_bytes_map(
         buf:    &[u8],
-        lims:   &DecodeLimits,
+        walk:   &Walk,
         depth:  usize,
         pos:    usize,
     )
@@ -391,17 +418,18 @@ impl Dat {
                         let mut i = 1 + n;
                         let mut count: usize = 0;
                         while i < byt_len {
-                            let (key, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            let key_at = i;
+                            let (key, n) = res!(Dat::from_bytes_depth(&buf[i..byt_len], walk, depth + 1, pos + i));
                             i += n;
                             if i >= byt_len {
                                 return Err(err!(
                                     "Not enough bytes to decode the required value \
-                                    for key {:?} in the {:?}, after successfully \
+                                    for key {} in the {:?}, after successfully \
                                     decoding {} key-value pairs.",
-                                    key, Self::code_name(buf[0]), count;
+                                    Self::key_shown(&key, &buf[key_at..i]), Self::code_name(buf[0]), count;
                                 Bytes, Input, Decode, Missing));
                             }
-                            let (val, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            let (val, n) = res!(Dat::from_bytes_depth(&buf[i..byt_len], walk, depth + 1, pos + i));
                             i += n;
                             map.insert(key, val);
                             count += 1;
@@ -437,7 +465,7 @@ impl Dat {
     #[inline(never)]
     fn from_bytes_ordmap(
         buf:    &[u8],
-        lims:   &DecodeLimits,
+        walk:   &Walk,
         depth:  usize,
         pos:    usize,
     )
@@ -460,24 +488,27 @@ impl Dat {
                         return Ok((Self::OrdMap(OrdDaticleMap::new()), 1 + n));
                     }
                     let payload_len = payload_len as usize;
-                    let byt_len = 1 + n + payload_len;
-                    if buf.len() > n + payload_len {
+                    // As for the map, the bound is by subtraction, since `payload_len` can be
+                    // near `usize::MAX`.
+                    if payload_len <= buf.len().saturating_sub(1 + n) {
+                        let byt_len = 1 + n + payload_len;
                         let mut map = OrdDaticleMap::new();
                         let mut i = 1 + n;
                         let mut count: u64 = 0;
                         let mut order: u64 = Dat::OMAP_ORDER_START_DEFAULT;
                         while i < byt_len {
-                            let (key, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            let key_at = i;
+                            let (key, n) = res!(Dat::from_bytes_depth(&buf[i..byt_len], walk, depth + 1, pos + i));
                             i += n;
                             if i >= byt_len {
                                 return Err(err!(
                                     "Not enough bytes to decode the required value \
-                                    for key {:?} in the {:?}, after successfully \
+                                    for key {} in the {:?}, after successfully \
                                     decoding {} key-value pairs.",
-                                    key, Self::code_name(buf[0]), count;
+                                    Self::key_shown(&key, &buf[key_at..i]), Self::code_name(buf[0]), count;
                                 Bytes, Input, Decode, Missing));
                             }
-                            let (val, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            let (val, n) = res!(Dat::from_bytes_depth(&buf[i..byt_len], walk, depth + 1, pos + i));
                             i += n;
                             map.insert(MapKey::new(order, key), val);
                             order = try_add!(order, Dat::OMAP_ORDER_DELTA_DEFAULT);
@@ -514,7 +545,7 @@ impl Dat {
     #[inline(never)]
     fn from_bytes_tuple(
         buf:    &[u8],
-        lims:   &DecodeLimits,
+        walk:   &Walk,
         depth:  usize,
         pos:    usize,
     )
@@ -539,7 +570,7 @@ impl Dat {
                     ];
                     let mut i: usize = 1;
                     for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], walk, depth + 1, pos + i));
                         list[j] = dat;
                         i += k;
                     }
@@ -568,7 +599,7 @@ impl Dat {
                     ];
                     let mut i: usize = 1;
                     for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], walk, depth + 1, pos + i));
                         list[j] = dat;
                         i += k;
                     }
@@ -589,7 +620,7 @@ impl Dat {
                     ];
                     let mut i: usize = 1;
                     for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], walk, depth + 1, pos + i));
                         list[j] = dat;
                         i += k;
                     }
@@ -611,7 +642,7 @@ impl Dat {
                     ];
                     let mut i: usize = 1;
                     for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], walk, depth + 1, pos + i));
                         list[j] = dat;
                         i += k;
                     }
@@ -634,7 +665,7 @@ impl Dat {
                     ];
                     let mut i: usize = 1;
                     for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], walk, depth + 1, pos + i));
                         list[j] = dat;
                         i += k;
                     }
@@ -658,7 +689,7 @@ impl Dat {
                     ];
                     let mut i: usize = 1;
                     for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], walk, depth + 1, pos + i));
                         list[j] = dat;
                         i += k;
                     }
@@ -683,7 +714,7 @@ impl Dat {
                     ];
                     let mut i: usize = 1;
                     for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], walk, depth + 1, pos + i));
                         list[j] = dat;
                         i += k;
                     }
@@ -709,7 +740,7 @@ impl Dat {
                     ];
                     let mut i: usize = 1;
                     for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], walk, depth + 1, pos + i));
                         list[j] = dat;
                         i += k;
                     }
@@ -736,7 +767,7 @@ impl Dat {
                     ];
                     let mut i: usize = 1;
                     for j in 0..N {
-                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                        let (dat, k) = res!(Dat::from_bytes_depth(&buf[i..], walk, depth + 1, pos + i));
                         list[j] = dat;
                         i += k;
                     }
@@ -1063,7 +1094,7 @@ impl Dat {
                                 ));
                             }
                             let v = v as usize;
-                            if buf.len() > 1 - 1 + n + v {
+                            if v <= buf.len().saturating_sub(1 + n) {
                                 return Ok((
                                     Self::BC64(buf[1 + n .. 1 + n + v].to_vec()),
                                     1 + n + v,
@@ -1071,7 +1102,7 @@ impl Dat {
                             } else {
                                 return Err(<Dat as FromBytes>::too_few(
                                     buf.len(),
-                                    1 + n + v,
+                                    (1 + n).saturating_add(v),
                                     &Self::code_name(buf[0]),
                                     file!(),
                                     line!(),
@@ -1111,7 +1142,7 @@ impl Dat {
                                 ));
                             }
                             let v = v as usize;
-                            if buf.len() > 1 - 1 + n + v {
+                            if v <= buf.len().saturating_sub(1 + n) {
                                 let owned = &buf[1 + n .. 1 + n + v].to_vec();
                                 return Ok((
                                     Self::Str(res!(std::str::from_utf8(
@@ -1122,7 +1153,7 @@ impl Dat {
                             } else {
                                 return Err(<Dat as FromBytes>::too_few(
                                     buf.len(),
-                                    1 + n + v,
+                                    (1 + n).saturating_add(v),
                                     &Self::code_name(buf[0]),
                                     file!(),
                                     line!(),
@@ -1162,7 +1193,7 @@ impl Dat {
                                 ));
                             }
                             let v = v as usize;
-                            if buf.len() > 1 - 1 + n + v {
+                            if v <= buf.len().saturating_sub(1 + n) {
                                 return Ok((
                                     Self::Aint(BigInt::from_signed_bytes_be(
                                         &buf[1 + n .. 1 + n + v]
@@ -1172,7 +1203,7 @@ impl Dat {
                             } else {
                                 return Err(<Dat as FromBytes>::too_few(
                                     buf.len(),
-                                    1 + n + v,
+                                    (1 + n).saturating_add(v),
                                     &Self::code_name(buf[0]),
                                     file!(),
                                     line!(),
@@ -1212,12 +1243,19 @@ impl Dat {
                                 ));
                             }
                             let v = v as usize;
-                            if buf.len() > 1 - 1 + n + v {
+                            // The payload ends in an 8-byte exponent, which a shorter one cannot hold.
+                            if v < 8 {
+                                return Err(err!(
+                                    "The Dat::Adec payload of {} bytes cannot hold its 8-byte \
+                                    exponent.", v;
+                                Bytes, Input, Decode, Invalid));
+                            }
+                            if v <= buf.len().saturating_sub(1 + n) {
                                 let bigint = BigInt::from_signed_bytes_be(
                                     &buf[1 + n .. 1 + n + v - 8]
                                 );
                                 let expi64 = i64::from_be_bytes(
-                                    res!(<[u8; 8]>::try_from(&buf[1 + n + v - 8 ..]),
+                                    res!(<[u8; 8]>::try_from(&buf[1 + n + v - 8 .. 1 + n + v]),
                                         Decode, Bytes)
                                 );
                                 return Ok((
@@ -1227,7 +1265,7 @@ impl Dat {
                             } else {
                                 return Err(<Dat as FromBytes>::too_few(
                                     buf.len(),
-                                    1 + n + v,
+                                    (1 + n).saturating_add(v),
                                     &Self::code_name(buf[0]),
                                     file!(),
                                     line!(),
@@ -1347,14 +1385,16 @@ impl Dat {
                     let v = u64::from_be_bytes(
                         res!(<[u8; 8]>::try_from(&buf[1..9]), Decode, Bytes)
                     ) as usize;
-                    if buf.len() > 8 + v {
+                    // `v` is a raw u64 a peer chose, so the bound is by subtraction.
+                    if v <= buf.len().saturating_sub(9) {
                         return Ok((
                             Self::BU64(buf[1 + 8 .. 1 + 8 + v].to_vec()),
                             1 + 8 + v,
                         ));
                     } else {
                         return Err(<Dat as FromBytes>::too_few(
-                            buf.len(), 1 + 8 + v, &Self::code_name(buf[0]), file!(), line!()));
+                            buf.len(), 9usize.saturating_add(v), &Self::code_name(buf[0]),
+                            file!(), line!()));
                     }
                 } else {
                     return Err(<Dat as FromBytes>::too_few(
@@ -1473,6 +1513,21 @@ impl Dat {
 }
 
 impl Dat {
+
+    // A map key as a refusal names it. A key is as long as the peer chose, so one whose encoding
+    // passes `SHOWN` bytes is named by its kind, its first bytes and its length, and never printed
+    // whole, which for a megabyte key made an error of several megabytes.
+    fn key_shown(key: &Dat, enc: &[u8]) -> String {
+        const SHOWN: usize = 32;
+        if enc.len() <= SHOWN {
+            return fmt!("{:?} ({} bytes)", key, enc.len());
+        }
+        let mut hex = String::new();
+        for b in &enc[..SHOWN / 2] {
+            hex.push_str(&fmt!("{:02x}", b));
+        }
+        fmt!("{} 0x{}... ({} bytes)", Self::code_name(enc[0]), hex, enc.len())
+    }
 
     /// Read a `u64` from bytes in the given buffer, and include the number of bytes read in the
     /// return tuple.  The code prefix must be included in the buffer, but it is assumed that it has

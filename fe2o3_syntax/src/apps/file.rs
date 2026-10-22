@@ -28,7 +28,7 @@ pub fn generic_file_system(
     let cmd = Cmd::from(CmdConfig {
         name:   fmt!("cd"),
         help:   Some(fmt!("Change directory")),
-        vals:   vec![(Kind::Str, fmt!("New directory path"))],
+        vals:   vec![(Kind::Str, fmt!("New directory path")).into()],
         cat:    fmt!("File system"),
         ..Default::default()
     });
@@ -46,20 +46,20 @@ pub fn generic_file_system(
     });
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("sort"),
-        hyph1:  fmt!("s"),
-        vals:   vec![(Kind::Str, fmt!("Sort directive 'size', 'type' or 'name'"))],
+        hyph1:  Some(fmt!("s")),
+        vals:   vec![(Kind::Str, fmt!("Sort directive 'size', 'type' or 'name'")).into()],
         help:   Some(fmt!("Sort by 'size', 'type' or 'name'")),
         ..Default::default()
     });
     let a2 = Arg::from(ArgConfig {
         name:   fmt!("bytes"),
-        hyph1:  fmt!("b"),
+        hyph1:  Some(fmt!("b")),
         help:   Some(fmt!("Show size in bytes (otherwise humanised)")),
         ..Default::default()
     });
     let a3 = Arg::from(ArgConfig {
         name:   fmt!("reverse"),
-        hyph1:  fmt!("r"),
+        hyph1:  Some(fmt!("r")),
         help:   Some(fmt!("Reverse any sort")),
         ..Default::default()
     });

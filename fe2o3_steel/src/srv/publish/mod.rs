@@ -40,10 +40,14 @@ pub mod declare;
 pub mod dest;
 pub mod feed;
 pub mod json;
+pub mod outbox;
 pub mod page;
+pub mod rate;
 pub mod send;
 pub mod store;
 pub mod subscribe;
+
+use crate::srv::cache;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_datime::time::{
@@ -56,6 +60,12 @@ use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::{
 	prelude::*,
 	id::NumIdDat,
+};
+use oxedyne_fe2o3_net::http::{
+	fields::HeaderFields,
+	msg::HttpMessage,
+	origin::cross_site,
+	status::HttpStatus,
 };
 use oxedyne_fe2o3_text::doc::{
 	Block,
@@ -178,6 +188,28 @@ pub struct PublishConfig {
 	// that and nothing else. An office behind one address that genuinely needs more raises it, the
 	// same operational judgement `comment_rate_secs` documents.
 	pub subscribe_rate_hourly:	u32,
+	// How the confirmations to one address are limited, whoever asks for them. The sender limits
+	// above count a source; these count the address, which is what a mail-bombing script names and
+	// rotates its sources around. `confirm_interval_secs` is the shortest gap between two
+	// confirmations to one address (`0` is off) and `confirm_max` the most within
+	// `confirm_window_days` (`0` is off). The window is also how long the address's counter lives.
+	pub confirm_interval_secs:	u64,
+	pub confirm_max:		u32,
+	pub confirm_window_days:	u64,
+	// How long the oldest entry in this site's outbound queue may wait, in seconds, before the
+	// operator is told the queue is not draining (`0` is off). It catches a ceiling held at 0 and a
+	// newsletter that the ceiling will take hours to send alike, and is told once for the episode.
+	pub outbox_alert_secs:		u64,
+	// How many sign-ups may wait in this site's outbound queue for their confirmation (`0` is no
+	// limit). Past it a sign-up is dropped, with a warning logged, and the reader is shown the same
+	// page as for one that was queued. A drainer sends at the host's ceiling, so without a cap a
+	// script that names many addresses queues hours of confirmations ahead of every real reader.
+	pub outbox_confirm_max:		u64,
+	// How many days a sign-up may wait, unconfirmed, before its record is deleted (`0` is never).
+	// The clock runs from the last confirmation the outbox actually sent, so a sign-up held while
+	// the host's ceiling is 0 has no clock and is kept. A confirmed, unsubscribed or bounced record
+	// is never deleted by it.
+	pub pending_expiry_days:	u64,
 	// Whether this site takes comments on its posts. Off unless a site asks for it: a comment
 	// endpoint is an unauthenticated public write, and turning one on for every site that happens
 	// to publish prose -- which is what a default of `true` would do -- is not a decision this
@@ -326,6 +358,12 @@ impl PublishConfig {
 			// loads and takes the defaults, which limit rather than not.
 			subscribe_rate_secs:	res!(get_count("subscribe_rate_secs", 60)),
 			subscribe_rate_hourly:	res!(get_count("subscribe_rate_hourly", 5)) as u32,
+			confirm_interval_secs:	res!(get_count("confirm_interval_secs", 86_400)),
+			confirm_max:		res!(get_count("confirm_max", 3)) as u32,
+			confirm_window_days:	res!(get_count("confirm_window_days", 30)),
+			outbox_alert_secs:	res!(get_count("outbox_alert_secs", 3600)),
+			outbox_confirm_max:	res!(get_count("outbox_confirm_max", 1000)),
+			pending_expiry_days:	res!(get_count("pending_expiry_days", 7)),
 			comments:		match m.get(&dat!("comments")) {
 				Some(Dat::Bool(b))	=> *b,
 				None			=> false,
@@ -532,6 +570,15 @@ impl PublishConfig {
 		Some(slug)
 	}
 
+	/// The window the confirmations to one address are counted in.
+	pub fn confirm_window(&self) -> rate::Window {
+		rate::Window {
+			interval_secs:	self.confirm_interval_secs,
+			max:		self.confirm_max,
+			span_secs:	self.confirm_window_days.saturating_mul(86_400),
+		}
+	}
+
 	/// The URL path a confirmation link points at, carrying the subscriber's token.
 	pub fn confirm_path(&self, token: &str) -> String {
 		let mut s = self.path.clone();
@@ -564,6 +611,35 @@ impl PublishConfig {
 		} else {
 			None
 		}
+	}
+
+	/// Refuses a public write that a browser sent from another site, or answers `None` to let it on.
+	///
+	/// The writes covered are the sign-up, a comment, a comment's edit and a comment's preview: each
+	/// is a form any page can aim a visitor's browser at. A one-click unsubscribe is not covered,
+	/// since a mail client posts it with no `Origin` and its token is the credential. The answer is a
+	/// `403`, in JSON (`{"said":"refused"}`) for a caller that asked for it. It is read from the
+	/// headers alone, so it costs no database read and a refused post stores nothing.
+	pub fn refuse_cross_site(
+		&self,
+		path:		&str,
+		headers:	&HeaderFields,
+		id:		&str,
+	)
+		-> Outcome<Option<HttpMessage>>
+	{
+		let is_write = self.subscription_of(path) == Some(Subscription::Subscribe)
+			|| self.comment_slug(path).is_some()
+			|| self.comment_edit_slug(path).is_some()
+			|| self.comment_preview_slug(path).is_some();
+		if !is_write || !cross_site(headers, &self.base_url) {
+			return Ok(None);
+		}
+		info!("{}: publish: a post to {} came from another site; refused", id, path);
+		if headers.wants_json() {
+			return Ok(Some(res!(json::said(HttpStatus::Forbidden, "refused", page::REFUSED_TEXT))));
+		}
+		Ok(Some(cache::generated(HttpMessage::respond_with_text(HttpStatus::Forbidden, "Forbidden."))))
 	}
 
 	fn confirm_bare_path(&self) -> String {

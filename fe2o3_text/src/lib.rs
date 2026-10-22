@@ -8,9 +8,9 @@
 //! - SACSS (Simple And Composite String Search) - An alternative to regex that aims to be more approachable
 //!   through composable boolean operations on simple pattern matches like "starts with", "contains" etc.
 //!
-//! - `regex` - A small backtracking regular-expression engine for the times when the pattern is
-//!   already written in that language, carrying a step budget so a pathological pattern reports
-//!   that it gave up rather than reporting no match
+//! - `regex` - A regular-expression engine with the syntax and meaning of the Rust `regex` crate,
+//!   which Typst's `regex(...)` uses: captures, Unicode property classes and replacement, matched
+//!   in time linear in pattern times text
 //!
 //! - `glob` - Shell-style path globbing, `**` included, for selecting files by name
 //!
@@ -32,9 +32,13 @@ pub mod access;
 pub mod base2x;
 pub mod base64;
 pub mod core;
+#[cfg(feature = "csl")]
+pub mod csl;
 pub mod glob;
 pub mod highlight;
 pub mod html;
+#[cfg(feature = "hyphenation")]
+pub mod hyphen;
 pub mod lines;
 pub mod lineset;
 pub mod doc;

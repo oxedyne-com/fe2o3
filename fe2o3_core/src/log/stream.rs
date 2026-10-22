@@ -14,10 +14,10 @@
 //! use oxedyne_fe2o3_core::prelude::*;
 //! 
 //! // Set the stream ID for the current thread.
-//! sync_log::set_stream(fmt!("my_thread");
+//! sync_log::set_stream(fmt!("my_thread"));
 //! 
 //! // Get the current thread's stream ID.
-//! let stream = sync_log::stream();
+//! assert_eq!(sync_log::stream(), "my_thread");
 //! ```
 //! 
 //! # Asynchronous Usage
@@ -28,14 +28,20 @@
 //! ```rust
 //! use oxedyne_fe2o3_core::prelude::*;
 //! 
-//! let handle = tokio::spawn(async_log::LOG_STREAM_ID.scope(
-//!     fmt!("my_stream"),
-//!     async move {
-//!         // This task will have access to the stream ID
-//!         let stream = async_log::stream();
-//!         // ... task code ...
-//!     }
-//! ));
+//! fn main() -> Outcome<()> {
+//!     let rt = res!(tokio::runtime::Builder::new_current_thread().build());
+//!     let stream = rt.block_on(async_log::LOG_STREAM_ID.scope(
+//!         fmt!("my_stream"),
+//!         async move {
+//!             // This task has access to the stream ID.
+//!             async_log::stream()
+//!         }
+//!     ));
+//!     assert_eq!(stream, "my_stream");
+//!     // Outside the scope the default applies.
+//!     assert_eq!(async_log::stream(), "main");
+//!     Ok(())
+//! }
 //! ```
 //! 
 //! # Default Values

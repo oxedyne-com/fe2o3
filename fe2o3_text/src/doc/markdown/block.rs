@@ -459,20 +459,20 @@ fn table(lines: &[&str], cols: Vec<Align>) -> Outcome<(Block, usize)> {
 		rows.push(res!(row(lines[i], cols.len())));
 		i += 1;
 	}
-	Ok((Block::Table { head: Some(head), rows, cols }, i))
+	Ok((Block::Table { head: Some(head), rows, cols, caption: Vec::new() }, i))
 }
 
 /// Reads one row of a table, held to the width the header set.
 fn row(line: &str, n: usize) -> Outcome<Row> {
 	let mut cells = Vec::with_capacity(n);
 	for text in cells_of(line).iter().take(n) {
-		cells.push(Cell(res!(inline::parse(text))));
+		cells.push(Cell::new(res!(inline::parse(text))));
 	}
 	// A row of fewer cells than the header named columns is short of the grid rather than wrong, and
 	// the cells it did not write are empty. A row of more has said something the header made no
 	// column for, and what it has no column for is dropped.
 	while cells.len() < n {
-		cells.push(Cell(Vec::new()));
+		cells.push(Cell::default());
 	}
 	Ok(Row(cells))
 }
@@ -1236,7 +1236,7 @@ mod tests {
 	fn test_a_table_may_have_no_rows_41() -> Outcome<()> {
 		let b = res!(parse("| a | b |\n| --- | --- |\n"));
 		match &b[0] {
-			Block::Table { head, rows, cols }	=> {
+			Block::Table { head, rows, cols, .. }	=> {
 				assert!(head.is_some(), "the table lost its header row");
 				assert!(rows.is_empty(), "the table invented a row: {:?}", rows);
 				assert_eq!(cols.len(), 2);
@@ -1252,11 +1252,11 @@ mod tests {
 		let b = res!(parse("| a | b |\n| --- | --- |\n| *loud* | [link](somewhere) |\n"));
 		match &b[0] {
 			Block::Table { rows, .. }	=> {
-				assert_eq!(rows[0].0[0], Cell(vec![Inline::Emph {
+				assert_eq!(rows[0].0[0], Cell::new(vec![Inline::Emph {
 					strong:		false,
 					content:	vec![Inline::Text("loud".into())],
 				}]));
-				assert_eq!(rows[0].0[1], Cell(vec![Inline::Link {
+				assert_eq!(rows[0].0[1], Cell::new(vec![Inline::Link {
 					to:		"somewhere".into(),
 					content:	vec![Inline::Text("link".into())],
 				}]));

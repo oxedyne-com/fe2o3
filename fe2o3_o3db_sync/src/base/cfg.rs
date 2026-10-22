@@ -62,7 +62,6 @@ pub struct OzoneConfig {
     pub bytes_before_hashing:           u64, // applies only to keys
     // Caches
     pub cache_size_limit_bytes:         u64,
-    pub init_load_caches:               bool,
     // Files
     pub data_file_max_bytes:            u64,
     // Chunking
@@ -118,7 +117,6 @@ impl Default for OzoneConfig {
             bytes_before_hashing:           32,
             // Caches
             cache_size_limit_bytes:         1_073_742_000, // 1 GiB
-            init_load_caches:               true,
             // Files
             data_file_max_bytes:            1_048_576, // 1 MiB
             // Chunking
@@ -160,14 +158,9 @@ impl Default for OzoneConfig {
             // the GC rename, which bound loss to the live file's tail under any
             // policy. Operators wanting a stronger floor set `sync_on_write` (an
             // fsync per write) or `sync_every_n_writes`; `sync_interval_ms = 0`
-            // restores the old never-fsync append behaviour.
-            //
-            // Known limitation (no background tick in this wave):
-            // `maybe_sync_files` evaluates the interval on each write, so if
-            // writes stop, the final sub-interval of writes is not fsynced until
-            // the next write arrives. The seal barrier still makes every sealed
-            // file durable; only the live file's most recent unsynced tail is
-            // exposed across a write pause.
+            // restores the old never-fsync append behaviour.  Each writer's
+            // syncer thread keeps the interval whether or not another write
+            // arrives, so the writes that end a burst are made durable too.
             sync_on_write:                  false,
             sync_every_n_writes:            0,
             sync_interval_ms:               200,
@@ -195,6 +188,29 @@ impl OzoneConfig {
                 "Configured scan bots per zone is zero, which leaves no bot to \
                 answer a scan; using one.");
             self.num_scbots_per_zone = 1;
+        }
+    }
+
+    /// Does a sealed data file hold enough old bytes for the collector to take it?  Either they
+    /// pass `OLD_DATA_PERCENT_GC_TRIGGER` of the maximum data file length, the rule for a full
+    /// file, or reach `OLD_SHARE_GC_TRIGGER` of the file's own length.  Old-marking can arrive
+    /// after a collection has shrunk a file, from a held discard, another file bot or a retire,
+    /// and weighed only against the maximum such a file could stay under the trigger for ever.
+    pub fn gc_due(&self, old_sum: u64, dat_size: usize) -> bool {
+        self.old_percent(old_sum) > constant::OLD_DATA_PERCENT_GC_TRIGGER
+            || Self::old_share(old_sum, dat_size) >= constant::OLD_SHARE_GC_TRIGGER
+    }
+
+    /// Old bytes as a percentage of the maximum data file length.
+    pub fn old_percent(&self, old_sum: u64) -> f64 {
+        100.0 * (old_sum as f64) / (self.data_file_max_bytes as f64)
+    }
+
+    /// Old bytes as a percentage of the file's own length.
+    pub fn old_share(old_sum: u64, dat_size: usize) -> f64 {
+        match dat_size {
+            0 => 0.0,
+            n => 100.0 * (old_sum as f64) / (n as f64),
         }
     }
 
@@ -249,15 +265,10 @@ impl OzoneConfig {
             limit of {} [B] for {} caches across {} zones.",
             cache_lim, per_cache_lim, total_num_caches, nz,
         );
-        info!(sync_log::stream(), 
-            "File data will {}be loaded into caches upon initialisation.",
-            if self.init_load_caches { "" } else { "not" },
-        );
         ZoneConfig {
             ncbots:             nc,
             nfbots:             nf,
             cache_size_lim:     per_cache_lim,
-            init_load_caches:   self.init_load_caches,
         }
     }
 
@@ -282,14 +293,57 @@ impl OzoneConfig {
         }
     }
 
+    /// Reads a stored configuration file.  The field `init_load_caches` is gone (2026-10-10):
+    /// every open replays the key index, which seeds the stamp floor and lets chunk tombstones be
+    /// dropped, so an open without it is no longer offered.  A file asking for it to be off is
+    /// refused; one asking for it on, as every store written before then does, asks for what now
+    /// always happens and is accepted.  `write_config_file` writes the field back as `true`, so an
+    /// unchanged open leaves the file byte for byte as it was.
+    pub fn load_file(path: &Path) -> Outcome<Self> {
+        let text = res!(std::fs::read_to_string(path));
+        let mut map = match res!(Dat::decode_string(text)).normalise() {
+            Dat::Map(m) => m,
+            dat => return Err(err!(
+                "Expected a daticle map in the configuration file {:?}, found a {:?}.",
+                path, dat.kind();
+                Input, Invalid)),
+        };
+        match map.remove(&Dat::Str(fmt!("init_load_caches"))) {
+            None | Some(Dat::Bool(true)) => (),
+            Some(v) => return Err(err!(
+                "The configuration file {:?} sets init_load_caches to {:?}.  The field was \
+                removed on 2026-10-10: every open now replays the key index, so a store cannot \
+                be opened without it.  Delete the field.", path, v;
+                Input, Invalid)),
+        }
+        Self::from_datmap(map)
+    }
+
     pub fn write_config_file(&self, db_root: &Path) -> Outcome<()> {
         let path = Self::config_path(db_root);
-        let mut file = res!(std::fs::File::create(&path));
-        let dat = Self::to_datmap(self.clone());
-        for mut line in dat.to_lines("    ", true) {
-            line.push_str("\n");
-            res!(file.write(line.as_bytes()));
+        let mut map = match Self::to_datmap(self.clone()) {
+            Dat::Map(m) => m,
+            dat => return Err(err!(
+                "Expected a daticle map from the configuration, found a {:?}.", dat.kind();
+                Bug, Invalid)),
+        };
+        // Old binaries read this file and require the field, so it stays, as `true`, for rollback.
+        map.insert(Dat::Str(fmt!("init_load_caches")), Dat::Bool(true));
+        let dat = Dat::Map(map);
+        let mut text = String::new();
+        for line in dat.to_lines("    ", true) {
+            text.push_str(&line);
+            text.push_str("\n");
         }
+        // A start under an unchanged configuration leaves the file alone, so that opening a store
+        // to read it, as `verify` and `textscan` do, writes nothing (2026-10-09).
+        if let Ok(old) = std::fs::read(&path) {
+            if old == text.as_bytes() {
+                return Ok(());
+            }
+        }
+        let mut file = res!(std::fs::File::create(&path));
+        res!(file.write_all(text.as_bytes()));
         debug!(sync_log::stream(), "O3db configuration written to {:?}: ", path);
         for line in dat.to_lines("    ", true) {
             debug!(sync_log::stream(), "{}", line);
@@ -396,7 +450,6 @@ pub struct ZoneConfig {
     pub ncbots:             usize,
     pub nfbots:             usize,
     pub cache_size_lim:     usize,
-    pub init_load_caches:   bool,
 }
 
 #[cfg(test)]
@@ -443,6 +496,46 @@ mod tests {
                 cfg.num_bots_per_zone(&WorkerType::Scan);
                 Test, Mismatch));
         }
+        Ok(())
+    }
+
+    // A store written before 2026-10-10 says `init_load_caches: true` and must still open; one
+    // that turned replay off must be told the field is gone.
+    #[test]
+    fn stored_init_load_caches_true_opens_false_is_refused() -> Outcome<()> {
+        let dir = std::env::temp_dir().join(fmt!("o3db_cfg_ilc_{}", std::process::id()));
+        res!(std::fs::create_dir_all(&dir));
+        let path = dir.join("config.jdat");
+        for (val, opens) in [(true, true), (false, false)] {
+            let mut map = match OzoneConfig::to_datmap(OzoneConfig::default()) {
+                Dat::Map(m) => m,
+                other => return Err(err!(
+                    "Expected a Dat::Map from to_datmap, got {:?}.", other;
+                    Test, Invalid)),
+            };
+            map.insert(Dat::Str(fmt!("init_load_caches")), Dat::Bool(val));
+            let mut text = String::new();
+            for line in Dat::Map(map).to_lines("    ", true) {
+                text.push_str(&line);
+                text.push_str("\n");
+            }
+            res!(std::fs::write(&path, text));
+            match (OzoneConfig::load_file(&path), opens) {
+                (Ok(cfg), true) => if cfg != OzoneConfig::default() {
+                    return Err(err!("A stored init_load_caches = true loaded as {:?}.", cfg;
+                        Test, Mismatch));
+                },
+                (Err(e), false) => if !fmt!("{}", e).contains("init_load_caches") {
+                    return Err(err!("The refusal does not name the field: {}", e;
+                        Test, Mismatch));
+                },
+                (r, _) => return Err(err!(
+                    "A stored init_load_caches = {} gave {:?}, expected it to {}.",
+                    val, r.map(|_| ()), if opens { "open" } else { "be refused" };
+                    Test, Mismatch)),
+            }
+        }
+        res!(std::fs::remove_dir_all(&dir));
         Ok(())
     }
 }

@@ -207,6 +207,8 @@ fn anti_entropy_reply_persists_received_records() -> Outcome<()> {
 		records:		vec![record.clone()],
 		requested_ids:	Vec::new(),
 		bulk:			false,
+		after:			None,
+		next:			None,
 	});
 	let out = res!(engine_a.handle_envelope(reply));
 	assert!(out.outbound.is_empty(),
@@ -233,6 +235,8 @@ fn anti_entropy_reply_triggers_push_for_requested_ids() -> Outcome<()> {
 		records:		Vec::new(),
 		requested_ids:	vec![rid],
 		bulk:			false,
+		after:			None,
+		next:			None,
 	});
 	let out = res!(engine_a.handle_envelope(reply));
 	assert_eq!(out.outbound.len(), 1);
@@ -373,6 +377,7 @@ fn anti_entropy_digest_rejects_cohort_table_on_receive() -> Outcome<()> {
 	let fake_digest = Envelope::new(a, b, MsgKind::AntiEntropyDigest {
 		table:	"treasury".to_string(),
 		sketch:	vec![0u8; 100],
+		after:	None,
 	});
 	assert!(engine_b.handle_envelope(fake_digest).is_err());
 	Ok(())
@@ -386,6 +391,7 @@ fn anti_entropy_digest_rejects_unknown_table() -> Outcome<()> {
 	let fake = Envelope::new(a, b, MsgKind::AntiEntropyDigest {
 		table:	"missing".to_string(),
 		sketch:	vec![0u8; 100],
+		after:	None,
 	});
 	assert!(engine_b.handle_envelope(fake).is_err());
 	Ok(())
@@ -450,6 +456,8 @@ fn anti_entropy_reply_placement_rechecks_incoming() -> Outcome<()> {
 		records:		vec![record.clone()],
 		requested_ids:	Vec::new(),
 		bulk:			false,
+		after:			None,
+		next:			None,
 	});
 	let _ = res!(engine_b.handle_envelope(reply));
 	assert_eq!(res!(engine_b.storage().len()), 0);

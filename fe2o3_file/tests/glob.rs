@@ -4,6 +4,8 @@
 use oxedyne_fe2o3_file::glob::{
     Glob,
     IgnoreFile,
+    EDITOR_DROPPINGS,
+    SYNC_DROPPINGS,
 };
 use oxedyne_fe2o3_text::secret;
 
@@ -182,6 +184,128 @@ pub fn test_glob(filter: &'static str) -> Outcome<()> {
         }
         assert!(f.excludes(b"keys", true), "the directory itself");
         assert!(!f.excludes(b"keys", false), "and not a file of that name");
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["Editor droppings are rules, and keep out real editor names 000", "all",
+        "glob", "editor"], ||
+    {
+        for line in EDITOR_DROPPINGS {
+            res!(Glob::new(line.as_bytes()));
+        }
+        let f = IgnoreFile::parse(EDITOR_DROPPINGS.join("\n").as_bytes());
+        for path in [
+            "ch3.typ.swp", ".ch3.typ.swp", "ch3.typ.swo", "ch3.typ.swx", "4913",
+            "#ch3.typ#", ".#ch3.typ", "ch3.typ~", "notes.kate-swp",
+        ] {
+            assert!(f.excludes(path.as_bytes(), false), "{} is an editor dropping", path);
+        }
+        for path in [
+            "ch3.typ", "src/main.rs", "swp.rs", "4913.rs", "sharpe.txt", "README~ish",
+        ] {
+            assert!(!f.excludes(path.as_bytes(), false), "{} is not", path);
+        }
+        // The repository's own rules still win: a `!` line re-includes a dropping by name.
+        let mut lines: Vec<&str> = EDITOR_DROPPINGS.to_vec();
+        lines.push("!ch3.typ~");
+        let f = IgnoreFile::parse(lines.join("\n").as_bytes());
+        assert!(!f.excludes(b"ch3.typ~", false), "a repo rule re-included it");
+        assert!(f.excludes(b"other.typ~", false), "everything else is still kept out");
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["Sync droppings keep out transfer names, never a conflict copy 000", "all",
+        "glob", "sync"], ||
+    {
+        for line in SYNC_DROPPINGS {
+            res!(Glob::new(line.as_bytes()));
+        }
+        let f = IgnoreFile::parse(SYNC_DROPPINGS.join("\n").as_bytes());
+        // Both spellings of the file Syncthing writes before it renames it into place, at any depth.
+        for path in [
+            ".syncthing.ch3.typ.tmp", "~syncthing~ch3.typ.tmp",
+            "notes/.syncthing.ch3.typ.tmp", "notes/deep/~syncthing~ch3.typ.tmp",
+        ] {
+            assert!(f.excludes(path.as_bytes(), false), "{} is a transfer file", path);
+        }
+        for path in [
+            // A conflict copy is the other machine's content, and is always kept.
+            "ch3.sync-conflict-20261001-123456-ABCDEFG.typ",
+            ".ch3.sync-conflict-20261001-123456-ABCDEFG.typ.swp",
+            // Folder-root bookkeeping, not a transfer name.
+            ".stfolder", ".stversions", ".stignore",
+            // Near misses: the whole shape has to hold.
+            "ch3.typ", "syncthing.tmp", "my.syncthing.ch3.tmp", ".syncthing.ch3.typ", "~syncthing~ch3.typ",
+        ] {
+            assert!(!f.excludes(path.as_bytes(), false), "{} is not", path);
+        }
+        // A repository's rule re-includes one by name, as for any dropping.
+        let mut lines: Vec<&str> = SYNC_DROPPINGS.to_vec();
+        lines.push("!.syncthing.*.tmp");
+        let f = IgnoreFile::parse(lines.join("\n").as_bytes());
+        assert!(!f.excludes(b".syncthing.ch3.typ.tmp", false), "a repo rule re-included it");
+        assert!(f.excludes(b"~syncthing~ch3.typ.tmp", false), "the other spelling is still kept out");
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["The droppings lists name files and never a folder 000", "all",
+        "glob", "editor", "sync", "files"], ||
+    {
+        let lists = [EDITOR_DROPPINGS, SYNC_DROPPINGS];
+        for list in lists {
+            let files = IgnoreFile::parse_files_only(list.join("\n").as_bytes());
+            let anyhow = IgnoreFile::parse(list.join("\n").as_bytes());
+            // A folder somebody keeps their work in, called as an editor might call a file.
+            for dir in [
+                "drafts~", ".#cache", "4913", "#auto#", "ch3.typ.swp", "kate.kate-swp",
+                ".syncthing.d.tmp", "~syncthing~d.tmp", "notes/deep/drafts~",
+            ] {
+                let named = list.iter().any(|l| Glob::new(l.as_bytes())
+                    .map_or(false, |g| g.matches(dir.as_bytes(), true)));
+                if named {
+                    // Control: the same lines compiled as an ordinary file do match it.
+                    assert!(anyhow.ignores(dir.as_bytes(), true), "{} is matched as a folder by parse", dir);
+                }
+                assert!(!files.ignores(dir.as_bytes(), true), "{} is a folder and is not matched", dir);
+                // And nothing beneath it is excluded for being in it.
+                let inside = fmt!("{}/chapter.typ", dir);
+                assert!(!files.excludes(inside.as_bytes(), false), "{} is not excluded", inside);
+            }
+        }
+        // The same lines, asked about files, are as they were.
+        let f = IgnoreFile::parse_files_only(EDITOR_DROPPINGS.join("\n").as_bytes());
+        for path in ["ch3.typ.swp", "4913", "#ch3.typ#", ".#ch3.typ", "ch3.typ~", "drafts~/ch3.typ~"] {
+            assert!(f.excludes(path.as_bytes(), false), "{} is still an editor dropping", path);
+        }
+        // And a repository's `!` line is read after them as before.
+        let mut lines: Vec<&str> = EDITOR_DROPPINGS.to_vec();
+        lines.push("!ch3.typ~");
+        let f = IgnoreFile::parse_files_only(lines.join("\n").as_bytes());
+        assert!(!f.excludes(b"ch3.typ~", false), "re-included by name");
+        assert!(f.excludes(b"other.typ~", false), "the rest are still kept out");
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["A files-only rule refuses a folder, whatever the pattern says 000", "all",
+        "glob", "files"], ||
+    {
+        let g = res!(glob("*.tmp"));
+        assert!(!g.is_files_only(), "a pattern says nothing of it");
+        assert!(g.matches(b"a.tmp", false) && g.matches(b"a.tmp", true), "unrestricted, it matches both");
+        let g = g.files_only();
+        assert!(g.is_files_only());
+        assert!(g.matches(b"a.tmp", false), "a file");
+        assert!(!g.matches(b"a.tmp", true), "not a folder of the same name");
+        assert!(g.matches(b"sub/deep/a.tmp", false), "at depth");
+        // A trailing slash asks for folders alone, and files-only for anything but, so both matches nothing.
+        let g = res!(glob("build/")).files_only();
+        assert!(!g.matches(b"build", true) && !g.matches(b"build", false), "contradictory, so empty");
+        // A file's rules are read in order and the last decides, as ever.
+        let f = IgnoreFile::parse_files_only(b"# comment\n*.tmp\n!keep.tmp\n");
+        assert!(f.excludes(b"a.tmp", false));
+        assert!(!f.excludes(b"keep.tmp", false), "re-included");
+        assert!(!f.excludes(b"a.tmp", true), "a folder is not a file");
+        assert!(!f.excludes(b"a.tmp/inner", false), "so nothing beneath it is excluded for its sake");
         Ok(())
     }));
 

@@ -1,3 +1,4 @@
+use crate::app::server::VhostDb;
 use crate::srv::{
     admin::{
         handler as admin_handler,
@@ -8,6 +9,7 @@ use crate::srv::{
     api::{
         self,
         ApiHandlerRegistry,
+        HandlerCtx,
     },
     cache,
     cfg::{
@@ -17,6 +19,11 @@ use crate::srv::{
     },
     dev::refresh::HtmlModifier,
     console as site_console,
+    context::VhostDbs,
+    id::{
+        self as steel_id,
+        Uid,
+    },
     publish::{
         self,
         PublishConfig,
@@ -52,11 +59,12 @@ use oxedyne_fe2o3_jdat::{
     id::NumIdDat,
 };
 use oxedyne_fe2o3_net::{
+    addr::client_key,
     file::RequestPath,
     http::{
         client::{
-            http_request,
-            https_request,
+            http_request_limited,
+            https_request_limited,
         },
         encoding,
         fields::{
@@ -70,6 +78,7 @@ use oxedyne_fe2o3_net::{
         msg::{
             FileWindow,
             HttpMessage,
+            ReadLimits,
         },
         range::{
             self,
@@ -81,16 +90,20 @@ use oxedyne_fe2o3_net::{
 
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fmt::Debug,
     net::SocketAddr,
     path::{
+        Component,
         Path,
         PathBuf,
     },
+    future::Future,
     sync::{
         Arc,
         RwLock,
     },
+    time::Duration,
 };
 
 use tokio::{
@@ -99,6 +112,45 @@ use tokio::{
 };
 use tokio_rustls::rustls::ClientConfig;
 
+
+// What the router made of a request path.
+enum Routed {
+    File(PathBuf),
+    Slash(String),  // a directory named without its slash, and where the slash form lives
+}
+
+/// One vhost's entry in Steel's database map, read at each request: the map is empty while Steel
+/// is sealed and filled when it is unsealed, so a handler sees the database from that moment on.
+#[derive(Clone)]
+pub struct VhostDbRef {
+    dbs:    VhostDbs<{ steel_id::UID_LEN }, Uid, VhostDb>,
+    key:    String,     // the vhost's primary hostname, lower case
+}
+
+impl VhostDbRef {
+    pub fn new(dbs: VhostDbs<{ steel_id::UID_LEN }, Uid, VhostDb>, vhost: &str) -> Self {
+        Self { dbs, key: vhost.to_lowercase() }
+    }
+
+    pub fn get(&self) -> Option<(Arc<RwLock<VhostDb>>, Uid)> {
+        match self.dbs.read() {
+            Ok(g)   => g.get(&self.key).cloned(),
+            Err(_)  => {
+                // As `ServerContext::db_for_vhost`: a map nobody can read is a vhost with no
+                // database, which a handler answers as it does while sealed.
+                fault!("The vhost database map lock is poisoned; treating '{}' as having no \
+                    database.", self.key);
+                None
+            }
+        }
+    }
+}
+
+impl Debug for VhostDbRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VhostDbRef({})", self.key)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AppWebHandler<
@@ -121,6 +173,8 @@ pub struct AppWebHandler<
     pub publish:                Option<Arc<PublishConfig>>,
     pub mail:                   Option<Arc<MailSender>>,
     pub site_admins:            Arc<Vec<String>>,
+    pub admin_dashboard:        bool,   // `false` answers 404 for `/admin` and everything under it
+    pub vhost_db:               Option<VhostDbRef>, // what `HandlerCtx::db` is read from
 }
 
 impl<
@@ -163,7 +217,27 @@ impl<
             publish,
             mail,
             site_admins,
+            admin_dashboard:    true,
+            vhost_db:           None,
         }
+    }
+
+    pub fn with_vhost_db(mut self, db: VhostDbRef) -> Self {
+        self.vhost_db = Some(db);
+        self
+    }
+
+    fn vhost_db(&self) -> Option<(Arc<RwLock<VhostDb>>, Uid)> {
+        match &self.vhost_db {
+            Some(r) => r.get(),
+            None    => None,
+        }
+    }
+
+    pub fn with_admin_dashboard(mut self, on: bool) -> Self {
+        // `new` leaves the dashboard on, as every config written before the setting says.
+        self.admin_dashboard = on;
+        self
     }
 
     pub fn err_id() -> String {
@@ -175,7 +249,7 @@ impl<
         loc:    &HttpLocator,
         id:     &String, 
     )
-        -> Outcome<PathBuf>
+        -> Outcome<Routed>
     {
         let route = loc.path.as_string();
 
@@ -187,7 +261,7 @@ impl<
                     for filename in &self.default_index_files {
                         let candidate = path.clone().join(filename);
                         if candidate.exists() {
-                            return Ok(candidate);
+                            return Ok(Routed::File(candidate));
                         }
                     }
                     return Err(err!(
@@ -195,7 +269,7 @@ impl<
                         Tried: {:?}", id, path, self.default_index_files;
                         File, NotFound)); 
                 }
-                OsPath::File(path) => return Ok(path.clone()),
+                OsPath::File(path) => return Ok(Routed::File(path.clone())),
             }
             None => {
                 // Fallback: try to serve directly from public directory.
@@ -213,19 +287,42 @@ impl<
                         Invalid, Path, Security));
                 }
                 
-                let full_path = self.public_dir.clone().join(path);
+                let full_path = self.public_dir.clone().join(&path);
                 
                 // If it's a directory, try index files.
                 if full_path.is_dir() {
                     for filename in &self.default_index_files {
                         let candidate = full_path.join(filename);
                         if candidate.exists() {
-                            return Ok(candidate);
+                            // A page served for `/invitation` has two addresses, and the page
+                            // draws its stylesheet and fonts relative to the one it was not
+                            // given: `reader.css` asked for beside `/invitation` is `/reader.css`.
+                            // So the directory named without its slash is moved to the one with
+                            // it, as every static server does. Built from the normalised path,
+                            // never the raw one, so `//host/..` cannot become a link that leaves
+                            // the site, and kept to plain characters so nothing in it can split
+                            // a header.
+                            if !route.ends_with('/') {
+                                let rel = path.clone().remove_relative();
+                                let rel = rel.to_string_lossy();
+                                let mut to = match rel.is_empty() {
+                                    true    => fmt!("/"),
+                                    false   => fmt!("/{}/", rel),
+                                };
+                                if !loc.query.is_empty() {
+                                    to.push('?');
+                                    to.push_str(&loc.query);
+                                }
+                                if !to.chars().any(|c| c.is_control()) {
+                                    return Ok(Routed::Slash(to));
+                                }
+                            }
+                            return Ok(Routed::File(candidate));
                         }
                     }
                 }
                 
-                return Ok(full_path);
+                return Ok(Routed::File(full_path));
             }
         }
     }
@@ -266,9 +363,12 @@ impl<
         // it: `request_path` never carries one, and splitting it on `?` finds nothing.
         let request_query = loc.query.clone();
         let api_routes = self.api_routes.clone();
+        let vhost_db = self.vhost_db();
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
+        let upstream = UpstreamBounds::of(&self.cfg);
         let admin_state = self.admin_state.clone();
+        let admin_dashboard = self.admin_dashboard;
         let publish = self.publish.clone();
         let site_admins = self.site_admins.clone();
         // A `HEAD` reached this branch because it asks what the `GET` would
@@ -281,6 +381,15 @@ impl<
         );
 
         async move {
+            // A vhost that has switched the dashboard off does not own `/admin`, and does not
+            // hand the prefix to anything else either: the whole subtree is a 404, so neither
+            // a login page nor a file of that name in its web root is reachable there.
+            if !admin_dashboard && is_admin_path(&request_path) {
+                return Ok(Some(cache::generated(HttpMessage::respond_with_text(
+                    HttpStatus::NotFound,
+                    "Not found.",
+                ))));
+            }
             // The dashboard owns the entire `/admin` and `/admin/*`
             // subtree on every vhost it is configured for. Dispatch
             // before any API/webhook/static route lookups so app
@@ -642,24 +751,27 @@ impl<
             // third-party APIs that the app wants to mirror through
             // Steel so browser calls pick up the operator-supplied
             // headers (auth tokens, rate-limit keys).
-            if let Some(route) = api_routes.iter().find(|r| r.path == request_path) {
+            // A handler that declines (`None`) leaves the path to the static files below.
+            if let Some(route) = ApiRoute::find(&api_routes, &request_path) {
                 if route.handler.is_some() {
                     debug!("{}: GET {} -> api handler '{}'",
                         id, request_path,
                         route.handler.as_deref().unwrap_or("?"));
-                    let resp = res!(api::dispatch(
-                        &api_handler_registry,
+                    let ctx = HandlerCtx {
                         route,
-                        HttpMethod::GET,
-                        &loc,
-                        &[],
-                        &req_headers,
-                        &tls_client,
-                        &id,
-                    ).await);
-                    return Ok(Some(resp));
-                }
-                if route.upstream_host.is_some() {
+                        method:         HttpMethod::GET,
+                        loc:            &loc,
+                        body:           &[],
+                        req_headers:    &req_headers,
+                        tls_client:     &tls_client,
+                        id:             &id,
+                        peer,
+                        db:             vhost_db,
+                    };
+                    if let Some(resp) = res!(api::dispatch_ctx(&api_handler_registry, ctx).await) {
+                        return Ok(Some(resp));
+                    }
+                } else if route.upstream_host.is_some() {
                     let resp = res!(forward_api_proxy(
                         route,
                         HttpMethod::GET,
@@ -667,6 +779,7 @@ impl<
                         &[],
                         &req_headers,
                         &tls_client,
+                        &upstream,
                         &id,
                     ).await);
                     return Ok(Some(resp));
@@ -674,7 +787,15 @@ impl<
             }
 
             let abs_path = match self.router(&loc, &id).await {
-                Ok(path) => path, // The path may not exist, but at least we have one.
+                Ok(Routed::File(path)) => path, // The path may not exist, but at least we have one.
+                Ok(Routed::Slash(to)) => {
+                    debug!("{}: {} is a directory; 301 to {}.", id, request_path, to);
+                    return Ok(Some(HttpMessage::new_response(HttpStatus::MovedPermanently)
+                        .with_field(
+                            HeaderName::Location,
+                            HeaderFieldValue::Generic(to),
+                        )));
+                }
                 Err(e) => {
                     // Tap out early if the route is definitely not known.
                     error!(e);
@@ -935,31 +1056,49 @@ impl<
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
     {
         let request_path = loc.path.as_string().to_string();
+        // Where a sign-up or a comment came from, as a limit counts it: an IPv6 client is its whole
+        // /64, since it can take a fresh address from that on every request.
+        let peer_key = client_key(&peer.ip()).to_string();
         // A one-click unsubscribe arrives as a POST carrying its token in the query, so this
         // handler needs the query as well as the path.
         let request_query = loc.query.clone();
         let id = id.to_string();
         let api_routes = self.api_routes.clone();
+        let vhost_db = self.vhost_db();
         let webhook_routes = self.webhook_routes.clone();
         let webhook_registry = self.webhook_registry.clone();
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
+        let upstream = UpstreamBounds::of(&self.cfg);
         let admin_state = self.admin_state.clone();
+        let admin_dashboard = self.admin_dashboard;
         let publish = self.publish.clone();
         let mail = self.mail.clone();
         let site_admins = self.site_admins.clone();
 
         async move {
+            // As for a `GET`: with the dashboard off, `/admin` is a 404 whatever the method.
+            if !admin_dashboard && is_admin_path(&request_path) {
+                return Ok(Some(HttpMessage::respond_with_text(
+                    HttpStatus::NotFound,
+                    "Not found.",
+                )));
+            }
             // The newsletter sign-up: a public POST under the published prefix,
             // answered before the console and the API routes. It touches the
             // subscriber store and the DKIM mail sender, not the posts, and
             // always answers the same themed page whether or not the address was
             // already known -- so the form is never an oracle for the list.
             if let Some(cfg) = &publish {
+                // A post from another site is refused before anything is read: the sign-up, the
+                // comment, its edit and its preview are the writes a page elsewhere could aim a
+                // visitor's browser at. The one-click unsubscribe is not among them.
+                if let Some(refused) = res!(cfg.refuse_cross_site(&request_path, &req_headers, &id)) {
+                    return Ok(Some(refused));
+                }
                 if let Some(Subscription::Subscribe) = cfg.subscription_of(&request_path) {
-                    let peer_ip = peer.ip().to_string();
                     let resp = res!(publish_subscribe::handle_subscribe(
-                        cfg.as_ref(), db.as_ref(), &mail, &body, Some(&peer_ip), &id).await);
+                        cfg.as_ref(), db.as_ref(), &mail, &req_headers, &body, Some(&peer_key), &id).await);
                     return Ok(Some(resp));
                 }
                 // An unsubscribe by POST, which is what one-click means: the newsletter carries
@@ -1020,7 +1159,7 @@ impl<
                         let html = res!(publish_comment::preview(
                             dbh,
                             &source,
-                            Some(&peer.ip().to_string()),
+                            Some(&peer_key),
                             &secret,
                             cfg.comment_rate_secs,
                         ));
@@ -1058,10 +1197,10 @@ impl<
                                 name:       f("name"),
                                 email:      site_console::form_field(&body, "email"),
                                 body:       f("body"),
-                                honeypot:   f("website"),
+                                honeypot:   f(publish_subscribe::TRAP_FIELD),
                                 challenge:  f("challenge"),
                                 nonce:      f("nonce"),
-                                from:       Some(peer.ip().to_string()),
+                                from:       Some(peer_key.clone()),
                                 now:        publish_comment::now_stamp(),
                             };
                             // The site's AI, where it has set one up, so a stranger's first comment
@@ -1201,6 +1340,7 @@ impl<
                         &body,
                         &req_headers,
                         &tls_client,
+                        &upstream,
                         &id,
                     ).await);
                     return Ok(Some(resp));
@@ -1214,33 +1354,37 @@ impl<
             }
 
             // Find a matching API route.
-            let route = match api_routes.iter().find(|r| r.path == request_path) {
+            let no_route = || HttpMessage::respond_with_text(
+                HttpStatus::NotFound,
+                "No API route matches this path.",
+            );
+            let route = match ApiRoute::find(&api_routes, &request_path) {
                 Some(r) => r,
                 None => {
                     debug!("{}: POST {} -- no matching API route.", id, request_path);
-                    return Ok(Some(HttpMessage::respond_with_text(
-                        HttpStatus::NotFound,
-                        "No API route matches this path.",
-                    )));
+                    return Ok(Some(no_route()));
                 }
             };
 
-            // In-process handler path: dispatch to the registered ApiHandler.
+            // In-process handler path: dispatch to the registered ApiHandler. A POST has no
+            // static file to fall through to, so a handler that declines is a 404.
             if route.handler.is_some() {
                 debug!("{}: POST {} -> api handler '{}'",
                     id, request_path,
                     route.handler.as_deref().unwrap_or("?"));
-                let resp = res!(api::dispatch(
-                    &api_handler_registry,
+                let ctx = HandlerCtx {
                     route,
-                    HttpMethod::POST,
-                    &loc,
-                    &body,
-                    &req_headers,
-                    &tls_client,
-                    &id,
-                ).await);
-                return Ok(Some(resp));
+                    method:         HttpMethod::POST,
+                    loc:            &loc,
+                    body:           &body,
+                    req_headers:    &req_headers,
+                    tls_client:     &tls_client,
+                    id:             &id,
+                    peer,
+                    db:             vhost_db,
+                };
+                let resp = res!(api::dispatch_ctx(&api_handler_registry, ctx).await);
+                return Ok(Some(resp.unwrap_or_else(no_route)));
             }
 
             // Proxy path: forward to the upstream via the shared helper.
@@ -1251,10 +1395,149 @@ impl<
                 &body,
                 &req_headers,
                 &tls_client,
+                &upstream,
                 &id,
             ).await);
             Ok(Some(resp))
         }
+    }
+
+    /// A `PUT`, `DELETE` or `PATCH` reaches an in-process handler route and nothing else: no
+    /// static file takes one, and a proxy route forwards `GET` and `POST` alone. `None`, which
+    /// the server answers with a `405`, everywhere else.
+    fn handle_other<
+        const SIDL: usize,
+        const UIDL: usize,
+        SID:    NumIdDat<SIDL> + 'static,
+        UID:    NumIdDat<UIDL> + 'static,
+        ENC:    Encrypter,
+        KH:     Hasher,
+        DB:     Database<UIDL, UID, ENC, KH>,
+    >(
+        &self,
+        method:         HttpMethod,
+        loc:            HttpLocator,
+        body:           Vec<u8>,
+        req_headers:    Arc<HeaderFields>,
+        _db:            Option<(Arc<RwLock<DB>>, UID)>,
+        _sid_opt:       &Option<SID>,
+        peer:           SocketAddr,
+        id:             &String,
+    )
+        -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
+    {
+        let request_path = loc.path.as_string().to_string();
+        let id = id.to_string();
+        let api_routes = self.api_routes.clone();
+        let vhost_db = self.vhost_db();
+        let api_handler_registry = self.api_handler_registry.clone();
+        let tls_client = self.tls_client.clone();
+        let admin_dashboard = self.admin_dashboard;
+
+        async move {
+            if !admin_dashboard && is_admin_path(&request_path) {
+                return Ok(Some(HttpMessage::respond_with_text(
+                    HttpStatus::NotFound,
+                    "Not found.",
+                )));
+            }
+            let route = match ApiRoute::find(&api_routes, &request_path) {
+                Some(r) if r.handler.is_some()  => r,
+                _                               => return Ok(None),
+            };
+            debug!("{}: {} {} -> api handler '{}'",
+                id, method, request_path,
+                route.handler.as_deref().unwrap_or("?"));
+            let ctx = HandlerCtx {
+                route,
+                method,
+                loc:            &loc,
+                body:           &body,
+                req_headers:    &req_headers,
+                tls_client:     &tls_client,
+                id:             &id,
+                peer,
+                db:             vhost_db,
+            };
+            api::dispatch_ctx(&api_handler_registry, ctx).await
+        }
+    }
+}
+
+/// Is the request path `/admin`, or under it, as the static router reads it? The router
+/// normalises the path (`//admin/x`, `/./admin/x` and `/x/../admin/x` are all `admin/x` to it),
+/// so a test of the raw text would let a spelling it does not recognise through to a file named
+/// `admin/...` in the web root.
+fn is_admin_path(path: &str) -> bool {
+    let rel = Path::new(path.strip_prefix('/').unwrap_or(path)).normalise().remove_relative();
+    rel.components().next() == Some(Component::Normal(OsStr::new("admin")))
+}
+
+/// What bounds one call to an `api_routes` or webhook upstream, from the server config: the
+/// reader's size limits on the reply, and a deadline on the whole call. Without them an upstream
+/// that states no length and never closes holds the visitor's request open and is buffered
+/// without limit.
+#[derive(Clone, Debug)]
+struct UpstreamBounds {
+    limits:     ReadLimits,
+    timeout:    Option<Duration>,
+}
+
+impl UpstreamBounds {
+
+    fn of(cfg: &ServerConfig) -> Self {
+        Self {
+            limits:     cfg.read_limits(),
+            timeout:    cfg.upstream_timeout(),
+        }
+    }
+
+    /// `Err` means the deadline passed before the call finished.
+    async fn run<F: Future<Output = Outcome<HttpMessage>>>(
+        &self,
+        call: F,
+    )
+        -> Result<Outcome<HttpMessage>, tokio::time::error::Elapsed>
+    {
+        match self.timeout {
+            Some(limit) => tokio::time::timeout(limit, call).await,
+            None        => Ok(call.await),
+        }
+    }
+}
+
+/// The visitor's answer to a call to an upstream: its reply if it gave one, `502` if it could not
+/// be reached, sent something that is not HTTP or overran the size limits, `504` if it overran the
+/// deadline. Returned as an error instead, the failure left the handler, and the connection
+/// closed on a visitor who was told nothing.
+fn upstream_answer(
+    id:     &str,
+    what:   &str,
+    host:   &str,
+    port:   u16,
+    bounds: &UpstreamBounds,
+    reply:  Result<Outcome<HttpMessage>, tokio::time::error::Elapsed>,
+)
+    -> HttpMessage
+{
+    match reply {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(e)) => {
+            warn!("{}: {} could not be served by its upstream {}:{}: {}",
+                id, what, host, port, e);
+            HttpMessage::respond_with_text(
+                HttpStatus::BadGateway,
+                "Bad Gateway: upstream proxy error.",
+            )
+        },
+        Err(_) => {
+            warn!("{}: {} got no complete reply from its upstream {}:{} within {:?}.",
+                id, what, host, port, bounds.timeout);
+            HttpMessage::respond_with_text(
+                HttpStatus::GatewayTimeout,
+                "Gateway Timeout: the upstream did not answer in time.",
+            )
+        },
     }
 }
 
@@ -1265,6 +1548,7 @@ async fn forward_api_proxy(
     body:           &[u8],
     req_headers:    &HeaderFields,
     tls_client:     &Option<Arc<ClientConfig>>,
+    bounds:         &UpstreamBounds,
     id:             &str,
 )
     -> Outcome<HttpMessage>
@@ -1342,33 +1626,40 @@ async fn forward_api_proxy(
         if route.upstream_tls { "https://" } else { "http://" },
         upstream_host, upstream_port, upstream_path, hdrs.len());
 
-    if route.upstream_tls {
-        let tls_cfg = match tls_client {
-            Some(cfg) => cfg.clone(),
-            None => return Err(err!(
-                "{}: API route '{}' configured with https:// upstream but \
-                no TLS client is available.", id, route.path;
-                Init, Missing)),
-        };
-        https_request(
-            upstream_host,
-            upstream_port,
-            method,
-            upstream_path,
-            &hdrs,
-            body,
-            tls_cfg,
-        ).await
-    } else {
-        http_request(
-            upstream_host,
-            upstream_port,
-            method,
-            upstream_path,
-            &hdrs,
-            body,
-        ).await
-    }
+    let call = async {
+        if route.upstream_tls {
+            let tls_cfg = match tls_client {
+                Some(cfg) => cfg.clone(),
+                None => return Err(err!(
+                    "{}: API route '{}' configured with https:// upstream but \
+                    no TLS client is available.", id, route.path;
+                    Init, Missing)),
+            };
+            https_request_limited(
+                upstream_host,
+                upstream_port,
+                method,
+                upstream_path,
+                &hdrs,
+                body,
+                tls_cfg,
+                Some(&bounds.limits),
+            ).await
+        } else {
+            http_request_limited(
+                upstream_host,
+                upstream_port,
+                method,
+                upstream_path,
+                &hdrs,
+                body,
+                Some(&bounds.limits),
+            ).await
+        }
+    };
+    let reply = bounds.run(call).await;
+    Ok(upstream_answer(
+        id, &fmt!("API route '{}'", route.path), upstream_host, upstream_port, bounds, reply))
 }
 
 async fn forward_webhook(
@@ -1376,6 +1667,7 @@ async fn forward_webhook(
     body:           &[u8],
     req_headers:    &HeaderFields,
     tls_client:     &Option<Arc<ClientConfig>>,
+    bounds:         &UpstreamBounds,
     id:             &str,
 )
     -> Outcome<HttpMessage>
@@ -1438,31 +1730,38 @@ async fn forward_webhook(
         upstream_host, upstream_port, upstream_path,
         body.len(), hdr_refs.len());
 
-    if route.upstream_tls {
-        let tls_cfg = match tls_client {
-            Some(cfg) => cfg.clone(),
-            None => return Err(err!(
-                "{}: webhook route '{}' configured with https:// upstream \
-                but no TLS client is available.", id, route.path;
-                Init, Missing)),
-        };
-        https_request(
-            upstream_host,
-            upstream_port,
-            HttpMethod::POST,
-            upstream_path,
-            &hdr_refs,
-            body,
-            tls_cfg,
-        ).await
-    } else {
-        http_request(
-            upstream_host,
-            upstream_port,
-            HttpMethod::POST,
-            upstream_path,
-            &hdr_refs,
-            body,
-        ).await
-    }
+    let call = async {
+        if route.upstream_tls {
+            let tls_cfg = match tls_client {
+                Some(cfg) => cfg.clone(),
+                None => return Err(err!(
+                    "{}: webhook route '{}' configured with https:// upstream \
+                    but no TLS client is available.", id, route.path;
+                    Init, Missing)),
+            };
+            https_request_limited(
+                upstream_host,
+                upstream_port,
+                HttpMethod::POST,
+                upstream_path,
+                &hdr_refs,
+                body,
+                tls_cfg,
+                Some(&bounds.limits),
+            ).await
+        } else {
+            http_request_limited(
+                upstream_host,
+                upstream_port,
+                HttpMethod::POST,
+                upstream_path,
+                &hdr_refs,
+                body,
+                Some(&bounds.limits),
+            ).await
+        }
+    };
+    let reply = bounds.run(call).await;
+    Ok(upstream_answer(
+        id, &fmt!("webhook route '{}'", route.path), upstream_host, upstream_port, bounds, reply))
 }

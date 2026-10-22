@@ -20,6 +20,7 @@
 //! Anthropic Claude
 
 use crate::{
+    addr::is_publicly_routable,
     dns_resolver,
     imap::client::Security,
     smtp::server::read_line,
@@ -34,9 +35,13 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::{
     net::{
         IpAddr,
+        Ipv4Addr,
         SocketAddr,
     },
-    sync::Arc,
+    sync::{
+        Arc,
+        Mutex,
+    },
     time::Duration,
 };
 
@@ -49,7 +54,22 @@ use tokio_rustls::rustls::ClientConfig;
 
 
 // Generous, because some receiving MX hosts greylist or impose multi-second waits before 220.
+// It bounds each step of a conversation, not the whole of it.
 pub const SMTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
+
+// The reply to the final "." may take this long whatever the step deadline, as RFC 5321
+// §4.5.3.2.6 allows. A sender that gives up while the receiver is still accepting sends the
+// message again on its next try, and the receiver ends up with both.
+const DATA_DONE_TIMEOUT: Duration = Duration::from_secs(600);
+
+// Once the message is accepted, QUIT is a courtesy, and no step of it waits longer than this. A
+// whole step spent on it could run out a caller's own deadline and report an accepted message as
+// failed, which is a false alarm and, where the caller retries, a duplicate.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+// The message goes over in pieces of this size, each held to the deadline on its own, so a large
+// message on a slow link is bounded by its progress rather than cut off for its size.
+const SEND_PIECE: usize = 64 * 1024;
 
 
 /// Where to post a message, and how to prove you may.
@@ -66,7 +86,10 @@ pub struct SubmissionConfig {
     // For a provider with two-factor authentication this is an application password, not the
     // password the human types into a browser.
     pub password:   String,
-    pub timeout:    Duration,   // per IO
+    // Each step: the connect, the TLS handshake, each command and each reply. The reply to the
+    // message itself may take DATA_DONE_TIMEOUT where that is longer, and QUIT no more than
+    // QUIT_TIMEOUT.
+    pub timeout:    Duration,
     // Dialled instead of resolving `host`. The certificate is still validated against `host`, so
     // pinning the address weakens nothing -- and a server connecting on behalf of a user must vet
     // the address it dials rather than hand the name to the resolver twice.
@@ -108,6 +131,59 @@ impl SubmissionConfig {
 }
 
 
+/// The addresses to try for a domain, from the A records of its mail exchanges, looked up with
+/// `lookup`.
+///
+/// Failing to find one is permanent only where the DNS said so for good: the domain publishes a null
+/// MX (RFC 7505), or every exchange is a name that does not exist (NXDOMAIN). An exchange that exists
+/// but has no A record may be an IPv6-only host, which this client cannot reach and a later one might,
+/// and a lookup that failed outright says nothing about the host, so both leave the failure transient.
+/// Mail to a dead domain used to be retried for ever because none of this was told apart.
+fn route<L>(mxs: &[dns_resolver::MxRecord], lookup: L) -> Outcome<Vec<DeliveryTarget>>
+    where
+        L: Fn(&str) -> Outcome<Vec<Ipv4Addr>>,
+{
+    if mxs.iter().all(|mx| mx.exchange.is_empty()) {
+        return Err(err!(
+            "The recipient domain publishes a null MX and accepts no mail (RFC 7505).";
+            IO, Network, Missing, Permanent));
+    }
+    let mut targets: Vec<DeliveryTarget> = Vec::new();
+    // Whether some exchange is not shown to be gone.
+    let mut open = false;
+    for mx in mxs {
+        if mx.exchange.is_empty() {
+            continue;
+        }
+        match lookup(&mx.exchange) {
+            Ok(addrs) if addrs.is_empty()   => open = true,
+            Ok(addrs)                       => {
+                for ip in addrs {
+                    targets.push(DeliveryTarget {
+                        host:       mx.exchange.clone(),
+                        addr:       IpAddr::V4(ip),
+                        port:       25,
+                        preference: mx.preference,
+                    });
+                }
+            }
+            Err(e) if is_permanent(&e)      => (),
+            Err(_)                          => open = true,
+        }
+    }
+    if !targets.is_empty() {
+        Ok(targets)
+    } else if open {
+        Err(err!(
+            "No reachable MX hosts for any of the configured recipients.";
+            IO, Network, Missing))
+    } else {
+        Err(err!(
+            "No mail exchange of the recipient domain exists (NXDOMAIN).";
+            IO, Network, Missing, Permanent))
+    }
+}
+
 /// One outbound delivery target after MX resolution, sorted into preference order by
 /// [`OutboundClient::deliver`].
 #[derive(Clone, Debug)]
@@ -121,6 +197,47 @@ struct DeliveryTarget {
     preference: u16,        // as the MX record gave it
 }
 
+/// Which mail exchanges one delivery keeps away from, and the one it last dialled.
+///
+/// A caller that has found an exchange not answering (see [`OutboundClient::exchanges`]) names it by
+/// address in [`Self::avoiding`], and `deliver_with` goes on to the next exchange of the recipient's
+/// domain as though it were not listed. The delivery notes each exchange as it dials it, so a caller
+/// that gives up on the delivery while it is under way, by dropping it at a deadline, still knows which
+/// exchange it was waiting on. One `Dial` serves one delivery.
+#[derive(Debug, Default)]
+pub struct Dial {
+    avoid:  Vec<IpAddr>,
+    last:   Mutex<Option<IpAddr>>,
+}
+
+impl Dial {
+
+    /// A dial that never connects to the exchanges at `avoid`.
+    pub fn avoiding(avoid: Vec<IpAddr>) -> Self {
+        Self { avoid, last: Mutex::new(None) }
+    }
+
+    /// Is the exchange at `ip` one this delivery keeps away from?
+    pub fn skips(&self, ip: IpAddr) -> bool {
+        self.avoid.contains(&ip)
+    }
+
+    /// Notes that the exchange at `ip` is the one now being dialled. A courier that is not
+    /// [`OutboundClient`] calls this for each exchange it tries, so the caller can tell which one held
+    /// a delivery up.
+    pub fn dialling(&self, ip: IpAddr) -> Outcome<()> {
+        let mut last = lock_mutex!(self.last);
+        *last = Some(ip);
+        Ok(())
+    }
+
+    /// The exchange most recently dialled, or `None` where none has been.
+    pub fn last(&self) -> Outcome<Option<IpAddr>> {
+        let last = lock_mutex!(self.last);
+        Ok(*last)
+    }
+}
+
 /// Per-process outbound SMTP client.
 ///
 /// Holds a rustls `ClientConfig` initialised with the system trust
@@ -132,6 +249,9 @@ pub struct OutboundClient {
     // IP whose PTR lines up.
     pub hostname:       Arc<String>,
     pub tls_config:     Arc<ClientConfig>,  // for STARTTLS, built once
+    // Whether `deliver` may dial an exchange whose address is not publicly routable. Off by
+    // default, and only a fixture on the loopback, or a development host, has a reason to set it.
+    pub allow_private_exchanges: bool,
 }
 
 impl OutboundClient {
@@ -143,6 +263,7 @@ impl OutboundClient {
         Ok(Self {
             hostname:   Arc::new(hostname.into()),
             tls_config: Arc::new(cfg),
+            allow_private_exchanges: false,
         })
     }
 
@@ -154,11 +275,31 @@ impl OutboundClient {
 
     /// Each MX in preference order until one succeeds. The queue id is the first accepting
     /// server's; where every host failed, the error is the last one's.
+    ///
+    /// An exchange at an address that is not publicly routable (see
+    /// [`crate::addr::is_publicly_routable`]) is never dialled unless `allow_private_exchanges` is
+    /// set. Where no exchange is left the error is permanent. Submission to a configured relay
+    /// ([`Self::submit`]) is not filtered.
     pub async fn deliver(
         &self,
         mail_from:  &str,
         rcpt_to:    &[String],
         body:       &[u8],
+    )
+        -> Outcome<String>
+    {
+        self.deliver_with(mail_from, rcpt_to, body, &Dial::default()).await
+    }
+
+    /// [`Self::deliver`], keeping away from the exchanges `dial` names and noting in it each exchange
+    /// it dials. Where every exchange that is left is one `dial` avoids, nothing is dialled and the
+    /// failure is transient.
+    pub async fn deliver_with(
+        &self,
+        mail_from:  &str,
+        rcpt_to:    &[String],
+        body:       &[u8],
+        dial:       &Dial,
     )
         -> Outcome<String>
     {
@@ -183,7 +324,30 @@ impl OutboundClient {
             }
         }
 
-        // MX lookup, then resolve each MX host to an A record.
+        let targets = res!(Self::resolve(domain).await);
+        self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body, SMTP_CLIENT_TIMEOUT, dial).await
+    }
+
+    /// The addresses of the exchanges a message to `rcpt_to` would be dialled at, in preference order,
+    /// found by the lookups `deliver` makes and without dialling any. An exchange this client would
+    /// never dial, being at an address that is not publicly routable, is left out, so the list may be
+    /// empty. A caller uses it to learn which exchanges it has found not answering before it sends.
+    pub async fn exchanges(&self, rcpt_to: &str) -> Outcome<Vec<IpAddr>> {
+        let domain = res!(extract_domain(rcpt_to));
+        let mut targets = res!(Self::resolve(domain).await);
+        targets.retain(|t| self.dialable(t));
+        targets.sort_by_key(|t| t.preference);
+        let mut ips: Vec<IpAddr> = Vec::new();
+        for t in &targets {
+            if !ips.contains(&t.addr) {
+                ips.push(t.addr);
+            }
+        }
+        Ok(ips)
+    }
+
+    // The exchanges of a domain: its MX records, each looked up for its A records.
+    async fn resolve(domain: String) -> Outcome<Vec<DeliveryTarget>> {
         let mxs = res!(
             tokio::task::spawn_blocking(move || dns_resolver::lookup_mx(&domain)).await
                 .map_err(|e| err!("MX lookup task join failure: {}.", e;
@@ -191,27 +355,18 @@ impl OutboundClient {
         );
         let mxs = res!(mxs);
 
-        let mut targets: Vec<DeliveryTarget> = Vec::new();
-        for mx in &mxs {
-            let exchange = mx.exchange.clone();
-            let pref = mx.preference;
-            let addrs_outcome = tokio::task::spawn_blocking(move || {
-                dns_resolver::lookup_a(&exchange)
-            }).await;
-            let addrs = match addrs_outcome {
-                Ok(Ok(v)) => v,
-                _ => continue,
-            };
-            for ip in addrs {
-                targets.push(DeliveryTarget {
-                    host:       mx.exchange.clone(),
-                    addr:       IpAddr::V4(ip),
-                    port:       25,
-                    preference: pref,
-                });
-            }
-        }
-        self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body).await
+        let targets = res!(
+            tokio::task::spawn_blocking(move || route(&mxs, dns_resolver::lookup_a)).await
+                .map_err(|e| err!("Exchange lookup task join failure: {}.", e;
+                    IO, Network, Init))
+        );
+        targets
+    }
+
+    // Whether this client may dial the exchange: not at a loopback, private or otherwise unroutable
+    // address, unless `allow_private_exchanges` is set.
+    fn dialable(&self, t: &DeliveryTarget) -> bool {
+        self.allow_private_exchanges || is_publicly_routable(&t.addr)
     }
 
     /// The delivery loop itself, given the exchanges rather than resolving them.
@@ -221,13 +376,17 @@ impl OutboundClient {
     /// whether the collapsed error is permanent -- could not be exercised at all. It carries
     /// jarrah's outbound mail and had no test until 2026-08-17. Private, and takes the exchanges as
     /// an argument rather than reading them from anywhere: this is not a way to configure where mail
-    /// goes, it is a way for a fixture to stand in as an exchange.
+    /// goes, it is a way for a fixture to stand in as an exchange. `deadline` bounds each step of
+    /// each conversation, and is an argument so a fixture need not wait a minute to see one pass. `dial`
+    /// names the exchanges to keep away from and notes each one dialled.
     async fn deliver_to_exchanges(
         &self,
         targets:    &[DeliveryTarget],
         mail_from:  &str,
         rcpt_to:    &[String],
         body:       &[u8],
+        deadline:   Duration,
+        dial:       &Dial,
     )
         -> Outcome<String>
     {
@@ -237,7 +396,40 @@ impl OutboundClient {
                 IO, Network, Missing));
         }
         let mut targets: Vec<DeliveryTarget> = targets.to_vec();
+        if !self.allow_private_exchanges {
+            // An exchange whose address is loopback, private or otherwise unroutable is never
+            // dialled, whatever name led to it: a record that points mail at the sender's own
+            // network is no exchange for the recipient. Nothing a later try finds will differ,
+            // so where nothing is left the failure is permanent and the address is suppressed.
+            targets.retain(|t| {
+                let routable = is_publicly_routable(&t.addr);
+                if !routable {
+                    warn!("Outbound SMTP: MX {} ({}) is not publicly routable and is not dialled.",
+                        t.host, t.addr);
+                }
+                routable
+            });
+            if targets.is_empty() {
+                let domain = rcpt_to.first()
+                    .and_then(|r| extract_domain(r).ok())
+                    .unwrap_or_default();
+                return Err(err!(
+                    "Every mail exchange of '{}' is at an address that is not publicly routable, \
+                    so nothing was dialled (MX routing).", domain;
+                    IO, Network, Security, Permanent));
+            }
+        }
         targets.sort_by_key(|t| t.preference);
+        // An exchange the caller has found not answering is left for another time, so a delivery is
+        // not held up again by the host that held up the last. Where every one is left, nothing has
+        // been shown wrong with the recipient, and the failure is transient.
+        let count = targets.len();
+        targets.retain(|t| !dial.skips(t.addr));
+        if targets.is_empty() {
+            return Err(err!(
+                "Every one of the {} mail exchanges is being avoided, so nothing was dialled.", count;
+                IO, Network));
+        }
 
         let mut last_err: Option<String> = None;
         // Whether any exchange refused this recipient with a 5xx. A permanent rejection -- an unknown
@@ -246,7 +438,8 @@ impl OutboundClient {
         // trying. A 4xx, a timeout or a connection error is transient and carries no such tag.
         let mut permanent = false;
         for tgt in &targets {
-            match self.try_one(tgt, mail_from, rcpt_to, body).await {
+            res!(dial.dialling(tgt.addr));
+            match self.try_one(tgt, mail_from, rcpt_to, body, deadline).await {
                 Ok(qid) => return Ok(qid),
                 Err(e) => {
                     if is_permanent(&e) {
@@ -310,36 +503,26 @@ impl OutboundClient {
                     Some(ip) => SocketAddr::new(IpAddr::V4(*ip), cfg.port),
                     None => return Err(err!(
                         "The submission host {} resolves to no address.", cfg.host;
-                        IO, Network, Missing)),
+                        IO, Network, Missing, Unreachable)),
                 }
             },
         };
 
-        let connect = TcpStream::connect(addr);
-        let plain = match timeout(cfg.timeout, connect).await {
-            Ok(Ok(s))  => s,
-            Ok(Err(e)) => return Err(err!(e,
-                "Connecting to the submission host {} at {}.", cfg.host, addr; IO, Network)),
-            Err(_)     => return Err(err!(
-                "Timeout connecting to the submission host {} at {}.", cfg.host, addr;
-                IO, Network)),
-        };
+        let mut conv = res!(Conversation::connect(addr, &cfg.host, cfg.timeout).await);
 
         // TLS from the first byte, or in the clear until STARTTLS lifts it.
-        let mut stream = match cfg.security {
-            Security::ImplicitTls =>
-                res!(tls::upgrade(plain, &cfg.host, self.tls_config.clone()).await),
-            _ => ClientStream::Plain(plain),
-        };
+        if cfg.security == Security::ImplicitTls {
+            conv = res!(conv.upgrade(self.tls_config.clone()).await);
+        }
 
-        let banner = res!(read_smtp_response(&mut stream).await);
+        let banner = res!(conv.reply().await);
         if banner.code != 220 {
             return Err(err!(
                 "Expected a 220 banner from {}, got {} {}", cfg.host, banner.code, banner.text;
                 IO, Network, Wire));
         }
 
-        let mut ehlo = res!(self.ehlo(&mut stream).await);
+        let mut ehlo = res!(self.ehlo(&mut conv).await);
 
         if cfg.security == Security::StartTls {
             let offered = ehlo.text.lines().any(|l| l.trim().eq_ignore_ascii_case("STARTTLS"));
@@ -347,25 +530,19 @@ impl OutboundClient {
                 return Err(err!(
                     "{} does not offer STARTTLS, so the account password cannot be sent to it \
                     without being readable on the wire.", cfg.host;
-                    IO, Network, Invalid));
+                    IO, Network, Invalid, Security));
             }
-            res!(write_command(&mut stream, "STARTTLS").await);
-            let resp = res!(read_smtp_response(&mut stream).await);
+            res!(conv.command("STARTTLS").await);
+            let resp = res!(conv.reply().await);
             if resp.code != 220 {
                 return Err(err!(
                     "{} refused STARTTLS: {} {}", cfg.host, resp.code, resp.text;
-                    IO, Network, Wire));
+                    IO, Network, Wire, Security));
             }
-            let plain = match stream.into_plain() {
-                Some(s) => s,
-                None => return Err(err!(
-                    "STARTTLS response received on an already-encrypted stream.";
-                    Invalid, Bug)),
-            };
-            stream = res!(tls::upgrade(plain, &cfg.host, self.tls_config.clone()).await);
+            conv = res!(conv.upgrade(self.tls_config.clone()).await);
             // The extension list before the upgrade cannot be trusted, and AUTH is usually only
             // offered after it, so ask again inside TLS.
-            ehlo = res!(self.ehlo(&mut stream).await);
+            ehlo = res!(self.ehlo(&mut conv).await);
         }
 
         if cfg.security == Security::Plain {
@@ -373,17 +550,16 @@ impl OutboundClient {
                 the clear. Only a loopback test server should ever be reached this way.", cfg.host);
         }
 
-        res!(authenticate(&mut stream, &ehlo, &cfg.user, &cfg.password).await);
-        let queue_id = res!(transact(&mut stream, mail_from, rcpt_to, body).await);
+        res!(authenticate(&mut conv, &ehlo, &cfg.user, &cfg.password).await);
+        let queue_id = res!(transact(&mut conv, mail_from, rcpt_to, body).await);
 
-        let _ = write_command(&mut stream, "QUIT").await;
-        let _ = read_smtp_response(&mut stream).await;
+        conv.quit().await;
         Ok(queue_id)
     }
 
-    async fn ehlo(&self, stream: &mut ClientStream) -> Outcome<SmtpResponse> {
-        res!(write_command(stream, &fmt!("EHLO {}", self.hostname)).await);
-        let resp = res!(read_smtp_response(stream).await);
+    async fn ehlo(&self, conv: &mut Conversation) -> Outcome<SmtpResponse> {
+        res!(conv.command(&fmt!("EHLO {}", self.hostname)).await);
+        let resp = res!(conv.reply().await);
         if resp.code != 250 {
             return Err(err!(
                 "EHLO rejected: {} {}", resp.code, resp.text;
@@ -398,24 +574,15 @@ impl OutboundClient {
         mail_from:  &str,
         rcpt_to:    &[String],
         body:       &[u8],
+        deadline:   Duration,
     )
         -> Outcome<String>
     {
-        let addr = std::net::SocketAddr::new(tgt.addr, tgt.port);
-        let connect = TcpStream::connect(addr);
-        let plain = match timeout(SMTP_CLIENT_TIMEOUT, connect).await {
-            Ok(Ok(s))  => s,
-            Ok(Err(e)) => return Err(err!(e,
-                "Connecting to {}.", addr; IO, Network)),
-            Err(_)     => return Err(err!(
-                "Timeout connecting to {}.", addr;
-                IO, Network)),
-        };
-
-        let mut stream = ClientStream::Plain(plain);
+        let addr = SocketAddr::new(tgt.addr, tgt.port);
+        let mut conv = res!(Conversation::connect(addr, &tgt.host, deadline).await);
 
         // Read the 220 banner.
-        let banner = res!(read_smtp_response(&mut stream).await);
+        let banner = res!(conv.reply().await);
         if banner.code != 220 {
             return Err(err!(
                 "Expected 220 banner, got {} {}", banner.code, banner.text;
@@ -423,43 +590,123 @@ impl OutboundClient {
         }
 
         // EHLO, then look at extensions.
-        res!(write_command(&mut stream, &fmt!("EHLO {}", self.hostname)).await);
-        let ehlo = res!(read_smtp_response(&mut stream).await);
-        if ehlo.code != 250 {
-            return Err(err!(
-                "EHLO rejected: {} {}", ehlo.code, ehlo.text;
-                IO, Network, Wire));
-        }
+        let ehlo = res!(self.ehlo(&mut conv).await);
         let supports_starttls = ehlo.text.lines().any(|l| {
             l.trim().eq_ignore_ascii_case("STARTTLS")
         });
 
         // Opportunistic STARTTLS.
         if supports_starttls {
-            res!(write_command(&mut stream, "STARTTLS").await);
-            let resp = res!(read_smtp_response(&mut stream).await);
+            res!(conv.command("STARTTLS").await);
+            let resp = res!(conv.reply().await);
             if resp.code == 220 {
-                let plain = match stream.into_plain() {
-                    Some(s) => s,
-                    None => return Err(err!(
-                        "STARTTLS response received on already-TLS stream.";
-                        Invalid, Bug)),
-                };
-                stream = res!(tls::upgrade(plain, &tgt.host, self.tls_config.clone()).await);
+                conv = res!(conv.upgrade(self.tls_config.clone()).await);
 
                 // Re-issue EHLO inside TLS.
-                res!(write_command(&mut stream, &fmt!("EHLO {}", self.hostname)).await);
-                let _ = res!(read_smtp_response(&mut stream).await);
+                res!(conv.command(&fmt!("EHLO {}", self.hostname)).await);
+                let _ = res!(conv.reply().await);
             }
         }
 
-        let queue_id = res!(transact(&mut stream, mail_from, rcpt_to, body).await);
+        let queue_id = res!(transact(&mut conv, mail_from, rcpt_to, body).await);
 
-        // QUIT.
-        let _ = write_command(&mut stream, "QUIT").await;
-        let _ = read_smtp_response(&mut stream).await;
-
+        conv.quit().await;
         Ok(queue_id)
+    }
+}
+
+/// One SMTP conversation: the stream, and the deadline every step on it is held to.
+///
+/// Every read, write and handshake goes through here, so no step can wait for ever. Until
+/// 2026-09-24 only the TCP connect was timed, and a server that took the connection and never
+/// spoke held `submit` for as long as the socket lived, whatever its timeout said -- and with it
+/// the text an alert sends beside its mail (D-06 audit A2).
+struct Conversation {
+    stream:     ClientStream,
+    peer:       String,     // named in errors, and the name a certificate is validated against
+    timeout:    Duration,   // per step
+}
+
+impl Conversation {
+
+    async fn connect(addr: SocketAddr, peer: &str, deadline: Duration) -> Outcome<Self> {
+        let plain = match timeout(deadline, TcpStream::connect(addr)).await {
+            Ok(Ok(s))  => s,
+            Ok(Err(e)) => return Err(tls::dial_fault(e,
+                fmt!("Connecting to {} at {}", peer, addr))),
+            Err(_)     => return Err(err!(
+                "Timeout connecting to {} at {}.", peer, addr; IO, Network, Timeout)),
+        };
+        Ok(Self { stream: ClientStream::Plain(plain), peer: peer.to_string(), timeout: deadline })
+    }
+
+    /// TLS over the plain stream, from the first byte or once STARTTLS has been agreed.
+    async fn upgrade(self, tls_config: Arc<ClientConfig>) -> Outcome<Self> {
+        let plain = match self.stream.into_plain() {
+            Some(s) => s,
+            None => return Err(err!(
+                "A TLS upgrade was asked of the stream to {}, which is already encrypted.",
+                self.peer; Invalid, Bug)),
+        };
+        let stream = res!(tls::upgrade(plain, &self.peer, tls_config, self.timeout).await);
+        Ok(Self { stream, peer: self.peer, timeout: self.timeout })
+    }
+
+    /// All of one reply, however many lines it runs to, within the step deadline.
+    async fn reply(&mut self) -> Outcome<SmtpResponse> {
+        let deadline = self.timeout;
+        self.reply_within(deadline).await
+    }
+
+    async fn reply_within(&mut self, deadline: Duration) -> Outcome<SmtpResponse> {
+        match timeout(deadline, read_smtp_response(&mut self.stream)).await {
+            Ok(r)  => r,
+            Err(_) => Err(err!(
+                "{} sent no reply within {:?}.", self.peer, deadline;
+                IO, Network, Read, Timeout)),
+        }
+    }
+
+    /// Ends the conversation once the message is accepted. The message is the receiver's by now,
+    /// so a QUIT that stalls or fails is logged and changes nothing.
+    async fn quit(mut self) {
+        self.timeout = self.timeout.min(QUIT_TIMEOUT);
+        let said = match self.command("QUIT").await {
+            Ok(()) => self.reply().await.map(|_| ()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = said {
+            debug!("{} accepted the message and then did not see QUIT through; the message \
+                stands: {}", self.peer, e);
+        }
+    }
+
+    /// CRLF-terminated, and flushed. The command is never named in an error, since AUTH carries
+    /// the credential.
+    async fn command(&mut self, cmd: &str) -> Outcome<()> {
+        self.send(fmt!("{}\r\n", cmd).as_bytes(), "a command").await
+    }
+
+    /// Written and flushed, each piece within the deadline.
+    async fn send(&mut self, bytes: &[u8], what: &str) -> Outcome<()> {
+        for piece in bytes.chunks(SEND_PIECE) {
+            match timeout(self.timeout, self.stream.write_all(piece)).await {
+                Ok(Ok(()))  => (),
+                Ok(Err(e))  => return Err(tls::wire_fault(e,
+                    fmt!("Writing {} to {}", what, self.peer), true)),
+                Err(_)      => return Err(err!(
+                    "{} took no more of {} within {:?}.", self.peer, what, self.timeout;
+                    IO, Network, Write, Timeout)),
+            }
+        }
+        match timeout(self.timeout, self.stream.flush()).await {
+            Ok(Ok(()))  => Ok(()),
+            Ok(Err(e))  => Err(tls::wire_fault(e,
+                fmt!("Flushing {} to {}", what, self.peer), true)),
+            Err(_)      => Err(err!(
+                "{} took no more of {} within {:?}.", self.peer, what, self.timeout;
+                IO, Network, Write, Timeout)),
+        }
     }
 }
 
@@ -468,15 +715,15 @@ impl OutboundClient {
 /// what they do once they are here, so they share the transaction rather than each keeping a copy
 /// of it -- the second copy is where the dot-stuffing gets forgotten.
 async fn transact(
-    stream:     &mut ClientStream,
+    conv:       &mut Conversation,
     mail_from:  &str,
     rcpt_to:    &[String],
     body:       &[u8],
 )
     -> Outcome<String>
 {
-    res!(write_command(stream, &fmt!("MAIL FROM:<{}>", mail_from)).await);
-    let resp = res!(read_smtp_response(stream).await);
+    res!(conv.command(&fmt!("MAIL FROM:<{}>", mail_from)).await);
+    let resp = res!(conv.reply().await);
     if resp.code / 100 != 2 {
         // A 5xx is a permanent refusal, tagged so the caller can suppress rather than retry; a 4xx is
         // transient and carries no such tag.
@@ -490,8 +737,8 @@ async fn transact(
             IO, Network, Wire));
     }
     for r in rcpt_to {
-        res!(write_command(stream, &fmt!("RCPT TO:<{}>", r)).await);
-        let resp = res!(read_smtp_response(stream).await);
+        res!(conv.command(&fmt!("RCPT TO:<{}>", r)).await);
+        let resp = res!(conv.reply().await);
         if resp.code / 100 != 2 {
             // A 5xx here is the no-such-mailbox case: permanent for this recipient, so it is tagged for
             // suppression. A 4xx (greylisting, a full mailbox) is transient and is not.
@@ -505,32 +752,27 @@ async fn transact(
                 IO, Network, Wire));
         }
     }
-    res!(write_command(stream, "DATA").await);
-    let resp = res!(read_smtp_response(stream).await);
+    res!(conv.command("DATA").await);
+    let resp = res!(conv.reply().await);
     if resp.code != 354 {
         return Err(err!(
             "DATA rejected: {} {}", resp.code, resp.text;
             IO, Network, Wire));
     }
 
-    // A line of the body that begins with a full stop would otherwise end the message.
-    let stuffed = dot_stuff(body);
-    if let Err(e) = stream.write_all(&stuffed).await {
-        return Err(err!(e, "Writing DATA body."; IO, Network, Write));
-    }
+    // A line of the body that begins with a full stop would otherwise end the message, and the
+    // terminator goes on a line of its own however the body ends.
+    let mut stuffed = dot_stuff(body);
     if !body.ends_with(b"\r\n") {
-        if let Err(e) = stream.write_all(b"\r\n").await {
-            return Err(err!(e, "Writing CRLF tail."; IO, Network, Write));
-        }
+        stuffed.extend_from_slice(b"\r\n");
     }
-    if let Err(e) = stream.write_all(b".\r\n").await {
-        return Err(err!(e, "Writing DATA terminator."; IO, Network, Write));
-    }
-    if let Err(e) = stream.flush().await {
-        return Err(err!(e, "Flushing DATA."; IO, Network, Write));
-    }
+    stuffed.extend_from_slice(b".\r\n");
+    res!(conv.send(&stuffed, "the message").await);
 
-    let resp = res!(read_smtp_response(stream).await);
+    // The receiver may be filtering the message before it answers, and giving up on it here is
+    // how it comes to be delivered twice.
+    let done = conv.timeout.max(DATA_DONE_TIMEOUT);
+    let resp = res!(conv.reply_within(done).await);
     if resp.code / 100 != 2 {
         // A 5xx on the message itself -- refused content, a policy block -- will not be cured by resending
         // the same message, so it is tagged permanent for the caller to suppress on.
@@ -554,27 +796,14 @@ async fn transact(
 /// read off the wire in [`transact`], so this reads the tag rather than parse a status code out of a
 /// message.
 ///
-/// The whole chain is walked, not only the outermost frame. `res!` wraps a cause in an
-/// `Error::Upstream` carrying **no tags of its own**, and `Error::tags` reports one frame's tags
-/// rather than the chain's -- so every `res!` between the 5xx and the caller hid the tag. Reading
-/// only the outer frame, as this did until 2026-08-17, made the predicate answer `false` to every
-/// permanent failure there has ever been: `submit` and `try_one` each pass `transact`'s error
-/// through one `res!`. Nothing was suppressed, and `fe2o3_steel`'s subscriber list kept mailing
-/// addresses their servers had refused outright.
+/// The tag is read from the whole chain, as [`Error::tags`] gathers it. `res!` wraps a cause in an
+/// `Error::Upstream` carrying **no tags of its own**, so reading only the outer frame, as this did
+/// until 2026-08-17, made the predicate answer `false` to every permanent failure there has ever
+/// been: `submit` and `try_one` each pass `transact`'s error through one `res!`. Nothing was
+/// suppressed, and `fe2o3_steel`'s subscriber list kept mailing addresses their servers had refused
+/// outright.
 pub fn is_permanent(e: &Error<ErrTag>) -> bool {
-    if e.tags().contains(&ErrTag::Permanent) {
-        return true;
-    }
-    let mut cause = std::error::Error::source(e);
-    while let Some(c) = cause {
-        if let Some(inner) = c.downcast_ref::<Error<ErrTag>>() {
-            if inner.tags().contains(&ErrTag::Permanent) {
-                return true;
-            }
-        }
-        cause = c.source();
-    }
-    false
+    e.tags().contains(&ErrTag::Permanent)
 }
 
 /// Prove to the provider that the sender holds the account.
@@ -585,7 +814,7 @@ pub fn is_permanent(e: &Error<ErrTag>) -> bool {
 /// caller establishes that first and refuses to proceed without it. `ehlo` is the extension list
 /// the server advertised inside TLS.
 async fn authenticate(
-    stream:     &mut ClientStream,
+    conv:       &mut Conversation,
     ehlo:       &SmtpResponse,
     user:       &str,
     password:   &str,
@@ -614,28 +843,28 @@ async fn authenticate(
         // each separated by a NUL.
         let raw = fmt!("\0{}\0{}", user, password);
         let cmd = fmt!("AUTH PLAIN {}", base64::encode(raw.as_bytes()));
-        res!(write_command(stream, &cmd).await);
-        let resp = res!(read_smtp_response(stream).await);
+        res!(conv.command(&cmd).await);
+        let resp = res!(conv.reply().await);
         return check_auth(&resp);
     }
 
     if mechanisms.iter().any(|m| m == "LOGIN") {
-        res!(write_command(stream, "AUTH LOGIN").await);
-        let resp = res!(read_smtp_response(stream).await);
+        res!(conv.command("AUTH LOGIN").await);
+        let resp = res!(conv.reply().await);
         if resp.code != 334 {
             return Err(err!(
                 "AUTH LOGIN was refused before the username: {} {}", resp.code, resp.text;
                 IO, Network, Wire));
         }
-        res!(write_command(stream, &base64::encode(user.as_bytes())).await);
-        let resp = res!(read_smtp_response(stream).await);
+        res!(conv.command(&base64::encode(user.as_bytes())).await);
+        let resp = res!(conv.reply().await);
         if resp.code != 334 {
             return Err(err!(
                 "The server rejected the username: {} {}", resp.code, resp.text;
                 IO, Network, Wire));
         }
-        res!(write_command(stream, &base64::encode(password.as_bytes())).await);
-        let resp = res!(read_smtp_response(stream).await);
+        res!(conv.command(&base64::encode(password.as_bytes())).await);
+        let resp = res!(conv.reply().await);
         return check_auth(&resp);
     }
 
@@ -671,7 +900,8 @@ struct SmtpResponse {
     text: String,   // the text lines, joined by '\n'
 }
 
-/// A response ends at the line whose fourth byte is a space rather than a hyphen.
+/// A response ends at the line whose fourth byte is a space rather than a hyphen. Untimed, so it
+/// is read only through [`Conversation::reply`].
 async fn read_smtp_response(stream: &mut ClientStream) -> Outcome<SmtpResponse> {
     let mut text = String::new();
     let mut code: u16 = 0;
@@ -680,7 +910,7 @@ async fn read_smtp_response(stream: &mut ClientStream) -> Outcome<SmtpResponse> 
             Some(l) => l,
             None => return Err(err!(
                 "Connection closed while reading SMTP response.";
-                IO, Network, Read)),
+                IO, Network, Read, Interrupted)),
         };
         if line.len() < 4 {
             return Err(err!(
@@ -712,18 +942,6 @@ async fn read_smtp_response(stream: &mut ClientStream) -> Outcome<SmtpResponse> 
         }
     }
     Ok(SmtpResponse { code, text })
-}
-
-/// CRLF-terminated, and flushed.
-async fn write_command(stream: &mut ClientStream, cmd: &str) -> Outcome<()> {
-    let line = fmt!("{}\r\n", cmd);
-    if let Err(e) = stream.write_all(line.as_bytes()).await {
-        return Err(err!(e, "Writing SMTP command."; IO, Network, Write));
-    }
-    if let Err(e) = stream.flush().await {
-        return Err(err!(e, "Flushing SMTP command."; IO, Network, Write));
-    }
-    Ok(())
 }
 
 /// RFC 5321 §4.5.2: any line whose first character is `.` gets a second one prepended, so the
@@ -782,6 +1000,7 @@ mod tests {
     const USER: &str = "alice@example.com";
     const PASS: &str = "app-password-not-a-real-one";
     const EHLO: &str = "sender.test";
+    const WAIT: Duration = Duration::from_secs(10);     // each step, where nothing should stall
 
 
     /// What the stand-in server does when it is spoken to.
@@ -802,6 +1021,8 @@ mod tests {
         banner:     u16,            // 220 is ready for mail; 421 refuses the connection
         rcpt_code:  u16,            // 250 accepts the recipient
         data_code:  u16,            // 250 accepts the message
+        stall:      &'static str,   // the command after which it goes silent; empty for never
+        slow_done:  Duration,       // how long the reply to the final "." is held back
     }
 
     impl Provider {
@@ -815,6 +1036,8 @@ mod tests {
                 banner:      220,
                 rcpt_code:   250,
                 data_code:   250,
+                stall:       "",
+                slow_done:   Duration::ZERO,
             }
         }
 
@@ -841,7 +1064,12 @@ mod tests {
     type Transcript = Arc<Mutex<Vec<String>>>;
 
     async fn provider(p: Provider) -> Outcome<(SocketAddr, Transcript)> {
-        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+        provider_on("127.0.0.1", p).await
+    }
+
+    // As `provider`, listening on another loopback address, so two exchanges can differ by address.
+    async fn provider_on(host: &str, p: Provider) -> Outcome<(SocketAddr, Transcript)> {
+        let listener = res!(TcpListener::bind(fmt!("{}:0", host)).await
             .map_err(|e| err!(e, "Binding the stand-in provider."; IO, Network)));
         let addr = res!(listener.local_addr()
             .map_err(|e| err!(e, "Reading the stand-in provider's address."; IO, Network)));
@@ -863,6 +1091,7 @@ mod tests {
             let mut in_data    = false;
             let mut await_user = false;
             let mut await_pass = false;
+            let mut silent     = false;
             let verdict = if p.auth_ok {
                 &b"235 2.7.0 Accepted\r\n"[..]
             } else {
@@ -873,9 +1102,16 @@ mod tests {
                 if let Ok(mut g) = log.lock() {
                     g.push(line.clone());
                 }
+                if !p.stall.is_empty() && line.to_uppercase().starts_with(p.stall) {
+                    silent = true;
+                }
+                if silent {
+                    continue;   // reads on, and answers nothing
+                }
                 if in_data {
                     if line == "." {
                         in_data = false;
+                        tokio::time::sleep(p.slow_done).await;
                         let _ = w.write_all(fmt!("{} 2.0.0 Ok: queued as STANDIN1\r\n",
                             p.data_code).as_bytes()).await;
                     }
@@ -976,8 +1212,11 @@ mod tests {
         false
     }
 
+    // The stand-in exchanges listen on the loopback, which a default client will not dial.
     async fn client() -> Outcome<OutboundClient> {
-        OutboundClient::with_system_roots(EHLO)
+        let mut c = res!(OutboundClient::with_system_roots(EHLO));
+        c.allow_private_exchanges = true;
+        Ok(c)
     }
 
     // ── The submission conversation ───────────────────────────────
@@ -1447,6 +1686,96 @@ mod tests {
         Ok(())
     }
 
+    // ── A domain with nowhere to deliver to ──
+
+    fn mx(exchange: &str) -> dns_resolver::MxRecord {
+        dns_resolver::MxRecord { preference: 10, exchange: exchange.to_string() }
+    }
+
+    /// What the resolver says of a name that does not exist.
+    fn nxdomain() -> Outcome<Vec<Ipv4Addr>> {
+        Err(err!("The name does not exist (DNS RCODE 3, NXDOMAIN)."; IO, Network, Missing, Permanent))
+    }
+
+    /// RFC 7505. The two stale messages on karri were stuck behind this: the domain says it takes
+    /// no mail, and the sender read that as a reason to ask again in thirty seconds, for ever. No
+    /// exchange is looked up, because there is none.
+    #[test]
+    fn test_a_null_mx_is_a_permanent_failure_00() -> Outcome<()> {
+        match route(&[mx("")], |_| Err(err!("a null MX was looked up."; IO, Network))) {
+            Ok(t) => Err(err!("A null MX gave targets: {:?}.", t; Test, Mismatch)),
+            Err(e) => {
+                req!(true, is_permanent(&e), "a null MX was read as transient");
+                Ok(())
+            }
+        }
+    }
+
+    /// NXDOMAIN for every exchange: the name is not there, so the domain has nowhere to deliver.
+    #[test]
+    fn test_exchanges_that_do_not_exist_are_permanent_00() -> Outcome<()> {
+        match route(&[mx("mx1.gone.example"), mx("mx2.gone.example")], |_| nxdomain()) {
+            Ok(t) => Err(err!("Absent exchanges gave targets: {:?}.", t; Test, Mismatch)),
+            Err(e) => {
+                req!(true, is_permanent(&e), "exchanges that do not exist were read as transient");
+                Ok(())
+            }
+        }
+    }
+
+    /// NOERROR with no A record, which is also what an IPv6-only exchange looks like. The name is
+    /// there, so nothing says it never will be deliverable: the message waits, it is not bounced.
+    #[test]
+    fn test_an_exchange_with_no_a_record_is_transient_00() -> Outcome<()> {
+        match route(&[mx("mx1.v6only.example")], |_| Ok(Vec::new())) {
+            Ok(t) => Err(err!("An exchange with no A record gave targets: {:?}.", t; Test, Mismatch)),
+            Err(e) => {
+                req!(false, is_permanent(&e), "an exchange with no A record was read as permanent");
+                Ok(())
+            }
+        }
+    }
+
+    /// A timeout or a SERVFAIL says nothing about the domain, so the message waits.
+    #[test]
+    fn test_a_failed_lookup_is_not_permanent_00() -> Outcome<()> {
+        match route(&[mx("mx1.slow.example")], |_| Err(err!("Timed out."; IO, Network, Timeout))) {
+            Ok(t) => Err(err!("A failed lookup gave targets: {:?}.", t; Test, Mismatch)),
+            Err(e) => {
+                req!(false, is_permanent(&e), "a failed DNS lookup was read as permanent");
+                Ok(())
+            }
+        }
+    }
+
+    /// One exchange gone and another that exists but has no A: the second is not shown to be gone.
+    #[test]
+    fn test_one_absent_exchange_does_not_condemn_the_others_00() -> Outcome<()> {
+        let looked = |host: &str| if host.starts_with("gone") { nxdomain() } else { Ok(Vec::new()) };
+        match route(&[mx("gone.example"), mx("mx2.v6only.example")], looked) {
+            Ok(t) => Err(err!("Gave targets: {:?}.", t; Test, Mismatch)),
+            Err(e) => {
+                req!(false, is_permanent(&e), "an exchange with no A record was condemned with its sibling");
+                Ok(())
+            }
+        }
+    }
+
+    /// An exchange that resolves is a target even when its sibling does not exist.
+    #[test]
+    fn test_a_resolving_exchange_is_a_target_00() -> Outcome<()> {
+        let looked = |host: &str| if host.starts_with("gone") {
+            nxdomain()
+        } else {
+            Ok(vec![Ipv4Addr::new(192, 0, 2, 25)])
+        };
+        let t = res!(route(&[mx("gone.example"), mx("mx2.up.example")], looked));
+        req!(1, t.len(), "the resolving exchange was not the one target");
+        req!(true, t[0].addr == IpAddr::V4(Ipv4Addr::new(192, 0, 2, 25)), "wrong address");
+        req!(25, t[0].port, "mail goes to port 25");
+        Ok(())
+    }
+
     // ── Delivery to an exchange, which carries jarrah's outbound mail ──
 
     /// A stand-in exchange, and the target that points at it. `preference` is what
@@ -1470,7 +1799,7 @@ mod tests {
         let (tgt, seen) = res!(exchange_at(Provider::accepting(), 10).await);
         let c = res!(client().await);
         let qid = res!(c.deliver_to_exchanges(&[tgt], "postmaster@example.com",
-            &[fmt!("bob@example.net")], &body()).await);
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
         req!(true, qid.contains("STANDIN1"));
 
         let lines = res!(lines_of(&seen));
@@ -1503,7 +1832,7 @@ mod tests {
         let (bad,  saw_bad)  = res!(exchange_at(dead, 10).await);
         let (good, saw_good) = res!(exchange_at(Provider::exchange(), 20).await);
         let qid = res!(c.deliver_to_exchanges(&[good.clone(), bad.clone()],
-            "a@example.com", &[fmt!("bob@example.net")], &body()).await);
+            "a@example.com", &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
         req!(true, qid.contains("STANDIN1"));
         req!(true, res!(lines_of(&saw_bad)).iter().any(|l| l.starts_with("RCPT TO")),
             "the preferred exchange was skipped: it was never offered the recipient");
@@ -1515,10 +1844,62 @@ mod tests {
         let (good, saw_good) = res!(exchange_at(Provider::exchange(), 10).await);
         let (bad,  saw_bad)  = res!(exchange_at(dead, 20).await);
         res!(c.deliver_to_exchanges(&[bad, good], "a@example.com",
-            &[fmt!("bob@example.net")], &body()).await);
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
         req!(true, res!(lines_of(&saw_good)).iter().any(|l| l == "."));
         req!(true, res!(lines_of(&saw_bad)).is_empty(),
             "a less-preferred exchange was used while a better one worked");
+        Ok(())
+    }
+
+    /// A stand-in exchange on a loopback address of its own, which a `Dial` can name.
+    async fn exchange_on(host: &str, preference: u16) -> Outcome<(DeliveryTarget, Transcript)> {
+        let (addr, seen) = res!(provider_on(host, Provider::exchange()).await);
+        Ok((DeliveryTarget {
+            host:       fmt!("mx{}.example.net", preference),
+            addr:       addr.ip(),
+            port:       addr.port(),
+            preference,
+        }, seen))
+    }
+
+    /// An exchange the caller has found not answering is not dialled, and the next one takes the
+    /// message. Both would accept it: only the skip keeps the preferred one out, so an empty transcript
+    /// there means it was never dialled, and the dial notes only the exchange that was.
+    #[tokio::test]
+    async fn test_a_skipped_exchange_is_not_dialled_00() -> Outcome<()> {
+        let c = res!(client().await);
+        let (slow, saw_slow) = res!(exchange_on("127.0.0.1", 10).await);
+        let (good, saw_good) = res!(exchange_on("127.0.0.2", 20).await);
+        let dial = Dial::avoiding(vec![slow.addr]);
+        req!(true, dial.skips(slow.addr));
+        req!(false, dial.skips(good.addr));
+        let qid = res!(c.deliver_to_exchanges(&[slow.clone(), good.clone()], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), WAIT, &dial).await);
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, res!(lines_of(&saw_slow)).is_empty(), "an exchange the dial avoids was dialled");
+        req!(true, res!(lines_of(&saw_good)).iter().any(|l| l == "."),
+            "the message did not reach the exchange that was not avoided");
+        req!(Some(good.addr), res!(dial.last()), "the dial did not note the exchange it reached");
+        Ok(())
+    }
+
+    /// Where every exchange is avoided nothing is dialled and the failure is transient, since nothing
+    /// is shown wrong with the recipient.
+    #[tokio::test]
+    async fn test_every_exchange_skipped_is_a_transient_failure_00() -> Outcome<()> {
+        let c = res!(client().await);
+        let (a, saw_a) = res!(exchange_on("127.0.0.1", 10).await);
+        let (b, saw_b) = res!(exchange_on("127.0.0.2", 20).await);
+        let dial = Dial::avoiding(vec![a.addr, b.addr]);
+        match c.deliver_to_exchanges(&[a, b], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), WAIT, &dial).await
+        {
+            Ok(q) => return Err(err!("A delivery avoiding every exchange gave {}.", q; Test, Mismatch)),
+            Err(e) => req!(false, is_permanent(&e), "every exchange avoided was read as permanent"),
+        }
+        req!(true, res!(lines_of(&saw_a)).is_empty() && res!(lines_of(&saw_b)).is_empty(),
+            "an exchange was dialled though all were avoided");
+        req!(None::<IpAddr>, res!(dial.last()), "the dial noted an exchange that was not dialled");
         Ok(())
     }
 
@@ -1533,7 +1914,7 @@ mod tests {
         let (b, _) = res!(exchange_at(dead, 20).await);
         let c = res!(client().await);
         match c.deliver_to_exchanges(&[a, b], "a@example.com",
-            &[fmt!("nobody@example.net")], &body()).await
+            &[fmt!("nobody@example.net")], &body(), WAIT, &Dial::default()).await
         {
             Ok(_)  => Err(err!("Two 550s were reported as a delivery."; Test, Invalid)),
             Err(e) => {
@@ -1554,7 +1935,7 @@ mod tests {
         let (b, _) = res!(exchange_at(busy, 20).await);
         let c = res!(client().await);
         match c.deliver_to_exchanges(&[a, b], "a@example.com",
-            &[fmt!("bob@example.net")], &body()).await
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await
         {
             Ok(_)  => Err(err!("Two 450s were reported as a delivery."; Test, Invalid)),
             Err(e) => {
@@ -1577,7 +1958,7 @@ mod tests {
             Provider { banner: 421, ..Provider::exchange() }, 20).await);
         let c = res!(client().await);
         match c.deliver_to_exchanges(&[dead, refusing], "a@example.com",
-            &[fmt!("nobody@example.net")], &body()).await
+            &[fmt!("nobody@example.net")], &body(), WAIT, &Dial::default()).await
         {
             Ok(_)  => Err(err!("A 550 and a 421 were reported as a delivery."; Test, Invalid)),
             Err(e) => {
@@ -1598,7 +1979,7 @@ mod tests {
         let (tgt, seen) = res!(exchange_at(p, 10).await);
         let c = res!(client().await);
         let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
-            &[fmt!("bob@example.net")], &body()).await);
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
         req!(true, qid.contains("STANDIN1"), "a refused STARTTLS stopped the delivery");
 
         let lines = res!(lines_of(&seen));
@@ -1614,7 +1995,7 @@ mod tests {
     async fn test_no_exchange_is_a_named_failure_00() -> Outcome<()> {
         let c = res!(client().await);
         let msg = match c.deliver_to_exchanges(&[], "a@example.com",
-            &[fmt!("bob@example.net")], &body()).await
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await
         {
             Err(e) => fmt!("{}", e),
             Ok(_)  => return Err(err!(
@@ -1634,13 +2015,300 @@ mod tests {
         let host = a.host.clone();
         let c = res!(client().await);
         let msg = match c.deliver_to_exchanges(&[a], "a@example.com",
-            &[fmt!("nobody@example.net")], &body()).await
+            &[fmt!("nobody@example.net")], &body(), WAIT, &Dial::default()).await
         {
             Err(e) => fmt!("{}", e),
             Ok(_)  => return Err(err!("A 550 was a delivery."; Test, Invalid)),
         };
         req!(true, msg.contains(&host), "the failing exchange was not named: {}", msg);
         req!(true, msg.contains("550"), "the server's code was dropped: {}", msg);
+        Ok(())
+    }
+
+    // ── Exchanges that are not publicly routable ──
+
+    /// A target at `addr`, on the port of a stand-in that would answer if it were dialled.
+    fn target_at(addr: IpAddr, port: u16) -> DeliveryTarget {
+        DeliveryTarget {
+            host:       fmt!("mx10.example.net"),
+            addr,
+            port,
+            preference: 10,
+        }
+    }
+
+    /// An MX that points at the sender's own network is a request forgery, or a misconfigured
+    /// record: either way the message must not be offered there, and the address must not be
+    /// retried. Each target here shares its port with a live stand-in, so a client that dialled
+    /// would reach it, and the stand-in's transcript says whether it did.
+    #[tokio::test]
+    async fn test_an_exchange_in_private_space_is_refused_without_a_connection_00() -> Outcome<()> {
+        let c = res!(OutboundClient::with_system_roots(EHLO));
+        req!(false, c.allow_private_exchanges, "the default must be to refuse private exchanges");
+        for ip in [
+            "127.0.0.1",            // loopback
+            "10.1.2.3",             // private
+            "169.254.169.254",      // the cloud metadata service
+            "fd00::1",              // unique local
+            "::ffff:127.0.0.1",     // loopback, spelled as a mapped IPv6 address
+        ] {
+            let (stand_in, seen) = res!(provider(Provider::exchange()).await);
+            let tgt = target_at(res!(ip.parse::<IpAddr>().map_err(|e|
+                err!(e, "The test address {}.", ip; Test, Invalid))), stand_in.port());
+            match c.deliver_to_exchanges(&[tgt], "a@example.com",
+                &[fmt!("bob@example.net")], &body(), STALL, &Dial::default()).await
+            {
+                Ok(_)  => return Err(err!(
+                    "Delivery to {} was reported as a success.", ip; Test, Invalid)),
+                Err(e) => {
+                    req!(true, is_permanent(&e),
+                        "{} was refused as transient, so the address is retried: {}", ip, e);
+                    let msg = fmt!("{}", e);
+                    req!(true, msg.contains("routable"),
+                        "the refusal for {} did not say why: {}", ip, msg);
+                },
+            }
+            // The stand-in is reached by 127.0.0.1 and ::ffff:127.0.0.1 alike, so a client that
+            // dialled either would have spoken to it. Give a late connection time to arrive.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            req!(true, res!(lines_of(&seen)).is_empty(),
+                "{} was dialled although it is not publicly routable", ip);
+        }
+        Ok(())
+    }
+
+    /// A client that opts in may deliver to an exchange on the loopback, which is how the
+    /// stand-ins of these tests, and a development host, are reached.
+    #[tokio::test]
+    async fn test_a_client_that_allows_private_exchanges_delivers_to_one_00() -> Outcome<()> {
+        let (tgt, seen) = res!(exchange_at(Provider::exchange(), 10).await);
+        let mut c = res!(OutboundClient::with_system_roots(EHLO));
+        c.allow_private_exchanges = true;
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l == "."), "the message never arrived");
+        Ok(())
+    }
+
+    // ── A peer that stops talking ─────────────────────────────────
+
+    /// A server that takes every connection and never says a word, as a wedged relay does while
+    /// its kernel still completes the handshake. Each connection is held open, and silent.
+    async fn mute_server() -> Outcome<SocketAddr> {
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the mute server."; IO, Network)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading the mute server's address."; IO, Network)));
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        Ok(addr)
+    }
+
+    /// Runs one conversation against a peer that stalls, and requires it to fail, to fail
+    /// within a few deadlines rather than hang, and to say that it timed out.
+    async fn fails_in_time<F>(what: &str, conversation: F) -> Outcome<()>
+    where
+        F: std::future::Future<Output = Outcome<String>>,
+    {
+        let start = std::time::Instant::now();
+        let out = match timeout(Duration::from_secs(10), conversation).await {
+            Ok(o)  => o,
+            Err(_) => return Err(err!(
+                "{}: still waiting after 10s, on a deadline of {:?}.", what, STALL;
+                Test, Timeout)),
+        };
+        let took = start.elapsed();
+        let msg = match out {
+            Ok(_)  => return Err(err!(
+                "{}: a peer that stopped talking was reported to have taken the message.", what;
+                Test, Invalid)),
+            Err(e) => fmt!("{}", e),
+        };
+        req!(true, took < Duration::from_secs(5),
+            "{}: took {:?} to fail on a deadline of {:?}", what, took, STALL);
+        req!(true, msg.contains("within"), "{}: the error did not say it timed out: {}", what, msg);
+        Ok(())
+    }
+
+    const STALL: Duration = Duration::from_millis(500);
+
+    /// THE HANG THAT WAS D-06 A2: a relay that takes the connection and never greets. `submit`
+    /// waited on the banner for as long as the socket lived, whatever its timeout said, and an
+    /// alert's text waited behind it. The same peer met with TLS from the first byte stalls the
+    /// handshake instead, which is timed by the same deadline.
+    #[tokio::test]
+    async fn test_a_server_that_never_speaks_fails_submission_in_time_00() -> Outcome<()> {
+        let addr = res!(mute_server().await);
+        let c = res!(client().await);
+        for security in [Security::Plain, Security::ImplicitTls] {
+            let cfg = cfg(addr, security).with_timeout(STALL);
+            res!(fails_in_time(&fmt!("{:?}", security),
+                c.submit(&cfg, USER, &[fmt!("bob@example.net")], &body())).await);
+        }
+        Ok(())
+    }
+
+    /// A server that greets, takes the login and then goes silent is held to the same deadline:
+    /// every reply is timed, not only the first.
+    #[tokio::test]
+    async fn test_a_server_that_stops_mid_conversation_fails_in_time_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(
+            Provider { stall: "MAIL FROM", ..Provider::accepting() }).await);
+        let c = res!(client().await);
+        let cfg = cfg(addr, Security::Plain).with_timeout(STALL);
+        res!(fails_in_time("stalled at MAIL FROM",
+            c.submit(&cfg, USER, &[fmt!("bob@example.net")], &body())).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.to_uppercase().starts_with("AUTH")),
+            "the stall came before the login, so a later step was not tested: {:?}", lines);
+        req!(false, lines.iter().any(|l| l.to_uppercase().starts_with("RCPT TO")),
+            "the client talked on past a reply that never came: {:?}", lines);
+        Ok(())
+    }
+
+    /// Delivery meets the same mute peer as an exchange, and is held to its deadline too.
+    #[tokio::test]
+    async fn test_an_exchange_that_never_speaks_fails_delivery_in_time_00() -> Outcome<()> {
+        let addr = res!(mute_server().await);
+        let tgt = DeliveryTarget {
+            host:       fmt!("mx10.example.net"),
+            addr:       addr.ip(),
+            port:       addr.port(),
+            preference: 10,
+        };
+        let c = res!(client().await);
+        res!(fails_in_time("delivery",
+            c.deliver_to_exchanges(&[tgt], "a@example.com", &[fmt!("bob@example.net")],
+                &body(), STALL, &Dial::default())).await);
+        Ok(())
+    }
+
+    // ── The ends of the transaction, which must not be cut short ──
+
+    /// A receiver that filters the message before it answers the final "." is waited for,
+    /// beyond the step deadline. Cut off at the step deadline, as it was from 4f0e16c until
+    /// D-06 audit R1, a receiver that accepted late was sent the message again on every retry.
+    #[tokio::test]
+    async fn test_a_slow_acceptance_is_waited_for_00() -> Outcome<()> {
+        let slow = Provider { slow_done: STALL * 3, ..Provider::exchange() };
+        let (tgt, seen) = res!(exchange_at(slow, 10).await);
+        let c = res!(client().await);
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), STALL, &Dial::default()).await);
+        req!(true, qid.contains("STANDIN1"), "the late acceptance was not read: {}", qid);
+        req!(1, res!(lines_of(&seen)).iter().filter(|l| *l == ".").count());
+
+        let (addr, _) = res!(provider(
+            Provider { slow_done: STALL * 3, ..Provider::accepting() }).await);
+        let cfg = cfg(addr, Security::Plain).with_timeout(STALL);
+        let qid = res!(c.submit(&cfg, USER, &[fmt!("bob@example.net")], &body()).await);
+        req!(true, qid.contains("STANDIN1"), "the late acceptance was not read: {}", qid);
+        Ok(())
+    }
+
+    /// Once the message is accepted, a receiver that goes silent at QUIT cannot turn the send
+    /// into a failure, nor hold it for a whole step: the caller would report an accepted message
+    /// as lost, and send it again.
+    #[tokio::test]
+    async fn test_a_silent_quit_does_not_fail_an_accepted_message_00() -> Outcome<()> {
+        let mute_at_quit = Provider { stall: "QUIT", ..Provider::exchange() };
+        let c = res!(client().await);
+
+        let (tgt, seen) = res!(exchange_at(mute_at_quit, 10).await);
+        let start = std::time::Instant::now();
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
+        let took = start.elapsed();
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l.to_uppercase() == "QUIT"),
+            "the client never said QUIT");
+        req!(true, took < WAIT / 2, "delivery waited {:?} on a silent QUIT", took);
+
+        let (addr, _) = res!(provider(
+            Provider { stall: "QUIT", ..Provider::accepting() }).await);
+        let start = std::time::Instant::now();
+        let qid = res!(c.submit(&cfg(addr, Security::Plain), USER,
+            &[fmt!("bob@example.net")], &body()).await);
+        let took = start.elapsed();
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, took < WAIT / 2, "submission waited {:?} on a silent QUIT", took);
+        Ok(())
+    }
+
+    // ── A failure says its cause in its tags (D-20261006-09) ──
+
+    /// A server that takes every connection and hangs up at once: a dropped connection, as the
+    /// client sees it.
+    async fn hangup_server() -> Outcome<SocketAddr> {
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the hang-up server."; IO, Network)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading the hang-up server's address."; IO, Network)));
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                drop(sock);
+            }
+        });
+        Ok(addr)
+    }
+
+    async fn submit_err(cfg: &SubmissionConfig) -> Outcome<Error<ErrTag>> {
+        let c = res!(client().await);
+        match c.submit(cfg, USER, &[fmt!("bob@example.net")], &body()).await {
+            Ok(_)  => Err(err!("A submission that should have failed was accepted."; Test, Invalid)),
+            Err(e) => Ok(e),
+        }
+    }
+
+    /// Nothing listening is `Unreachable`, which a caller explains as a name or port to check.
+    #[tokio::test]
+    async fn test_nothing_listening_is_tagged_unreachable_00() -> Outcome<()> {
+        let addr = {
+            let l = res!(TcpListener::bind("127.0.0.1:0").await
+                .map_err(|e| err!(e, "Binding a port to free."; Test, IO)));
+            res!(l.local_addr().map_err(|e| err!(e, "Reading its address."; Test, IO)))
+        };
+        let e = res!(submit_err(&cfg(addr, Security::Plain)).await);
+        req!(true, e.tags().contains(&ErrTag::Unreachable),
+            "a refused connection was not tagged Unreachable: {:?}", e.tags());
+        Ok(())
+    }
+
+    /// A hang-up, in the clear or in the TLS handshake, is `Interrupted`, and never a certificate
+    /// fault or an unreachable server: the owner's error was a drop reported as a certificate.
+    #[tokio::test]
+    async fn test_a_hang_up_is_tagged_interrupted_00() -> Outcome<()> {
+        let addr = res!(hangup_server().await);
+        for security in [Security::Plain, Security::ImplicitTls] {
+            let e = res!(submit_err(&cfg(addr, security)).await);
+            req!(true, e.tags().contains(&ErrTag::Interrupted),
+                "{:?}: a hang-up was not tagged Interrupted: {:?}", security, e.tags());
+            req!(false, e.tags().contains(&ErrTag::Security),
+                "{:?}: a hang-up was tagged as a security fault: {:?}", security, e.tags());
+            req!(false, e.tags().contains(&ErrTag::Unreachable),
+                "{:?}: a hang-up was called unreachable: {:?}", security, e.tags());
+        }
+        Ok(())
+    }
+
+    /// A provider that will not encrypt the line, by not offering STARTTLS or by refusing it, is
+    /// `Security` without `Init`: the password was withheld, and no certificate was involved.
+    #[tokio::test]
+    async fn test_an_unencrypted_line_is_tagged_security_not_a_certificate_00() -> Outcome<()> {
+        for (starttls, label) in [(false, "not offered"), (true, "refused")] {
+            let p = Provider { starttls, starttls_ok: false, ..Provider::accepting() };
+            let (addr, _) = res!(provider(p).await);
+            let e = res!(submit_err(&cfg(addr, Security::StartTls)).await);
+            req!(true, e.tags().contains(&ErrTag::Security),
+                "STARTTLS {}: not tagged Security: {:?}", label, e.tags());
+            req!(false, e.tags().contains(&ErrTag::Init),
+                "STARTTLS {}: tagged Init, which reads as a refused certificate: {:?}", label, e.tags());
+        }
         Ok(())
     }
 }

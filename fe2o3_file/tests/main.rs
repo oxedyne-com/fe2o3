@@ -3,8 +3,10 @@ mod exif;
 mod glob;
 mod odf;
 mod office;
+mod quiet;
 mod relpath;
 mod tree;
+mod walk;
 mod pptx;
 mod xlsx;
 mod zip;
@@ -36,6 +38,7 @@ fn run_tests() -> Outcome<()> {
     res!(tree::test_tree(filter));
     res!(exif::test_exif(filter));
     res!(glob::test_glob(filter));
+    res!(quiet::test_quiet(filter));
     res!(relpath::test_relpath(filter));
     res!(zip::test_zip(filter));
     res!(office::test_office(filter));
@@ -43,6 +46,7 @@ fn run_tests() -> Outcome<()> {
     res!(pptx::test_pptx(filter));
     res!(odf::test_odf(filter));
     res!(edit::test_edit(filter));
+    res!(walk::test_walk(filter));
 
     Ok(())
 }

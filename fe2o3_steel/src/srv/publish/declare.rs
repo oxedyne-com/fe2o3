@@ -523,10 +523,12 @@ pub fn serve_json(
 			let mut f = vec![
 				(dat!("key"),		dat!(item.key.clone())),
 				(dat!("name"),		dat!(item.name.clone())),
-				(dat!("medium"),	dat!(item.medium.slug().to_string())),
 			];
-			if let Some(level) = levels.get(&item.key) {
-				f.extend(resolved(Declaration::new(*level, item.medium)));
+			// A declared item takes its medium with the rest of the resolved mark; an undeclared one
+			// still says what it is. Either way the key appears once.
+			match levels.get(&item.key) {
+				Some(level)	=> f.extend(resolved(Declaration::new(*level, item.medium))),
+				None		=> f.push((dat!("medium"), dat!(item.medium.slug().to_string()))),
 			}
 			create_dat_ordmap(f)
 		})
@@ -698,6 +700,11 @@ mod tests {
 		assert!(body.contains(r#""mark": "/assets/marks/doc-some-ai.svg""#), "no artwork URL: {}", body);
 		assert!(body.contains(r#""href": "https://example.org/some-ai/doc""#), "no link: {}", body);
 		assert!(body.contains(r#""words": "Made with some AI""#), "no words: {}", body);
+		// A declared item names its medium once, not once as a declarable and again as a mark.
+		let widget = res!(body.split_once(r#""key": "widget""#).map(|(_, rest)| rest.to_string())
+			.ok_or_else(|| err!("no widget item in: {}", body; Missing)));
+		let widget = widget.split('}').next().unwrap_or("");
+		assert_eq!(widget.matches(r#""medium""#).count(), 1, "medium repeated: {}", body);
 		// The site's own declaration rides alongside, so a footer needs one fetch and not two.
 		assert!(body.contains(r#""/assets/marks/code-with-ai.svg""#), "no site mark: {}", body);
 

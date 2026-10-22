@@ -18,6 +18,19 @@ pub const HTTP_FILE_BODY_CHUNK_SIZE:            usize = 65_536;
 /// that actually arrive, so the reservation is doing its job in every ordinary case.
 pub const HTTP_BODY_RESERVE_MAX:                usize = 1_048_576;
 
+/// Longest a chunked body's chunk-size line may run before its terminating
+/// CRLF arrives.
+///
+/// The line is a hex length and optional `;`-delimited extensions, so a few
+/// dozen bytes covers every legitimate one. Fixed rather than tied to
+/// `ReadLimits::max_header_bytes`, because a peer that never closes the line
+/// is a resource-exhaustion attempt whatever header or body bound is
+/// configured -- including none -- so the cap applies even to a caller that
+/// set no `ReadLimits` at all. A trailer line, by contrast, is bounded by
+/// `max_header_bytes` itself: it is one more header-like field, and inherits
+/// whatever policy the caller already chose for the header block.
+pub const HTTP_CHUNK_LINE_MAX:                  usize = 4_096;
+
 pub const HTTP_HEADER_MAX_MULTILINES:           u8 = 10;
 pub const HTTP_HEADER_MAX_FIELDS:               u16 = 100;
 pub const HTTP_BODY_BYTES_MAX_VIEW:             usize = 300;

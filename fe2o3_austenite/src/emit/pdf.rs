@@ -1,21 +1,27 @@
 //! The PDF page writer.
 //!
-//! The parallel of [`super::svg`], over the very same placed frames. Where the SVG writer renders each
-//! box and glyph outline as a `<path>` element, this one hands the same [`Path`] and [`Rgba`] to
-//! `fe2o3_graphics`'s [`PdfWriter`], which emits them as fill and stroke operators in a page's content
-//! stream. No font is embedded: a glyph is a filled outline path, exactly as it is for SVG, which is
-//! the whole reason a PDF writer here is short.
+//! The parallel of [`super::svg`], over the very same placed frames. Boxes and graphics go to
+//! `fe2o3_graphics`'s [`PdfWriter`] as fill and stroke operators. Text goes as text: each glyph is shown
+//! by id from its face's own font file, embedded once and subset to the glyphs the document uses, with a
+//! `/ToUnicode` from the same [`ShapedText::glyph_text`] the SVG text layer reads, so the PDF's text
+//! selects, copies and searches. A face that cannot be embedded falls back to filled outlines in a Type-3
+//! font, which still extracts.
 //!
 //! A document is one file across all its pages, not a string per page, so this module's entry point is
 //! [`render_document`] rather than the per-page `render_page` the [`super::Emitter`] enum uses for
 //! SVG.
 
+use crate::doc::DocInfo;
 use crate::font::ShapedText;
 use crate::ir::{
 	DrawOp,
 	Graphic,
 	LinkTarget,
 	Sp,
+};
+use crate::ledger::{
+	AnchorId,
+	Position,
 };
 use crate::page::{
 	Page,
@@ -32,13 +38,87 @@ use oxedyne_fe2o3_graphics::{
 		Path,
 	},
 	pdf::{
+		ColourOut,
+		NamedDest,
 		OutlineItem,
+		PdfInfo,
 		PdfPage,
 		PdfStream,
 		PdfWriter,
 	},
 	transform::Transform,
 };
+
+const ENGINE_NAME: &str = "Austenite";	// `/Creator` and `/Producer`: a name, never a version or a build
+const DEST_LIFT: f64 = 10.0;			// points a destination sits above its anchor, as Typst's do
+
+/// The PDF destination name an internal link to `id` jumps by: the anchor's kind and key, which stay the
+/// same however the document repaginates.
+pub fn dest_name(id: &AnchorId) -> String {
+	fmt!("{}:{}", id.kind.name(), id.key)
+}
+
+/// Where a link to the anchor `id`, which landed at `pos`, jumps: a little above the anchor, so the line
+/// it marks is not flush with the window's top edge. A position on no page has none.
+pub fn named_dest(id: &AnchorId, pos: &Position) -> Option<NamedDest> {
+	if pos.page < 1 {
+		return None;
+	}
+	Some(NamedDest {
+		name:	dest_name(id),
+		page:	(pos.page - 1) as usize,
+		x:		pos.x.to_pt(),
+		y:		(pos.y.to_pt() - DEST_LIFT).max(0.0),
+	})
+}
+
+/// The Info dictionary a document's metadata lowers to, `/Creator` and `/Producer` always naming the engine.
+pub fn pdf_info(doc_info: &DocInfo) -> PdfInfo {
+	PdfInfo {
+		title:		doc_info.title.clone(),
+		author:		doc_info.author.clone(),
+		subject:	doc_info.subject.clone(),
+		keywords:	doc_info.keywords.clone(),
+		creator:	Some(ENGINE_NAME.to_string()),
+		producer:	Some(ENGINE_NAME.to_string()),
+	}
+}
+
+/// How the sink writes its PDF. The default is what the evaluator's one-shot compile has always written:
+/// version 1.7, compressed streams, an outline, and an Info dictionary of the document's metadata with the
+/// engine named as `/Creator` and `/Producer`. The `watch` and `build` commands set each from a setting, and
+/// by default write no Info dictionary at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PdfOptions {
+	pub minor:		u8,			// the version header, 1.`minor`
+	pub compress:	bool,		// Flate on the streams
+	pub outline:	bool,		// bookmarks from the headings
+	pub doc_info:	bool,		// `/Title`, `/Author`, `/Subject` and `/Keywords` from `set document(..)`
+	pub engine_info:	bool,	// `/Creator` and `/Producer`
+	pub colour:		ColourOut,
+}
+
+impl Default for PdfOptions {
+	fn default() -> Self {
+		Self { minor: 7, compress: true, outline: true, doc_info: true, engine_info: true, colour: ColourOut::Rgb }
+	}
+}
+
+impl PdfOptions {
+	/// The Info dictionary these options ask for, none when no field is.
+	pub fn info(&self, doc_info: &DocInfo) -> Option<PdfInfo> {
+		let full = pdf_info(doc_info);
+		let info = PdfInfo {
+			title:		if self.doc_info { full.title } else { None },
+			author:		if self.doc_info { full.author } else { None },
+			subject:	if self.doc_info { full.subject } else { None },
+			keywords:	if self.doc_info { full.keywords } else { None },
+			creator:	if self.engine_info { full.creator } else { None },
+			producer:	if self.engine_info { full.producer } else { None },
+		};
+		if info == PdfInfo::default() { None } else { Some(info) }
+	}
+}
 
 /// Renders a whole document -- every page -- as one PDF file, held in a buffer. A convenience for a
 /// short run; a whole book streams to a file with [`stream_document`] instead, which never holds more
@@ -63,16 +143,17 @@ pub fn open_document<W: Write>(out: W, total: usize) -> Outcome<PdfStream<W>> {
 }
 
 /// As [`open_document`], but the file also carries a document outline (the viewer's bookmark side
-/// panel), built by the caller from the heading table and the front-matter anchors. An empty outline
-/// yields a file byte-identical to [`open_document`]'s.
+/// panel), built by the caller from the heading table and the front-matter anchors, and the Info
+/// dictionary of `doc_info`.
 pub fn open_document_with_outline<W: Write>(
 	out:		W,
 	total:		usize,
 	outline:	Vec<OutlineItem>,
+	doc_info:	&DocInfo,
 )
 	-> Outcome<PdfStream<W>>
 {
-	PdfStream::new_with_outline(out, total, true, outline)
+	PdfStream::new_with_outline_and_info(out, total, true, outline, Some(pdf_info(doc_info)))
 }
 
 /// Renders one page's frame to the open PDF stream. The page's outlines live only for this call: the
@@ -82,10 +163,9 @@ pub fn write_page<W: Write>(stream: &mut PdfStream<W>, page: &Page) -> Outcome<(
 	stream.page(&res!(render_page(page)))
 }
 
-/// Writes a page whose draw list was built elsewhere -- on a worker thread, so the outline fetches and
-/// the SVG the same walk produces run off the writer's thread. The content stream is serialised here, in
-/// page order, because that is where a glyph's Type-3 code is assigned deterministically; with text now a
-/// few bytes of text operators rather than full inline outlines, that serialisation is cheap.
+/// Writes a page whose draw list was built elsewhere -- on a worker thread, so the SVG the same walk
+/// produces runs off the writer's thread. The content stream is serialised here, in page order, because
+/// that is where a font's object number and a Type-3 glyph's code are assigned deterministically.
 pub fn write_built_page<W: Write>(stream: &mut PdfStream<W>, pdf_page: &PdfPage) -> Outcome<()> {
 	stream.page(pdf_page)
 }
@@ -107,14 +187,30 @@ pub fn render_page(page: &Page) -> Outcome<PdfPage> {
 	let grey = Rgba::new(176, 176, 176, 255);
 
 	for placed in &page.frame.placed {
-		// Real text is drawn glyph by glyph as filled outlines; a rule or a reservation as one
-		// rectangle.
+		// Real text is shown glyph by glyph; a rule or a reservation is one rectangle.
 		if let PlacedKind::Text(shaped) = &placed.kind {
 			res!(draw_text(&mut out, placed.x, placed.y, placed.dims.height, shaped));
 			continue;
 		}
 		if let PlacedKind::Graphic(g) = &placed.kind {
 			res!(draw_graphic(&mut out, placed.x, placed.y, g));
+			continue;
+		}
+		// A group is drawn under its page matrix and clip, as a saved graphics state.
+		if let PlacedKind::Group(g) = &placed.kind {
+			let m = g.page_transform(placed.x, placed.y);
+			let clip = match &g.clip {
+				Some(c) => {
+					let t = Transform::translate(placed.x.to_pt() as f32, placed.y.to_pt() as f32);
+					Some(res!(c.transform(&t)))
+				},
+				None => None,
+			};
+			out.push([m.a, m.b, m.c, m.d, m.e, m.f], clip);
+			continue;
+		}
+		if let PlacedKind::GroupEnd = &placed.kind {
+			out.pop();
 			continue;
 		}
 
@@ -133,11 +229,11 @@ pub fn render_page(page: &Page) -> Outcome<PdfPage> {
 			PlacedKind::Reserved	=> out.stroke(path, grey, 0.5),
 			PlacedKind::Text(_)		=> continue,	// drawn above
 			PlacedKind::Graphic(_)	=> continue,	// drawn above
+			PlacedKind::Group(_) | PlacedKind::GroupEnd	=> continue,	// drawn above
 		}
 	}
 
-	// The running head and folio arrive as `PlacedKind::Text` and are drawn as glyph outlines with the
-	// body, above. This writer adds no page furniture of its own.
+	// The running head and folio arrive as `PlacedKind::Text` and are shown with the body, above. This writer adds no page furniture of its own.
 	Ok(out)
 }
 
@@ -155,16 +251,16 @@ fn draw_graphic(
 	let t = Transform::translate(bx.to_pt() as f32, by.to_pt() as f32);
 	let ox = bx.to_pt();
 	let oy = by.to_pt();
-	// A linked graphic (the meta page's "Made with AI" chip) draws a clickable link annotation over its
-	// placement box, in the same y-down engine frame the ink is placed in; the writer flips it into PDF
-	// space. Only the mark carries the link, matching the template, where the words beside it are plain.
-	// v0 draws only an external URI annotation here; an internal `LinkTarget::Anchor` needs the ledger to
-	// resolve its destination page, which this per-graphic call does not hold, so it is left for a
-	// follow-up (Pearl already carries the internal target for a reader that has the ledger).
-	if let Some(LinkTarget::Uri(url)) = &graphic.link {
-		let w = graphic.dims.width.to_pt();
-		let h = (graphic.dims.height + graphic.dims.depth).to_pt();
-		out.link(ox, oy, w, h, url.clone());
+	// A linked graphic -- a link area over text, an image or a block, or the meta page's "Made with AI"
+	// chip -- draws a clickable link annotation over its placement box, in the same y-down engine frame the
+	// ink is placed in; the writer flips it into PDF space. An internal link names its anchor's destination,
+	// which the writer places at the close, once every anchor has landed.
+	let w = graphic.dims.width.to_pt();
+	let h = (graphic.dims.height + graphic.dims.depth).to_pt();
+	match &graphic.link {
+		Some(LinkTarget::Uri(url))		=> out.link(ox, oy, w, h, url.clone()),
+		Some(LinkTarget::Anchor(id))	=> out.link_named(ox, oy, w, h, dest_name(id)),
+		None							=> (),
 	}
 	for op in &graphic.ops {
 		match op {
@@ -175,7 +271,7 @@ fn draw_graphic(
 				// image XObject, straight RGB with a soft mask only when a sample is translucent.
 				let (rgb, alpha) = crate::image::split_rgba(image);
 				out.image(
-					rgb, alpha, image.width, image.height,
+					rgb, alpha, image.tone, image.width, image.height,
 					ox + *x as f64, oy + *y as f64, *w as f64, *h as f64);
 			},
 		}
@@ -183,7 +279,8 @@ fn draw_graphic(
 	Ok(())
 }
 
-/// Draws a placed run as filled glyph outlines. `height` is the line's own HBox height -- the face
+/// Shows a placed run: each glyph by id from its embedded face, or as a filled outline when the face
+/// cannot be embedded. `height` is the line's own HBox height -- the face
 /// ascent for an ordinary line, or the cap height for a first line raised under the block-edge model
 /// (see `linebreak::set_lines`), whose glyphs then carry a compensating negative shift -- so
 /// `by + height` is the baseline either way. `bx`/`by` are the box's top-left.
@@ -204,6 +301,19 @@ fn draw_text(
 	let texts = shaped.glyph_text();
 
 	for (glyph, text) in shaped.run().glyphs.iter().zip(texts.into_iter()) {
+		// The pen: x the glyph's left, y its baseline, in the engine's top-left y-down frame.
+		let x = base_x + glyph.x;
+		let y = base_y - glyph.y;
+		if let Some(prog) = res!(shaped.program(glyph)) {
+			// Every glyph is shown, a space included: its text is what puts the word gap into a copy.
+			let gid = match u16::try_from(glyph.id) {
+				Ok(g)	=> g,
+				Err(_)	=> return Err(err!(
+					"Glyph id {} exceeds the 16 bits a font program can index.", glyph.id; Invalid, Range, LimitReached)),
+			};
+			out.text(prog, gid, x, y, shaped.size(), shaped.colour(), text);
+			continue;
+		}
 		// The writer stores this canonical outline once and shows it at the run's point size. A glyph with
 		// no ink -- a space -- has an empty outline and is skipped, exactly as the SVG writer skips it, so the
 		// two arms place the same marks; the viewer infers word gaps from the glyph positions.
@@ -211,9 +321,8 @@ fn draw_text(
 		if outline.is_empty() {
 			continue;
 		}
-		// The pen: x the glyph's left, y its baseline, in the engine's top-left y-down frame. The writer
-		// flips the outline back to y up within the page's y-flip, so the glyph reads upright.
-		out.glyph(outline, base_x + glyph.x, base_y - glyph.y, shaped.size(), glyph.adv, shaped.colour(), text);
+		// The writer flips the outline back to y up within the page's y-flip, so the glyph reads upright.
+		out.glyph(outline, x, y, shaped.size(), glyph.adv, shaped.colour(), text);
 	}
 	Ok(())
 }
@@ -221,6 +330,7 @@ fn draw_text(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use oxedyne_fe2o3_graphics::colour::Ink;
 	use crate::ir::{
 		DrawOp,
 		Dims,
@@ -237,10 +347,10 @@ mod tests {
 	use std::sync::Arc;
 
 	#[test]
-	fn text_is_type3_and_extractable_via_tounicode() -> Outcome<()> {
-		// A shaped word is drawn as a Type-3 font, and the font's /ToUnicode CMap maps its codes back to the
-		// source characters, so a viewer extracts the real word rather than the font's private codes. Built
-		// uncompressed, so the CMap is readable straight from the bytes.
+	fn text_embeds_its_font_and_extracts_via_tounicode() -> Outcome<()> {
+		// A shaped word is shown from its embedded CFF face, and the font's /ToUnicode CMap maps its glyph
+		// ids back to the source characters, so a viewer extracts the real word. Built uncompressed, so the
+		// CMap is readable straight from the bytes.
 		use crate::font::ShapedText;
 		use oxedyne_fe2o3_font::{
 			face::Role,
@@ -261,12 +371,16 @@ mod tests {
 		let bytes	= res!(w.to_bytes());
 		let text	= String::from_utf8_lossy(&bytes);
 
-		assert!(text.contains("/Subtype /Type3"), "the word is drawn as a Type-3 font");
-		assert!(text.contains(" Tj\n"), "the glyphs are shown with text operators");
+		assert!(text.contains("/Subtype /Type0"), "the word is shown from a composite font");
+		assert!(text.contains("/Subtype /CIDFontType0 "), "over a CFF CIDFont");
+		assert!(text.contains("/Subtype /CIDFontType0C"), "whose program is embedded");
+		assert!(text.contains("+LibertinusSerif-Regular"), "under a subset tag and its PostScript name");
+		assert!(!text.contains("/Subtype /Type3"), "no glyph falls back to outlines");
+		assert!(text.contains(" Tj\n") || text.contains(" TJ\n"), "the glyphs are shown with text operators");
 		assert!(text.contains("beginbfchar"), "a ToUnicode CMap carries character mappings");
 		// The distinct letters of "Oxegen" appear as UTF-16BE destinations in the CMap.
 		for (ch, hex) in [('O', "004F"), ('x', "0078"), ('e', "0065"), ('g', "0067"), ('n', "006E")] {
-			assert!(text.contains(&fmt!("<{}>", hex)),
+			assert!(text.contains(&fmt!("> <{}>", hex)),
 				"the CMap maps '{}' (U+{}) so the word is extractable", ch, hex);
 		}
 		Ok(())
@@ -279,7 +393,7 @@ mod tests {
 		let geom	= PageGeometry::new(Sp::from_pt(200.0), Sp::from_pt(300.0), Sp::from_pt(20.0));
 		let rect	= res!(Path::rect(Bounds::new(0.0, 0.0, 36.0, 36.0)));
 		let graphic	= Graphic::new(
-			vec![DrawOp::Fill { path: rect, colour: Rgba::BLACK }],
+			vec![DrawOp::Fill { path: rect, colour: Ink::BLACK }],
 			Dims::new(Sp::from_pt(36.0), Sp::from_pt(36.0), Sp::ZERO))
 			.with_link("https://need2know.ai/with-ai/doc".to_string());
 		let mut frame = Frame::new();
@@ -301,7 +415,7 @@ mod tests {
 		let geom	= PageGeometry::new(Sp::from_pt(200.0), Sp::from_pt(300.0), Sp::from_pt(20.0));
 		let rect	= res!(Path::rect(Bounds::new(0.0, 0.0, 36.0, 36.0)));
 		let graphic	= Graphic::new(
-			vec![DrawOp::Fill { path: rect, colour: Rgba::BLACK }],
+			vec![DrawOp::Fill { path: rect, colour: Ink::BLACK }],
 			Dims::new(Sp::from_pt(36.0), Sp::from_pt(36.0), Sp::ZERO));
 		let mut frame = Frame::new();
 		frame.push(Placed::new(

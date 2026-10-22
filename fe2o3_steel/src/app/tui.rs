@@ -25,6 +25,7 @@ use std::sync::{
 
 use oxedyne_fe2o3_core::{
     prelude::*,
+    file as core_file,
     log::{
         bot::FileConfig,
     },
@@ -273,6 +274,8 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
     let wallet_path = Path::new("./").join(constant::WALLET_NAME);
     let (wallet, db_default_enc_key, unlocked_admin_name, unlocked_admin_scopes) =
     if wallet_path.is_file() {
+        // Tighten a wallet that predates `save_secret` before loading it.
+        res!(core_file::restrict_secret(&wallet_path));
         let wallet = res!(Wallet::load(
             wallet_path,
             Some(DecoderConfig::<(), ()>::default()),
@@ -353,7 +356,7 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
                     pass_bytes,
                     DEFAULT_WALLET_KDF_NAME,
                 ));
-                res!(wallet.save(
+                res!(wallet.save_secret(
                     &wallet_path,
                     "  ",
                     Some(EncoderConfig::<(), ()>::default()),
@@ -433,27 +436,33 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
     let mut shell_cfg = ShellConfig::default();
 
     if invocation_cmds.len() > 0 {
-        match context.execute(invocation_cmds, &shell_cfg) {
-            Ok(evals) => for eval in evals {
-                match eval {
-                    Evaluation::Output(s) => println!("{}", s),
-                    Evaluation::Exit => {
-                        println!("Exiting {} now.", cfg.app_human_name);
-                    }
-                    _ => (),
-                }
-            }
-            Err(e) => {
-                //println!("{} error: {}", cfg.app_human_name, e);
-                return Err(e);
-            }
-        }
+        let evals = res!(context.execute(invocation_cmds, &shell_cfg));
+        res!(command_line_outcome(evals, &cfg.app_human_name));
     } else {
         shell_cfg.greeting_msg =
             fmt!("Welcome, type \"help\" for a help menu.");
         res!(context.start_shell(&shell_cfg, None));
     }
 
+    Ok(())
+}
+
+
+/// Prints a command-line invocation's evaluations, and fails on the first error among them, so
+/// that `<app> server` refusing to start (a missing certificate, say) exits non-zero with the
+/// reason instead of returning quietly to a supervisor that reads a clean exit as a deliberate
+/// stop.
+pub fn command_line_outcome(evals: Vec<Evaluation>, app_name: &str) -> Outcome<()> {
+    for eval in evals {
+        match eval {
+            Evaluation::Output(s)   => println!("{}", s),
+            Evaluation::Exit        => println!("Exiting {} now.", app_name),
+            Evaluation::None        => (),
+            Evaluation::Error(s)    => return Err(err!(
+                "{}: {}", app_name, s;
+                Init)),
+        }
+    }
     Ok(())
 }
 
@@ -583,13 +592,18 @@ fn migrate_legacy_wallet_inline(_cfg: &AppConfig) -> Outcome<()> {
     ));
     let new_wallet = Wallet::new(metadata, vec![admin], DaticleMap::new());
 
+    // A plain `fs::copy` would carry the source's mode, so the backup holds
+    // the same passphrase verifier and key-derivation material at a wider
+    // mode than the original.
     let backup_path = Path::new("./").join(fmt!("{}.pre-admins", constant::WALLET_NAME));
-    if let Err(e) = std::fs::copy(&wallet_path, &backup_path) {
-        return Err(err!(e,
-            "Backing up {:?} to {:?}.", wallet_path, backup_path;
-            IO, File, Write));
-    }
-    res!(new_wallet.save(
+    let old_wallet_bytes = match std::fs::read(&wallet_path) {
+        Ok(b) => b,
+        Err(e) => return Err(err!(e,
+            "Reading {:?} to back it up before the admin-user migration.", wallet_path;
+            IO, File, Read)),
+    };
+    res!(core_file::save_secret(&backup_path, &old_wallet_bytes));
+    res!(new_wallet.save_secret(
         &wallet_path,
         "  ",
         Some(EncoderConfig::<(), ()>::default()),

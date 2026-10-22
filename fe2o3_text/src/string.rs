@@ -62,6 +62,22 @@ impl Indenter {
     }
 }
 
+/// A three letter alias for wrapping a string, or a formatted one, in a `Stringer`.
+///
+///```
+/// use oxedyne_fe2o3_text::str;
+///
+/// assert_eq!(str!("The meaning is {}", 42).inner(), "The meaning is 42");
+/// assert_eq!(str!(String::from("plain")).inner(), "plain");
+/// assert_eq!(str!().inner(), "");
+///```
+#[macro_export]
+macro_rules! str {
+    ()                                  => ($crate::string::Stringer::new(""));
+    ($fmt:literal, $($arg:tt)+)         => ($crate::string::Stringer::new(format!($fmt, $($arg)+)));
+    ($s:expr)                           => ($crate::string::Stringer::new($s));
+}
+
 new_type!(Stringer, String, Clone, Debug, Eq, Ord, PartialEq, PartialOrd);
 
 impl fmt::Display for Stringer {

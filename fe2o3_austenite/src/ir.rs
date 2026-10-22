@@ -8,6 +8,7 @@
 //! Lengths are [`Sp`], scaled points, per the architecture's reproducibility rule. Floating point
 //! appears only at the output boundary, where a coordinate becomes a device length.
 
+use crate::eval::realise::Tag;
 use crate::font::ShapedText;
 use crate::ledger::{
 	AnchorId,
@@ -17,8 +18,9 @@ use crate::ledger::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::Ink,
 	path::Path,
+	pixmap::Tone,
 };
 
 use std::sync::Arc;
@@ -37,6 +39,13 @@ impl Sp {
 	/// boundary conversion; once inside the engine a length never leaves the integer domain.
 	pub fn from_pt(pt: f64) -> Self {
 		Sp((pt * Sp::UNIT as f64).round() as i32)
+	}
+
+	/// Converts a length in points to scaled points, rounding up. A width measured in one pass and given
+	/// back as a region in the next must still hold what it measured, which rounding to the nearest unit
+	/// does not promise: half a unit less is enough to break the last word of an exactly fitted line.
+	pub fn from_pt_up(pt: f64) -> Self {
+		Sp((pt * Sp::UNIT as f64 - 1e-6).ceil() as i32)
 	}
 
 	/// The length in points, for the output boundary only.
@@ -85,7 +94,7 @@ impl FromDat for Sp {
 
 /// A span of the source a box came from, in byte offsets, so a diagnostic can quote it. The
 /// architecture makes this universal; Phase 0 carries it but does not yet render carets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Span {
 	pub start:	u32,
 	pub end:	u32,
@@ -93,6 +102,31 @@ pub struct Span {
 
 impl Span {
 	pub fn new(start: u32, end: u32) -> Self { Self { start, end } }
+}
+
+/// Where a construct was written: the file it stands in and the byte span of the item that holds it. Its
+/// `Debug` names no position. The authoring memo keys a block by its derived `Debug`, and where a block was
+/// written does not change what it sets, so a block moved by an edit elsewhere is still served from the
+/// memo, and takes the sites of the block it is served for ([`crate::doc::Answered`]).
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Site {
+	pub file:	Arc<str>,
+	pub span:	Span,
+}
+
+impl Site {
+	pub fn new(file: &Arc<str>, span: Span) -> Self { Self { file: file.clone(), span } }
+
+	/// A site in no file, for a construct built by the engine rather than read from a source.
+	pub fn none() -> Self { Self { file: Arc::from(""), span: Span::default() } }
+}
+
+impl Default for Site {
+	fn default() -> Self { Self::none() }
+}
+
+impl std::fmt::Debug for Site {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Site") }
 }
 
 /// The three measurements a box occupies, split at the baseline as TeX splits them: `height` reaches
@@ -169,6 +203,8 @@ impl Glue {
 pub struct Penalty {
 	pub cost:		i32,
 	pub flagged:	bool,
+	pub strong:		bool,	// a strong eject: ejects even on an empty page (a trailing/consecutive `#pagebreak()`), never set on any other break
+	pub column:		bool,	// a forced column break (`#colbreak()`): the next column, or the next page from the last
 }
 
 impl Penalty {
@@ -176,18 +212,33 @@ impl Penalty {
 	pub const EJECT:	i32	= -10_000;	// a break here is forced
 
 	pub fn new(cost: i32, flagged: bool) -> Self {
-		Self { cost, flagged }
+		Self { cost, flagged, strong: false, column: false }
 	}
 
-	/// A forced break, which the page breaker must take -- an explicit page break, or the end of a
-	/// chapter.
-	pub fn eject() -> Self { Self { cost: Self::EJECT, flagged: false } }
+	/// A forced break, which the page breaker must take -- a chapter end, section furniture, or a weak
+	/// `#pagebreak(weak: true)`. The driver drops it on an already-empty page, so it opens no blank page.
+	pub fn eject() -> Self { Self { cost: Self::EJECT, flagged: false, strong: false, column: false } }
+
+	/// A strong forced break -- the default `#pagebreak()`. Ejects unconditionally, opening a blank page when
+	/// it lands on an already-empty page or trails the document, matching Typst 0.15.1's strong pagebreak.
+	pub fn strong_eject() -> Self { Self { cost: Self::EJECT, flagged: false, strong: true, column: false } }
+
+	/// A forced column break -- Typst's `#colbreak()`, strong unless `weak`. In a layout of several columns
+	/// it moves the flow to the next column, or to the next page from the last; on a page of one column it
+	/// is a page break, as Typst makes it. A weak one is dropped in a column that holds nothing yet.
+	pub fn column_eject(weak: bool) -> Self { Self { cost: Self::EJECT, flagged: false, strong: !weak, column: true } }
 
 	/// Is a break at this penalty forbidden?
 	pub fn is_forbidden(&self) -> bool { self.cost >= Self::INFINITY }
 
 	/// Is a break at this penalty forced?
 	pub fn is_forced(&self) -> bool { self.cost <= Self::EJECT }
+
+	/// Is this a strong forced eject, one that opens a page even where the current one is empty?
+	pub fn is_strong(&self) -> bool { self.strong }
+
+	/// Is this a column break rather than a page break?
+	pub fn is_column(&self) -> bool { self.column }
 }
 
 /// A footnote: the superscript mark set in the running text, and the note set at the foot of the page
@@ -211,12 +262,13 @@ pub struct RasterImage {
 	pub width:	usize,		// samples across
 	pub height:	usize,		// samples down
 	pub rgba:	Vec<u8>,	// width * height * 4 straight-RGBA bytes, top row first
+	pub tone:	Tone,		// grey when the source file held grey alone
 }
 
 /// A hint from an `image(...)` or `padded-image(...)` call for how large to draw a figure: a fraction of
 /// the measure (`50%`) or an absolute length in points (`4cm`). An axis with no hint is taken from the
 /// other axis and the image's own aspect, and a figure with no hint at all fills the measure.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Length {
 	Rel(f64),	// a fraction of the container measure
 	Abs(f64),	// an absolute length in points
@@ -226,8 +278,8 @@ pub enum Length {
 /// graphic's own frame, which is y down and in points, so placing the graphic needs only a translation.
 #[derive(Clone, Debug)]
 pub enum DrawOp {
-	Fill { path: Path, colour: Rgba },
-	Stroke { path: Path, colour: Rgba, width: f32 },	// stroke width in points
+	Fill { path: Path, colour: Ink },
+	Stroke { path: Path, colour: Ink, width: f32 },	// stroke width in points
 	// A raster drawn to fill the rectangle at top-left (x, y), w wide and h tall, in the graphic's frame.
 	Image { image: Arc<RasterImage>, x: f32, y: f32, w: f32, h: f32 },
 }
@@ -390,6 +442,29 @@ pub enum FloatPlacement {
 	Bottom,
 }
 
+/// How wide a float runs: within the column it is met in, or across every column of the page (Typst's
+/// `scope: "column"` and `scope: "parent"`). On a page of one column the two coincide.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FloatScope {
+	#[default]
+	Column,
+	Parent,
+}
+
+/// Where a float settles and how wide it runs: Typst's `placement` and `scope` taken together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Floating {
+	pub side:	FloatPlacement,
+	pub scope:	FloatScope,
+}
+
+impl Floating {
+	/// A float within its column, Typst's default scope.
+	pub fn column(side: FloatPlacement) -> Self {
+		Self { side, scope: FloatScope::Column }
+	}
+}
+
 /// A block-level float: self-contained vertical material -- a figure and its caption, or an aside box --
 /// set at the top or foot of a page rather than in the flow, its parts kept together (Typst's
 /// `figure(placement: auto | top | bottom)`).
@@ -398,19 +473,36 @@ pub enum FloatPlacement {
 /// with `clearance`, not paragraph glue). `height` is the material's own extent, what the break weighs.
 /// `clearance` is the gap between the float and the body (Typst's `place.clearance`, default 1.5em of the
 /// float's font size), applied above a foot float and below a top float, and only when the page carries
-/// other content. A float is only ever a top-level node of the document stream, never nested in a line or
-/// keep box.
+/// other content. `scope` decides whether it settles within its column or spans the page's columns. A float
+/// is only ever a top-level node of the document stream, never nested in a line or keep box.
 #[derive(Clone, Debug)]
 pub struct FloatNode {
 	pub list:		Vec<Node>,
 	pub height:		Sp,
 	pub clearance:	Sp,
 	pub placement:	FloatPlacement,
+	pub scope:		FloatScope,
 }
 
 impl FloatNode {
-	pub fn new(list: Vec<Node>, height: Sp, clearance: Sp, placement: FloatPlacement) -> Self {
-		Self { list, height, clearance, placement }
+	pub fn new(list: Vec<Node>, height: Sp, clearance: Sp, floating: Floating) -> Self {
+		Self { list, height, clearance, placement: floating.side, scope: floating.scope }
+	}
+}
+
+/// The column layout a run of pages flows in: `count` equal columns parted by `gutter` (Typst's
+/// `page.columns` and `columns.gutter`). One column is the ordinary page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageColumns {
+	pub count:	usize,
+	pub gutter:	Sp,
+}
+
+impl PageColumns {
+	pub const ONE: Self = Self { count: 1, gutter: Sp::ZERO };
+
+	pub fn new(count: usize, gutter: Sp) -> Self {
+		Self { count: count.max(1), gutter }
 	}
 }
 
@@ -436,6 +528,85 @@ impl ColumnsNode {
 	}
 }
 
+/// A 2D affine map `(x, y) -> (a x + c y + e, b x + d y + f)`, in points, y down, as PDF's `cm`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Transform {
+	pub a:	f64,
+	pub b:	f64,
+	pub c:	f64,
+	pub d:	f64,
+	pub e:	f64,
+	pub f:	f64,
+}
+
+impl Transform {
+	pub fn identity() -> Self { Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 } }
+
+	pub fn translate(x: f64, y: f64) -> Self { Self { e: x, f: y, ..Self::identity() } }
+
+	pub fn scale(sx: f64, sy: f64) -> Self { Self { a: sx, d: sy, ..Self::identity() } }
+
+	pub fn rotate(radians: f64) -> Self {
+		let (s, c) = radians.sin_cos();
+		Self { a: c, b: s, c: -s, d: c, e: 0.0, f: 0.0 }
+	}
+
+	/// The image of the point `(x, y)`.
+	pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+		(self.a * x + self.c * y + self.e, self.b * x + self.d * y + self.f)
+	}
+
+	/// `self` applied after `inner`.
+	pub fn then(&self, inner: &Transform) -> Transform {
+		Transform {
+			a:	self.a * inner.a + self.c * inner.b,
+			b:	self.b * inner.a + self.d * inner.b,
+			c:	self.a * inner.c + self.c * inner.d,
+			d:	self.b * inner.c + self.d * inner.d,
+			e:	self.a * inner.e + self.c * inner.f + self.e,
+			f:	self.b * inner.e + self.d * inner.f + self.f,
+		}
+	}
+}
+
+/// Material drawn under a transform (`move`, `scale`, `rotate`, `skew`). `dims` is the layout footprint
+/// the flow reserves, which Typst keeps as the untransformed size unless `reflow` is set. `list` is a
+/// vertical list set from the footprint's top-left; `transform` maps that local frame (points, y down,
+/// origin at the top-left) onto the frame the node is placed in.
+#[derive(Clone, Debug)]
+pub struct TransformNode {
+	pub transform:	Transform,
+	pub list:		Vec<Node>,
+	pub dims:		Dims,
+}
+
+/// Material clipped to its box, or to `path` when given (a rounded `block(clip: true, radius: ..)`). The
+/// list is a vertical list set from the box's top-left.
+#[derive(Clone, Debug)]
+pub struct ClipNode {
+	pub list:	Vec<Node>,
+	pub dims:	Dims,
+	pub path:	Option<Path>,	// in the box's own frame, points, y down
+}
+
+/// A box of absolutely positioned children: Typst's frame. Each child is set with its top-left at its
+/// offset from the frame's top-left, whatever came before it, so children may overlap. `dims` splits the
+/// frame's height at its baseline, as every box does.
+///
+/// `parent` names the [`Node::Mark`] (or the located element's start tag) the frame's contents belong to
+/// logically: a float's frame is drawn at the top or foot of a region but read, for introspection, where its
+/// `place` stood in the flow, as Typst's frame parents make it.
+#[derive(Clone, Debug)]
+pub struct FrameNode {
+	pub dims:	Dims,
+	pub items:	Vec<(Sp, Sp, Node)>,	// (x, y) of each child's top-left, then the child
+	pub parent:	Option<u64>,
+}
+
+impl FrameNode {
+	pub fn new(dims: Dims) -> Self { Self { dims, items: Vec::new(), parent: None } }
+}
+
 /// One item of a box-glue-penalty list: the closed vocabulary the whole engine is built on.
 #[derive(Clone, Debug)]
 pub enum Node {
@@ -447,12 +618,30 @@ pub enum Node {
 	Anchor(AnchorId),	// a zero-size marker recording where an identity landed
 	Float(FloatNode),	// a block-level float, deferred by the driver to the top or foot of a later page
 	Columns(ColumnsNode),	// a block flowed into equal side-by-side columns, filled left to right
+	// A zero-size marker setting the column layout the following pages flow in (Typst's `set page(columns:)`):
+	// a page already carrying material is closed first, so the new layout starts on a fresh page. Like
+	// `RepeatHead`, a driver-time control node, never ToDat-serialised.
+	PageColumns(PageColumns),
 	// A zero-size marker arming (Some) or disarming (None) a repeated header: while armed, the driver
 	// stamps the boxed header at the top of every fresh page the following material spills onto, so a
 	// breakable table's column heads repeat down a multi-page run (Typst's `table.header` repeat). It is
 	// never ToDat-serialised -- it is a driver-time control node the lowerer weaves, not shipped IR -- so
 	// adding it changes no on-disc format. Transparent to breakability, like `Anchor`.
 	RepeatHead(Option<Box<BoxNode>>),
+	// A zero-size marker arming (Some) or disarming (None) a repeated footer: while armed, the rows that
+	// break across regions are closed in every region but the last by the boxed footer, set straight after
+	// them, and each region reserves its height (Typst's `table.footer` repeat). The final footer is the
+	// list's own, after the marker disarms. A driver-time control node like `RepeatHead`.
+	RepeatFoot(Option<Box<BoxNode>>),
+	Frame(FrameNode),			// absolutely positioned children, Typst's frame
+	Transform(TransformNode),	// material drawn under an affine map
+	Clip(ClipNode),				// material clipped to its box or a path
+	// Where a located element starts or ends (`eval::realise::Tag`): zero-size, it records the element's
+	// page and position in the ledger when placed, as Typst's frame tags do.
+	Tag(Tag),
+	// A zero-size marker of where out-of-flow material (a float) stands in the flow; a frame whose `parent`
+	// names it is ordered here for introspection.
+	Mark(u64),
 }
 
 impl Node {
@@ -476,6 +665,14 @@ impl Node {
 			// A repeated-header marker is a zero-size control node: it arms or disarms the driver's header
 			// repeat and occupies no vertical space where it stands.
 			Node::RepeatHead(_)	=> Sp::ZERO,
+			Node::RepeatFoot(_)	=> Sp::ZERO,
+			// A column-layout marker occupies nothing; the driver acts on it between pages.
+			Node::PageColumns(_)	=> Sp::ZERO,
+			Node::Frame(f)		=> f.dims.vextent(),
+			Node::Transform(t)	=> t.dims.vextent(),
+			Node::Clip(c)		=> c.dims.vextent(),
+			Node::Tag(_)		=> Sp::ZERO,
+			Node::Mark(_)		=> Sp::ZERO,
 		}
 	}
 

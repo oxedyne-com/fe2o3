@@ -41,10 +41,7 @@
 
 use crate::{
     prelude::*,
-    comm::{
-        msg::OzoneMsg,
-        response::Wait,
-    },
+    comm::response::Wait,
 };
 
 use oxedyne_fe2o3_jdat::{
@@ -73,7 +70,7 @@ use std::{
 pub struct MigrationReport {
     pub scanned:        usize,                  // keys the source scan emitted
     pub copied:         usize,                  // keys with a value present, copied to the target
-    pub tombstones:     usize,                  // scanned keys whose value was absent (deleted)
+    pub tombstones:     usize,                  // scanned keys read absent (deleted after the scan)
     pub verified:       usize,                  // copied keys whose target bytes matched the source
     pub per_prefix:     BTreeMap<String, usize>,// copied keys grouped by key prefix (before first ':')
     pub source_bytes:   u64,
@@ -156,8 +153,9 @@ pub fn migrate_live_set<
     let mut tombstones  = 0usize;
     let mut per_prefix: BTreeMap<String, usize> = BTreeMap::new();
 
-    // 2. Copy each present value into the target.  A key whose value is absent
-    //    is a live tombstone: it is dropped, not copied.
+    // 2. Copy each present value into the target.  The scan leaves deleted keys
+    //    out, so a key whose value is absent was deleted after the scan: it is
+    //    dropped, not copied.
     for (kdat, _empty, _meta) in &entries {
         match res!(source.get_wait(kdat, schms2)) {
             None => {
@@ -293,9 +291,9 @@ pub fn verify_migration<
 ///
 /// A store dispatches `n` write parts -- one `Complete` record, or one bunch key
 /// plus one record per chunk -- and reports `n` first as an `OzoneMsg::Chunks`,
-/// then one acknowledgement per part.  Waiting for all `n` acknowledgements,
-/// rather than on ordering between writers, is what makes the copy safe to
-/// verify immediately.
+/// then answers each part twice, written and then durable.  Waiting for all `n`
+/// final answers, rather than on ordering between writers, is what makes the
+/// copy safe to verify immediately.
 fn store_and_wait<
     const UIDL: usize,
     UID:    NumIdDat<UIDL> + 'static,
@@ -313,13 +311,7 @@ fn store_and_wait<
     -> Outcome<()>
 {
     let resp = res!(api.store_using_schemes(k, v, user, schms2));
-    let n = match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::Chunks(n) => n,
-        other => return Err(err!(
-            "Expected an OzoneMsg::Chunks acknowledging the write, got {:?}.", other;
-            Channel, Unexpected)),
-    };
-    res!(resp.recv_number(n, constant::USER_REQUEST_WAIT));
+    res!(resp.recv_store_ack());
     Ok(())
 }
 

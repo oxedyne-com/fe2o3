@@ -20,6 +20,42 @@ impl Dir {
 	}
 }
 
+/// An OpenType feature applied across a whole run: `smcp` for small capitals, `onum` for old-style
+/// figures. The value is the feature's setting -- 0 switches it off, 1 on, and a higher value picks an
+/// alternate where the feature offers several.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Feature {
+	pub tag:	[u8; 4],
+	pub value:	u32,
+}
+
+impl Feature {
+
+	/// The feature switched on.
+	pub const fn on(tag: &[u8; 4]) -> Self {
+		Self { tag: *tag, value: 1 }
+	}
+
+	/// Small capitals from lower case: what Typst's `smallcaps` asks the font for.
+	pub const SMALL_CAPS: Self = Self::on(b"smcp");
+
+	/// The feature at a given setting; 0 switches off a feature a shaper applies by default.
+	pub const fn set(tag: &[u8; 4], value: u32) -> Self {
+		Self { tag: *tag, value }
+	}
+}
+
+/// Everything a shaping call may be told beyond the string, the size and the direction. The default is
+/// what [`Face::shape_with`](crate::face::Face::shape_with) has always done: no features, the language
+/// and script guessed from the text, and default-ignorable characters shaped as the font has them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShapeSpec<'a> {
+	pub features:			&'a [Feature],
+	pub language:			Option<&'a str>,	// BCP 47, as `en` or `de-CH`; selects `locl` forms
+	pub script:				Option<[u8; 4]>,	// ISO 15924, as `Latn`; else guessed from the text
+	pub remove_ignorables:	bool,				// drop default ignorables (a soft hyphen, a joiner) from the run
+}
+
 /// One glyph, placed in pixels relative to the run's start and baseline, y up as the font has it.
 /// Painting flips it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,6 +66,23 @@ pub struct Glyph {
 	pub y:		f32,	// vertical offset from the baseline, pixels, upwards
 	pub adv:	f32,	// pen movement, kept not inferred: a mark's advance is nought, its x is not
 	pub cluster:	usize,	// byte offset into the ORIGINAL string, so a caret moves by cluster
+	pub safe_to_break:	bool,	// the shaper's own word: cutting the text before this cluster changes no glyph
+}
+
+/// A glyph made by hand rather than by the shaper: at the origin, safe to break. A literal that
+/// sets only what it knows and takes the rest with `..Default::default()` survives a new field.
+impl Default for Glyph {
+	fn default() -> Self {
+		Self {
+			id:				0,
+			face:			0,
+			x:				0.0,
+			y:				0.0,
+			adv:			0.0,
+			cluster:		0,
+			safe_to_break:	true,	// nothing shaped across it, so nothing to reshape
+		}
+	}
 }
 
 /// A run of shaped text: one string, one font, one size, one direction.

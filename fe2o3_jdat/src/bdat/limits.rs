@@ -16,13 +16,18 @@ use oxedyne_fe2o3_core::prelude::*;
 /// depth 1, a list holding a scalar reaches depth 2, and a list holding a list holding a scalar
 /// reaches depth 3.  `max_bytes` bounds the length of the buffer handed to the decoder, not the
 /// length of the value decoded from it, since a value may be followed by bytes that are none of the
-/// decoder's business.
+/// decoder's business.  `max_items` counts every value the decoder builds, containers and scalars
+/// alike, and bounds the memory a buffer can make the decoder allocate: a buffer of `n` bytes can
+/// describe `n` one-byte values, each of which costs a whole `Dat` in memory, so `max_bytes` alone
+/// lets 16 MiB of input become some 1 GiB of values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecodeLimits {
     /// Greatest nesting depth the decoder will descend to, with the root value at depth 1.
     pub max_depth: usize,
     /// Greatest length, in bytes, of a buffer the decoder will accept.
     pub max_bytes: usize,
+    /// Greatest number of values the decoder will build from one buffer.
+    pub max_items: usize,
 }
 
 impl Default for DecodeLimits {
@@ -30,6 +35,7 @@ impl Default for DecodeLimits {
         Self {
             max_depth: Self::DEFAULT_MAX_DEPTH,
             max_bytes: Self::DEFAULT_MAX_BYTES,
+            max_items: Self::DEFAULT_MAX_ITEMS,
         }
     }
 }
@@ -55,15 +61,22 @@ impl DecodeLimits {
     pub const DEFAULT_MAX_TEXT_DEPTH: usize = 512;
     /// Default buffer length, in bytes.
     pub const DEFAULT_MAX_BYTES: usize = 64 * 1024 * 1024;
+    /// Default value count, which is no bound.  A value cannot be smaller than a byte, so no count
+    /// could be both below `max_bytes` and safe for every document that fits, and a count tied to
+    /// the byte limit would silently follow it when a caller changes that.  A reader of untrusted
+    /// input sets one from the densest shape it accepts, with [`Self::with_max_items`].
+    pub const DEFAULT_MAX_ITEMS: usize = usize::MAX;
 
     /// No limits at all, as trusted by [`Dat::from_bytes`](crate::Dat::from_bytes), whose behaviour
     /// predates this type.
     pub const UNLIMITED: Self = Self {
         max_depth: usize::MAX,
         max_bytes: usize::MAX,
+        max_items: usize::MAX,
     };
 
-    /// Creates limits with the given maximum depth and buffer length.
+    /// Creates limits with the given maximum depth and buffer length, and no bound on the number
+    /// of values.
     pub fn new(
         max_depth:  usize,
         max_bytes:  usize,
@@ -73,6 +86,7 @@ impl DecodeLimits {
         Self {
             max_depth,
             max_bytes,
+            max_items: Self::DEFAULT_MAX_ITEMS,
         }
     }
 
@@ -86,6 +100,30 @@ impl DecodeLimits {
     pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
         self.max_bytes = max_bytes;
         self
+    }
+
+    /// Returns the limits with the maximum number of values replaced.
+    pub fn with_max_items(mut self, max_items: usize) -> Self {
+        self.max_items = max_items;
+        self
+    }
+
+    /// Rejects the value numbered `items` (the first is 1) when it passes the maximum, naming the
+    /// offset of its first byte.
+    pub fn check_items(
+        &self,
+        items:  usize,
+        pos:    usize,
+    )
+        -> Outcome<()>
+    {
+        if items > self.max_items {
+            return Err(err!(
+                "Decoding value number {} at byte offset {} exceeds the maximum of {} values.",
+                items, pos, self.max_items;
+            Input, Invalid, Excessive, Size));
+        }
+        Ok(())
     }
 
     /// Rejects a buffer longer than the maximum length.
@@ -104,6 +142,7 @@ impl DecodeLimits {
         Self {
             max_depth:  Self::DEFAULT_MAX_TEXT_DEPTH,
             max_bytes:  Self::DEFAULT_MAX_BYTES,
+            max_items:  Self::DEFAULT_MAX_ITEMS,
         }
     }
 

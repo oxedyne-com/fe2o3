@@ -515,16 +515,18 @@ fn history_table(hist: &[send::SendEntry]) -> String {
 	let mut s = String::new();
 	s.push_str("<h2>Send history</h2>\n");
 	s.push_str("<table class=\"mc-table\">\n<thead><tr>\
-		<th>Post</th><th>When</th><th>Attempted</th><th>Sent</th><th>Failed</th><th>Suppressed</th>\
-		</tr></thead>\n<tbody>\n");
+		<th>Post</th><th>When</th><th>Attempted</th><th>Sent</th><th>Waiting</th><th>Failed</th>\
+		<th>Suppressed</th></tr></thead>\n<tbody>\n");
 	for e in hist {
 		s.push_str(&fmt!(
 			"<tr><td><span class=\"mc-slug\">{slug}</span></td><td>{at}</td>\
-			<td>{attempted}</td><td>{sent}</td><td>{failed}</td><td>{suppressed}</td></tr>\n",
+			<td>{attempted}</td><td>{sent}</td><td>{waiting}</td><td>{failed}</td>\
+			<td>{suppressed}</td></tr>\n",
 			slug		= html_escape(&e.slug),
 			at		= html_escape(&e.at),
 			attempted	= e.attempted,
 			sent		= e.sent,
+			waiting		= e.waiting(),
 			failed		= e.failed,
 			suppressed	= e.suppressed,
 		));
@@ -2909,11 +2911,11 @@ pub async fn handle_post<
 	}
 }
 
-/// Sends a live post to every confirmed subscriber.
+/// Queues a live post for every confirmed subscriber.
 ///
 /// The console side of "own the send": it reads the slug the send form named, checks the post is live,
-/// and hands off to [`send::send_newsletter`], which signs and delivers a message per confirmed
-/// subscriber straight to their MX. Where mail is not configured on the host, it says so rather than
+/// and hands off to [`send::send_newsletter`], which queues a message per confirmed subscriber for the
+/// outbox to sign and deliver straight to their MX at the host's hourly ceiling. Where mail is not configured on the host, it says so rather than
 /// pretending to send. The reason -- how many went, how many failed, or why none could -- rides back in
 /// the redirect the way every other console write's does.
 async fn do_newsletter<
@@ -2948,28 +2950,28 @@ async fn do_newsletter<
 	if !valid_slug(&slug) {
 		return Ok(subs_back_with("that is not a post's name", json));
 	}
-	let from = cfg.newsletter_from(sender);
-	match send::send_newsletter(sender, db, cfg, &from, &slug, id).await {
+	match send::send_newsletter(sender, db, &slug, id) {
 		Ok(report)	=> {
-			info!("{}: console: '{}' sent newsletter '{}' ({} sent, {} failed, {} suppressed)",
-				id, who, slug, report.sent, report.failed, report.suppressed);
-			// One history entry per real send, stamped with the moment the way the mail's own Date header
-			// is. A history that will not write does not fail the send -- the mail has gone -- so it logs
-			// and carries on.
-			let at = send::iso_now().unwrap_or_default();
-			let entry = send::SendEntry::of(&slug, &at, &report);
-			if let Err(e) = send::record_send(db, &entry) {
-				warn!("{}: console: '{}' sent newsletter '{}' but the history would not record it: {}",
-					id, who, slug, e);
-			}
+			info!("{}: console: '{}' queued newsletter '{}' for {} subscriber(s)",
+				id, who, slug, report.attempted);
+			let hourly = sender.pacer().hourly();
+			let when = if hourly == 0 {
+				fmt!("this host's mail ceiling is 0, so nothing leaves until it is raised")
+			} else {
+				fmt!("it goes out at {} an hour, and the send history shows how far it has got", hourly)
+			};
 			Ok(subs_back_with(
-				&fmt!("newsletter '{}' sent to {} subscriber(s), {} failed, {} suppressed",
-					slug, report.sent, report.failed, report.suppressed),
+				&fmt!("newsletter '{}' queued for {} subscriber(s); {}", slug, report.attempted, when),
 				json))
 		}
 		Err(e)			=> {
 			warn!("{}: console: '{}' newsletter '{}' failed: {}", id, who, slug, e);
-			Ok(subs_back_with("the newsletter could not be sent; the log says why", json))
+			if e.tags().contains(&ErrTag::Exists) {
+				return Ok(subs_back_with(
+					&fmt!("newsletter '{}' is still being sent; it can be queued again once it has gone", slug),
+					json));
+			}
+			Ok(subs_back_with("the newsletter could not be queued; the log says why", json))
 		}
 	}
 }
@@ -4595,6 +4597,12 @@ mod tests {
 			comment_rate_hourly:	0,
 			subscribe_rate_secs:	0,
 			subscribe_rate_hourly:	0,
+			confirm_interval_secs:	0,
+			confirm_max:		0,
+			confirm_window_days:	0,
+			outbox_alert_secs:	0,
+			outbox_confirm_max:	0,
+			pending_expiry_days:	0,
 			newsletter_from:	String::new(),
 			categories:		vec![],
 			default_author:		String::new(),
@@ -4667,6 +4675,7 @@ mod tests {
 			state:		state,
 			token:		fmt!("t0000000000000000000000000000000"),
 			created:	created.map(|c| fmt!("{}", c)),
+			sent:		None,
 		}
 	}
 
@@ -5441,6 +5450,7 @@ mod ui_dump {
 			state:		state,
 			token:		fmt!("t0000000000000000000000000000000"),
 			created:	Some(fmt!("{}", created)),
+			sent:		None,
 		};
 		let subs = vec![
 			sub("a@example.com", subscribe::SubState::Confirmed, "2026-07-19T08:00:00Z"),

@@ -203,6 +203,19 @@ impl HashScheme {
     }
 }
 
+/// The SHA3-256 digest of the parts taken in order as one message.  It cannot fail, and equals
+/// `HashScheme::new_sha3_256().hash(parts, [])` without the `Hash` wrapper and the match on
+/// `HashForm::Bytes32` that a caller of the scheme must write.
+pub fn sha3_256(parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = keccak::Sha3::v256();
+    for part in parts {
+        hasher.update(part);
+    }
+    let mut out = [0u8; 32];
+    hasher.finalize(&mut out);
+    out
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct HasherDefAlt<
     D: Hasher,
@@ -498,6 +511,27 @@ mod tests {
         // "hello" with the salt " world" must digest as SHA3-256("hello world").
         let hash = res!(digest(hasher.hash(&[b"hello"], *b" world")));
         req!(hash, HELLO_WORLD);
+        Ok(())
+    }
+
+    /// The free function must agree with the `HashScheme` path on the same published vectors,
+    /// however the message is cut into parts, and an empty message is the published empty digest.
+    #[test]
+    fn sha3_256_matches_hasher() -> Outcome<()> {
+        req!(sha3_256(&[b"hello world"]), HELLO_WORLD);
+        req!(sha3_256(&[b"hello", b" ", b"world"]), HELLO_WORLD);
+        let hasher = HashScheme::new_sha3_256();
+        let via_scheme = res!(digest(hasher.hash(&[b"hello", b" ", b"world"], [])));
+        req!(sha3_256(&[b"hello", b" ", b"world"]), via_scheme);
+        // SHA3-256 of the empty message, from FIPS 202 (python3 hashlib.sha3_256(b"")).
+        let empty = [
+            0xa7, 0xff, 0xc6, 0xf8, 0xbf, 0x1e, 0xd7, 0x66,
+            0x51, 0xc1, 0x47, 0x56, 0xa0, 0x61, 0xd6, 0x62,
+            0xf5, 0x80, 0xff, 0x4d, 0xe4, 0x3b, 0x49, 0xfa,
+            0x82, 0xd8, 0x0a, 0x4b, 0x80, 0xf8, 0x43, 0x4a,
+        ];
+        req!(sha3_256(&[]), empty);
+        req!(sha3_256(&[b""]), empty);
         Ok(())
     }
 

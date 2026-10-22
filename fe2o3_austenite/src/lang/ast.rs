@@ -6,6 +6,7 @@
 //! tree names only what the engine can already set.
 
 use crate::ir::FloatPlacement;
+use crate::ir::Floating;
 use crate::ir::Length;
 use crate::ir::Span;
 use crate::lang::codefig::CodeFigure;
@@ -19,14 +20,21 @@ use crate::theme::ThemePatch;
 pub enum Item {
 	Heading { level: u8, runs: Vec<Inline>, label: Option<String>, span: Span },	// label: a trailing <name>, runs: the title's inline markup
 	Paragraph { runs: Vec<Inline>, label: Option<String>, span: Span },	// label: a trailing <name>, anchoring a display equation for cross-reference
-	List { ordered: bool, items: Vec<ListItem>, span: Span },	// `-` bullets or `+` numbered; items may nest sub-lists by indent
+	List { ordered: bool, items: Vec<ListItem>, loose: bool, span: Span },	// `-` bullets or `+` numbered; items may nest sub-lists by indent; loose when a blank line parts its items
 	Code { lines: Vec<String>, span: Span },	// a ```-fenced block, set verbatim in the mono face
 	Table { spec: TableSpec, span: Span },	// a bare `#table(...)`, not wrapped in a figure
-	// caption: the caption's inline markup; placement: Some when floated (`figure(placement: auto|top|bottom)`)
-	Figure { body: FigureBody, caption: Option<Vec<Inline>>, supplement: String, label: Option<String>, placement: Option<FloatPlacement>, span: Span },
+	// caption: the caption's inline markup; placement: Some when floated (`figure(placement: auto|top|bottom)`),
+	// carrying its `scope:` -- a parent-scoped float spans every column of the page
+	Figure { body: FigureBody, caption: Option<Vec<Inline>>, supplement: String, label: Option<String>, placement: Option<Floating>, span: Span },
 	Image { path: String, width: Option<Length>, height: Option<Length>, scale: Option<f64>, span: Span },	// a line-leading `#padded-image(...)`/`#image(...)`, set centred without a figure number
 	SectionBanner { path: String, span: Span },	// a line-leading `#section-banner("logo")`, a full-width grey bar carrying a right-aligned section logo
 	Rule { width: Length, thickness: f64, grey: u8, span: Span },	// a standalone `#line(length:.., stroke:..)` horizontal divider
+	PageBreak { weak: bool, span: Span },
+	ColBreak { weak: bool, span: Span },	// a line-leading `#colbreak()`: the next column, or a page break on a page of one column
+	// A line-leading `#place(<side>, float: true, scope: .., clearance: ..)[ ... ]`: its body set as a float at
+	// the top or foot of its column, or -- `scope: "parent"` -- spanning every column of the page.
+	Place { items: Vec<Item>, floating: Floating, clearance: Option<Spacing>, span: Span },	// a line-leading `#pagebreak()` (strong) or `#pagebreak(weak: true)`; a strong break always ejects, a weak one only a page carrying content
+	Space { amount: Spacing, weak: bool, span: Span },	// a line-leading `#v(<len>)`, in pt or em; a weak one collapses as Typst's does
 	PrintGlossary { span: Span },	// a line-leading `#print-glossary()`, a placeholder the book layer fills with the Term/Definition table
 	// A line-leading `#context { ... collect-claim-refs() ... }`: the reverse claim-reference index the Logic
 	// appendix builds. Recognised by the signature `collect-claim-refs(` in the block, not by evaluating the
@@ -41,7 +49,14 @@ pub enum Item {
 	// scope to it (H1's flat-splice sibling). Nesting the items rather than bracketing them with a separate
 	// open/close marker makes an unmatched or missing close structurally impossible. Lowered to
 	// `Block::Scoped`.
-	Scoped { patch: ThemePatch, items: Vec<Item> },
+	Scoped { patch: ThemePatch, items: Vec<Item>, span: Span },
+}
+
+/// A length that may be relative to the font size: absolute points, or ems of the text size in force.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Spacing {
+	Pt(f64),
+	Em(f64),
 }
 
 /// One item of an [`Item::List`]: its own inline runs, and any lists nested beneath it by deeper marker
@@ -51,6 +66,7 @@ pub enum Item {
 pub struct ListItem {
 	pub runs:		Vec<Inline>,
 	pub children:	Vec<Item>,
+	pub span:		Span,	// the item's own marker line, where what its runs ask for is answered
 }
 
 /// What a `#figure(...)` wraps: a `#table(...)` this reader sets in full, or an image call whose ink is
@@ -282,6 +298,7 @@ pub enum Inline {
 	BoldItalic(String),	// *_x_* or _*x*_, the two faces nested, lowered to a bold-italic segment
 	Super(String),	// #super[...], lowered to a raised, smaller segment
 	Sub(String),	// #sub[...], lowered to a dropped, smaller segment
+	SmallCaps(String),	// #smallcaps[...], lowered to a segment shaped with the font's `smcp` feature
 	PageRef(String),	// @label, resolving to the labelled anchor's page number
 	Code(String),	// `raw` or #raw("..."), set in the mono face
 	Math(Atom),		// $...$, parsed to the engine's maths tree

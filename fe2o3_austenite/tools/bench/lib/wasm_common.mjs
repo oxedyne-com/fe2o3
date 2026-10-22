@@ -1,0 +1,205 @@
+// Shared node-side helpers for the S0 wasm bench: loading the two vendored wasm
+// compilers exactly as Daimond's `www/js/typst.js` sequences them (dummy access
+// model, the same bundled font set, shadow sources), but reading everything with
+// `fs` instead of `fetch`, because Node's `fetch` does not resolve `file://` --
+// confirmed on this host, Node v20.20.2. This is the one deliberate deviation
+// from the browser driving code; see tools/bench/README.md.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { prepare, repoint } from './packages.mjs';
+
+const DIAG_FULL = 3; // typst.ts diagnostics_format: full (matches www/js/typst.js)
+
+const FONTS = [
+	'LibertinusSerif-Regular.otf',
+	'LibertinusSerif-Bold.otf',
+	'LibertinusSerif-Italic.otf',
+	'LibertinusSerif-BoldItalic.otf',
+	'NewCMMath-Regular.otf',
+];
+
+/// Reads a `.typ` file as one project source at `/main.typ`, the shape both
+/// wasm compile entry points want (`{ main, sources: [[path, text], ...] }`).
+/// The project carries `strict: true`, as Daimond sends it on every door;
+/// typst.ts ignores the field.
+export function projectFromFile(typPath) {
+	const text = fs.readFileSync(typPath, 'utf8');
+	return { main: '/main.typ', sources: [['/main.typ', text]], strict: true };
+}
+
+// A glue module is cached by URL, and its init keeps the first wasm instance it
+// made, so importing it again yields the same linear memory and every static
+// cache in it -- typst.ts's comemo among them. A distinct query string makes a
+// distinct module, and so a new instance with fresh memory: a truly cold engine.
+let freshCount = 0;
+function glueUrl(file, fresh) {
+	const url = pathToFileURL(file).href;
+	return fresh ? `${url}?fresh=${process.pid}-${++freshCount}` : url;
+}
+
+/// Builds the Austenite wasm instance from a vendor directory containing
+/// `oxedyne_fe2o3_austenite.js` and `..._bg.wasm`, exactly as `getAustenite()`
+/// does in `www/js/typst.js`. `fresh` gives it a wasm instance of its own.
+export async function loadAustenite(vendorDir, fresh = false) {
+	const glue = glueUrl(path.join(vendorDir, 'oxedyne_fe2o3_austenite.js'), fresh);
+	const wasmPath = path.join(vendorDir, 'oxedyne_fe2o3_austenite_bg.wasm');
+	const mod = await import(glue);
+	// The single-object form: the bare buffer makes the glue warn that it is deprecated.
+	await mod.default({ module_or_path: fs.readFileSync(wasmPath) });
+	const instance = new mod.DaimondTypst();
+	return {
+		engine: 'austenite',
+		// The wasm instance itself, for a caller that needs a door the wrapper below does not carry
+		// (`supplyPackage`, `queryProject`, ...), and `DaimondTypst`, to make another.
+		instance,
+		DaimondTypst: mod.DaimondTypst,
+		compilePdf(project) {
+			return instance.compileProject(project);
+		},
+		compileVector(project) {
+			return instance.compileProjectVector(project);
+		},
+		compileDelta(project) {
+			return instance.compileProjectDelta(project);
+		},
+		heapMB() {
+			return instance.heapMB();
+		},
+	};
+}
+
+/// Builds the typst.ts wasm compiler from a vendor directory containing
+/// `typst_ts_web_compiler.mjs`/`..._bg.wasm` and a `fonts/` subdirectory with
+/// the bundled font set, exactly as `getCompiler()` does in `www/js/typst.js`:
+/// a dummy access model (sources are injected, nothing is read from disk) and
+/// the same five bundled fonts. `fresh` gives it a wasm instance of its own.
+///
+/// A project's own fonts and binary assets, as `gather.mjs` returns them, are
+/// added the way Daimond adds them: the fonts after the bundled ones, each by
+/// `add_raw_font`; the assets into the shadow filesystem by `map_shadow`, after
+/// every `reset_shadow`. A compile that carries its own `assets` uses those
+/// instead.
+///
+/// Packages are supplied as Daimond's typst.ts leg supplies them (`packages.mjs`):
+/// each package is laid out under `/_pkg` with its `.typ` files re-pointed and a
+/// one-line module that carries the binding, its sources go in with the project's
+/// and its other files with the assets, and every package import in a project
+/// source is re-pointed at that module. There is no registry behind typst.ts, so
+/// an import of a package that was not supplied fails the compile.
+///
+/// # Arguments
+/// * `project` - `{ fonts: [[name, Uint8Array]], assets: [[shadowPath, Uint8Array]],
+///   packages: [{ spec, pack }] }`; a compile that carries its own `packages` uses those instead.
+export async function loadTypstTs(vendorDir, project = {}, fresh = false) {
+	const glue = glueUrl(path.join(vendorDir, 'typst_ts_web_compiler.mjs'), fresh);
+	const wasmPath = path.join(vendorDir, 'typst_ts_web_compiler_bg.wasm');
+	const mod = await import(glue);
+	// The single-object form: the bare buffer makes the glue warn that it is deprecated.
+	await mod.default({ module_or_path: fs.readFileSync(wasmPath) });
+	const builder = new mod.TypstCompilerBuilder();
+	builder.set_dummy_access_model();
+	for (const name of FONTS) {
+		const buf = fs.readFileSync(path.join(vendorDir, 'fonts', name));
+		await builder.add_raw_font(buf);
+	}
+	for (const [, buf] of project.fonts ?? []) {
+		await builder.add_raw_font(buf);
+	}
+	const compiler = await builder.build();
+	const ownAssets = project.assets ?? [];
+	const laidOut = (packages) => {
+		const sources = [];
+		const assets = [];
+		for (const { spec, pack } of packages) {
+			const ready = prepare(spec, pack);
+			sources.push(...ready.sources);
+			assets.push(...ready.assets);
+		}
+		return { sources, assets };
+	};
+	const ownPackages = laidOut(project.packages ?? []);
+	let lastMain = null;
+	function ensureSources(project) {
+		compiler.reset_shadow();
+		const pkg = project.packages ? laidOut(project.packages) : ownPackages;
+		// The project's sources, then the packages', as Daimond's gather orders them; a package import in a
+		// project's own source is re-pointed at the last moment, as it does.
+		const sources = project.sources.map(([p, text]) => [p, p.endsWith('.typ') && text.includes('@') ? repoint(text) : text]);
+		for (const [p, text] of [...sources, ...pkg.sources]) {
+			if (compiler.add_source(p, text) === false) {
+				throw new Error(`typst.ts refused source ${p}`);
+			}
+		}
+		for (const [p, bytes] of [...(project.assets ?? ownAssets), ...pkg.assets]) {
+			if (compiler.map_shadow(p, bytes) === false) {
+				throw new Error(`typst.ts refused asset ${p}`);
+			}
+		}
+		lastMain = project.main;
+	}
+	function extract(ret, key) {
+		if (ret instanceof Uint8Array) return ret;
+		if (ret && typeof ret === 'object') {
+			const cand = ret.result ?? ret.artifact ?? ret[key];
+			if (cand instanceof Uint8Array) return cand;
+			if (cand && cand.buffer) return new Uint8Array(cand.buffer);
+		}
+		return null;
+	}
+	return {
+		engine: 'typstts',
+		compilePdf(project) {
+			ensureSources(project);
+			const ret = compiler.compile(project.main, undefined, 'pdf', DIAG_FULL);
+			const bytes = extract(ret, 'pdf');
+			return bytes ? { pdf: bytes } : { error: JSON.stringify(ret).slice(0, 500) };
+		},
+		compileVector(project) {
+			ensureSources(project);
+			const ret = compiler.compile(project.main, undefined, 'vector', DIAG_FULL);
+			const bytes = extract(ret, 'vector');
+			return bytes ? { vector: bytes } : { error: JSON.stringify(ret).slice(0, 500) };
+		},
+		// typst.ts has no changed-only delta door in Daimond's wiring (see
+		// tools/bench/README.md): its live-view path is a full re-compile to
+		// `vector` on every edit, which is what edit_latency.mjs times.
+		compileDelta(project) {
+			return this.compileVector(project);
+		},
+	};
+}
+
+export async function loadEngine(kind, vendorDir, fresh = false) {
+	if (kind === 'austenite') return loadAustenite(vendorDir, fresh);
+	if (kind === 'typstts') return loadTypstTs(vendorDir, {}, fresh);
+	throw new Error(`unknown engine ${kind}`);
+}
+
+/// One wall-clock timing of a synchronous compile call, in seconds.
+export function timeOnce(fn) {
+	const t0 = process.hrtime.bigint();
+	const ret = fn();
+	const t1 = process.hrtime.bigint();
+	return { wall_s: Number(t1 - t0) / 1e9, ret };
+}
+
+export function loadavg1() {
+	// os.loadavg()[0] mirrors /proc/loadavg field 1.
+	return os.loadavg()[0];
+}
+
+export function psiAvg10(resource) {
+	try {
+		const raw = fs.readFileSync(`/proc/pressure/${resource}`, 'utf8');
+		const line = raw.split('\n').find((l) => l.startsWith('some'));
+		const m = line && line.match(/avg10=([0-9.]+)/);
+		return m ? Number(m[1]) : 0;
+	} catch {
+		return 0;
+	}
+}
+
+export const __dirnameOf = (importMetaUrl) => path.dirname(fileURLToPath(importMetaUrl));

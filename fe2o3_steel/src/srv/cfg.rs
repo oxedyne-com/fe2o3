@@ -34,6 +34,7 @@ use oxedyne_fe2o3_net::{
             SameSite,
         },
         fwd::ForwardedPolicy,
+        msg::ReadLimits,
     },
 };
 
@@ -180,6 +181,12 @@ impl ApiRoute {
                 "ApiRoute: 'path' field is required and must be a string.";
                 Invalid, Input, Missing)),
         };
+        if path.contains('*') {
+            return Err(err!(
+                "ApiRoute '{}': a path holds no '*'. A route that owns a subtree says \
+                'prefix: true'.", path;
+                Invalid, Input));
+        }
         // Either `upstream` (proxy) or `handler` (in-process). Not both.
         let upstream_str = match m.get(&dat!("upstream")) {
             Some(Dat::Str(s)) => Some(s.clone()),
@@ -206,6 +213,21 @@ impl ApiRoute {
                 both.", path;
                 Invalid, Input, Conflict)),
             _ => {}
+        }
+        // A prefix route hands its whole subtree to a handler. A proxy that wants a subtree is a
+        // `proxy_routes` entry, which already forwards the remainder of the path.
+        let prefix = match m.get(&dat!("prefix")) {
+            Some(Dat::Bool(b))  => *b,
+            None                => false,
+            _ => return Err(err!(
+                "ApiRoute '{}': 'prefix' must be a boolean when present.", path;
+                Invalid, Input, Mismatch)),
+        };
+        if prefix && upstream_str.is_some() {
+            return Err(err!(
+                "ApiRoute '{}': 'prefix' applies to handler routes only. A proxy for a whole \
+                subtree is a 'proxy_routes' entry.", path;
+                Invalid, Input, Conflict));
         }
         // Parse upstream URL into host, port, path, scheme (proxy mode only).
         let (upstream_host, upstream_port, upstream_path, upstream_tls) = match upstream_str {
@@ -262,6 +284,12 @@ impl ApiRoute {
             None => Vec::new(),
             _ => Vec::new(),
         };
+        // A prefix route is held under its pattern, `/edit/*`, so the route table needs no field
+        // beyond the path and an exact `/edit` and a prefix `/edit` stay two routes.
+        let path = match prefix {
+            true    => fmt!("{}/*", path.trim_end_matches('/')),
+            false   => path,
+        };
         Ok(Self {
             path,
             upstream_host,
@@ -272,6 +300,55 @@ impl ApiRoute {
             handler,
             config,
         })
+    }
+
+    /// The route that answers `path`, if any: the longest matching route wins, and an exact route
+    /// beats a prefix route of the same path.
+    pub fn find<'a>(routes: &'a [ApiRoute], path: &str) -> Option<&'a ApiRoute> {
+        routes.iter()
+            .filter(|r| r.matches(path))
+            .max_by_key(|r| (r.base().len(), !r.is_prefix()))
+    }
+
+    /// Does this route own the subtree under its path (config `prefix: true`)?
+    pub fn is_prefix(&self) -> bool {
+        self.path.ends_with("/*")
+    }
+
+    /// The path a prefix route owns the subtree of, `/edit` for `/edit/*` and `/` for `/*`; the
+    /// path itself for an exact route.
+    pub fn base(&self) -> &str {
+        match self.path.strip_suffix("/*") {
+            Some("")    => "/",
+            Some(b)     => b,
+            None        => self.path.as_str(),
+        }
+    }
+
+    /// Does this route answer `path`? An exact route answers its own path alone. A prefix route
+    /// answers its base and every path beneath it, on a segment boundary -- `/edit` owns `/edit/x`
+    /// but not `/editor` -- and never one whose remainder holds a `.` or `..` segment, which would
+    /// hand a handler a path naming somewhere outside the subtree it owns.
+    pub fn matches(&self, path: &str) -> bool {
+        if !self.is_prefix() {
+            return path == self.path;
+        }
+        let base = self.base();
+        if path == base {
+            return true;
+        }
+        let rest = match path.strip_prefix(base) {
+            Some(r) => r,
+            None    => return false,
+        };
+        let rest = match base.ends_with('/') {
+            true    => rest,
+            false   => match rest.strip_prefix('/') {
+                Some(r) => r,
+                None    => return false,
+            },
+        };
+        !rest.split('/').any(|seg| seg == "." || seg == "..")
     }
 
     pub fn get_config(&self, key: &str) -> Option<&str> {
@@ -596,9 +673,21 @@ impl WebhookRoute {
 /// Proxy routes are checked after redirect rules but before static file
 /// serving and API routes.  When multiple proxy routes match, the longest
 /// prefix wins.
+///
+/// A route with `exact` set claims the one path it names instead of a
+/// subtree, so a form endpoint such as `/subscribe` can be handed to its
+/// own process without also handing it `/subscribe.py` or `/subscribers.txt`.
+/// Unlike an [`ApiRoute`], which also names one path, a proxy route tells the
+/// upstream who the client is (`X-Forwarded-For`, see `fe2o3_net::http::fwd`),
+/// accepts any method and streams the reply with its status untouched.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProxyRoute {
     pub path_prefix:    String,                     // `/` matches everything, `/api/` a subtree
+    // When true, `path_prefix` names the one path the route serves, and a request for anything
+    // else -- `/subscribe.py`, `/subscribe/`, `/subscribers.txt` beside an exact `/subscribe` --
+    // is left to the rest of the dispatch chain. Defaults to false, the prefix match every
+    // config written before the field existed says.
+    pub exact:          bool,
     pub upstream_host:  String,                     // e.g. `127.0.0.1`, `localhost`
     pub upstream_port:  u16,
     pub upstream_tls:   bool,                       // default false; loopback rarely needs it
@@ -633,6 +722,14 @@ impl ProxyRoute {
                 path_prefix;
                 Invalid, Input, Missing)),
         };
+        let exact = match m.get(&dat!("exact")) {
+            Some(Dat::Bool(b)) => *b,
+            None => false,
+            _ => return Err(err!(
+                "ProxyRoute '{}': 'exact' must be a boolean when present.",
+                path_prefix;
+                Invalid, Input, Mismatch)),
+        };
         let upstream_tls = match m.get(&dat!("upstream_tls")) {
             Some(Dat::Bool(b)) => *b,
             None => false,
@@ -651,6 +748,7 @@ impl ProxyRoute {
         };
         Ok(Self {
             path_prefix,
+            exact,
             upstream_host,
             upstream_port,
             upstream_tls,
@@ -658,8 +756,12 @@ impl ProxyRoute {
         })
     }
 
+    /// Does this route claim the request path?
     pub fn matches(&self, request_path: &str) -> bool {
-        request_path.starts_with(&self.path_prefix)
+        match self.exact {
+            true    => request_path == self.path_prefix,
+            false   => request_path.starts_with(&self.path_prefix),
+        }
     }
 
     pub fn upstream_path_for(&self, request_path: &str) -> String {
@@ -798,6 +900,140 @@ impl WsRoute {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ TILE CONFIG                                                               │
+// │                                                                           │
+// │ Map tiles served from local archives under a prefix, one archive per      │
+// │ build. See `srv::tiles` for what the route keeps, which is nothing.       │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A vhost's tile route: `{prefix}/{build}/{z}/{x}/{y}.{ext}` and `{prefix}/tiles.json`.
+///
+/// Each build names an archive by absolute path, which keeps a file of tens or hundreds of
+/// gigabytes out of the app tree. Several builds may be served at once so that a client holding
+/// the previous build's URLs keeps working across a refresh; `current` is the one the index
+/// advertises.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TileConfig {
+    pub prefix:         String,                 // e.g. `/t`, no trailing slash
+    pub current:        String,                 // the build `tiles.json` names
+    pub builds:         BTreeMap<String, PathBuf>,
+    pub allow_origins:  Vec<String>,            // exact `scheme://host[:port]` matches
+    pub attribution:    String,                 // shown by the map, carried in the index
+}
+
+pub const TILE_ATTRIBUTION_DEFAULT: &str = "© OpenStreetMap";
+
+impl TileConfig {
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        let prefix = match m.get(&dat!("prefix")) {
+            Some(Dat::Str(s)) => s.clone(),
+            None => fmt!("/t"),
+            _ => return Err(err!(
+                "TileConfig: 'prefix' must be a string."; Invalid, Input, Mismatch)),
+        };
+        if !prefix.starts_with('/') || prefix.len() < 2 || prefix.ends_with('/') {
+            return Err(err!(
+                "TileConfig: 'prefix' '{}' must start with '/', name at least one character \
+                and not end with '/'.", prefix; Invalid, Input));
+        }
+        let current = match m.get(&dat!("current")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "TileConfig: 'current' is required and must be a build id string.";
+                Invalid, Input, Missing)),
+        };
+        let mut builds = BTreeMap::new();
+        match m.get(&dat!("builds")) {
+            Some(Dat::Map(sub)) => for (k, v) in sub {
+                let (build, path) = match (k, v) {
+                    (Dat::Str(b), Dat::Str(p)) => (b.clone(), PathBuf::from(p)),
+                    _ => return Err(err!(
+                        "TileConfig: each 'builds' entry must map a build id string to a \
+                        path string."; Invalid, Input, Mismatch)),
+                };
+                res!(Self::check_build_id(&build));
+                if !path.is_absolute() {
+                    return Err(err!(
+                        "TileConfig: build '{}' names {:?}, which is not an absolute path. \
+                        An archive belongs outside the app tree.", build, path;
+                        Invalid, Input, Path));
+                }
+                builds.insert(build, path);
+            },
+            _ => return Err(err!(
+                "TileConfig: 'builds' is required and must map build ids to archive paths.";
+                Invalid, Input, Missing)),
+        }
+        if !builds.contains_key(&current) {
+            return Err(err!(
+                "TileConfig: 'current' build '{}' is not among 'builds' {:?}.",
+                current, builds.keys().collect::<Vec<_>>(); Invalid, Input, Missing));
+        }
+        // Either list shape, since a config writes `(vek|[...])` as readily as `[...]`.
+        let items: &[Dat] = match m.get(&dat!("allow_origins")) {
+            Some(Dat::List(list))   => list,
+            Some(Dat::Vek(vek))     => vek.as_slice(),
+            None                    => &[],
+            _ => return Err(err!(
+                "TileConfig: 'allow_origins' must be a list of strings.";
+                Invalid, Input, Mismatch)),
+        };
+        let mut allow_origins = Vec::new();
+        for item in items {
+            match item {
+                Dat::Str(s) => {
+                    res!(Self::check_origin(s));
+                    allow_origins.push(s.clone());
+                }
+                _ => return Err(err!(
+                    "TileConfig: 'allow_origins' entries must be strings, not {:?}.", item.kind();
+                    Invalid, Input, Mismatch)),
+            }
+        }
+        let attribution = match m.get(&dat!("attribution")) {
+            Some(Dat::Str(s)) => s.clone(),
+            None => TILE_ATTRIBUTION_DEFAULT.to_string(),
+            _ => return Err(err!(
+                "TileConfig: 'attribution' must be a string."; Invalid, Input, Mismatch)),
+        };
+        Ok(Self { prefix, current, builds, allow_origins, attribution })
+    }
+
+    // A build id is one URL path segment, so it is kept to a plain alphabet.
+    fn check_build_id(build: &str) -> Outcome<()> {
+        if build.is_empty() || build.len() > 64 || !build.bytes().all(|b|
+            b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+            || build.starts_with('.')
+        {
+            return Err(err!(
+                "TileConfig: build id '{}' must be 1 to 64 characters of letters, digits, \
+                '-', '_' or '.', not starting with '.'.", build; Invalid, Input));
+        }
+        Ok(())
+    }
+
+    // An origin as a browser sends it: a scheme, a host, perhaps a port, and nothing after.
+    // A wildcard is refused, since the point of the list is who may draw the tiles.
+    fn check_origin(origin: &str) -> Outcome<()> {
+        let rest = match origin.strip_prefix("https://")
+            .or_else(|| origin.strip_prefix("http://"))
+        {
+            Some(r) => r,
+            None => return Err(err!(
+                "TileConfig: origin '{}' must start with 'https://' or 'http://'.", origin;
+                Invalid, Input)),
+        };
+        if rest.is_empty() || rest.contains('/') || rest.contains('*') {
+            return Err(err!(
+                "TileConfig: origin '{}' must be 'scheme://host[:port]' with no path and no \
+                wildcard.", origin; Invalid, Input));
+        }
+        Ok(())
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ TERMINAL CONFIG                                                           │
 // │                                                                           │
 // │ Enables terminal session management for a vhost.  When configured,        │
@@ -877,6 +1113,13 @@ pub struct VhostConfig {
     // source. `None` leaves the default `<head>` untouched. Taken as a raw URL and rendered as
     // `<script src="{url}" defer></script>`.
     pub head_injection_url:     Option<String>,
+    // A per-vhost `Permissions-Policy` header value that replaces the locked-down default Steel
+    // emits on every response. `None` -- the default, and what every config written before this
+    // existed says -- keeps that default, which denies every sensor feature. A site that must call
+    // a browser capability from its own pages (the camera for a capture ceremony, say) sets the
+    // FULL policy string it wants here, so a browser-capability grant is explicit and per-site
+    // rather than a code default that would loosen every deployment at once.
+    pub permissions_policy:     Option<String>,
     // Each route forwards every request under a path prefix to an upstream server, with WebSocket
     // tunnelling and streaming responses. Checked after redirects but before static files and API
     // routes; the longest prefix wins.
@@ -906,6 +1149,30 @@ pub struct VhostConfig {
     // such a bug stays content and never becomes authority. Empty -- the default, and what every
     // config written before this existed says -- means the site has no console.
     pub site_admins:            Vec<String>,
+    // Map tiles from local archives under a prefix. `None` serves none.
+    pub tiles:                  Option<TileConfig>,
+    // Whether requests on this vhost reach the log and the traffic recorder at all. `false`
+    // writes no connection line, request line or traffic record, which a vhost serving tiles
+    // must set, since its requests say where each viewer looked. Defaults to `true`.
+    pub access_log:             bool,
+    // Whether this vhost serves the operator dashboard at `/admin` and everything under it.
+    // `false` answers 404 there, so a public site with nothing to administer shows no login page
+    // and its web root can never be read through that prefix. The dashboard is one surface for
+    // the whole process, so this only decides which names it is reachable by: the loopback
+    // listener (`admin_local_port`) names no vhost and is untouched. Defaults to `true`, which is
+    // what every config written before the field existed says.
+    pub admin_dashboard:        bool,
+    // Whether this vhost's Ozone fsyncs every write before acknowledging it, rather than on the
+    // library's 200 ms interval. A store whose every write is an author's edit (a wiki, say) sets
+    // it, trading write latency for losing nothing on a power cut. Defaults to `false`, which is
+    // what every config written before the field existed says, and is ignored with no `db_dir_rel`.
+    pub db_sync_on_write:       bool,
+    // Headers set on every response this vhost sends, a static file, a handler's answer or an
+    // error alike, each replacing any field of that name the response or Steel's baseline gave
+    // it. Names are held lower-case. A site that must not leak its readers (`Referrer-Policy:
+    // no-referrer`, `X-Robots-Tag: noindex`, its own CSP) says so here, once. Empty by default,
+    // which is what every config written before the field existed says.
+    pub response_headers:       Vec<(String, String)>,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -946,10 +1213,16 @@ impl Default for VhostConfig {
             egress_allowed:         Vec::new(),
             admin_keys:             Vec::new(),
             head_injection_url:     None,
+            permissions_policy:     None,
             proxy_routes:           Vec::new(),
             ws_routes:              Vec::new(),
             term_config:            None,
             site_admins:            Vec::new(),
+            tiles:                  None,
+            access_log:             true,
+            admin_dashboard:        true,
+            db_sync_on_write:       false,
+            response_headers:       Vec::new(),
         }
     }
 }
@@ -1197,6 +1470,14 @@ impl VhostConfig {
                 "VhostConfig: 'head_injection_url' must be a string.";
                 Invalid, Input, Mismatch)),
         };
+        // Per-vhost Permissions-Policy override (optional).
+        let permissions_policy = match m.get(&dat!("permissions_policy")) {
+            Some(Dat::Str(s)) => Some(s.clone()),
+            None => None,
+            _ => return Err(err!(
+                "VhostConfig: 'permissions_policy' must be a string.";
+                Invalid, Input, Mismatch)),
+        };
         // Reverse proxy routes (optional).
         let proxy_routes = match m.get(&dat!("proxy_routes")) {
             Some(Dat::List(list)) => {
@@ -1283,6 +1564,63 @@ impl VhostConfig {
                 "VhostConfig: 'site_admins' must be a list of strings.";
                 Invalid, Input, Mismatch)),
         };
+        let tiles = match m.get(&dat!("tiles")) {
+            Some(Dat::Map(sub)) => Some(res!(TileConfig::from_datmap(sub))),
+            None => None,
+            _ => return Err(err!(
+                "VhostConfig: 'tiles' must be a map.";
+                Invalid, Input, Mismatch)),
+        };
+        let access_log = match m.get(&dat!("access_log")) {
+            Some(Dat::Bool(b)) => *b,
+            None => true,
+            _ => return Err(err!(
+                "VhostConfig: 'access_log' must be a boolean.";
+                Invalid, Input, Mismatch)),
+        };
+        let admin_dashboard = match m.get(&dat!("admin_dashboard")) {
+            Some(Dat::Bool(b)) => *b,
+            None => true,
+            _ => return Err(err!(
+                "VhostConfig: 'admin_dashboard' must be a boolean.";
+                Invalid, Input, Mismatch)),
+        };
+        let db_sync_on_write = match m.get(&dat!("db_sync_on_write")) {
+            Some(Dat::Bool(b)) => *b,
+            None => false,
+            _ => return Err(err!(
+                "VhostConfig: 'db_sync_on_write' must be a boolean.";
+                Invalid, Input, Mismatch)),
+        };
+        let response_headers = match m.get(&dat!("response_headers")) {
+            Some(Dat::Map(sub)) => {
+                let mut out = Vec::new();
+                for (k, v) in sub.iter() {
+                    let (name, val) = match (k, v) {
+                        (Dat::Str(k), Dat::Str(v))  => (k.to_lowercase(), v.clone()),
+                        _ => return Err(err!(
+                            "VhostConfig: 'response_headers' maps header names to strings.";
+                            Invalid, Input, Mismatch)),
+                    };
+                    res!(Self::check_response_header(&name, &val));
+                    out.push((name, val));
+                }
+                out
+            }
+            None => Vec::new(),
+            _ => return Err(err!(
+                "VhostConfig: 'response_headers' must be a map.";
+                Invalid, Input, Mismatch)),
+        };
+        // A tile request names where its viewer looked, so a vhost serving tiles may not keep
+        // even the connection lines that would pair a viewer's address with the time.
+        if tiles.is_some() && access_log {
+            return Err(err!(
+                "VhostConfig '{}': a vhost serving 'tiles' must set 'access_log': false, so \
+                that no request from a map viewer is written to the log.",
+                hostnames.first().map(|s| s.as_str()).unwrap_or("");
+                Invalid, Input, Security, Configuration));
+        }
         Ok(Self {
             hostnames,
             public_dir_rel,
@@ -1295,12 +1633,46 @@ impl VhostConfig {
             egress_allowed,
             admin_keys,
             head_injection_url,
+            permissions_policy,
             proxy_routes,
             ws_routes,
             term_config,
             publish,
             site_admins,
+            tiles,
+            access_log,
+            admin_dashboard,
+            db_sync_on_write,
+            response_headers,
         })
+    }
+
+    /// Can `name: val` be set on every response? The name must be an RFC 9110 token, the value
+    /// must hold no line break, and a field that frames the message or carries state (its length,
+    /// coding or type, the connection, a cookie) is the producer's, never the vhost's.
+    pub fn check_response_header(name: &str, val: &str) -> Outcome<()> {
+        let tchar = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
+        if name.is_empty() || !name.chars().all(tchar) {
+            return Err(err!(
+                "VhostConfig: response header name '{}' is not an HTTP token.", name;
+                Invalid, Input));
+        }
+        if val.chars().any(|c| c == '\r' || c == '\n' || c == '\0') {
+            return Err(err!(
+                "VhostConfig: response header '{}' has a line break or NUL in its value.", name;
+                Invalid, Input, Security));
+        }
+        const PRODUCERS: &[&str] = &[
+            "connection", "content-encoding", "content-length", "content-type", "keep-alive",
+            "set-cookie", "trailer", "transfer-encoding", "upgrade",
+        ];
+        if PRODUCERS.contains(&name) {
+            return Err(err!(
+                "VhostConfig: response header '{}' belongs to the response that carries it and \
+                cannot be set for a whole vhost.", name;
+                Invalid, Input, Conflict));
+        }
+        Ok(())
     }
 
     /// Every upstream this vhost's configuration can reach outward to, as
@@ -1701,6 +2073,7 @@ pub struct MailConfig {
     pub dkim_rsa_selector:  String,         // must differ from `dkim_selector`; default "rsa"
     pub dkim_domain:        String,         // may differ from `hostname`
     pub local_domains:      Vec<String>,    // recipients outside this set are refused at RCPT TO
+    pub outbound_hourly:    u32,            // newsletter mail sent an hour, host-wide; 0 holds it all
 }
 
 impl Default for MailConfig {
@@ -1720,6 +2093,7 @@ impl Default for MailConfig {
             dkim_rsa_selector:  String::new(),
             dkim_domain:        String::new(),
             local_domains:      Vec::new(),
+            outbound_hourly:    crate::srv::publish::outbox::HOURLY_DEFAULT,
         }
     }
 }
@@ -1765,6 +2139,21 @@ impl MailConfig {
         }
         if let Some(Dat::Str(s)) = m.get(&dat!("dkim_domain")) {
             out.dkim_domain = s.clone();
+        }
+        // A count, however narrowly the grammar typed it: a bare `0` is not a `u32` to the decoder.
+        match m.get(&dat!("outbound_hourly")) {
+            None                                    => (),
+            Some(Dat::U8(n))                        => out.outbound_hourly = *n as u32,
+            Some(Dat::U16(n))                       => out.outbound_hourly = *n as u32,
+            Some(Dat::U32(n))                       => out.outbound_hourly = *n,
+            Some(Dat::U64(n))                       => out.outbound_hourly = (*n).min(u32::MAX as u64) as u32,
+            Some(Dat::I8(n)) if *n >= 0             => out.outbound_hourly = *n as u32,
+            Some(Dat::I16(n)) if *n >= 0            => out.outbound_hourly = *n as u32,
+            Some(Dat::I32(n)) if *n >= 0            => out.outbound_hourly = *n as u32,
+            Some(Dat::I64(n)) if *n >= 0            => out.outbound_hourly = (*n).min(u32::MAX as i64) as u32,
+            _ => return Err(err!(
+                "MailConfig: 'outbound_hourly' must be a count of zero or more.";
+                Invalid, Input, Mismatch)),
         }
         match m.get(&dat!("local_domains")) {
             Some(Dat::List(l)) => {
@@ -1903,11 +2292,42 @@ pub struct WatchPeer {
     // What to call it in an alert: a person's name for the machine, not a hostname, since the
     // alert is read on a phone in the dark.
     pub name:     String,
+    // The machine this entry probes something on: the row the Fleet page draws it in, and the
+    // unit an outage is told by, so a gateway's `/api/health` and the Steel health body on the
+    // same box are two entries, one row and one text. Absent in configuration, it is the
+    // entry's own name.
+    pub host:     String,
     pub url:      String,   // the health URL, `https` unless `plain_ok` is set
     // Whether a plain `http` URL is acceptable for this one peer. Off unless the operator
     // writes it, and never a global switch: see `crate::srv::watch` for the single case it is
     // meant for.
     pub plain_ok: bool,
+    // Health-body field -> the value at or above which that class is in distress. Empty -- the
+    // default -- leaves the peer as plain up/down, so an existing peer list keeps working
+    // unchanged. Every field is "higher is worse" (memory per cent, load, dropped connections),
+    // so distress is an at-or-above test.
+    pub distress: BTreeMap<String, i64>,
+    // Health-body field -> the value at or below which that class has cleared, giving hysteresis:
+    // a peer enters distress at `distress` and leaves it only under `clear`. A field named in
+    // `distress` but not here uses its distress value as the clear boundary, i.e. no dead-band.
+    pub clear:    BTreeMap<String, i64>,
+    // Health-body field -> the consecutive over-threshold readings before that class is distress,
+    // in place of `watch.fail_threshold`. A field absent here takes its default from
+    // `crate::srv::watch::SUSTAIN_DEFAULTS` -- `dropped_1m` 10, since a burst of shield drops is
+    // the shield working -- and otherwise `fail_threshold`.
+    pub sustain:  BTreeMap<String, i64>,
+    // The shared secret to present in the `x-steel-health-token` header, so the peer serves its
+    // body rather than a 404. `None` sends no header and reads only liveness. Supports
+    // `{file:...}`, resolved at start-up.
+    pub token:    Option<String>,
+    // This peer's own reminder schedule, down or distressed, in place of `watch.repeat_secs`.
+    // `None` -- the default -- uses the watcher's.
+    pub repeat_secs: Option<Vec<u64>>,
+    // Whether this watcher tells anyone about this peer. Every watcher detects and records; when
+    // several watch one peer, all but one entry say `"speaks": (false)`, so the operator hears
+    // one voice rather than a chorus. On unless written off, so a peer never goes unheard by
+    // omission.
+    pub speaks:   bool,
 }
 
 /// Watching the other machines in the estate.
@@ -1924,9 +2344,10 @@ pub struct WatchConfig {
     pub interval_secs:  u64,                // seconds between rounds
     pub fail_threshold: u32,                // consecutive failures before a peer is called down
     pub timeout_secs:   u64,                // seconds to wait for a health answer
-    // Seconds between reminders while a peer stays down. An alarm that fires every round is an
-    // alarm that gets silenced, and the text leg costs money per message.
-    pub repeat_secs:    u64,
+    // The reminder schedule while a peer stays down or distressed: the gaps, in seconds, after
+    // the onset message, the last repeating for as long as the episode lasts. Any change of state
+    // starts it again. See `crate::srv::watch` for why it backs off.
+    pub repeat_secs:    Vec<u64>,
     // Seconds between proof-of-life messages; zero switches them off. The alerting path is used
     // rarely by design, and a path used rarely is broken when it is needed -- an expired
     // credential, a rotated key, a changed number, a lapsed verification. This exercises every
@@ -2015,6 +2436,43 @@ impl SmsAlertConfig {
     }
 }
 
+/// A reminder schedule: one count of seconds, a fixed gap, or a list of them, the last of which
+/// repeats. Any unsigned width is read, as a threshold is; anything else, and an empty list, is
+/// refused, so a mistyped cadence is a start-up failure rather than a silent default.
+fn reminder_schedule(d: &Dat, what: &str) -> Outcome<Vec<u64>> {
+    let secs = |d: &Dat| -> Option<u64> {
+        match d {
+            Dat::U64(n)             => Some(*n),
+            Dat::U32(n)             => Some(*n as u64),
+            Dat::U16(n)             => Some(*n as u64),
+            Dat::U8(n)              => Some(*n as u64),
+            Dat::I64(n) if *n >= 0  => Some(*n as u64),
+            Dat::I32(n) if *n >= 0  => Some(*n as u64),
+            _                       => None,
+        }
+    };
+    let items: Vec<&Dat> = match d {
+        Dat::List(l)    => l.iter().collect(),
+        Dat::Vek(v)     => v.iter().collect(),
+        other           => vec![other],
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match secs(item) {
+            Some(n) => out.push(n),
+            None    => return Err(err!(
+                "{} holds {:?}, which is not a count of seconds.", what, item;
+                Configuration, Invalid, Input)),
+        }
+    }
+    if out.is_empty() {
+        return Err(err!(
+            "{} is an empty list. Give at least one gap in seconds.", what;
+            Configuration, Invalid, Missing));
+    }
+    Ok(out)
+}
+
 impl WatchConfig {
     /// Parse a `WatchConfig` from a `DaticleMap`.
     ///
@@ -2032,8 +2490,8 @@ impl WatchConfig {
         if let Some(Dat::U64(n)) = m.get(&dat!("timeout_secs")) {
             out.timeout_secs = *n;
         }
-        if let Some(Dat::U64(n)) = m.get(&dat!("repeat_secs")) {
-            out.repeat_secs = *n;
+        if let Some(d) = m.get(&dat!("repeat_secs")) {
+            out.repeat_secs = res!(reminder_schedule(d, "watch.repeat_secs"));
         }
         if let Some(Dat::U64(n)) = m.get(&dat!("heartbeat_secs")) {
             out.heartbeat_secs = *n;
@@ -2062,10 +2520,62 @@ impl WatchConfig {
                         "watch.peers entry {} needs both a 'name' and a 'url'.", i;
                         Configuration, Invalid, Missing));
                 }
+                let host = match get("host") {
+                    h if h.is_empty() => name.clone(),
+                    h => h,
+                };
                 // Absent means false, so every peer written before this key existed keeps
                 // demanding TLS, which is the answer a silent config should give.
                 let plain_ok = matches!(pm.get(&dat!("plain_ok")), Some(Dat::Bool(true)));
-                out.peers.push(WatchPeer { name, url, plain_ok });
+                // Distress / clear threshold maps: field -> integer. Absent leaves the peer plain
+                // up/down. A non-integer value is refused rather than skipped, so a typo in a
+                // threshold is a start-up failure and not a silently unwatched class.
+                let thresholds = |key: &str| -> Outcome<BTreeMap<String, i64>> {
+                    let mut out = BTreeMap::new();
+                    if let Some(Dat::Map(tm)) = pm.get(&dat!(key)) {
+                        for (k, v) in tm.iter() {
+                            let field = match k {
+                                Dat::Str(s) => s.clone(),
+                                _ => return Err(err!(
+                                    "watch.peers entry {} '{}' has a non-string field name.", i, key;
+                                    Configuration, Invalid, Input)),
+                            };
+                            let value = match v {
+                                Dat::I64(n) => *n,
+                                Dat::U64(n) => *n as i64,
+                                Dat::U32(n) => *n as i64,
+                                Dat::U16(n) => *n as i64,
+                                Dat::U8(n)  => *n as i64,
+                                Dat::I32(n) => *n as i64,
+                                Dat::I16(n) => *n as i64,
+                                Dat::I8(n)  => *n as i64,
+                                _ => return Err(err!(
+                                    "watch.peers entry {} '{}.{}' is not an integer.", i, key, field;
+                                    Configuration, Invalid, Input)),
+                            };
+                            out.insert(field, value);
+                        }
+                    }
+                    Ok(out)
+                };
+                let distress = res!(thresholds("distress"));
+                let clear = res!(thresholds("clear"));
+                let sustain = res!(thresholds("sustain"));
+                let token = match pm.get(&dat!("token")) {
+                    Some(Dat::Str(s)) if !s.is_empty() => Some(s.clone()),
+                    _ => None,
+                };
+                let repeat_secs = match pm.get(&dat!("repeat_secs")) {
+                    None    => None,
+                    Some(d) => Some(res!(reminder_schedule(d,
+                        &fmt!("watch.peers entry {} ('{}') repeat_secs", i, name)))),
+                };
+                // Absent means true: silence must be written down, never fallen into.
+                let speaks = !matches!(pm.get(&dat!("speaks")), Some(Dat::Bool(false)));
+                out.peers.push(WatchPeer {
+                    name, host, url, plain_ok, distress, clear, sustain, token, repeat_secs,
+                    speaks,
+                });
             }
         }
         if out.enabled {
@@ -2098,7 +2608,10 @@ impl Default for WatchConfig {
             // enough that fifty minutes of silence cannot happen again.
             fail_threshold: 3,
             timeout_secs:   10,
-            repeat_secs:    900,
+            // Told at onset, then after an hour, four hours, and daily. A fixed fifteen minutes
+            // sent one inbox 315 near-identical mails in nine days in October 2026, and Gmail
+            // then refused everything the sending host relayed.
+            repeat_secs:    vec![3_600, 14_400, 86_400],
             // Monthly. Often enough that a dead path is caught before it
             // matters, rare enough that the message stays worth reading.
             heartbeat_secs: 2_592_000,
@@ -2228,6 +2741,22 @@ pub struct ServerConfig {
 
     // --- Server bind and policy (shared) ------------------------------------
     pub log_level:                      String,         // used by the server once running
+    // The log file's rotation, under `<app root>/www/logs/`. A file past `log_file_max_bytes`
+    // is archived as `<app>.log.<n>.gz`; at most `log_files_max` files are kept, the live one
+    // included, and none older than `log_max_age_days`. Zero -- the default for each -- means
+    // 1 MiB, every archive, and any age, as before these fields.
+    #[optional]
+    pub log_file_max_bytes:             u64,
+    #[optional]
+    pub log_files_max:                  u16,
+    #[optional]
+    pub log_max_age_days:               u16,
+    // The log file is synced to disk every `log_flush_ms` (zero means 1000), and at once after
+    // an error line, an archive and shutdown. `log_durable` syncs after every line instead.
+    #[optional]
+    pub log_flush_ms:                   u32,
+    #[optional]
+    pub log_durable:                    bool,
     pub server_address:                 String,         // typically "0.0.0.0"
     pub server_port_tcp:                u16,            // the primary HTTPS port
     // Optional plaintext HTTP listener port. When non-zero, Steel binds this port too and
@@ -2273,6 +2802,13 @@ pub struct ServerConfig {
     // Anything other than `/admin*` returns 404. Defaults to 0, disabled.
     #[optional]
     pub admin_local_port:               u16,
+    // Optional plaintext HTTP listener on the loopback interface, 127.0.0.1 and ::1, serving
+    // every vhost as the TLS port does, with the vhost chosen from each request's Host header and
+    // no HSTS sent. It is for a process on this host -- a sidecar, a local tool, a front Steel --
+    // that has no reason to speak TLS to its neighbour. It cannot be bound anywhere else. Defaults
+    // to 0, disabled.
+    #[optional]
+    pub loopback_http_port:             u16,
     pub session_expiry_default_secs:    u32,            // seconds
     pub ws_ping_interval_secs:          u8,             // seconds
     pub server_max_errors_allowed:      u8,             // consecutive, on one connection
@@ -2304,6 +2840,12 @@ pub struct ServerConfig {
     // error. Zero disables the deadline.
     #[optional]
     pub http_header_read_timeout_ms:    u64,
+    // Wall-clock budget, in milliseconds, for one call to an `api_routes` or webhook upstream, from
+    // connecting to the last byte of its reply. A call that overruns it is answered `504 Gateway
+    // Timeout`. The size limits above bound the reply's headers and body (`502 Bad Gateway` over
+    // them). Zero disables the deadline.
+    #[optional]
+    pub upstream_timeout_ms:            u64,
     // When true, Steel injects a baseline set of security response headers into every HTTPS
     // response: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
     // `Permissions-Policy`.
@@ -2350,6 +2892,85 @@ pub struct ServerConfig {
     #[optional]
     pub trusted_proxies:                Vec<String>,
 
+    // ── Admission control ─────────────────────────────────────────────────
+    //
+    // Three concurrency bounds on the accept path, all `#[optional]` and all
+    // inert at their defaults: a fresh binary changes nothing until a deployment
+    // sets them to its own vCPU and RAM. They are concurrency limits, orthogonal
+    // to the per-IP *rate* guard (`addr_guard`), and together they close the
+    // distributed-flood, slow-hold and handshake-flood shapes a rate limiter
+    // alone cannot see.
+
+    // Maximum concurrent connections in flight across every address. A
+    // connection beyond it is dropped before the handshake. 0 disables the cap.
+    #[optional]
+    pub max_conn:                       u64,
+    // Maximum concurrent connections from any one address, enforced by the
+    // generic `fe2o3_net` guard's `acquire`. 0 disables the cap.
+    #[optional]
+    pub max_conn_per_ip:                u64,
+    // Maximum TLS handshakes running at once, the CPU-exhaustion bound on a
+    // single-vCPU box. A flood then queues handshakes rather than melting the
+    // core. 0 disables the semaphore.
+    #[optional]
+    pub max_tls_handshakes:             u64,
+    // Deadline on each TLS handshake, and on the wait for a handshake permit,
+    // in milliseconds. Without it a drip-fed handshake pins a permit for ever and
+    // turns `max_tls_handshakes` into a slowloris amplifier, so a non-zero
+    // `max_tls_handshakes` requires a non-zero deadline here (checked at load).
+    // 0 leaves handshakes untimed, which is safe only when the semaphore is also
+    // off. A timed-out handshake counts as a dropped connection.
+    #[optional]
+    pub tls_handshake_timeout_ms:       u64,
+
+    // ── Health body ───────────────────────────────────────────────────────
+    //
+    // The path a token-gated integer health body is served at (see
+    // `crate::srv::health`). Empty -- the default -- serves no health body and
+    // the path is a plain 404 like any other. A deployment opts in by naming a
+    // path, e.g. `/_steel/health`.
+    #[optional]
+    pub health_path:                    String,
+    // The per-peer shared secret a caller must present in the
+    // `x-steel-health-token` header to be served the body; anyone else gets a
+    // 404, so the path stays invisible. Supports `{file:...}`, resolved at
+    // start-up so it is readable while the box is sealed. Empty disables the body
+    // even when a path is set, since a body with no token is a body with no gate.
+    #[optional]
+    pub health_token:                   String,
+    // Job stamps whose ages the body reports: field name -> absolute path, e.g.
+    // `{ "forge_state_age_s": "/var/lib/forge-pull/stamp/state.ok" }`. Each is
+    // `lstat`ed on every authorised request and reported in whole seconds since its mtime;
+    // a stamp that is missing, unreadable or a symlink reads as never written (see
+    // `crate::srv::health::stamp_age_secs`). Checked at start-up: names of lower-case
+    // letters, digits and `_`, none a built-in field, absolute paths, at most 16. Empty --
+    // the default -- reports none.
+    #[optional]
+    pub health_stamps:                  DaticleMap,
+
+    // ── Address whitelist ─────────────────────────────────────────────────
+    //
+    // IP addresses that are never rate-limited, throttled or blacklisted -- the
+    // guard's `Whitelist` state, but written down so it survives a restart. The
+    // runtime `whitelist()` call alone lives only in the in-memory map and is
+    // lost when the process ends, which is how a shared home NAT address ends up
+    // stuck blocked after a busy spell. Each entry is parsed to an `IpAddr` at
+    // start-up (an unparseable one is a start-up failure, like `trusted_proxies`),
+    // and applied to the guard as the process comes up. Empty -- the default --
+    // whitelists nobody.
+    #[optional]
+    pub whitelist_ips:                  Vec<String>,
+
+    // ── Health residents ──────────────────────────────────────────────────
+    //
+    // Process names whose resident memory the health body reports, one
+    // `res.<name>.*` group each (see `crate::srv::health`), e.g. `["steel",
+    // "daimond_gateway"]`. Matched on the kernel's command name, which keeps
+    // fifteen bytes. A name is letters, digits, `_`, `-` and `.`, checked at
+    // load. Empty -- the default -- reports no residents.
+    #[optional]
+    pub health_residents:               Vec<String>,
+
     // --- Virtual hosts ------------------------------------------------------
     // Stored as a `Dat::List` of `Dat::Map` entries and parsed via `get_vhosts()`.
     pub vhosts:                         Dat,
@@ -2358,7 +2979,10 @@ pub struct ServerConfig {
     pub acme:                           DaticleMap,     // parsed via `get_acme()`
 
     // --- Mail ---------------------------------------------------------------
-    // Parsed via `get_mail()`. An empty map disables the mail server entirely.
+    // Parsed via `get_mail()`. Absent, or an empty map, disables the mail server entirely.
+    // `#[optional]` since 2026-09-23, so a host that runs no mail -- a watcher, a forge proxy
+    // -- need not carry a disabled block to satisfy the loader.
+    #[optional]
     pub mail:                           DaticleMap,
 
     // --- Alerts -------------------------------------------------------------
@@ -2418,6 +3042,11 @@ impl Default for ServerConfig {
         Self {
             tls_dir_rel:                    fmt!("./tls"),
             log_level:                      fmt!("debug"),
+            log_file_max_bytes:             0,      // 1 MiB
+            log_files_max:                  0,      // every archive kept
+            log_max_age_days:               0,      // archives of any age kept
+            log_flush_ms:                   0,      // 1 s
+            log_durable:                    false,
             server_address:                 fmt!("0.0.0.0"),
             server_port_tcp:                8443,
             server_port_tcp_plaintext:      0,      // disabled by default
@@ -2427,6 +3056,7 @@ impl Default for ServerConfig {
             compression_enabled:            true,
             compression_min_bytes:          encoding::MIN_BYTES_DEFAULT as u64,
             admin_local_port:               0,      // disabled by default
+            loopback_http_port:             0,      // disabled by default
             session_expiry_default_secs:    604_800, // 1 week.
             ws_ping_interval_secs:          30,
             server_max_errors_allowed:      30,
@@ -2434,6 +3064,7 @@ impl Default for ServerConfig {
             http_max_header_bytes:          16 * 1024,            // 16 KiB
             http_max_body_bytes:            8 * 1024 * 1024,      // 8 MiB
             http_header_read_timeout_ms:    15_000,               // 15 s
+            upstream_timeout_ms:            30_000,               // 30 s
             security_headers_enabled:       true,
             content_security_policy:        String::new(),
             addr_guard:                     DaticleMap::new(),
@@ -2443,6 +3074,15 @@ impl Default for ServerConfig {
             ],
             auth_rps_max:                   5,
             trusted_proxies:                Vec::new(), // Trust nobody: always strip.
+            max_conn:                       0,      // no total ceiling by default
+            max_conn_per_ip:                0,      // no per-IP concurrency cap by default
+            max_tls_handshakes:             0,      // handshakes unbounded by default
+            tls_handshake_timeout_ms:       0,      // untimed by default (safe while the sem is off)
+            health_path:                    String::new(), // no health body by default
+            health_token:                   String::new(), // no token, so no body served
+            health_stamps:                  DaticleMap::new(), // no stamp ages reported
+            whitelist_ips:                  Vec::new(), // nothing whitelisted by default
+            health_residents:               Vec::new(), // no residents reported
             vhosts:                         Dat::List(vec![Dat::Map(vhost_map)]),
             acme:                           AcmeConfig::default().to_datmap(),
             mail:                           DaticleMap::new(),
@@ -2453,6 +3093,30 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+
+    /// The log file's size limit, the archives kept beside the live file, and their age limit,
+    /// with each zero field read as its default (see `log_file_max_bytes`).
+    pub fn log_rotation(&self) -> (u64, Option<usize>, Option<std::time::Duration>) {
+        let max = match self.log_file_max_bytes {
+            0 => 1_048_576,
+            n => n,
+        };
+        let keep = match self.log_files_max {
+            0 => None,
+            n => Some(n as usize - 1),  // the live file is one of them
+        };
+        let age = match self.log_max_age_days {
+            0 => None,
+            d => Some(std::time::Duration::from_secs(d as u64 * 86_400)),
+        };
+        (max, keep, age)
+    }
+
+    /// The log file's sync interval and whether every line is synced, the zero interval read
+    /// as the default (see `log_flush_ms`).
+    pub fn log_flush(&self) -> (std::time::Duration, bool) {
+        (std::time::Duration::from_millis(self.log_flush_ms as u64), self.log_durable)
+    }
 
     /// Validate the whole server configuration: each vhost's webroot, static
     /// routes, default index files and hostnames, plus the ACME cache path.
@@ -2480,11 +3144,104 @@ impl ServerConfig {
             res!(vh.validate_egress());
         }
         let _ = res!(self.get_acme());
+        // A resident name that cannot ride in a flattened body key is refused here, rather than
+        // silently missing from every body the host serves.
+        let _ = res!(self.get_health_residents());
         // A mistyped trusted proxy must be a start-up failure. An entry that failed to parse and
         // was skipped would leave an allow-list that looks populated and trusts nobody -- or, read
         // the other way round, an operator who believes their CDN is named here when it is not.
         let _ = res!(self.get_forwarded_policy());
+        // A mistyped whitelist address is likewise a start-up failure, since the whole point of
+        // the entry is to keep a real address reachable.
+        let _ = res!(self.get_whitelist_ips());
+        // The handshake semaphore is a slowloris amplifier without a deadline: a permit held
+        // across a drip-fed handshake is never returned. Refuse the unsafe combination at start-up
+        // rather than discover it as an outage.
+        if self.max_tls_handshakes > 0 && self.tls_handshake_timeout_ms == 0 {
+            return Err(err!(
+                "ServerConfig: max_tls_handshakes is {} but tls_handshake_timeout_ms is 0. A \
+                bounded handshake count without a deadline lets one slow client pin a permit for \
+                ever, turning the defence into a denial-of-service. Set a timeout (e.g. 10000).",
+                self.max_tls_handshakes;
+                Configuration, Invalid, Input));
+        }
         Ok(())
+    }
+
+    /// The configured whitelist addresses, parsed. An unparseable entry is an
+    /// error rather than a skip, so a typo cannot silently leave a real address
+    /// exposed to the rate limiter it was meant to bypass.
+    pub fn get_whitelist_ips(&self) -> Outcome<Vec<std::net::IpAddr>> {
+        let mut out = Vec::with_capacity(self.whitelist_ips.len());
+        for entry in &self.whitelist_ips {
+            let ip: std::net::IpAddr = res!(entry.trim().parse().map_err(|_| err!(
+                "ServerConfig: whitelist_ips entry '{}' is not a valid IP address.", entry;
+                Configuration, Invalid, Input)));
+            out.push(ip);
+        }
+        Ok(out)
+    }
+
+    /// The configured health stamps, each a field the body can carry and an absolute path.
+    ///
+    /// A bad entry is an error rather than a skip, and the server refuses to start on one:
+    /// a stamp dropped here would be a field silently absent from every body, and an absent
+    /// field trips no watcher's threshold.
+    pub fn get_health_stamps(&self) -> Outcome<Vec<crate::srv::health::HealthStamp>> {
+        use crate::srv::health::{
+            BUILTIN_FIELDS,
+            HealthStamp,
+            STAMP_NAME_MAX,
+            STAMPS_MAX,
+            is_stamp_name,
+        };
+        if self.health_stamps.len() > STAMPS_MAX {
+            return Err(err!(
+                "ServerConfig: health_stamps names {} stamps, and at most {} are read, since each \
+                is an lstat on every health request.", self.health_stamps.len(), STAMPS_MAX;
+                Configuration, Invalid, Range));
+        }
+        let mut out = Vec::with_capacity(self.health_stamps.len());
+        for (k, v) in self.health_stamps.iter() {
+            let field = match k {
+                Dat::Str(s) => s.clone(),
+                other => return Err(err!(
+                    "ServerConfig: health_stamps has a field name {:?} that is not a string.",
+                    other.kind();
+                    Configuration, Invalid, Input)),
+            };
+            if BUILTIN_FIELDS.contains(&field.as_str()) {
+                return Err(err!(
+                    "ServerConfig: health_stamps field '{}' is one of the health body's own \
+                    fields, and a stamp under that name would replace the reading a watcher's \
+                    threshold was written for. Name it for its job, e.g. 'forge_state_age_s'.",
+                    field;
+                    Configuration, Invalid, Input));
+            }
+            if !is_stamp_name(&field) {
+                return Err(err!(
+                    "ServerConfig: health_stamps field '{}' is not a usable name. It becomes a \
+                    key in the health body, so it must be 1 to {} of lower-case letters, digits \
+                    and '_'.", field, STAMP_NAME_MAX;
+                    Configuration, Invalid, Input));
+            }
+            let path = match v {
+                Dat::Str(s) => PathBuf::from(s),
+                other => return Err(err!(
+                    "ServerConfig: health_stamps field '{}' must name its stamp's path as a \
+                    string, got {:?}.", field, other.kind();
+                    Configuration, Invalid, Input)),
+            };
+            if !path.is_absolute() {
+                return Err(err!(
+                    "ServerConfig: health_stamps field '{}' names {:?}, which is not an absolute \
+                    path. A stamp belongs to another job's tree rather than this app's root, so \
+                    it is written out in full.", field, path;
+                    Configuration, Invalid, Input, Path));
+            }
+            out.push(HealthStamp { field, path });
+        }
+        Ok(out)
     }
 
     /// Which immediate peers are entitled to speak the forwarding headers.
@@ -2493,6 +3250,20 @@ impl ServerConfig {
     /// nobody, which strips every caller-supplied forwarding header.
     pub fn get_forwarded_policy(&self) -> Outcome<ForwardedPolicy> {
         ForwardedPolicy::new(&self.trusted_proxies)
+    }
+
+    /// Does every listener this config opens bind a loopback address? The TLS port, the
+    /// plaintext redirect and the mail listeners bind `server_address`; the admin, loopback HTTP
+    /// and internal listeners bind loopback by construction. So the answer is whether
+    /// `server_address` is loopback, and a build meant only for development can refuse to start
+    /// when it is not. A listener added to Steel on any other address must be named here.
+    pub fn binds_loopback_only(&self) -> Outcome<bool> {
+        match self.server_address.parse::<std::net::IpAddr>() {
+            Ok(ip)  => Ok(ip.is_loopback()),
+            Err(e)  => Err(err!(e,
+                "Invalid server_address '{}' in config.", self.server_address;
+                Invalid, Input, Network)),
+        }
     }
 
     pub fn get_vhosts(&self) -> Outcome<Vec<VhostConfig>> {
@@ -2561,6 +3332,24 @@ impl ServerConfig {
         Ok(Some(cfg))
     }
 
+    /// The configured health residents, each checked to be a name that can ride in a
+    /// `res.<name>.<figure>` key.
+    pub fn get_health_residents(&self) -> Outcome<Vec<String>> {
+        let mut out = Vec::with_capacity(self.health_residents.len());
+        for name in &self.health_residents {
+            let name = name.trim();
+            if !crate::srv::health::is_resident_name(name) {
+                return Err(err!(
+                    "ServerConfig: health_residents entry '{}' is not a usable process name. It \
+                    becomes part of a health-body key, so it must be 1 to {} of letters, digits, \
+                    '_', '-' and '.'.", name, crate::srv::health::RES_NAME_MAX;
+                    Configuration, Invalid, Input));
+            }
+            out.push(name.to_string());
+        }
+        Ok(out)
+    }
+
     /// Parse the `alerts` block. An empty map, or an `enabled: false` map, disables alerting.
     pub fn get_alerts(&self) -> Outcome<Option<AlertConfig>> {
         if self.alerts.is_empty() {
@@ -2608,6 +3397,12 @@ impl ServerConfig {
         if let Some(v) = take_u64("blist_cnt") {
             s.blist_cnt = v.min(u16::MAX as u64) as u16;
         }
+        if let Some(v) = take_u64("decay_secs") {
+            s.decay_after = Duration::from_secs(v);
+        }
+        // The per-IP concurrency cap is a top-level admission knob, not part of
+        // the rate-guard block, but it is enforced by the same guard object.
+        s.conn_max = self.max_conn_per_ip as usize;
         s
     }
 
@@ -2625,6 +3420,32 @@ impl ServerConfig {
             key: SESSION_ID_KEY_LABEL.to_string(),
             val: sid,
             attrs: Some(session_cookie_attrs),
+        }
+    }
+
+    /// The bounds the HTTP reader enforces on a message it reads, from the three `http_*` limits.
+    /// Zero in the config means no limit.
+    pub fn read_limits(&self) -> ReadLimits {
+        ReadLimits {
+            max_header_bytes: match self.http_max_header_bytes {
+                0 => None,
+                n => Some(n as usize),
+            },
+            max_body_bytes: match self.http_max_body_bytes {
+                0 => None,
+                n => Some(n as usize),
+            },
+            header_read_timeout: match self.http_header_read_timeout_ms {
+                0 => None,
+                ms => Some(Duration::from_millis(ms)),
+            },
+        }
+    }
+
+    pub fn upstream_timeout(&self) -> Option<Duration> {
+        match self.upstream_timeout_ms {
+            0 => None,
+            ms => Some(Duration::from_millis(ms)),
         }
     }
 
@@ -2765,6 +3586,76 @@ impl AdminKey {
 mod tests {
     use super::*;
 
+    fn route_map(path: &str, prefix: Option<bool>, upstream: Option<&str>) -> DaticleMap {
+        let mut m = DaticleMap::new();
+        m.insert(dat!("path"), dat!(path));
+        match upstream {
+            Some(u) => { m.insert(dat!("upstream"), dat!(u)); }
+            None    => { m.insert(dat!("handler"), dat!("h")); }
+        }
+        if let Some(p) = prefix {
+            m.insert(dat!("prefix"), Dat::Bool(p));
+        }
+        m
+    }
+
+    #[test]
+    fn test_api_route_prefix_parse_00() -> Outcome<()> {
+        let r = res!(ApiRoute::from_datmap(&route_map("/edit", Some(true), None)));
+        assert_eq!(r.path, "/edit/*");
+        assert!(r.is_prefix());
+        assert_eq!(r.base(), "/edit");
+        let r = res!(ApiRoute::from_datmap(&route_map("/", Some(true), None)));
+        assert_eq!((r.path.as_str(), r.base()), ("/*", "/"));
+        let r = res!(ApiRoute::from_datmap(&route_map("/edit", None, None)));
+        assert!(!r.is_prefix());
+        // A proxy owns no subtree here, and a path may not spell the pattern itself.
+        assert!(ApiRoute::from_datmap(
+            &route_map("/edit", Some(true), Some("https://api.example.com/x"))).is_err());
+        assert!(ApiRoute::from_datmap(&route_map("/edit/*", None, None)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_api_route_find_precedence_00() -> Outcome<()> {
+        let routes = vec![
+            res!(ApiRoute::from_datmap(&route_map("/", Some(true), None))),
+            res!(ApiRoute::from_datmap(&route_map("/edit", Some(true), None))),
+            res!(ApiRoute::from_datmap(&route_map("/edit", None, None))),
+            res!(ApiRoute::from_datmap(&route_map("/edit/raw", None, None))),
+        ];
+        let found = |p: &str| ApiRoute::find(&routes, p).map(|r| r.path.clone());
+        assert_eq!(found("/edit"),          Some(fmt!("/edit")));       // exact beats prefix
+        assert_eq!(found("/edit/x"),        Some(fmt!("/edit/*")));
+        assert_eq!(found("/edit/x/y"),      Some(fmt!("/edit/*")));
+        assert_eq!(found("/edit/raw"),      Some(fmt!("/edit/raw")));   // longest wins
+        assert_eq!(found("/editor"),        Some(fmt!("/*")));          // segment boundary
+        assert_eq!(found("/edit/../admin"), None);                     // no dot segments
+        assert_eq!(found("/edit/./x"),      None);
+        assert_eq!(found("/"),              Some(fmt!("/*")));
+        // Without the root prefix, a path beside the subtree reaches nothing.
+        let routes = vec![res!(ApiRoute::from_datmap(&route_map("/edit", Some(true), None)))];
+        assert!(ApiRoute::find(&routes, "/edit/..").is_none());
+        assert!(ApiRoute::find(&routes, "/editor").is_none());
+        Ok(())
+    }
+
+    /// A whitelist address parses to an `IpAddr`, and a malformed one is a hard
+    /// error rather than a silent skip -- the whole point of the entry is to keep
+    /// a real address reachable, so a typo must be loud.
+    #[test]
+    fn whitelist_ips_parse_and_reject() {
+        let mut cfg = ServerConfig::default();
+        cfg.whitelist_ips = vec![fmt!("203.0.113.7"), fmt!("2001:db8::1")];
+        let ips = cfg.get_whitelist_ips().expect("valid addresses must parse");
+        assert_eq!(ips.len(), 2);
+        assert!(ips.iter().any(|ip| ip.to_string() == "203.0.113.7"));
+
+        cfg.whitelist_ips = vec![fmt!("not-an-ip")];
+        assert!(cfg.get_whitelist_ips().is_err(),
+            "a malformed whitelist address must be a start-up failure, not a skip");
+    }
+
     /// A field added to `ServerConfig` without `#[optional]` invalidates every
     /// config file already on disk, which is an outage rather than a feature.
     /// The compression and fingerprint settings are new, so a config written
@@ -2798,6 +3689,231 @@ mod tests {
             "compression must be on for a config that says nothing about it");
         assert_eq!(cfg.compression_min_bytes, 1024);
         assert_eq!(cfg.fingerprint_max_age_secs, 31_536_000);
+        Ok(())
+    }
+
+    /// A server config as karri, jarrah and birch carried it after the 2026-09-21 deploy, before
+    /// `health_residents`, `health_stamps` or anything else added since.
+    fn deployed_config_map() -> DaticleMap {
+        let mut m = DaticleMap::new();
+        m.insert(dat!("tls_dir_rel"),                 dat!("./tls"));
+        m.insert(dat!("log_level"),                   dat!("info"));
+        m.insert(dat!("server_address"),              dat!("0.0.0.0"));
+        m.insert(dat!("server_port_tcp"),             Dat::U16(8443));
+        m.insert(dat!("server_port_tcp_plaintext"),   Dat::U16(80));
+        m.insert(dat!("hsts_max_age_secs"),           Dat::U32(0));
+        m.insert(dat!("session_expiry_default_secs"), Dat::U32(604_800));
+        m.insert(dat!("ws_ping_interval_secs"),       Dat::U8(30));
+        m.insert(dat!("server_max_errors_allowed"),   Dat::U8(30));
+        m.insert(dat!("allow_anonymous_sessions"),    Dat::Bool(true));
+        // The fields the 2026-09-21 deploy added, as karri, jarrah and birch carry them now.
+        m.insert(dat!("health_path"),                 dat!("/_steel/health"));
+        m.insert(dat!("health_token"),                dat!("a-token"));
+        m.insert(dat!("max_conn"),                    Dat::U64(512));
+        m.insert(dat!("vhosts"),                      Dat::List(Vec::new()));
+        m.insert(dat!("acme"),                        Dat::Map(DaticleMap::new()));
+        m.insert(dat!("mail"),                        Dat::Map(DaticleMap::new()));
+        m
+    }
+
+    /// Every production `config.jdat` predates `health_residents`, so one without it must load
+    /// and report no residents, and one that names residents must read them in both list forms.
+    #[test]
+    fn a_config_without_health_residents_still_loads() -> Outcome<()> {
+        let mut m = deployed_config_map();
+
+        let cfg = res!(ServerConfig::from_datmap(m.clone()));
+        assert!(cfg.health_residents.is_empty());
+        assert!(res!(cfg.get_health_residents()).is_empty());
+
+        m.insert(dat!("health_residents"), Dat::List(vec![dat!("steel"), dat!("daimond_gateway")]));
+        let cfg = res!(ServerConfig::from_datmap(m.clone()));
+        assert_eq!(res!(cfg.get_health_residents()), vec![fmt!("steel"), fmt!("daimond_gateway")]);
+
+        m.insert(dat!("health_residents"), Dat::Vek(Vek(vec![dat!("steel")])));
+        let cfg = res!(ServerConfig::from_datmap(m));
+        assert_eq!(res!(cfg.get_health_residents()), vec![fmt!("steel")],
+            "the (vek|[...]) form must read the same as a plain list");
+        Ok(())
+    }
+
+    /// A resident name that could break the body is a start-up failure, not a silently
+    /// missing resident.
+    #[test]
+    fn a_health_resident_that_cannot_ride_in_a_key_is_refused() {
+        let mut cfg = ServerConfig::default();
+        cfg.health_residents = vec![fmt!("steel"), fmt!("bad:name")];
+        let msg = match cfg.get_health_residents() {
+            Err(e)  => fmt!("{}", e),
+            Ok(_)   => String::new(),
+        };
+        assert!(msg.contains("bad:name"),
+            "the name must be refused, and the refusal must name it, got: '{}'", msg);
+    }
+
+    /// A watch entry names the machine it probes on, and an entry that does not is its own.
+    #[test]
+    fn a_watch_peer_host_defaults_to_its_name() -> Outcome<()> {
+        let peer = |name: &str, host: Option<&str>| -> Dat {
+            let mut pm = DaticleMap::new();
+            pm.insert(dat!("name"), dat!(name));
+            pm.insert(dat!("url"), dat!("https://example.test/health"));
+            if let Some(h) = host {
+                pm.insert(dat!("host"), dat!(h));
+            }
+            Dat::Map(pm)
+        };
+        let mut m = DaticleMap::new();
+        m.insert(dat!("enabled"), Dat::Bool(true));
+        m.insert(dat!("peers"), Dat::List(vec![
+            peer("jarrah", None),
+            peer("daimond gateway", Some("jarrah")),
+        ]));
+        let w = res!(WatchConfig::from_datmap(&m));
+        assert_eq!(w.peers[0].host, "jarrah");
+        assert_eq!(w.peers[1].name, "daimond gateway");
+        assert_eq!(w.peers[1].host, "jarrah", "the gateway sits on jarrah's row");
+        Ok(())
+    }
+
+    /// Every production config predates `health_stamps`, so one without it must load and
+    /// report no stamps, and one that names stamps must read them as written.
+    #[test]
+    fn a_config_without_health_stamps_still_loads() -> Outcome<()> {
+        let mut m = deployed_config_map();
+        let cfg = res!(ServerConfig::from_datmap(m.clone()));
+        assert!(cfg.health_stamps.is_empty());
+        assert!(res!(cfg.get_health_stamps()).is_empty());
+
+        let mut stamps = DaticleMap::new();
+        stamps.insert(dat!("forge_state_age_s"), dat!("/var/lib/forge-pull/stamp/state.ok"));
+        stamps.insert(dat!("forge_repos_age_s"), dat!("/var/lib/forge-pull/stamp/repos.ok"));
+        m.insert(dat!("health_stamps"), Dat::Map(stamps));
+        let cfg = res!(ServerConfig::from_datmap(m));
+        let got = res!(cfg.get_health_stamps());
+        let fields: Vec<&str> = got.iter().map(|s| s.field.as_str()).collect();
+        assert_eq!(fields, vec!["forge_repos_age_s", "forge_state_age_s"]);
+        assert_eq!(got[1].path, PathBuf::from("/var/lib/forge-pull/stamp/state.ok"));
+        Ok(())
+    }
+
+    /// A stamp that cannot be served as written is a start-up failure that names it, not a field
+    /// silently missing from every body.
+    #[test]
+    fn a_bad_health_stamp_is_refused_and_named() {
+        let refusal = |field: &str, path: Dat| -> String {
+            let mut cfg = ServerConfig::default();
+            cfg.health_stamps.insert(dat!(field), path);
+            match cfg.get_health_stamps() {
+                Err(e)  => fmt!("{}", e),
+                Ok(_)   => String::new(),
+            }
+        };
+        let msg = refusal("mem_pct", dat!("/var/lib/job/ok"));
+        assert!(msg.contains("mem_pct") && msg.contains("own"),
+            "a built-in name must be refused as such, got: '{}'", msg);
+        // The Fleet view's fields are the body's own as well, and the watcher writes its measured
+        // `probe_ms` over whatever the body carried under that name.
+        for field in ["disk_pct", "sealed_dbs", "mail_down", "probe_ms"] {
+            let msg = refusal(field, dat!("/var/lib/job/ok"));
+            assert!(msg.contains(field) && msg.contains("own"),
+                "the Fleet field '{}' must be refused as the body's own, got: '{}'", field, msg);
+        }
+        for bad in ["Forge_Age", "forge-age", "res.x.procs", "a:b"] {
+            let msg = refusal(bad, dat!("/var/lib/job/ok"));
+            assert!(msg.contains(bad), "'{}' must be refused by name, got: '{}'", bad, msg);
+        }
+        let msg = refusal("job_age_s", dat!("stamp/ok"));
+        assert!(msg.contains("absolute"), "a relative path must be refused, got: '{}'", msg);
+        let msg = refusal("job_age_s", Dat::U64(3));
+        assert!(msg.contains("job_age_s"), "a non-string path must be refused, got: '{}'", msg);
+
+        let mut cfg = ServerConfig::default();
+        for i in 0..=crate::srv::health::STAMPS_MAX {
+            cfg.health_stamps.insert(dat!(fmt!("job{}_age_s", i)), dat!(fmt!("/var/lib/{}", i)));
+        }
+        assert!(cfg.get_health_stamps().is_err(), "more than STAMPS_MAX stamps must be refused");
+    }
+
+    /// A host that runs no mail need not carry a disabled block, and one without it has mail off.
+    #[test]
+    fn a_config_without_a_mail_block_loads_with_mail_off() -> Outcome<()> {
+        let mut m = deployed_config_map();
+        m.remove(&dat!("mail"));
+        let cfg = res!(ServerConfig::from_datmap(m));
+        assert!(res!(cfg.get_mail()).is_none());
+        assert!(res!(cfg.get_mail_any()).is_none());
+        Ok(())
+    }
+
+    /// A peer's own reminder cadence is read in any unsigned width, an absent one leaves the
+    /// watcher's, and one that is not a count of seconds is refused rather than defaulted.
+    #[test]
+    fn a_peer_repeat_is_read_and_a_bad_one_refused() -> Outcome<()> {
+        let peer = |name: &str, repeat: Option<Dat>| -> Dat {
+            let mut pm = DaticleMap::new();
+            pm.insert(dat!("name"), dat!(name));
+            pm.insert(dat!("url"), dat!("https://example.test/_steel/health"));
+            if let Some(r) = repeat {
+                pm.insert(dat!("repeat_secs"), r);
+            }
+            Dat::Map(pm)
+        };
+        let watch = |peers: Vec<Dat>| -> DaticleMap {
+            let mut m = DaticleMap::new();
+            m.insert(dat!("enabled"), Dat::Bool(true));
+            m.insert(dat!("peers"), Dat::List(peers));
+            m
+        };
+        let w = res!(WatchConfig::from_datmap(&watch(vec![
+            peer("jarrah", None),
+            peer("jarrah forge copy", Some(Dat::U64(21_600))),
+            peer("birch", Some(Dat::U32(3_600))),
+        ])));
+        assert_eq!(w.peers[0].repeat_secs, None, "absent must leave the watcher's cadence");
+        assert_eq!(w.peers[1].repeat_secs, Some(vec![21_600]));
+        assert_eq!(w.peers[2].repeat_secs, Some(vec![3_600]));
+
+        let refused = WatchConfig::from_datmap(&watch(vec![peer("karri", Some(dat!("6h")))]));
+        let msg = match refused {
+            Err(e)  => fmt!("{}", e),
+            Ok(_)   => String::new(),
+        };
+        assert!(msg.contains("karri") && msg.contains("repeat_secs"),
+            "a cadence that is not seconds must be refused by peer, got: '{}'", msg);
+        Ok(())
+    }
+
+    /// The watcher's reminders back off by default, a schedule may be a list in either list form,
+    /// an empty one is refused, and a peer speaks unless its entry says otherwise.
+    #[test]
+    fn a_reminder_schedule_backs_off_by_default_and_speaking_is_opt_out() -> Outcome<()> {
+        assert_eq!(WatchConfig::default().repeat_secs, vec![3_600, 14_400, 86_400],
+            "the default must back off to daily, not remind on a fixed short gap");
+        let mut quiet = DaticleMap::new();
+        quiet.insert(dat!("name"), dat!("jarrah"));
+        quiet.insert(dat!("url"), dat!("https://example.test/_steel/health"));
+        quiet.insert(dat!("speaks"), Dat::Bool(false));
+        quiet.insert(dat!("repeat_secs"), Dat::List(vec![Dat::U64(600), Dat::U32(7_200)]));
+        let mut loud = DaticleMap::new();
+        loud.insert(dat!("name"), dat!("birch"));
+        loud.insert(dat!("url"), dat!("https://example.test/_steel/health"));
+        let mut m = DaticleMap::new();
+        m.insert(dat!("enabled"), Dat::Bool(true));
+        m.insert(dat!("repeat_secs"), Dat::List(vec![Dat::U64(1_800), Dat::U64(43_200)]));
+        m.insert(dat!("peers"), Dat::List(vec![Dat::Map(quiet), Dat::Map(loud)]));
+        let w = res!(WatchConfig::from_datmap(&m));
+        assert_eq!(w.repeat_secs, vec![1_800, 43_200]);
+        assert_eq!(w.peers[0].repeat_secs, Some(vec![600, 7_200]));
+        assert!(!w.peers[0].speaks, "an entry written silent must stay silent");
+        assert!(w.peers[1].speaks, "an entry that says nothing must speak");
+
+        m.insert(dat!("repeat_secs"), Dat::List(Vec::new()));
+        let msg = match WatchConfig::from_datmap(&m) {
+            Err(e)  => fmt!("{}", e),
+            Ok(_)   => String::new(),
+        };
+        assert!(msg.contains("watch.repeat_secs"), "an empty schedule must be refused, got '{}'", msg);
         Ok(())
     }
 
@@ -2879,6 +3995,7 @@ mod tests {
     fn proxy_up(prefix: &str, host: &str, port: u16) -> ProxyRoute {
         ProxyRoute {
             path_prefix:    prefix.to_string(),
+            exact:          false,
             upstream_host:  host.to_string(),
             upstream_port:  port,
             upstream_tls:   false,
@@ -2918,6 +4035,40 @@ mod tests {
         v.proxy_routes = vec![proxy_up("/chat/", "evil.example.com", 8080)];
         assert!(v.validate_egress().is_err(),
             "a proxy_route to a host the operator did not name must be refused");
+    }
+
+    /// A prefix route claims a subtree, and an exact one only the path it names.
+    /// The difference is what keeps `/subscribe.py` and `/subscribers.txt` out
+    /// of the process behind an exact `/subscribe`.
+    #[test]
+    fn an_exact_proxy_route_claims_only_the_path_it_names() {
+        let prefix = proxy_up("/subscribe", "127.0.0.1", 9900);
+        let mut exact = proxy_up("/subscribe", "127.0.0.1", 9900);
+        exact.exact = true;
+        for path in ["/subscribe", "/subscribe.py", "/subscribers.txt", "/subscribe/x"] {
+            assert!(prefix.matches(path), "a prefix route must claim {}", path);
+        }
+        assert!(exact.matches("/subscribe"));
+        for path in ["/subscribe.py", "/subscribers.txt", "/subscribe/", "/subscribe/x", "/", ""] {
+            assert!(!exact.matches(path), "an exact route must not claim {:?}", path);
+        }
+    }
+
+    /// `exact` is optional, defaults to the prefix match, and must be a boolean.
+    #[test]
+    fn a_proxy_route_reads_exact_and_defaults_to_a_prefix() -> Outcome<()> {
+        let mut m = DaticleMap::new();
+        m.insert(dat!("path_prefix"),   dat!("/subscribe"));
+        m.insert(dat!("upstream_host"), dat!("127.0.0.1"));
+        m.insert(dat!("upstream_port"), Dat::U16(9900));
+        assert!(!res!(ProxyRoute::from_datmap(&m)).exact,
+            "a route written before `exact` existed must stay a prefix route");
+        m.insert(dat!("exact"), Dat::Bool(true));
+        assert!(res!(ProxyRoute::from_datmap(&m)).exact);
+        m.insert(dat!("exact"), dat!("yes"));
+        assert!(ProxyRoute::from_datmap(&m).is_err(),
+            "a non-boolean `exact` must be refused, not read as false");
+        Ok(())
     }
 
     /// A webhook route in forwarding mode POSTs the payload onward, which is

@@ -12,8 +12,6 @@ use oxedyne_fe2o3_jdat::{
 use std::{
     mem,
     path::PathBuf,
-    thread,
-    time::Duration,
 };
 
 pub fn default_cfg() -> Outcome<OzoneConfig> {
@@ -23,7 +21,6 @@ pub fn default_cfg() -> Outcome<OzoneConfig> {
         bytes_before_hashing:           32,
         // Caches
         cache_size_limit_bytes:         100_000_000,
-        init_load_caches:               true,
         // Files
         data_file_max_bytes:            2_000,//1_000_000,
         // Chunking
@@ -77,7 +74,7 @@ pub fn start_db<
     db_root:        PathBuf,
     cfg_opt:        Option<OzoneConfig>,
     schms_input:    RestSchemesInput<ENC, KH, PR, CS>,
-    _zone_path:      Option<String>, // create a separate zone container in this directory
+    zone_path:      Option<String>, // a separate zone container, created here if missing
     gc_on:          bool,
     wipe:           bool,
 )
@@ -101,6 +98,10 @@ pub fn start_db<
         let cfg_path = OzoneConfig::config_path(&db_root);
         let _ = std::fs::remove_file(&cfg_path);
     }
+    // The store refuses a zone container that does not exist, and a start fails on it.
+    if let Some(dir) = &zone_path {
+        res!(std::fs::create_dir_all(dir));
+    }
     let mut db = res!(O3db::new(
         db_root,
         cfg_opt,
@@ -116,10 +117,9 @@ pub fn start_db<
         }
     }
     test!(sync_log::stream(), "Starting db...");
+    // `start` returns once every zone is ready, so nothing has to be slept off here.
     res!(db.start("test"));
     res!(ok!(db.updated_api()).activate_gc(gc_on));
-
-    thread::sleep(Duration::from_secs(1));
 
     // Ping all bots.
     let (start, msgs) = res!(db.api().ping_bots(constant::USER_REQUEST_WAIT));

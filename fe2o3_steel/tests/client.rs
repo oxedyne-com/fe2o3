@@ -215,7 +215,7 @@ pub async fn test_client(filter: &'static str) -> Outcome<()> {
                 WebSocketSinkHandler,
             );
             let mut ws = res!(result);
-            let (request, key) = res!(ws::connect_request(host));
+            let (request, key) = res!(ws::connect_request(host, "/ws", None));
             let result = ws.connect(request, Some(key)).await;
             res!(result);
             

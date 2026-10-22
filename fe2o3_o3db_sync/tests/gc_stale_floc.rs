@@ -8,7 +8,7 @@
 //! caches have to follow that.
 //!
 //! The location cache does follow it: `cache_data_file` sends each carried record's new location
-//! to its cbot, which re-anchors the entry (`Cache::update_if_same_fnum`), and any location still
+//! to its cbot, which re-anchors the entry (`Cache::reanchor`), and any location still
 //! in flight is mapped through the file state's ephemeral old -> new move map.
 //!
 //! The reader's file cache does not.  `ReaderBot::get_file` keeps an open `File` per file number
@@ -290,7 +290,6 @@ fn run_case(case: Case) -> Outcome<()> {
     cfg.data_file_max_bytes     = 4_000;
     cfg.rest_chunk_threshold    = 1_500;
     cfg.rest_chunk_bytes        = 64;
-    cfg.init_load_caches        = true;
     cfg.sync_on_write           = true;
     cfg.zone_overrides          = DaticleMap::new();
 
@@ -442,7 +441,6 @@ fn read_during_compaction() -> Outcome<()> {
     cfg.data_file_max_bytes     = 4_000;
     cfg.rest_chunk_threshold    = 1_500;
     cfg.rest_chunk_bytes        = 64;
-    cfg.init_load_caches        = true;
     cfg.sync_on_write           = true;
     cfg.zone_overrides          = DaticleMap::new();
 
@@ -640,9 +638,9 @@ fn del_val(i: usize) -> Dat { value_of((i as u8).wrapping_mul(7).wrapping_add(3)
 fn chunked_survivor_key() -> Dat { dat!("gcrace:chunksurv") }
 fn chunked_survivor_val() -> Dat { value_of(0xa5, CHUNKED_BYTES) }
 
-/// A delete of a chunked key travels the same read path as a get: `delete_using_responder` calls
-/// `reclaim_chunks_on_delete`, which fetches the bunch key through a reader bot before it can
-/// tombstone the chunk records it names.  If that bunch-key record lives in a file a collection is
+/// A delete of a chunked key travels the same read path as a get: `delete_using_responder` reads
+/// the bunch key through a reader bot, through `chunk_set_of`, before it can tombstone the chunk
+/// records it names.  If that bunch-key record lives in a file a collection is
 /// renaming underneath the reader, the fetch is exposed to exactly the stale-handle race that
 /// `read_during_compaction` drives -- and a failed fetch there fails the delete with `[Checksum]`.
 /// This case deletes a set of chunked keys while a supersession burst compacts the files their
@@ -680,7 +678,6 @@ fn delete_during_compaction() -> Outcome<()> {
     cfg.data_file_max_bytes     = 4_000;
     cfg.rest_chunk_threshold    = 1_500;
     cfg.rest_chunk_bytes        = 64;
-    cfg.init_load_caches        = true;
     cfg.sync_on_write           = true;
     cfg.zone_overrides          = DaticleMap::new();
 
@@ -717,8 +714,8 @@ fn delete_during_compaction() -> Outcome<()> {
         if nc < 2 {
             let _ = db.shutdown();
             return Err(err!(
-                "[{}] Delete-target {} stored in {} chunk(s); it must chunk so its delete drives \
-                reclaim_chunks_on_delete.", label, i, nc;
+                "[{}] Delete-target {} stored in {} chunk(s); it must chunk so its delete reads \
+                its bunch key.", label, i, nc;
                 Test, Size));
         }
     }

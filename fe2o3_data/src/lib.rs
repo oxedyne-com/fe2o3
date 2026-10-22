@@ -2,7 +2,10 @@
 //! 
 //! This crate provides several core data structures:
 //! 
+//! - Shortest edit scripts ([`diff`]) - Myers' matched pairs and changed runs between two slices, under a budget
+//! - Generation-swept maps ([`gen_map`]) - A cache map that drops what the last two compiles left untouched, under a byte ceiling
 //! - Interval maps ([`interval`]) - Disjoint half-open integer ranges mapped to values
+//! - Sized LRU maps ([`lru`]) - A least-recently-used map that evicts to stay under a byte ceiling
 //! - Ring buffers ([`ring`]) - Fixed-size circular buffers with position tracking
 //! - Stacks ([`stack`]) - Immutable stack implementation using Arc for thread-safety
 //! - Trees ([`tree`]) - Generic tree structure with navigation and display capabilities
@@ -19,10 +22,13 @@
 //! appropriate.
 //!
 #![forbid(unsafe_code)]
+pub mod diff;
 pub mod digraph;
+pub mod gen_map;
 pub mod hll;
 pub mod iblt;
 pub mod interval;
+pub mod lru;
 pub mod ring;
 pub mod stack;
 pub mod time;

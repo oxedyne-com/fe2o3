@@ -42,6 +42,15 @@ impl OzoneConfig {
                 CONTROL_REQUEST_TIMEOUT, USER_REQUEST_TIMEOUT;
             Invalid, Input));
         }
+        if DURABILITY_TIMEOUT <= USER_REQUEST_TIMEOUT || DURABILITY_TIMEOUT > CONTROL_REQUEST_TIMEOUT {
+            return Err(err!(
+                "The durability timeout, {:?}, must exceed the user request timeout, {:?}, and \
+                not exceed the control operation timeout, {:?}.  It waits on the disk, which \
+                answers more slowly than any bot, and it is a request's deadline, which a \
+                start-up control operation outlasts.",
+                DURABILITY_TIMEOUT, USER_REQUEST_TIMEOUT, CONTROL_REQUEST_TIMEOUT;
+            Invalid, Input));
+        }
         Ok(())
     }
 }
@@ -56,6 +65,10 @@ pub const MAX_ZONES:                    u16 = 100;
 pub const LIVE_FILE_CLAIM_LIMIT:        usize = 1024;
 pub const DEFAULT_MAX_ZONE_DIR_BYTES:   u64 = 104_857_600; // 100 MiB
 pub const CONFIG_FILENAME:              &'static str = "config.jdat";
+pub const STORE_LOCK_FILENAME:          &'static str = "ozone.lock"; // held by the one process on a store
+pub const FAULT_FILENAME:               &'static str = "ozone.fault"; // the cuts a failed sync leaves for the next open
+pub const REFUSAL_FILENAME:             &'static str = "ozone.refused"; // every open is refused while it stands
+pub const QUARANTINE_DIR:               &'static str = "quarantine"; // in a zone, the tails a cut removed
 pub const DB_UID_CHAR_LEN:              usize = 5;
 
 pub const DATA_FILE_EXT:                &'static str = "dat";
@@ -68,18 +81,25 @@ pub const HASH_BYTES:                   usize = 8; // u64
 pub const CACHE_HASH_BYTES:             usize = 4; // u32
 
 // File size management.
-// When the total length of old values in a data file exceeds the following percentage of the
-// maximum data file length, garbage collection on the file is triggered.
+// A sealed data file is collected once its old bytes pass the first percentage of the maximum
+// data file length, or reach the second of the file's own length (`OzoneConfig::gc_due`).  The
+// second catches a file a collection has already shrunk whose old-marking arrived late, which
+// the first could leave stranded for ever.  It is high so that a shrunk file is not collected
+// again for a few late old bytes: at 75 % a collection copies at most 25 bytes per 75 reclaimed,
+// where weighing a shrunk file at 30 % of its own length tripled small-file collections and
+// raised the collector's bytes per application byte from 0.92 to 1.30 (2026-10-10).
 pub const OLD_DATA_PERCENT_GC_TRIGGER:  f64 = 30.0;
+pub const OLD_SHARE_GC_TRIGGER:         f64 = 75.0;
 
 // File reading cache.
 pub const FILE_CACHE_EXPIRY_SECS:       u64 = 15*60; // 15 mins
 pub const MAX_CACHED_FILES:             usize = 200;
 
-// A read handed a post-collection (`postgc`) location may find that location already superseded by
-// a second collection of the same file, and retries with a freshly fetched location.  This bounds
-// those retries so a file a supersession burst keeps collecting cannot spin a reader for ever.
-pub const MAX_POSTGC_READ_ATTEMPTS:     usize = 8;
+// A read whose record is not the one its cache bot named -- a location a collection has moved, or
+// one read through the handle of the file's previous generation -- retries with a freshly fetched
+// location.  This bounds those retries, for every read, so a file a supersession burst keeps
+// collecting cannot spin a reader for ever.
+pub const MAX_READ_ATTEMPTS:            usize = 8;
 
 // Resource management.
 pub const CACHE_JETTISON_FRAC_OF_LIM:   f64 = 0.20;
@@ -89,8 +109,12 @@ pub const BOT_ERR_COUNT_WARNING:        usize = 10;
 pub const STACK_SIZE:                   usize = 2 * 1024 * 1024;
 
 // Shutdown.
-// Wait for all bots to idle after shutting off server.
+// How long a close waits for the bots to finish in order before the supervisor answers it; any
+// still running are finished afterwards, in the same order (`Supervisor::shutdown`).
 pub const SHUTDOWN_MAX_WAIT:            Duration = Duration::from_secs(3);
+
+// A chunked read that finds its chunk set retired re-reads the key's head, at most this often.
+pub const CHUNK_READ_RETRIES:           usize = 8;
 
 // Intervals.
 pub const HEALTH_CHECK_INTERVAL:        Duration = Duration::from_secs(60);
@@ -111,10 +135,20 @@ pub const USER_REQUEST_WAIT:                    Wait = Wait {
     check_interval: CHECK_INTERVAL,
 };
 pub const BOT_REQUEST_TIMEOUT:                  Duration = Duration::from_secs(5);
+pub const CLOSE_SETTLE:                         Duration = Duration::from_secs(5); // barrier and held discards at close
+pub const HELD_BARRIER:                         Duration = Duration::from_millis(200); // owed to a held discard, under every policy
 pub const BOT_REQUEST_WAIT:                     Wait = Wait {
     max_wait:       BOT_REQUEST_TIMEOUT,
     check_interval: CHECK_INTERVAL,
 };
+// A write is answered twice.  `OzoneMsg::Written` says its record is appended, which is the
+// writer's own work and is held to USER_REQUEST_TIMEOUT like any request.  The final answer says
+// the record is durable under the store's sync policy and readable, and that waits on the disk:
+// an fsync queued behind everything else a busy machine is writing took over eleven seconds when
+// measured (2026-09-23), and a six-second deadline then reported as failed a write that went on
+// to land.  So this deadline marks a disk that has stopped rather than one that is busy, and what
+// its expiry reports is a write not confirmed durable, never a write that failed.
+pub const DURABILITY_TIMEOUT:                   Duration = Duration::from_secs(120);
 // A control operation -- activating garbage collection, rolling every writer onto a fresh live
 // file -- is issued once, by whoever owns the database, and usually while it is still starting.
 // Its message queues behind whatever the zone bots are already doing, and the initial survey of

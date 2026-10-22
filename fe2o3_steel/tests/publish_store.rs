@@ -13,6 +13,7 @@ use oxedyne_fe2o3_steel::srv::{
         Markup,
         PostState,
         PublishConfig,
+        rate::Window,
         send::{
             self,
             BlueskyCreds,
@@ -257,7 +258,7 @@ fn subscribers_survive_the_database() -> Outcome<()> {
     assert!(res!(subscribe::confirmed(&handle, "test")).is_empty(), "a fresh send set is not empty");
 
     // A sign-up records a pending subscriber and hands back its token to send a confirmation with.
-    let sub = match res!(subscribe::add_pending(&handle, "  Me@Example.COM ")) {
+    let sub = match res!(subscribe::add_pending(&handle, "  Me@Example.COM ", &Window::default(), 0)) {
         Some(s) => s,
         None    => return Err(err!("a fresh address did not pend"; Test, Missing)),
     };
@@ -286,7 +287,7 @@ fn subscribers_survive_the_database() -> Outcome<()> {
     assert_eq!(res!(subscribe::confirm(&handle, &token, "test")), subscribe::ConfirmOutcome::Already);
 
     // Re-subscribing a confirmed address is silent: no confirmation to send, and the list does not grow.
-    assert!(res!(subscribe::add_pending(&handle, "me@example.com")).is_none(),
+    assert!(res!(subscribe::add_pending(&handle, "me@example.com", &Window::default(), 0)).is_none(),
         "re-subscribing a confirmed address asked for a second confirmation");
     assert_eq!(res!(subscribe::count(&handle, "test")), 1, "the subscriber list grew on a re-subscribe");
 
@@ -296,7 +297,7 @@ fn subscribers_survive_the_database() -> Outcome<()> {
     assert_eq!(res!(subscribe::count(&handle, "test")), 1, "an unsubscribe deleted the record");
 
     // A second subscriber, confirmed, so the export carries more than one row.
-    let sub2 = match res!(subscribe::add_pending(&handle, "other@example.net")) {
+    let sub2 = match res!(subscribe::add_pending(&handle, "other@example.net", &Window::default(), 0)) {
         Some(s) => s,
         None    => return Err(err!("a second address did not pend"; Test, Missing)),
     };
@@ -325,7 +326,7 @@ fn suppression_keeps_a_bounced_address_off_the_list() -> Outcome<()> {
     let handle = (db, uid);
 
     // A confirmed subscriber is in the send set.
-    let sub = match res!(subscribe::add_pending(&handle, "gone@example.com")) {
+    let sub = match res!(subscribe::add_pending(&handle, "gone@example.com", &Window::default(), 0)) {
         Some(s) => s,
         None    => return Err(err!("a fresh address did not pend"; Test, Missing)),
     };
@@ -344,7 +345,7 @@ fn suppression_keeps_a_bounced_address_off_the_list() -> Outcome<()> {
 
     // A re-subscribe does not resurrect it: the same suppressed answer as an address already on the list,
     // and the record stays bounced.
-    assert!(res!(subscribe::add_pending(&handle, "gone@example.com")).is_none(),
+    assert!(res!(subscribe::add_pending(&handle, "gone@example.com", &Window::default(), 0)).is_none(),
         "re-subscribing a bounced address asked for a confirmation");
     match res!(subscribe::get(&handle, "gone@example.com")) {
         Some(s) => assert_eq!(s.state, SubState::Bounced, "a re-subscribe resurrected a bounced address"),
@@ -353,7 +354,7 @@ fn suppression_keeps_a_bounced_address_off_the_list() -> Outcome<()> {
 
     // An unsubscribe, by contrast, IS reopened by a re-subscribe -- the difference between a choice and a
     // bounce. A second, confirmed, then unsubscribed address proves it.
-    let sub2 = match res!(subscribe::add_pending(&handle, "back@example.net")) {
+    let sub2 = match res!(subscribe::add_pending(&handle, "back@example.net", &Window::default(), 0)) {
         Some(s) => s,
         None    => return Err(err!("a second address did not pend"; Test, Missing)),
     };
@@ -361,7 +362,7 @@ fn suppression_keeps_a_bounced_address_off_the_list() -> Outcome<()> {
     res!(subscribe::unsubscribe(&handle, &sub2.token, "test"));
     assert!(res!(subscribe::confirmed(&handle, "test")).is_empty(), "an unsubscribed address stayed in the send set");
     // Re-subscribing an unsubscribed address pends afresh: a confirmation is due.
-    assert!(res!(subscribe::add_pending(&handle, "back@example.net")).is_some(),
+    assert!(res!(subscribe::add_pending(&handle, "back@example.net", &Window::default(), 0)).is_some(),
         "re-subscribing an unsubscribed address did not reopen it");
 
     Ok(())
@@ -380,12 +381,12 @@ fn admin_unsubscribe_and_remove_round_trip() -> Outcome<()> {
     };
     let handle = (db, uid);
 
-    let a = match res!(subscribe::add_pending(&handle, "a@example.com")) {
+    let a = match res!(subscribe::add_pending(&handle, "a@example.com", &Window::default(), 0)) {
         Some(s) => s,
         None    => return Err(err!("a did not pend"; Test, Missing)),
     };
     res!(subscribe::confirm(&handle, &a.token, "test"));
-    let b = match res!(subscribe::add_pending(&handle, "b@example.com")) {
+    let b = match res!(subscribe::add_pending(&handle, "b@example.com", &Window::default(), 0)) {
         Some(s) => s,
         None    => return Err(err!("b did not pend"; Test, Missing)),
     };
@@ -467,7 +468,7 @@ async fn a_test_send_touches_no_state_or_history() -> Outcome<()> {
     let handle = (db, uid);
 
     // A confirmed subscriber and a draft post: the state a test must not disturb.
-    let sub = match res!(subscribe::add_pending(&handle, "reader@example.com")) {
+    let sub = match res!(subscribe::add_pending(&handle, "reader@example.com", &Window::default(), 0)) {
         Some(s) => s,
         None    => return Err(err!("the reader did not pend"; Test, Missing)),
     };
@@ -541,5 +542,75 @@ fn read_tallies_survive_the_database() -> Outcome<()> {
     assert_eq!(all.get("quiet").copied(), Some(1));
     assert_eq!(all.get("unread").copied(), None, "a post that was never read gained a key");
 
+    Ok(())
+}
+
+// The confirmations to one address, counted by the address and not by who asked. The window is the
+// shipped default (a day apart, three in thirty days) and the clock is an argument, so a month of
+// sign-ups takes no time.
+const DAY: u64 = 86_400;
+const T0: u64 = 1_800_000_000;
+
+fn confirm_window() -> Window {
+    Window { interval_secs: DAY, max: 3, span_secs: 30 * DAY }
+}
+
+/// Six sign-ups for one address within a day ask for one confirmation, not six.
+#[test]
+fn six_signups_in_a_day_ask_for_one_confirmation() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let w = confirm_window();
+    let mut asked = 0;
+    for i in 0..6 {
+        if res!(subscribe::add_pending(&handle, "reader@example.com", &w, T0 + i * 600)).is_some() {
+            res!(subscribe::count_sent(&handle, "reader@example.com", &w, T0 + i * 600));
+            asked += 1;
+        }
+    }
+    assert_eq!(asked, 1, "one address was sent {} confirmations in a day", asked);
+    Ok(())
+}
+
+/// Four sign-ups over four days ask for three confirmations: the fourth is past the count.
+#[test]
+fn four_signups_over_four_days_ask_for_three() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let w = confirm_window();
+    let mut asked = 0;
+    for d in 0..4 {
+        if res!(subscribe::add_pending(&handle, "reader@example.com", &w, T0 + d * DAY)).is_some() {
+            res!(subscribe::count_sent(&handle, "reader@example.com", &w, T0 + d * DAY));
+            asked += 1;
+        }
+    }
+    assert_eq!(asked, 3, "one address was sent {} confirmations in four days", asked);
+    Ok(())
+}
+
+/// A repeat sign-up leaves the pending address's token as it was, so the first link still works.
+#[test]
+fn a_repeat_signup_keeps_the_token() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let w = confirm_window();
+    let first = match res!(subscribe::add_pending(&handle, "reader@example.com", &w, T0)) {
+        Some(s) => s,
+        None    => return Err(err!("a fresh address did not pend"; Test, Missing)),
+    };
+    // One allowed repeat, a day on, and one refused, a minute after that.
+    for at in [T0 + DAY, T0 + DAY + 60] {
+        if let Some(again) = res!(subscribe::add_pending(&handle, "reader@example.com", &w, at)) {
+            res!(subscribe::count_sent(&handle, "reader@example.com", &w, at));
+            assert_eq!(again.token, first.token, "a repeat sign-up was handed a new token");
+        }
+    }
+    match res!(subscribe::get(&handle, "reader@example.com")) {
+        Some(s) => assert_eq!(s.token, first.token, "a repeat sign-up replaced the stored token"),
+        None    => return Err(err!("the pending subscriber vanished"; Test, Missing)),
+    }
+    assert_eq!(res!(subscribe::confirm(&handle, &first.token, "test")),
+        subscribe::ConfirmOutcome::Confirmed, "the first link no longer confirms");
     Ok(())
 }

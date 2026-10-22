@@ -14,7 +14,8 @@
 //!     {
 //!       "address":      "postmaster@example.com",
 //!       "delivery_dir": "example.com/postmaster",
-//!       "argon2id":     "$argon2id$v=19$m=4096,t=3,p=1$<salt>$<hash>"
+//!       "argon2id":     "$argon2id$v=19$m=4096,t=3,p=1$<salt>$<hash>",
+//!       "send_as":      ["news@example.com", "noreply@example.com"]
 //!     }
 //!   ]
 //! }
@@ -22,6 +23,11 @@
 //!
 //! The `argon2id` value is the encoded form produced by
 //! `oxedyne_fe2o3_hash::kdf::KeyDerivationScheme`.
+//!
+//! `send_as`, optional, lists the addresses besides its own that the account may send as on
+//! submission: the identities a mail client sends through this one login. The submission server
+//! refuses any other sender, in the envelope or in the header `From`, since 2026-09-23. Being
+//! hot-reloaded, a change to it takes effect at the next authentication.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::kdf::KeyDerivationScheme;
@@ -50,6 +56,7 @@ struct PasswdEntry {
     /// Encoded Argon2id hash (output of
     /// `KeyDerivationScheme::encode_to_string`).
     encoded_hash:   String,
+    send_as:        Vec<String>,    // lower-cased, besides `address`
 }
 
 /// File-backed user store.
@@ -115,7 +122,8 @@ impl PasswdFileUserStore {
                     "User entry missing 'argon2id'.";
                     Invalid, Input, Missing)),
             };
-            out.push(PasswdEntry { address, delivery_dir, encoded_hash });
+            let send_as = res!(read_send_as(m.get(&dat!("send_as")), &address));
+            out.push(PasswdEntry { address, delivery_dir, encoded_hash, send_as });
         }
         Ok(out)
     }
@@ -128,9 +136,42 @@ impl PasswdFileUserStore {
         MailUser {
             local,
             domain,
-            delivery_key: e.delivery_dir.clone(),
+            delivery_key:   e.delivery_dir.clone(),
+            send_as:        e.send_as.clone(),
         }
     }
+}
+
+/// An entry's `send_as` list, lower-cased. Absent is an empty list. Anything that is not a list
+/// of addresses is refused rather than skipped, since a skipped entry is an identity whose mail
+/// is refused with no word of why.
+fn read_send_as(d: Option<&Dat>, address: &str) -> Outcome<Vec<String>> {
+    let items: Vec<Dat> = match d {
+        None                => return Ok(Vec::new()),
+        Some(Dat::List(l))  => l.clone(),
+        Some(Dat::Vek(v))   => v.iter().cloned().collect(),
+        Some(other)         => return Err(err!(
+            "User entry {}: 'send_as' must be a list of addresses, got {:?}.",
+            address, other.kind();
+            Invalid, Input, Mismatch)),
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let a = match item {
+            Dat::Str(s) => s.trim().to_lowercase(),
+            other => return Err(err!(
+                "User entry {}: a 'send_as' member is a {:?}, not an address.",
+                address, other.kind();
+                Invalid, Input, Mismatch)),
+        };
+        match a.rfind('@') {
+            Some(i) if i > 0 && i + 1 < a.len() && !a.contains(char::is_whitespace) => out.push(a),
+            _ => return Err(err!(
+                "User entry {}: 'send_as' member {:?} is not an address.", address, a;
+                Invalid, Input)),
+        }
+    }
+    Ok(out)
 }
 
 impl UserStore for PasswdFileUserStore {
@@ -168,5 +209,82 @@ impl UserStore for PasswdFileUserStore {
             return Ok(Some(Self::entry_to_user(e)));
         }
         Ok(None)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A users file in a fresh scratch directory, removed by the caller.
+    fn users_file(tag: &str, body: &str) -> Outcome<PathBuf> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(fmt!(
+            "fe2o3_mail_passwd_{}_{}_{}", tag, std::process::id(), nanos));
+        res!(fs::create_dir_all(&dir), IO, File);
+        let path = dir.join("users.jdat");
+        res!(fs::write(&path, body), IO, File);
+        Ok(path)
+    }
+
+    fn entry(send_as: &str) -> String {
+        fmt!("{{ \"users\": [ {{ \"address\": \"Hello@Example.com\", \"delivery_dir\": \"example.com/hello\", \
+            \"argon2id\": \"x\"{} }} ] }}", send_as)
+    }
+
+    /// The identities an entry lists reach the account, lower-cased, and an entry without the
+    /// field sends as itself alone.
+    #[test]
+    fn send_as_reaches_the_account() -> Outcome<()> {
+        let path = res!(users_file("listed", &entry(
+            ", \"send_as\": [\"News@Example.com\", \"noreply@example.com\"]")));
+        let store = PasswdFileUserStore::new(path.clone());
+        let user = match res!(store.lookup("hello@example.com")) {
+            Some(u) => u,
+            None => return Err(err!("The listed account did not resolve."; Test)),
+        };
+        assert_eq!(user.send_as, vec![fmt!("news@example.com"), fmt!("noreply@example.com")]);
+        assert!(user.may_send_as("hello@example.com"));
+        assert!(user.may_send_as("NEWS@example.com"));
+        assert!(!user.may_send_as("ceo@example.com"));
+
+        res!(fs::write(&path, entry("")), IO, File);
+        let user = match res!(store.lookup("hello@example.com")) {
+            Some(u) => u,
+            None => return Err(err!("The plain account did not resolve."; Test)),
+        };
+        assert!(user.send_as.is_empty());
+        assert!(!user.may_send_as("news@example.com"), "the reload must drop the identity");
+        if let Some(dir) = path.parent() {
+            let _ = fs::remove_dir_all(dir);
+        }
+        Ok(())
+    }
+
+    /// A `send_as` that is not a list of addresses fails the load and says which entry.
+    #[test]
+    fn a_bad_send_as_is_refused_by_entry() -> Outcome<()> {
+        for bad in [
+            ", \"send_as\": \"news@example.com\"",
+            ", \"send_as\": [\"news\"]",
+            ", \"send_as\": [\"news @example.com\"]",
+            ", \"send_as\": [(u8|3)]",
+        ] {
+            let path = res!(users_file("bad", &entry(bad)));
+            let store = PasswdFileUserStore::new(path.clone());
+            match store.lookup("hello@example.com") {
+                Ok(u) => return Err(err!("{:?} loaded as {:?}.", bad, u; Test)),
+                Err(e) => assert!(fmt!("{}", e).contains("hello@example.com"),
+                    "the refusal must name the entry: {}", e),
+            }
+            if let Some(dir) = path.parent() {
+                let _ = fs::remove_dir_all(dir);
+            }
+        }
+        Ok(())
     }
 }

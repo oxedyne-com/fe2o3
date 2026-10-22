@@ -11,6 +11,7 @@ use crate::srv::{
     },
     constant,
     context::ServerContext,
+    tiles::TileRequest,
     wsproxy,
 };
 
@@ -47,11 +48,11 @@ use oxedyne_fe2o3_net::{
         header::{
             HttpHeadline,
             HttpMethod,
+            HttpVersion,
         },
         msg::{
             HttpMessageReader,
             HttpMessage,
-            ReadLimits,
         },
         status::HttpStatus,
     },
@@ -63,10 +64,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
-    time::{
-        Duration,
-        Instant,
-    },
+    time::Instant,
 };
 
 use tokio::{
@@ -78,8 +76,17 @@ use tokio::{
         AsyncWriteExt,
     },
 };
-use tokio_rustls::server::TlsStream;
 
+
+// A log line about one connection or request, written only where the vhost
+// keeps an access log.
+macro_rules! alog {
+    ($on:expr, $($arg:tt)+) => {
+        if $on {
+            log!($($arg)+);
+        }
+    };
+}
 
 impl<
     const UIDL: usize,
@@ -92,23 +99,100 @@ impl<
 >
     ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>
 {
-    pub async fn handle_https(
+    /// The token-gated health body, or `None` when the request is not for the
+    /// health path (so the caller falls through to normal dispatch).
+    ///
+    /// When the path *is* the health path this always answers -- a `200` with the
+    /// integer body to a caller presenting the right token, a `404` to anyone
+    /// else -- and never falls through, so the path never reaches a file router
+    /// that might serve something at the same location. A missing token and a
+    /// wrong token take the identical `404` path, compared in constant time, so
+    /// the route leaks no timing oracle and its existence stays invisible. The
+    /// body is served even while the box is sealed (the watcher reads a `503` as
+    /// down), and the caller answers this before it logs the request, so the
+    /// token in the header is never written to a log.
+    fn health_response(&self, request: &HttpMessage) -> Option<HttpMessage> {
+        // Both a path and a token must be configured; a path without a token is
+        // a body with no gate, which the config contract disables.
+        if self.cfg.health_path.is_empty() || self.cfg.health_token.is_empty() {
+            return None;
+        }
+        let path = match &request.header.headline {
+            HttpHeadline::Request { loc, .. } => loc.path.as_string().to_string(),
+            _ => return None,
+        };
+        if path != self.cfg.health_path {
+            return None;
+        }
+        // A 404 that is byte-for-byte the unauthorised answer, reused for both
+        // the no-admin-state and wrong-token cases so neither is distinguishable.
+        let not_found = || HttpMessage::respond_with_text(
+            HttpStatus::NotFound, "Not Found");
+        let admin = match self.admin_state.as_ref() {
+            Some(a) => a,
+            None    => return Some(not_found()),
+        };
+        let presented = match request.header.fields.get_one(
+            &HeaderName::NonStandard("x-steel-health-token".to_string()))
+        {
+            Some(v) => fmt!("{}", v),
+            None    => String::new(),
+        };
+        // Constant-time, so a missing and a wrong token are one path.
+        if !oxedyne_fe2o3_core::byte::ct_eq(
+            presented.as_bytes(), self.cfg.health_token.as_bytes())
+        {
+            return Some(not_found());
+        }
+        // Assembled per request, stamp ages included: each stamp is read now rather than
+        // sampled, so a job whose timer has died shows an age that keeps growing.
+        let body = admin.health_body();
+        Some(HttpMessage::new_response(HttpStatus::OK)
+            .with_field(
+                HeaderName::ContentType,
+                HeaderFieldValue::Generic("application/json; charset=utf-8".to_string()),
+            )
+            .with_field(
+                HeaderName::CacheControl,
+                HeaderFieldValue::Generic("no-store".to_string()),
+            )
+            .with_body(body.to_json().into_bytes()))
+    }
+
+    /// Serves one connection: a TLS stream from the public port, or, with `plain`, a TCP stream
+    /// from the loopback listener (`srv::loopback`), which has no SNI, so each request's vhost is
+    /// taken from its Host header, and is sent no HSTS.
+    pub async fn handle_https<S>(
         self,
-        mut stream: TlsStream<TcpStream>,
+        mut stream: S,
         sni:        Option<String>,
         src_addr:   SocketAddr,
+        plain:      bool,
     )
         -> Outcome<()>
+        where S: AsyncRead + AsyncWrite + Unpin + Send + 'static
     {
-        let id = fmt!("Https|Cx:{}", IdDat::<4, u32>::randef()); // Cx = Connection id.
+        let id = if plain {
+            fmt!("Http|Cx:{}", IdDat::<4, u32>::randef())
+        } else {
+            fmt!("Https|Cx:{}", IdDat::<4, u32>::randef()) // Cx = Connection id.
+        };
 
         // Resolve the vhost once per connection from the SNI. All requests
         // on a single TLS connection are considered to target the same vhost,
-        // which matches how every HTTP/1.1 and HTTP/2 client behaves.
-        let vhost = self.vhost_for(sni.as_deref());
+        // which matches how every HTTP/1.1 and HTTP/2 client behaves. A plain
+        // connection has no SNI and resolves it per request instead, below.
+        let conn_vhost = self.vhost_for(sni.as_deref());
         let log_level = res!(self.cfg.log_level());
-        log!(log_level, "{}: connection from {:?}, sni={:?}, vhost='{}'.",
-            id, src_addr, sni, vhost.primary_hostname());
+        // A vhost with its access log off writes no line naming a peer or a
+        // request, and gives the traffic recorder nothing.
+        // On a plain connection this is the default vhost's until a request names its own.
+        let mut logged = conn_vhost.access_log;
+        if !plain {
+            alog!(logged, log_level,
+                "{}: connection from {:?}, sni={:?}, vhost='{}'.",
+                id, src_addr, sni, conn_vhost.primary_hostname());
+        }
 
         let (mut read_stream, mut write_stream) = tokio::io::split(&mut stream);
 
@@ -116,25 +200,7 @@ impl<
         // reader enforces the configured header / body bounds and the
         // slowloris read deadline. A zero value in the config means
         // "disabled" and maps to `None` in `ReadLimits`.
-        let limits = ReadLimits {
-            max_header_bytes: if self.cfg.http_max_header_bytes == 0 {
-                None
-            } else {
-                Some(self.cfg.http_max_header_bytes as usize)
-            },
-            max_body_bytes: if self.cfg.http_max_body_bytes == 0 {
-                None
-            } else {
-                Some(self.cfg.http_max_body_bytes as usize)
-            },
-            header_read_timeout: if self.cfg.http_header_read_timeout_ms == 0 {
-                None
-            } else {
-                Some(Duration::from_millis(
-                    self.cfg.http_header_read_timeout_ms,
-                ))
-            },
-        };
+        let limits = self.cfg.read_limits();
 
         let mut reader: HttpMessageReader<
             '_,
@@ -152,20 +218,33 @@ impl<
             let req_started_at = Instant::now();
             match result {
                 Some(Ok(request)) => {
-                    log!(log_level, "{}: Incoming from {:?}:", id, src_addr);
-                    request.log(log_get_level!());
-
-                    // Pull method+path out for traffic recording
-                    // before the request is moved into the dispatch
-                    // chain. Both are cheap clones.
-                    let (rec_method, rec_path) = match &request.header.headline {
-                        HttpHeadline::Request { method, loc } => (
-                            fmt!("{}", method),
-                            loc.path.as_string().to_string(),
-                        ),
-                        _ => (String::new(), String::new()),
+                    // Health route, answered before anything is logged so the
+                    // token in the header is never written to a log, and before
+                    // vhost/Host dispatch so it needs no vhost of its own. When
+                    // it answers, the connection is done.
+                    if let Some(mut resp) = self.health_response(&request) {
+                        resp.set_connection_close(true);
+                        if let Err(e) = resp.write_all(&mut write_stream).await {
+                            warn!("{}: could not send health response: {}", id, e);
+                        }
+                        break;
+                    }
+                    // On a plain connection the Host header picks the vhost, and a
+                    // Host that names none lands on the default, where the check
+                    // below answers it 421 as it would a TLS client's.
+                    let vhost = if plain {
+                        let host = match request.header.fields.get_one(&HeaderName::Host) {
+                            Some(HeaderFieldValue::Generic(h)) => Some(match h.find(':') {
+                                Some(i) => h[..i].to_string(),
+                                None    => h.clone(),
+                            }),
+                            _ => None,
+                        };
+                        self.vhost_for(host.as_deref())
+                    } else {
+                        conn_vhost.clone()
                     };
-
+                    logged = vhost.access_log;
                     // Validate the Host header against the vhost hostnames.
                     // A mismatch means an SNI/Host disagreement, which is a
                     // misdirected client; we return 421.
@@ -190,6 +269,48 @@ impl<
                             break;
                         }
                     }
+
+                    // Tiles, answered before the request is logged, before the
+                    // session cookie is read and before the traffic recorder
+                    // sees it, since a tile request says where its viewer
+                    // looked. See `srv::tiles`. The connection stays open for
+                    // the next tile unless the client asked to close it.
+                    if let Some(tiles) = vhost.tiles.as_ref() {
+                        if let Some(treq) = TileRequest::of(&request) {
+                            if let Some(mut resp) = tiles.respond(treq).await {
+                                let close = request.get_connection_close();
+                                if close {
+                                    resp.set_connection_close(true);
+                                }
+                                match resp.write_all(&mut write_stream).await {
+                                    Ok(()) => (),
+                                    Err(e) => return Err(err!(e,
+                                        "{}: Could not send a tile response.", id;
+                                        IO, Network, Wire, Write)),
+                                }
+                                if close {
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
+                    alog!(logged, log_level, "{}: Incoming from {:?}:", id, src_addr);
+                    if logged {
+                        request.log(log_get_level!());
+                    }
+
+                    // Pull method+path out for traffic recording
+                    // before the request is moved into the dispatch
+                    // chain. Both are cheap clones.
+                    let (rec_method, rec_path) = match &request.header.headline {
+                        HttpHeadline::Request { method, loc } => (
+                            fmt!("{}", method),
+                            loc.path.as_string().to_string(),
+                        ),
+                        _ => (String::new(), String::new()),
+                    };
 
                     // What content codings the client will take, kept as a
                     // string because the request itself is moved into the
@@ -227,7 +348,7 @@ impl<
                                 issued_cookie = Some(
                                     self.cfg.session_cookie_default(s.clone()),
                                 );
-                                log!(log_level,
+                                alog!(logged, log_level,
                                     "{}: issuing anonymous session {}.", id, s);
                                 (Some(new_sid), Some(s))
                             } else {
@@ -251,7 +372,7 @@ impl<
                                 if let Some(ws_route) = vhost.ws_routes.iter()
                                     .find(|r| r.matches(&ws_path))
                                 {
-                                    log!(log_level,
+                                    alog!(logged, log_level,
                                         "{}: ws route {} -> ws://{}:{}{}",
                                         id, ws_path,
                                         ws_route.upstream_host,
@@ -281,10 +402,10 @@ impl<
                             {
                                 let proxy_path = loc.path.as_string().to_string();
                                 if let Some(proxy_route) = vhost.proxy_routes.iter()
-                                    .filter(|r| proxy_path.starts_with(&r.path_prefix))
+                                    .filter(|r| r.matches(&proxy_path))
                                     .max_by_key(|r| r.path_prefix.len())
                                 {
-                                    log!(log_level,
+                                    alog!(logged, log_level,
                                         "{}: proxy ws {} -> {}:{}{}",
                                         id, proxy_path,
                                         proxy_route.upstream_host,
@@ -320,7 +441,7 @@ impl<
                                     .unwrap_or("")
                                     .to_string();
                                 if session_name.is_empty() {
-                                    log!(log_level,
+                                    alog!(logged, log_level,
                                         "{}: terminal WS missing session name.", id);
                                     let mut resp = HttpMessage::respond_with_text(
                                         HttpStatus::BadRequest,
@@ -368,7 +489,7 @@ impl<
                                     }
                                     TerminalGate::Dispatch => (),
                                 }
-                                log!(log_level,
+                                alog!(logged, log_level,
                                     "{}: terminal ws -> '{}'", id, session_name);
                                 let reunited = read_stream.unsplit(write_stream);
                                 return crate::srv::ws::term::handle_terminal_websocket::<
@@ -381,7 +502,7 @@ impl<
                                 ).await;
                             }
                         }
-                        log!(log_level, "Connection upgrading to websocket...");
+                        alog!(logged, log_level, "Connection upgrading to websocket...");
                         // The raw sid string is enough for the WS handler:
                         // it only needs a stable per-client key prefix, not
                         // the typed numeric identifier.
@@ -412,6 +533,9 @@ impl<
 
                     let mut response = None;
                     let close_requested = request.get_connection_close();
+                    // Only an HTTP/1.0 request that asked to keep the connection reaches
+                    // here with `close_requested` false.
+                    let request_is_1_0 = request.header.version == HttpVersion::Http1_0;
                     if close_requested {
                         let mut msg = HttpMessage::new_response(HttpStatus::OK);
                         msg.set_connection_close(true);
@@ -435,6 +559,7 @@ impl<
                                     Ok(d) if d.should_drop() => {
                                         warn!("{}: auth guard dropping {} from {}: {:?}",
                                             id, path_str, src_addr, d);
+                                        admin.r429.incr();
                                         let mut resp = HttpMessage::respond_with_text(
                                             HttpStatus::TooManyRequests,
                                             "Too many authentication attempts. \
@@ -460,16 +585,25 @@ impl<
 
                     match request.header.headline.clone() {
                         HttpHeadline::Request { method, loc } => {
-                            // Redirect rules fire before the file router.
-                            let request_uri = loc.path.as_string().to_string();
+                            // Redirect rules fire before the file router. A rule matches on the
+                            // path alone, but `{uri}` in its target is the path and the query as
+                            // they arrived, so a www -> apex redirect keeps `?ref=x`.
+                            let request_path = loc.path.as_string().to_string();
                             if let Some(rule) = Self::match_redirect(
                                 &vhost.redirects,
-                                &request_uri,
+                                &request_path,
                             ) {
+                                let request_uri = match loc.query.is_empty() {
+                                    true    => request_path.clone(),
+                                    false   => fmt!("{}?{}", request_path, loc.query),
+                                };
                                 let target = rule.resolve_target(&request_uri);
-                                log!(log_level,
+                                // The log line names the path, not the query, as the rest of the
+                                // request log does.
+                                alog!(logged, log_level,
                                     "{}: redirect {} {} -> {} ({})",
-                                    id, rule.status, request_uri, target,
+                                    id, rule.status, request_path,
+                                    rule.resolve_target(&request_path),
                                     match rule.match_kind {
                                         RedirectMatch::Exact    => "exact",
                                         RedirectMatch::Prefix   => "prefix",
@@ -498,10 +632,10 @@ impl<
                                 if !vhost.proxy_routes.is_empty() {
                                     let proxy_path = loc.path.as_string().to_string();
                                     if let Some(proxy_route) = vhost.proxy_routes.iter()
-                                        .filter(|r| proxy_path.starts_with(&r.path_prefix))
+                                        .filter(|r| r.matches(&proxy_path))
                                         .max_by_key(|r| r.path_prefix.len())
                                     {
-                                        log!(log_level,
+                                        alog!(logged, log_level,
                                             "{}: proxy {} -> {}:{}{}",
                                             id, proxy_path,
                                             proxy_route.upstream_host,
@@ -525,6 +659,7 @@ impl<
                                             proxy_route,
                                             &mut write_stream,
                                             src_addr,
+                                            plain,
                                             &id,
                                         ).await;
 
@@ -548,7 +683,7 @@ impl<
                                         };
 
                                         // Record traffic for the proxied request.
-                                        if let Some(recorder) = self.traffic.as_ref() {
+                                        if let Some(recorder) = self.traffic.as_ref().filter(|_| logged) {
                                             let dur_us = req_started_at
                                                 .elapsed().as_micros() as u64;
                                             let record = RequestRecord {
@@ -660,15 +795,46 @@ impl<
                                         ).await;
                                         response = res!(result);
                                     }
-                                    _ => fault!("{}: Unsupported HTTP request method '{}'.",
-                                        id, method),
+                                    // These reach an in-process handler route, through
+                                    // `handle_ctx`, and nothing else. Every other method, and
+                                    // these where no handler takes them, is a 405: a request
+                                    // left unanswered holds its client until the read times
+                                    // out.
+                                    HttpMethod::PUT | HttpMethod::DELETE | HttpMethod::PATCH => {
+                                        let vhost_db = self.db_for_vhost(
+                                            vhost.primary_hostname(),
+                                        );
+                                        let result = vhost.web_handler.handle_other(
+                                            method,
+                                            loc,
+                                            body,
+                                            req_headers.clone(),
+                                            vhost_db,
+                                            &sid_opt,
+                                            src_addr,
+                                            &id,
+                                        ).await;
+                                        response = match res!(result) {
+                                            Some(r) => Some(r),
+                                            None    => Some(method_not_allowed()),
+                                        };
+                                    }
+                                    HttpMethod::OPTIONS
+                                    | HttpMethod::TRACE
+                                    | HttpMethod::CONNECT => {
+                                        alog!(logged, log_level,
+                                            "{}: {} is not served; 405.", id, method);
+                                        response = Some(method_not_allowed());
+                                    }
                                 }
                             }
                         }
-                        _ => fault!("{}: Unsupported HTTP '{:?}'.", id, request.header.headline),
+                        _ => if logged {
+                            fault!("{}: Unsupported HTTP '{:?}'.", id, request.header.headline);
+                        },
                     }
 
-                    log!(log_level, "Outgoing HTTPS message:");
+                    alog!(logged, log_level, "Outgoing HTTPS message:");
                     let mut rec_status: u16 = 0;
                     let mut rec_bytes: Option<u64> = None;
                     match response {
@@ -681,70 +847,67 @@ impl<
                             }
                             // Inject HSTS header if configured, so browsers
                             // remember to use HTTPS for subsequent visits.
-                            if self.cfg.hsts_max_age_secs > 0 {
-                                msg.header.fields.insert(
-                                    HeaderName::StrictTransportSecurity,
-                                    HeaderFieldValue::Generic(fmt!(
-                                        "max-age={}; includeSubDomains",
-                                        self.cfg.hsts_max_age_secs,
-                                    )),
-                                    None,
-                                );
+                            // Never over plain HTTP, where the header means nothing.
+                            // Like the baseline below, it fills only an empty field: a
+                            // handler that sets its own policy is not given a second one.
+                            if let Some(hsts) = self.hsts_value(plain) {
+                                if msg.header.fields.get_all(&HeaderName::StrictTransportSecurity).is_none() {
+                                    msg.header.fields.insert(
+                                        HeaderName::StrictTransportSecurity,
+                                        HeaderFieldValue::Generic(hsts),
+                                        None,
+                                    );
+                                }
                             }
-                            // Baseline security response headers: cheap
-                            // defence in depth against content sniffing,
-                            // clickjacking and referrer leakage. Each one
-                            // is a hard-coded conservative default; tighten
-                            // via per-deployment patches if the defaults
-                            // bite an integration.
+                            // Baseline security response headers: cheap defence in depth
+                            // against content sniffing, clickjacking and referrer leakage.
+                            // Each is a conservative default, so it fills a field the response
+                            // left empty and never adds a second value beside a handler's own:
+                            // two `Referrer-Policy` fields leave the browser the laxer one.
                             if self.cfg.security_headers_enabled {
-                                msg.header.fields.insert(
-                                    HeaderName::XContentTypeOptions,
-                                    HeaderFieldValue::Generic(
-                                        "nosniff".to_string()),
-                                    None,
-                                );
-                                msg.header.fields.insert(
-                                    HeaderName::XFrameOptions,
-                                    HeaderFieldValue::Generic(
-                                        "SAMEORIGIN".to_string()),
-                                    None,
-                                );
-                                msg.header.fields.insert(
-                                    HeaderName::ReferrerPolicy,
-                                    HeaderFieldValue::Generic(
-                                        "strict-origin-when-cross-origin"
-                                        .to_string()),
-                                    None,
-                                );
-                                // Permissions-Policy: deny every sensor
-                                // feature by default. Apps that need any
-                                // of camera / microphone / geolocation /
-                                // payment can override by tweaking this
-                                // string (future per-vhost config).
-                                msg.header.fields.insert(
-                                    HeaderName::PermissionsPolicy,
-                                    HeaderFieldValue::Generic(
-                                        "accelerometer=(), camera=(), \
+                                // Permissions-Policy denies every sensor feature unless the
+                                // vhost replaces the whole policy through `permissions_policy`
+                                // (a capture ceremony sets `camera=(self)`, say), so a
+                                // browser-capability grant is explicit and per-site.
+                                let permissions_policy = vhost.permissions_policy
+                                    .as_deref()
+                                    .unwrap_or("accelerometer=(), camera=(), \
                                         geolocation=(), gyroscope=(), \
                                         magnetometer=(), microphone=(), \
-                                        payment=(), usb=()".to_string()),
-                                    None,
-                                );
+                                        payment=(), usb=()");
+                                for (nam, val) in [
+                                    (HeaderName::XContentTypeOptions,   "nosniff"),
+                                    (HeaderName::XFrameOptions,         "SAMEORIGIN"),
+                                    (HeaderName::ReferrerPolicy,        "strict-origin-when-cross-origin"),
+                                    (HeaderName::PermissionsPolicy,     permissions_policy),
+                                ] {
+                                    if msg.header.fields.get_all(&nam).is_none() {
+                                        msg.header.fields.insert(
+                                            nam, HeaderFieldValue::Generic(val.to_string()), None);
+                                    }
+                                }
                             }
-                            // Content-Security-Policy: only emit if the
-                            // operator configured a value. An empty CSP
-                            // string is not injected at all because the
-                            // absence of the header is different from
-                            // `default-src 'none'` -- the former is a
-                            // no-op, the latter blocks the whole page.
-                            if !self.cfg.content_security_policy.is_empty() {
+                            // Content-Security-Policy: only emit if the operator configured a
+                            // value. An empty CSP string is not injected at all because the
+                            // absence of the header is different from `default-src 'none'` --
+                            // the former is a no-op, the latter blocks the whole page.
+                            if !self.cfg.content_security_policy.is_empty()
+                                && msg.header.fields.get_all(&HeaderName::ContentSecurityPolicy).is_none()
+                            {
                                 msg.header.fields.insert(
                                     HeaderName::ContentSecurityPolicy,
                                     HeaderFieldValue::Generic(
                                         self.cfg.content_security_policy.clone()),
                                     None,
                                 );
+                            }
+                            // The vhost's own `response_headers` come last and replace any
+                            // field of the same name, so a static file, a handler's answer and
+                            // an error page all carry exactly what the site configured.
+                            for (nam, val) in &vhost.response_headers {
+                                msg.header.fields.remove(nam);
+                                msg.header.fields.insert(
+                                    nam.clone(), HeaderFieldValue::Generic(val.clone()), None);
                             }
                             // Pull the status code out for the
                             // traffic record before the message is
@@ -810,6 +973,16 @@ impl<
                                 }
                             }
 
+                            // Say what happens to the connection. A request that asked
+                            // to close, or an HTTP/1.0 one that did not ask to stay, is
+                            // told it will end; an HTTP/1.0 one that asked to stay is told
+                            // it may (RFC 9112 9.3), since it assumes nothing otherwise.
+                            if close_requested {
+                                msg.set_connection_close(true);
+                            } else if request_is_1_0 {
+                                msg.set_connection_close(false);
+                            }
+
                             // The length the response actually carries, which for a
                             // body sent from a file is the window rather than the
                             // empty buffer beside it.
@@ -821,7 +994,7 @@ impl<
                                     IO, Network, Wire, Write)),
                             }
                         }
-                        None => log!(log_level, " None"),
+                        None => alog!(logged, log_level, " None"),
                     }
 
                     // Emit a traffic record for this request now that
@@ -830,7 +1003,7 @@ impl<
                     // are logged but never propagated, since the
                     // request itself succeeded and we do not want
                     // the dashboard to break the data path.
-                    if let Some(recorder) = self.traffic.as_ref() {
+                    if let Some(recorder) = self.traffic.as_ref().filter(|_| logged) {
                         let dur_us = req_started_at.elapsed().as_micros() as u64;
                         let record = RequestRecord {
                             when_ns:        traffic::now_ns(),
@@ -846,6 +1019,12 @@ impl<
                             warn!("{}: traffic recorder rejected entry: {}",
                                 id, e);
                         }
+                    }
+
+                    // The reply is out. A connection that was asked to close ends here,
+                    // by the server, rather than waiting for the client to drop it.
+                    if close_requested {
+                        break;
                     }
                 }
                 Some(Err(e)) => {
@@ -863,16 +1042,21 @@ impl<
                         (HttpStatus::RequestTimeout,
                          "Request timed out while reading headers.")
                     } else {
+                        // Returned, the error is logged by the accept loop, so a vhost with its
+                        // access log off closes the connection quietly instead.
+                        if !logged {
+                            break;
+                        }
                         warn!("{}: HTTP read error: {}", id, e);
                         return Err(e);
                     };
-                    warn!("{}: dropping connection ({}): {}", id, status, e);
+                    alog!(logged, LogLevel::Warn, "{}: dropping connection ({}): {}", id, status, e);
                     let mut resp = HttpMessage::respond_with_text(status, msg);
                     resp.set_connection_close(true);
                     match resp.write_all(&mut write_stream).await {
                         Ok(()) => (),
-                        Err(we) => warn!("{}: failed to emit {} response: {}",
-                            id, status, we),
+                        Err(we) => alog!(logged, LogLevel::Warn,
+                            "{}: failed to emit {} response: {}", id, status, we),
                     }
                     break;
                 }
@@ -885,10 +1069,14 @@ impl<
         // Gracefully close the TLS connection.
         let reunited_stream = read_stream.unsplit(write_stream);
         let result = reunited_stream.shutdown().await;
+        // A peer that has already gone makes this fail on most connections, and on a vhost
+        // with its access log off even a bare line per connection is a record of traffic.
         if let Err(e) = result {
-            error!(e.into());
+            if logged {
+                error!(e.into());
+            }
         }
-        log!(log_level, "{}: Connection with {:?} closed.", id, src_addr);
+        alog!(logged, log_level, "{}: Connection with {:?} closed.", id, src_addr);
 
         Ok(())
     }
@@ -907,12 +1095,22 @@ impl<
         None
     }
 
+    /// The `Strict-Transport-Security` value this server gives a response that sets none: never
+    /// over plain HTTP, where the header means nothing, and never when `hsts_max_age_secs` is 0.
+    fn hsts_value(&self, plain: bool) -> Option<String> {
+        match !plain && self.cfg.hsts_max_age_secs > 0 {
+            true    => Some(fmt!("max-age={}; includeSubDomains", self.cfg.hsts_max_age_secs)),
+            false   => None,
+        }
+    }
+
     async fn handle_proxy_http<W>(
         &self,
         request:    HttpMessage,
         route:      &ProxyRoute,
         client_w:   &mut W,
         src_addr:   SocketAddr,
+        plain:      bool,       // the visitor came over the loopback listener, not TLS
         id:         &str,
     )
         -> Outcome<(u16, Option<u64>)>
@@ -1023,8 +1221,20 @@ impl<
                         }
                     }
 
-                    // Forward the response headers to the client.
-                    match client_w.write_all(header_bytes).await {
+                    // Forward the response headers to the client. TLS ends at this hop, so
+                    // this hop is where HSTS belongs: the upstream behind it speaks plain
+                    // loopback HTTP and rightly sends none. Filled as on Steel's own responses,
+                    // only where the upstream left the field empty, so its own is never doubled.
+                    let filled = match self.hsts_value(plain) {
+                        Some(hsts)  => fwd::fill_head_field(
+                            header_bytes, "Strict-Transport-Security", &hsts),
+                        None        => None,
+                    };
+                    let head_out = match &filled {
+                        Some(h) => h.as_slice(),
+                        None    => header_bytes,
+                    };
+                    match client_w.write_all(head_out).await {
                         Ok(()) => (),
                         Err(e) => return Err(err!(e,
                             "{}: proxy: failed to write response headers to client.", id;
@@ -1157,6 +1367,17 @@ pub enum TerminalGate {
     Dispatch,
     NotEnabled,
     NotAuthenticated,
+}
+
+/// The answer to a method Steel serves nowhere on this path.
+fn method_not_allowed() -> HttpMessage {
+    HttpMessage::respond_with_text(
+        HttpStatus::MethodNotAllowed,
+        "Method not allowed.",
+    ).with_field(
+        HeaderName::Allow,
+        HeaderFieldValue::Generic(fmt!("GET, HEAD, POST")),
+    )
 }
 
 /// Decides whether to dispatch an upgrade to the terminal bridge.

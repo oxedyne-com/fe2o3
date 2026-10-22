@@ -1,5 +1,5 @@
 use oxedyne_fe2o3_core::{
-    debug,
+    prelude::*,
     rand::Rand,
 };
 

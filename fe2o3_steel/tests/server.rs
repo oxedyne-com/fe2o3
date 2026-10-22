@@ -67,7 +67,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 0x82, 0x61, 0x0f, 0x17, 0x24, 0xc4, 0x0d, 0xd2,
             ];
 
-            let mut db = res!(context::new_db(&db_root, &db_enc_key));
+            let mut db = res!(context::new_db(&db_root, &db_enc_key, false));
 
             // Since we are testing, delete all existing data and index files.
             let files = res!(db.find_all_data_files());
@@ -116,6 +116,12 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 term_config:            None,
                 publish:                None,
                 site_admins:            Vec::new(),
+                tiles:                  None,
+                access_log:             true,
+                permissions_policy:     None,
+                admin_dashboard:        true,
+                db_sync_on_write:       false,
+                response_headers:       Vec::new(),
             };
 
             let web_handler: AppWebHandler<HashMap<String, OsPath>> = AppWebHandler::new(
@@ -148,6 +154,10 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 ws_routes:      vhost_cfg.ws_routes.clone(),
                 term_manager:   None,
                 uses_sessions:  vhost_cfg.uses_sessions(),
+                permissions_policy: vhost_cfg.permissions_policy.clone(),
+                tiles:          None,
+                access_log:     vhost_cfg.access_log,
+                response_headers: Vec::new(),
             });
 
             let mut vhosts = HashMap::new();

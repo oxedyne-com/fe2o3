@@ -26,7 +26,8 @@
 //!         RestSchemesInput::default(),
 //!         Uid::default(),
 //!     ));
-//!     res!(db.start());
+//!     // Returns once every zone has surveyed its files and loaded its caches.
+//!     res!(db.start("my_db"));
 //!     
 //!     // Store a value
 //!     let resp = res!(db.api().store(
@@ -35,12 +36,10 @@
 //!         user_id,
 //!     ));
 //!     
-//!     // Handle potential errors during storage
-//!     match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-//!         OzoneMsg::Error(e) => return Err(err!(e, "Failed to store value"; IO, Data, Write)),
-//!         OzoneMsg::Ok => Ok(()),
-//!         msg => Err(err!("Unexpected response: {:?}", msg; Channel, Unexpected)),
-//!     }
+//!     // Each record is answered written, within the user request deadline, and then durable,
+//!     // within the durability deadline.  A writer's error arrives as the error it was.
+//!     let (_existed, _records) = res!(resp.recv_store_ack());
+//!     Ok(())
 //! }
 //! ```
 //! 
@@ -153,10 +152,15 @@ pub mod comm;
 pub mod dal; // Data Abstraction Layer.
 pub mod data;
 pub mod file;
+pub mod lone_index; // An index standing without its data file, judged at the open.
+pub mod gateway; // The gateway's own Ozone parameterisation, and opening a store under it for an operator tool.
 pub mod test;
 
 pub mod db;
+pub mod ns; // A path namespace: values under paths, a per-directory index, one mutation lane.
 pub mod migrate; // Live-set store migration and compaction (drops orphaned chunk records).
+pub mod textscan; // Read-only check of the JDAT text a store holds against the decoder's refusals.
+pub mod verify; // Read-only check that every live value reads back whole (a torn chunked value fails).
 pub mod sweep; // In-place, online orphan sweep (reclaims orphaned chunk records via supersession).
 pub mod prelude;
 
@@ -169,4 +173,7 @@ pub mod oam; // Oxegen Allocation Mechanism placement primitive for the distribu
 #[cfg(feature = "dist")]
 pub mod dist;
 
-pub use crate::db::O3db;
+pub use crate::{
+    api::CompactReport,
+    db::O3db,
+};

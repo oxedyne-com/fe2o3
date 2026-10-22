@@ -24,7 +24,10 @@ use oxedyne_fe2o3_font::{
 	shape::Dir,
 };
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::{
+		Ink,
+		Rgba,
+	},
 	path::{
 		PathBuilder,
 		Pt,
@@ -145,7 +148,7 @@ impl Plot {
 				for (k, p) in pts.iter().enumerate() {
 					if k == 0 { pb.move_to(*p); } else { pb.line_to(*p); }
 				}
-				ops.push(DrawOp::Stroke { path: res!(pb.finish()), colour: s.colour, width: s.width });
+				ops.push(DrawOp::Stroke { path: res!(pb.finish()), colour: s.colour.into(), width: s.width });
 			}
 		}
 
@@ -203,7 +206,7 @@ impl Plot {
 					let mut pb = PathBuilder::new();
 					pb.move_to(a);
 					pb.line_to(b);
-					ops.push(DrawOp::Stroke { path: res!(pb.finish()), colour: s.colour, width: s.width });
+					ops.push(DrawOp::Stroke { path: res!(pb.finish()), colour: s.colour.into(), width: s.width });
 				}
 				let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, lsize, label));
 				let asc		= shaped.dims().height.to_pt() as f32;
@@ -353,7 +356,7 @@ fn seg(x0: f32, y0: f32, x1: f32, y1: f32, colour: Rgba, width: f32) -> Outcome<
 	let mut pb = PathBuilder::new();
 	pb.move_to(Pt::new(x0, y0));
 	pb.line_to(Pt::new(x1, y1));
-	Ok(DrawOp::Stroke { path: res!(pb.finish()), colour, width })
+	Ok(DrawOp::Stroke { path: res!(pb.finish()), colour: colour.into(), width })
 }
 
 /// A filled axis-aligned rectangle.
@@ -364,7 +367,7 @@ fn filled_rect(x0: f32, y0: f32, x1: f32, y1: f32, colour: Rgba) -> Outcome<Draw
 	pb.line_to(Pt::new(x1, y1));
 	pb.line_to(Pt::new(x0, y1));
 	pb.close();
-	Ok(DrawOp::Fill { path: res!(pb.finish()), colour })
+	Ok(DrawOp::Fill { path: res!(pb.finish()), colour: colour.into() })
 }
 
 /// A stroked axis-aligned rectangle outline.
@@ -375,7 +378,7 @@ fn rect_outline(x0: f32, y0: f32, x1: f32, y1: f32, colour: Rgba, width: f32) ->
 	pb.line_to(Pt::new(x1, y1));
 	pb.line_to(Pt::new(x0, y1));
 	pb.close();
-	Ok(DrawOp::Stroke { path: res!(pb.finish()), colour, width })
+	Ok(DrawOp::Stroke { path: res!(pb.finish()), colour: colour.into(), width })
 }
 
 /// A small filled triangle at `(x, y)` pointing along `(dx, dy)`, the tip an axis arrowhead takes.
@@ -390,7 +393,7 @@ fn arrow_tip(x: f32, y: f32, dx: f32, dy: f32, colour: Rgba) -> Outcome<DrawOp> 
 	pb.line_to(Pt::new(bx + px * half, by + py * half));
 	pb.line_to(Pt::new(bx - px * half, by - py * half));
 	pb.close();
-	Ok(DrawOp::Fill { path: res!(pb.finish()), colour })
+	Ok(DrawOp::Fill { path: res!(pb.finish()), colour: colour.into() })
 }
 
 /// Strokes a polyline as a run of short dashes, so a dashed curve reads the same in SVG and PDF without
@@ -418,7 +421,7 @@ fn dash_polyline(ops: &mut Vec<DrawOp>, pts: &[Pt], colour: Rgba, width: f32) ->
 				let mut pb = PathBuilder::new();
 				pb.move_to(Pt::new(a.x + ux * d, a.y + uy * d));
 				pb.line_to(Pt::new(a.x + ux * seg_end, a.y + uy * seg_end));
-				ops.push(DrawOp::Stroke { path: res!(pb.finish()), colour, width });
+				ops.push(DrawOp::Stroke { path: res!(pb.finish()), colour: colour.into(), width });
 				d = seg_end;
 			} else {
 				d += period - into;
@@ -439,7 +442,7 @@ fn bake(ops: &mut Vec<DrawOp>, shaped: &ShapedText, base_x: f32, base_y: f32) ->
 		}
 		let t = Transform::scale(1.0, -1.0)
 			.then(&Transform::translate(base_x + glyph.x, base_y - glyph.y));
-		ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: Rgba::BLACK });
+		ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: Ink::BLACK });
 	}
 	Ok(())
 }

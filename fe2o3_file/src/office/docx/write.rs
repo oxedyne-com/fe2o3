@@ -193,7 +193,15 @@ impl Build {
 				}
 			}
 			Block::Rule				=> res!(self.rule()),
-			Block::Table { head, rows, cols }	=> res!(self.table(head, rows, cols)),
+			Block::Table { head, rows, cols, caption } => {
+				res!(self.table(head, rows, cols));
+				// Its caption is the paragraph after it, which is where a reader looks for one, and wears
+				// Word's own caption style so that a reader can tell it from the prose that follows.
+				if !caption.is_empty() {
+					res!(self.para(caption, Ctx { style: Some("Caption"), num: None }));
+				}
+			}
+			Block::Figure { .. } | Block::Terms { .. } => res!(self.blocks(&block.as_plain(), ctx)),
 			// A division names a region and says nothing about how it looks, which is the tree's whole
 			// design. There is nothing to draw, so its content is written where it stands.
 			Block::Div { content, .. }		=> res!(self.blocks(content, ctx)),
@@ -244,7 +252,7 @@ impl Build {
 					res!(self.inlines(content, Fmt { link: true, ..fmt }));
 					res!(self.out.close("w:hyperlink"));
 				}
-				Inline::Image { src, alt }		=> {
+				Inline::Image { src, alt, .. }	=> {
 					// The tree holds where an image is, not what it holds, and nothing here can
 					// fetch it. The alt text stands in its place and the omission is counted, so the
 					// caller can say so rather than the reader having to notice.
@@ -252,7 +260,7 @@ impl Build {
 					res!(self.run(alt, Fmt { italic: true, ..fmt }));
 				}
 				// A span names a region and says nothing about how it looks. Its content stands.
-				Inline::Span { content, .. }		=> res!(self.inlines(content, fmt)),
+				Inline::Span { content, .. } | Inline::Sup(content) | Inline::Sub(content)		=> res!(self.inlines(content, fmt)),
 				Inline::Break				=> {
 					self.out.open("w:r", &[]);
 					self.out.empty("w:br", &[]);
@@ -409,7 +417,8 @@ impl Build {
 					res!(self.out.close("w:pPr"));
 				}
 			}
-			res!(self.inlines(&cell.0, Fmt { bold: head, ..Fmt::default() }));
+			// A cell that heads its row is set as a header row's cells are.
+			res!(self.inlines(&cell.content, Fmt { bold: head || cell.header, ..Fmt::default() }));
 			res!(self.out.close("w:p"));
 			res!(self.out.close("w:tc"));
 		}

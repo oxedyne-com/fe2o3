@@ -369,3 +369,36 @@ const VER7PLUS: &str = "
 1000001010100000110111001101101110111011101110111011010101000
 1111111010000110001000100010101010101010101010101011000100001
 ";
+
+/// The dark modules an SVG from [`QrMatrix::to_svg`] draws, as rows of `0` and `1` in the grid's
+/// own coordinates, read back from its run-length path.
+fn rows_of_svg(svg: &str, size: usize) -> Outcome<String> {
+	let d = res!(svg.split("<path fill=\"#000\" d=\"").nth(1).and_then(|r| r.split('"').next())
+		.ok_or_else(|| err!("The SVG has no dark path."; Test, Missing)));
+	let mut grid = vec![b'0'; size * size];
+	for run in d.split('M').filter(|r| !r.is_empty()) {
+		let n: Vec<usize> = run.split(|c: char| !c.is_ascii_digit()).filter(|v| !v.is_empty())
+			.filter_map(|v| v.parse().ok()).collect();
+		let (x, y, w) = match n.as_slice() {
+			[x, y, w, 1, w2] if w == w2	=> (*x - QUIET_ZONE, *y - QUIET_ZONE, *w),
+			_				=> return Err(err!("Run '{}' is not M x y h n v1 h-n z.", run; Test, Invalid)),
+		};
+		for i in x..x + w {
+			grid[y * size + i] = b'1';
+		}
+	}
+	let rows: Vec<String> = grid.chunks(size).map(|r| String::from_utf8_lossy(r).into_owned()).collect();
+	Ok(rows.join("\n"))
+}
+
+#[test]
+fn svg_draws_exactly_the_dark_modules_inside_a_quiet_zone() -> Outcome<()> {
+	let qr = res!(encode("https://zoary.oxegen.io/invite#t=AbCdEf0123456789", QrEcc::Medium));
+	let svg = qr.to_svg();
+	let side = qr.size() + 2 * QUIET_ZONE;
+	assert!(svg.starts_with(&fmt!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\" shape-rendering=\"crispEdges\">", side, side)), "{}", svg);
+	assert!(svg.contains(&fmt!("<path fill=\"#fff\" d=\"M0 0h{}v{}H0z\"/>", side, side)), "no white ground: {}", svg);
+	assert!(!svg.contains("width=") && !svg.contains("height="), "the caller sizes it");
+	assert_eq!(res!(rows_of_svg(&svg, qr.size())), rows_of(&qr), "the SVG's modules differ from the matrix");
+	Ok(())
+}

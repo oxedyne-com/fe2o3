@@ -689,6 +689,63 @@ impl KeyDeriver for KeyDerivationScheme {
     }
 }
 
+// Passwords, at OWASP's Argon2id minimum (2026): 19 MiB, 2 passes, 1 lane.
+pub const PASSWORD_MEM_COST:    u32     = 19_456;   // KiB
+pub const PASSWORD_TIME_COST:   u32     = 2;
+pub const PASSWORD_SALT_LEN:    usize   = 16;       // bytes
+pub const PASSWORD_HASH_LEN:    u32     = 32;       // bytes
+// The most a stored string may ask of a verify, so a corrupt or planted one cannot stall a server.
+pub const PASSWORD_MAX_MEM:     u32     = 1_048_576; // KiB, 1 GiB
+pub const PASSWORD_MAX_TIME:    u32     = 64;
+pub const PASSWORD_MAX_LANES:   u32     = 16;
+pub const PASSWORD_MIN_SALT:    usize   = 8;        // bytes, RFC 9106's floor
+
+/// Hashes a password to a PHC string, Argon2id at [`PASSWORD_MEM_COST`] KiB and
+/// [`PASSWORD_TIME_COST`] passes over one lane, with a fresh random salt of
+/// [`PASSWORD_SALT_LEN`] bytes. The string is all a server keeps; [`verify_password`] reads it.
+pub fn hash_password(pass: &[u8]) -> Outcome<String> {
+    let mut kdf = res!(KeyDerivationScheme::new_argon2(
+        "Argon2id",
+        0x13,
+        PASSWORD_MEM_COST,
+        PASSWORD_TIME_COST,
+        PASSWORD_SALT_LEN,
+        PASSWORD_HASH_LEN,
+    ));
+    res!(kdf.derive(pass));
+    kdf.encode_to_string()
+}
+
+/// Does `pass` match the PHC string `phc`? The tags are compared in constant time. The string's
+/// own parameters are used, so an older, weaker hash still verifies, but one asking more than
+/// [`PASSWORD_MAX_MEM`], [`PASSWORD_MAX_TIME`] or [`PASSWORD_MAX_LANES`], or holding a salt
+/// shorter than [`PASSWORD_MIN_SALT`] or no tag, is an error rather than a slow `false`.
+pub fn verify_password(pass: &[u8], phc: &str) -> Outcome<bool> {
+    let mut state = Argon2State::default();
+    res!(state.from_argon2_string(phc, true));
+    if state.mem_cost > PASSWORD_MAX_MEM
+        || state.time_cost > PASSWORD_MAX_TIME
+        || state.lanes == 0
+        || state.lanes > PASSWORD_MAX_LANES
+    {
+        return Err(err!(
+            "A password hash asks m={} KiB, t={}, p={}, beyond the bounds m <= {}, t <= {},             1 <= p <= {} set for a verify.", state.mem_cost, state.time_cost, state.lanes,
+            PASSWORD_MAX_MEM, PASSWORD_MAX_TIME, PASSWORD_MAX_LANES;
+        Excessive, Input, Security));
+    }
+    if state.salt.len() < PASSWORD_MIN_SALT {
+        return Err(err!(
+            "A password hash has a salt of {} bytes, under the {} byte floor.",
+            state.salt.len(), PASSWORD_MIN_SALT;
+        Invalid, Input, Security));
+    }
+    match &state.hash {
+        Some(h) if !h.is_empty() => (),
+        _ => return Err(err!("A password hash holds no tag."; Missing, Input)),
+    }
+    KeyDerivationScheme::Argon2(state).verify(pass)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct KeyDeriverDefAlt<
     D: KeyDeriver,

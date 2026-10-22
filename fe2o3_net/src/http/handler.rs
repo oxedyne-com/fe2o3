@@ -1,6 +1,7 @@
 use crate::{
     http::{
         fields::HeaderFields,
+        header::HttpMethod,
         msg::HttpMessage,
         loc::HttpLocator,
     },
@@ -76,4 +77,30 @@ pub trait WebHandler:
         id:             &String,
     )
         -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send;
+
+    /// Handle a `PUT`, `DELETE` or `PATCH`. The default answers nothing, which the server
+    /// turns into a `405`, so a handler that serves only `GET` and `POST` need not say so.
+    fn handle_other<
+        const SIDL: usize,
+        const UIDL: usize,
+        SID:    NumIdDat<SIDL> + 'static,
+        UID:    NumIdDat<UIDL> + 'static,
+        ENC:    Encrypter,
+        KH:     Hasher,
+        DB:     Database<UIDL, UID, ENC, KH>,
+    >(
+        &self,
+        _method:        HttpMethod,
+        _loc:           HttpLocator,
+        _body:          Vec<u8>,
+        _req_headers:   Arc<HeaderFields>,
+        _db:            Option<(Arc<RwLock<DB>>, UID)>,
+        _sid_opt:       &Option<SID>,
+        _peer:          SocketAddr,
+        _id:            &String,
+    )
+        -> impl std::future::Future<Output = Outcome<Option<HttpMessage>>> + Send
+    {
+        std::future::ready(Ok(None))
+    }
 }

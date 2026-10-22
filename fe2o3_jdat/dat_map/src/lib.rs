@@ -5,6 +5,8 @@
 /// Credit: https://github.com/ex0dus-0x/structmap
 ///
 
+mod dat;
+
 use std::collections::BTreeMap;
 
 use proc_macro::TokenStream;
@@ -262,4 +264,18 @@ fn parse_valueless_attrs(fields: &syn::Fields, attr_name: &str) -> BTreeMap<Stri
         }
     }
     map
+}
+
+/// Derives `ToDat`, each field through its own `ToDat`. See the `dat` module for the encoding.
+#[proc_macro_derive(ToDat)]
+pub fn to_dat(input: TokenStream) -> TokenStream {
+    let ast = syn::parse_macro_input!(input as DeriveInput);
+    dat::derive_to_dat(ast).into()
+}
+
+/// Derives `FromDat`, each field through its own `FromDat`. See the `dat` module for the encoding.
+#[proc_macro_derive(FromDat)]
+pub fn from_dat(input: TokenStream) -> TokenStream {
+    let ast = syn::parse_macro_input!(input as DeriveInput);
+    dat::derive_from_dat(ast).into()
 }

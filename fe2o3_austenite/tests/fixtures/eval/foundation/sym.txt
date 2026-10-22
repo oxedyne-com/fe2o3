@@ -1,0 +1,25 @@
+// symbols: modifier resolution, repr of a partly modified symbol, symbol(), emoji.
+sym.alpha
+sym.arrow
+sym.arrow.r
+sym.arrow.r.long
+sym.arrow.long.r
+sym.dot
+sym.dot.c
+sym.quote.l.double
+sym.control.bel
+sym.gender.female
+emoji.face
+emoji.face.grin
+str(sym.arrow.r.long.bar)
+str(sym.dot)
+str(emoji.face.angry.red)
+symbol("x")
+symbol("a", ("b", "c"))
+symbol(("r", "→"), ("l", "←"))
+str(symbol(("r", "→"), ("l", "←")))
+str(symbol(("r", "→"), ("l", "←")).l)
+!symbol()
+!symbol("a", "b")
+!sym.arrow.q
+!sym.alpha.r

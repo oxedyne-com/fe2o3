@@ -1,34 +1,57 @@
-//! A minimal PDF writer: pages of filled and stroked outline paths.
+//! A minimal PDF writer: pages of filled and stroked outline paths, and text in embedded fonts.
 //!
-//! The typesetter above this crate turns every glyph into a filled outline [`Path`] -- the Pearl
-//! principle, that a font is a set of outlines and not a program -- so a page is a list of filled
-//! paths and nothing else. This writer leans on that entirely: it embeds no font, no CMap and no font
-//! program, and writes each glyph as ordinary path-construction and fill operators in a content
-//! stream. That is the whole simplification, and it is why the file this module produces is small and
-//! self-contained.
+//! Text reaches the page in one of two ways. A glyph from an embeddable font file ([`FontProgram`]) is
+//! shown by `TJ` from a `Type0` font over a subset of that very file, so a viewer renders the designer's
+//! outlines with its own rasteriser and copies, searches and reads aloud the text through the font's
+//! `/ToUnicode`. A glyph whose font cannot be embedded -- a variable `CFF2` face, or a licence that
+//! forbids it -- falls back to its filled outline, stored once in a Type-3 font that carries a
+//! `/ToUnicode` of its own, so it too stays extractable.
 //!
-//! The geometry and colour are the crate's own [`Path`], [`Pt`], [`Seg`] and [`Rgba`]; nothing here
+//! The geometry and colour are the crate's own [`Path`], [`Pt`], [`Seg`] and [`Ink`]; nothing here
 //! defines a parallel type. A quadratic segment is elevated to a cubic on the way out, since PDF has
 //! no quadratic operator, and the whole page is flipped in y so the engine's top-left, y-down frame
 //! meets PDF's bottom-left, y-up one.
 //!
+//! A colour is an [`Ink`], and a [`ColourOut`] says how it is written: in the ink's own space (`g`, `rg`
+//! or `k`), lowered to sRGB, which is what every file written before an ink knew its space holds, or
+//! converted to CMYK or grey through an ICC transform, with each raster, and a transparency group on each
+//! page that names the space.
+//!
 //! The bytes are deterministic: no dates are written, the `/ID` is derived from the file's own
-//! content rather than the clock, and no producer string leaks a version or a build. The same page
-//! list yields the same bytes on every run, which is what a content-addressed pipeline needs.
+//! content rather than the clock, and the Info dictionary ([`PdfInfo`]) holds only what the caller
+//! gives it. The same page list and the same Info yield the same bytes on every run, which is what a
+//! content-addressed pipeline needs.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::colour::Rgba;
+use crate::colour::Ink;
+use crate::pdf_colour::Inks;
+use crate::pdf_font::{
+	FontFile,
+	FontProgram,
+	Outlines,
+};
 use crate::path::{
 	Path,
 	Pt,
 	Seg,
 };
+use crate::pixmap::Tone;
 use crate::transform::Transform;
 
+pub use crate::pdf_colour::{
+	Black,
+	CacheStats,
+	ColourOut,
+	ImageCache,
+};
+
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::io::Write;
+use std::sync::Arc;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -59,21 +82,23 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// One drawn shape: a path and how it is painted, or a raster image placed in a rectangle. Fill and
 /// stroke are the two the typesetter needs for vector ink -- glyphs and rules fill, a held-open
 /// reservation strokes; `Image` embeds a decoded raster (a figure's photograph or diagram) as an image
-/// XObject, its samples straight RGB with an optional grey soft mask for translucency.
+/// XObject, its samples straight RGB with an optional grey soft mask for translucency, and the tone of its
+/// source, which a converting mode reads to keep a grey raster grey.
 #[derive(Clone, Debug)]
 pub enum Draw {
 	Fill {
 		path:	Path,
-		colour:	Rgba,
+		colour:	Ink,
 	},
 	Stroke {
 		path:	Path,
-		colour:	Rgba,
+		colour:	Ink,
 		width:	f64,	// pen width, in points
 	},
 	Image {
 		rgb:	Vec<u8>,			// packed RGB, iw*ih*3, row-major, top row first
 		alpha:	Option<Vec<u8>>,	// packed grey soft mask, iw*ih, present only when a pixel is translucent
+		tone:	Tone,				// grey when the source held grey alone, its RGB then three equal samples
 		iw:		usize,				// image width in samples
 		ih:		usize,				// image height in samples
 		x:		f64,				// placement rectangle, engine frame (top-left, y down), points
@@ -87,27 +112,54 @@ pub enum Draw {
 		y:			f32,		// pen y (the baseline) in the engine frame, points
 		size:		f32,		// point size the glyph is shown at
 		adv:		f32,		// advance in points at that size, for the font's /Widths
-		colour:		Rgba,
+		colour:		Ink,
 		text:		String,		// source scalar(s) this glyph stands for, for /ToUnicode; may be empty
 	},
+	Text {
+		font:		Arc<FontProgram>,
+		gid:		u16,		// glyph id in the program, shown as the CID of the same number
+		x:			f32,		// pen x in the engine frame (top-left, y down), points
+		y:			f32,		// the baseline in the engine frame, points
+		size:		f32,		// point size
+		colour:		Ink,
+		text:		String,		// source scalar(s), for /ToUnicode; may be empty
+	},
+	// Opens a group: the draws up to the matching `Pop` are drawn under `matrix` (`[a b c d e f]`, mapping
+	// the group's coordinates onto the engine frame, top-left and y down) and clipped to `clip`, given in
+	// the group's coordinates, when present. Written as `q`, `cm` and `W n`, closed by `Q`.
+	Push {
+		matrix:	[f64; 6],
+		clip:	Option<Path>,
+	},
+	Pop,
 }
 
 impl Draw {
 
-	/// The paint colour of a vector draw, opaque for an image (whose translucency rides its own soft
+	/// The alpha of a vector draw's paint, opaque for an image (whose translucency rides its own soft
 	/// mask, not the page's alpha graphics state).
-	fn colour(&self) -> Rgba {
+	fn alpha(&self) -> u8 {
 		match self {
-			Draw::Fill { colour, .. }	=> *colour,
-			Draw::Stroke { colour, .. }	=> *colour,
-			Draw::Glyph { colour, .. }	=> *colour,
-			Draw::Image { .. }			=> Rgba::new(0, 0, 0, 255),
+			Draw::Fill { colour, .. }	=> colour.alpha(),
+			Draw::Stroke { colour, .. }	=> colour.alpha(),
+			Draw::Glyph { colour, .. }	=> colour.alpha(),
+			Draw::Text { colour, .. }	=> colour.alpha(),
+			Draw::Image { .. }			=> 255,
+			Draw::Push { .. } | Draw::Pop	=> 255,
 		}
 	}
 }
 
-/// A clickable link over a rectangle of the page: a `/Link` annotation whose action opens a URI. The
-/// rectangle is in the engine's page frame -- top-left origin, y down, in points -- exactly as a draw's
+/// Where a link annotation goes: out of the document by a URI action, or into it by a named destination,
+/// which [`PdfStream::close_with_dests`] places once every page is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTo {
+	Uri(String),	// an external address
+	Named(String),	// a destination in the document, by name
+}
+
+/// A clickable link over a rectangle of the page: a `/Link` annotation that opens a URI or jumps to a
+/// named destination. The rectangle is in the engine's page frame -- top-left origin, y down, in points -- exactly as a draw's
 /// coordinates are, so a caller hands over the same rectangle it placed the ink in and [`PdfStream`]
 /// flips it into PDF's y-up frame when it writes the annotation. The border is drawn away, so a linked
 /// image reads as the picture alone.
@@ -117,7 +169,17 @@ pub struct LinkAnnot {
 	pub y0:		f64,	// top
 	pub x1:		f64,	// right
 	pub y1:		f64,	// bottom
-	pub uri:	String,	// the destination the link opens
+	pub to:		LinkTo,	// where the link goes
+}
+
+/// A named destination: the place a [`LinkTo::Named`] link of that name jumps to, a point on a page in
+/// the engine's y-down point frame, which the viewer scrolls to the top of its window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedDest {
+	pub name:	String,
+	pub page:	usize,	// zero-based
+	pub x:		f64,	// points from the left
+	pub y:		f64,	// points from the top
 }
 
 /// One page: its size in points, the shapes drawn on it back to front, and any clickable link
@@ -144,20 +206,39 @@ impl PdfPage {
 	/// engine's y-down point frame -- the same frame [`image`](Self::image) places a raster in -- opening
 	/// `uri`. The page gains an `/Annots` entry; a page with no link stays byte-identical to before.
 	pub fn link(&mut self, x: f64, y: f64, w: f64, h: f64, uri: String) {
-		self.annots.push(LinkAnnot { x0: x, y0: y, x1: x + w, y1: y + h, uri });
+		self.annots.push(LinkAnnot { x0: x, y0: y, x1: x + w, y1: y + h, to: LinkTo::Uri(uri) });
 	}
 
-	pub fn fill(&mut self, path: Path, colour: Rgba) {
-		self.draws.push(Draw::Fill { path, colour });
+	/// As [`link`](Self::link), but jumping to the named destination `name` within the document. Only a
+	/// stream opened by [`PdfStream::open`] writes it, since only its catalogue, written at the close, can
+	/// name the destinations; a stream with a fixed page count leaves the link out.
+	pub fn link_named(&mut self, x: f64, y: f64, w: f64, h: f64, name: String) {
+		self.annots.push(LinkAnnot { x0: x, y0: y, x1: x + w, y1: y + h, to: LinkTo::Named(name) });
 	}
 
-	pub fn stroke(&mut self, path: Path, colour: Rgba, width: f64) {
-		self.draws.push(Draw::Stroke { path, colour, width });
+	pub fn fill(&mut self, path: Path, colour: impl Into<Ink>) {
+		self.draws.push(Draw::Fill { path, colour: colour.into() });
+	}
+
+	/// Opens a group drawn under `matrix` and clipped to `clip`; see [`Draw::Push`]. Every `push` must be
+	/// matched by a [`pop`](Self::pop) on the same page.
+	pub fn push(&mut self, matrix: [f64; 6], clip: Option<Path>) {
+		self.draws.push(Draw::Push { matrix, clip });
+	}
+
+	/// Closes the innermost open group.
+	pub fn pop(&mut self) {
+		self.draws.push(Draw::Pop);
+	}
+
+	pub fn stroke(&mut self, path: Path, colour: impl Into<Ink>, width: f64) {
+		self.draws.push(Draw::Stroke { path, colour: colour.into(), width });
 	}
 
 	/// Places a decoded raster in the rectangle at top-left `(x, y)`, `w` wide and `h` tall, in the
 	/// engine's y-down point frame. `rgb` is `iw * ih * 3` straight-RGB samples, top row first; `alpha`,
-	/// when given, is the matching `iw * ih` grey soft mask that carries any translucency. The image is
+	/// when given, is the matching `iw * ih` grey soft mask that carries any translucency. `tone` is the source's,
+	/// so that a converting mode writes a grey source as `/DeviceGray`, as it writes a grey ink. The image is
 	/// scaled to fill the rectangle, so the caller sizes the rectangle to the image's aspect if it wants
 	/// no distortion.
 	#[allow(clippy::too_many_arguments)]
@@ -165,6 +246,7 @@ impl PdfPage {
 		&mut self,
 		rgb:	Vec<u8>,
 		alpha:	Option<Vec<u8>>,
+		tone:	Tone,
 		iw:		usize,
 		ih:		usize,
 		x:		f64,
@@ -172,7 +254,7 @@ impl PdfPage {
 		w:		f64,
 		h:		f64,
 	) {
-		self.draws.push(Draw::Image { rgb, alpha, iw, ih, x, y, w, h });
+		self.draws.push(Draw::Image { rgb, alpha, tone, iw, ih, x, y, w, h });
 	}
 
 	/// Adds a glyph placed at pen `(x, y)` -- `x` the left, `y` the baseline, in the engine's top-left,
@@ -182,8 +264,26 @@ impl PdfPage {
 	/// glyph is text-extractable, or empty when none is known. The writer stores each distinct outline
 	/// once as a Type-3 `CharProc` and references it here, so a glyph drawn a thousand times costs its
 	/// outline once.
-	pub fn glyph(&mut self, outline: Path, x: f32, y: f32, size: f32, adv: f32, colour: Rgba, text: String) {
-		self.draws.push(Draw::Glyph { outline, x, y, size, adv, colour, text });
+	pub fn glyph(&mut self, outline: Path, x: f32, y: f32, size: f32, adv: f32, colour: impl Into<Ink>, text: String) {
+		self.draws.push(Draw::Glyph { outline, x, y, size, adv, colour: colour.into(), text });
+	}
+
+	/// Adds glyph `gid` of an embeddable font at pen `(x, y)` -- `x` the left, `y` the baseline, in the
+	/// engine's top-left, y-down point frame -- shown at `size` points and painted `colour`. `text` is the
+	/// source it stands for, recorded in the font's `/ToUnicode`; the first non-empty text a glyph is met
+	/// with is the one it keeps. The font is embedded once, subset to the glyphs the document shows.
+	#[allow(clippy::too_many_arguments)]
+	pub fn text(
+		&mut self,
+		font:	Arc<FontProgram>,
+		gid:	u16,
+		x:		f32,
+		y:		f32,
+		size:	f32,
+		colour:	impl Into<Ink>,
+		text:	String,
+	) {
+		self.draws.push(Draw::Text { font, gid, x, y, size, colour: colour.into(), text });
 	}
 }
 
@@ -260,9 +360,28 @@ fn build_outline_links(items: &[OutlineItem]) -> (Vec<OutlineLinks>, Vec<usize>)
 	(links, roots)
 }
 
-/// A PDF text string for a title: a parenthesised literal with `(`, `)` and `\` escaped when the text
-/// is printable ASCII, else a UTF-16BE hex string with a byte-order mark so any Unicode renders. Both
-/// forms are deterministic, which the content-addressed file needs.
+/// The PDF Info dictionary, the properties a viewer's document panel shows. A field left `None` writes
+/// no entry; a set one is encoded as an outline title is ([`pdf_text_string`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PdfInfo {
+	pub title:		Option<String>,
+	pub author:		Option<String>,
+	pub subject:	Option<String>,
+	pub keywords:	Option<String>,
+	pub creator:	Option<String>,
+	pub producer:	Option<String>,
+}
+
+impl PdfInfo {
+	fn is_empty(&self) -> bool {
+		self.title.is_none() && self.author.is_none() && self.subject.is_none()
+			&& self.keywords.is_none() && self.creator.is_none() && self.producer.is_none()
+	}
+}
+
+/// A PDF text string for a title or an Info dictionary value: a parenthesised literal with `(`, `)` and
+/// `\` escaped when the text is printable ASCII, else a UTF-16BE hex string with a byte-order mark so any
+/// Unicode renders. Both forms are deterministic, which the content-addressed file needs.
 fn pdf_text_string(s: &str) -> String {
 	if s.bytes().all(|b| (0x20..0x7f).contains(&b)) {
 		let mut out = String::from("(");
@@ -286,12 +405,25 @@ fn pdf_text_string(s: &str) -> String {
 	}
 }
 
+/// Opens a `/Span` marked-content sequence whose `/ActualText` is `text`, in UTF-16BE hex with a byte-order
+/// mark. A glyph's `/ToUnicode` entry holds one text, so a glyph shown for another (every missing character
+/// drawn as `.notdef`, say) is bracketed by this and `EMC` for the extracted text to be the real one.
+fn actual_text(s: &mut String, text: &str) {
+	s.push_str("/Span <</ActualText <FEFF");
+	for u in text.encode_utf16() {
+		s.push_str(&fmt!("{:04X}", u));
+	}
+	s.push_str(">>> BDC\n");
+}
+
 /// Accumulates pages and writes them out as one PDF file.
 #[derive(Clone, Debug, Default)]
 pub struct PdfWriter {
 	pages:		Vec<PdfPage>,
 	compress:	bool,
 	outline:	Vec<OutlineItem>,
+	info:		Option<PdfInfo>,
+	colour_out:	ColourOut,
 }
 
 impl PdfWriter {
@@ -304,6 +436,19 @@ impl PdfWriter {
 	/// uncompressed stream is trivially deterministic and easy to read while the writer is young.
 	pub fn with_compression(mut self, on: bool) -> Self {
 		self.compress = on;
+		self
+	}
+
+	/// Sets the Info dictionary the trailer's `/Info` names. A writer given none, or one with every field
+	/// unset, writes no `/Info` at all.
+	pub fn with_info(mut self, info: PdfInfo) -> Self {
+		self.info = Some(info);
+		self
+	}
+
+	/// Sets how colours are written, [`ColourOut::Rgb`] unless told otherwise.
+	pub fn with_colour_out(mut self, out: ColourOut) -> Self {
+		self.colour_out = out;
 		self
 	}
 
@@ -323,8 +468,9 @@ impl PdfWriter {
 	/// returns it. The bytes are exactly those [`PdfStream`] writes page by page, so a caller that
 	/// cannot hold the whole document keeps the identical file by streaming to a file handle instead.
 	pub fn to_bytes(&self) -> Outcome<Vec<u8>> {
-		let mut stream = res!(PdfStream::new_with_outline(
-			Vec::new(), self.pages.len(), self.compress, self.outline.clone()));
+		let mut stream = res!(PdfStream::new_with_outline_and_info(
+			Vec::new(), self.pages.len(), self.compress, self.outline.clone(), self.info.clone()))
+			.with_colour_out(self.colour_out.clone());
 		for page in &self.pages {
 			res!(stream.page(page));
 		}
@@ -343,11 +489,11 @@ impl PdfWriter {
 /// page -- names every page object and their count. The deterministic `/ID` is a hash of the body,
 /// folded here as each byte is written rather than over a finished buffer, so no buffer is needed.
 ///
-/// Text is written as Type-3 fonts: each distinct glyph outline is stored once as a `CharProc` and
-/// shown per occurrence by a one-byte code, rather than its outline written inline every time. The
-/// glyph store and the fonts are filled as pages are written -- in page order, on the writer's thread,
-/// so a code is assigned once and deterministically -- and the font objects themselves are written in
-/// [`finish`](Self::finish) after the last page, on numbers reserved as each font is first needed.
+/// Text is written in fonts gathered as pages are written -- in page order, on the writer's thread, so
+/// every number and code is assigned once and deterministically. An embedded font records the glyph ids
+/// shown from it and is subset to them in [`finish`](Self::finish), when the set is complete; an outline
+/// glyph is stored once as a Type-3 `CharProc` and shown by a one-byte code. Both kinds of font object
+/// are written after the last page, on numbers reserved as each font is first needed.
 pub struct PdfStream<W: Write> {
 	out:		W,
 	compress:	bool,
@@ -360,8 +506,98 @@ pub struct PdfStream<W: Write> {
 	hash_b:		u64,			// running FNV-1a of the body, second half
 	outline:	Vec<OutlineItem>,	// document outline entries, empty for none
 	outline_root:	usize,		// object number of the /Outlines dict, zero when there is no outline
+	info:		Option<PdfInfo>,	// the Info dictionary the trailer's /Info points at, unset for none
 	glyph_slots:	HashMap<u64, (usize, u8)>,	// outline content key -> (font index, code)
 	fonts:		Vec<Type3Font>,	// one Type-3 font per 256 distinct glyphs, in assignment order
+	cid_slots:	HashMap<u64, usize>,	// font program key -> index into `cid_fonts`
+	cid_fonts:	Vec<CidFont>,	// one embedded font per program, in order of first use
+	deferred:	bool,			// opened by `open`: the page tree, outline and Info are written by `close`
+	page_objs:	Vec<usize>,		// a deferred stream's page object numbers, in page order
+	heights:	Vec<f64>,		// a deferred stream's page heights, in page order, to flip a destination
+	named:		BTreeSet<String>,	// the destination names a written link jumps to
+	colour_out:	ColourOut,		// how a colour is written, `Rgb` unless set
+}
+
+/// One embedded font: the program, the glyphs shown from it with the text each stands for, and the
+/// object number reserved for its `Type0` dictionary when it was first needed.
+struct CidFont {
+	obj:	usize,
+	prog:	Arc<FontProgram>,
+	used:	BTreeMap<u16, String>,
+}
+
+/// The text-object state of a content stream being built: whether a `BT` is open, the font, size and
+/// colour last set in it, and the `TJ` run being gathered.
+#[derive(Default)]
+struct TextState {
+	open:	bool,
+	font:	Option<(String, f32)>,
+	colour:	Option<Ink>,
+	run:	Option<TjRun>,
+}
+
+/// Consecutive embedded glyphs on one baseline, shown by a single `TJ` whose numbers carry the
+/// difference between each glyph's placed position and where the font's own advance leaves the pen.
+struct TjRun {
+	y:		f32,
+	pen:	f64,	// where the viewer's pen stands after the last glyph, points
+	items:	String,
+	hex:	bool,	// a hex string is open in `items`
+	adj:	bool,	// `items` holds a number, so it needs the array form
+}
+
+impl TextState {
+
+	fn flush(&mut self, s: &mut String) {
+		if let Some(mut run) = self.run.take() {
+			if run.hex {
+				run.items.push('>');
+			}
+			if run.adj {
+				s.push_str(&fmt!("[{}] TJ\n", run.items));
+			} else {
+				s.push_str(&fmt!("{} Tj\n", run.items));
+			}
+		}
+	}
+
+	fn close(&mut self, s: &mut String) {
+		self.flush(s);
+		if self.open {
+			s.push_str("ET\n");
+		}
+		self.open	= false;
+		self.font	= None;
+		self.colour	= None;
+	}
+
+	/// Opens a text object if none is, and sets the colour and font when they differ from what is set.
+	fn begin(
+		&mut self,
+		s:			&mut String,
+		translucent:	bool,
+		alpha:		&mut Option<u8>,
+		colour:		Ink,
+		font:		&str,
+		size:		f32,
+	) {
+		if !self.open {
+			s.push_str("BT\n");
+			self.open = true;
+		}
+		if self.colour != Some(colour) {
+			if translucent {
+				set_alpha(s, alpha, colour.alpha());
+			}
+			set_colour(s, colour, false);
+			self.colour = Some(colour);
+		}
+		let want = (font.to_string(), size);
+		if self.font.as_ref() != Some(&want) {
+			s.push_str(&fmt!("/{} {} Tf\n", font, numf32(size)));
+			self.font = Some(want);
+		}
+	}
 }
 
 /// One Type-3 font: up to 256 distinct glyphs, and the object number reserved for its font dictionary
@@ -392,6 +628,22 @@ impl<W: Write> PdfStream<W> {
 	/// panel). Each entry's page must be one of the `n` promised, since its destination names that page
 	/// object. An empty outline yields a file byte-identical to [`new`]'s.
 	pub fn new_with_outline(out: W, n: usize, compress: bool, outline: Vec<OutlineItem>) -> Outcome<Self> {
+		Self::new_with_outline_and_info(out, n, compress, outline, None)
+	}
+
+	/// As [`new_with_outline`](Self::new_with_outline), and the file also carries `info` as its Info
+	/// dictionary, written as the last object and named by the trailer's `/Info`. `None` writes the file
+	/// [`new_with_outline`](Self::new_with_outline) writes.
+	pub fn new_with_outline_and_info(
+		out:		W,
+		n:			usize,
+		compress:	bool,
+		outline:	Vec<OutlineItem>,
+		info:		Option<PdfInfo>,
+	)
+		-> Outcome<Self>
+	{
+		let info = info.filter(|i| !i.is_empty());
 		for it in &outline {
 			if it.page >= n {
 				return Err(err!(
@@ -421,8 +673,16 @@ impl<W: Write> PdfStream<W> {
 			hash_b:		FNV_BASIS_B,
 			outline,
 			outline_root,
+			info,
 			glyph_slots:	HashMap::new(),
 			fonts:		Vec::new(),
+			cid_slots:	HashMap::new(),
+			cid_fonts:	Vec::new(),
+			deferred:	false,
+			page_objs:	Vec::new(),
+			heights:	Vec::new(),
+			named:		BTreeSet::new(),
+			colour_out:	ColourOut::default(),
 		};
 
 		res!(s.body(b"%PDF-1.7\n"));
@@ -457,6 +717,59 @@ impl<W: Write> PdfStream<W> {
 		Ok(s)
 	}
 
+	/// Opens a stream for a document whose page count, outline and Info dictionary are known only at the
+	/// end: the pages are written as they come, each on the next free object numbers, and
+	/// [`close`](Self::close) then writes the catalogue and the page tree naming them, the outline, the
+	/// subset fonts, the Info dictionary and the cross-reference table. Objects 1 and 2 are reserved for the
+	/// catalogue and the page tree, so a reader that follows the trailer finds them wherever they sit.
+	/// A stream opened here is ended by `close`; `finish` refuses it.
+	pub fn open(out: W, compress: bool) -> Outcome<Self> {
+		Self::open_version(out, compress, 7)
+	}
+
+	/// As [`open`](Self::open), the header naming PDF version 1.`minor`, which may be 4 to 7. The writer
+	/// uses nothing newer than 1.4, so the version is the header's claim and nothing else changes.
+	pub fn open_version(out: W, compress: bool, minor: u8) -> Outcome<Self> {
+		if !(4..=7).contains(&minor) {
+			return Err(err!("A PDF version of 1.{} cannot be written; 1.4 to 1.7 can.", minor; Input, Invalid, Range));
+		}
+		let mut s = Self {
+			out,
+			compress,
+			n:			usize::MAX,
+			offsets:	vec![0; 3],
+			pos:		0,
+			added:		0,
+			next_extra:	3,
+			hash_a:		FNV_BASIS_A,
+			hash_b:		FNV_BASIS_B,
+			outline:	Vec::new(),
+			outline_root:	0,
+			info:		None,
+			glyph_slots:	HashMap::new(),
+			fonts:		Vec::new(),
+			cid_slots:	HashMap::new(),
+			cid_fonts:	Vec::new(),
+			deferred:	true,
+			page_objs:	Vec::new(),
+			heights:	Vec::new(),
+			named:		BTreeSet::new(),
+			colour_out:	ColourOut::default(),
+		};
+		res!(s.body(fmt!("%PDF-1.{}\n", minor).as_bytes()));
+		res!(s.body(b"%\xE2\xE3\xCF\xD3\n"));
+		Ok(s)
+	}
+
+	/// Sets how colours are written, [`ColourOut::Rgb`] unless told otherwise. Call it before the first page.
+	pub fn with_colour_out(mut self, out: ColourOut) -> Self {
+		self.colour_out = out;
+		self
+	}
+
+	/// How many pages have been written.
+	pub fn pages(&self) -> usize { self.added }
+
 	/// Writes the next page -- its page object and its content stream -- then advances. The page must
 	/// be the next of the `n` promised at construction; an extra page is a mismatch the file could not
 	/// name, so it is refused rather than written past the page tree.
@@ -472,8 +785,15 @@ impl<W: Write> PdfStream<W> {
 				name it.", self.n; Input, Invalid, Excessive));
 		}
 		let i			= self.added;
-		let page_obj	= 3 + 2 * i;
-		let content_obj	= 4 + 2 * i;
+		let (page_obj, content_obj) = if self.deferred {
+			let p = self.next_extra;
+			self.next_extra += 2;
+			self.page_objs.push(p);
+			self.heights.push(page.height);
+			(p, p + 1)
+		} else {
+			(3 + 2 * i, 4 + 2 * i)
+		};
 
 		// Assign object numbers for every image on the page -- one for the image itself, and one more for
 		// its soft mask when it carries translucency -- so the page's resource dictionary can name them
@@ -497,7 +817,17 @@ impl<W: Write> PdfStream<W> {
 
 		// The link annotations, if any, take one further object -- the `/Annots` array -- numbered after the
 		// images. A page with no link claims no number and writes no `/Annots`, so its bytes are unchanged.
-		let annots_obj = if page.annots.is_empty() {
+		// A named link is written only where the close can name its destination.
+		let deferred = self.deferred;
+		let written = |a: &&LinkAnnot| deferred || matches!(a.to, LinkTo::Uri(_));
+		if deferred {
+			for a in &page.annots {
+				if let LinkTo::Named(name) = &a.to {
+					self.named.insert(name.clone());
+				}
+			}
+		}
+		let annots_obj = if !page.annots.iter().any(|a| written(&a)) {
 			None
 		} else {
 			let a = self.next_extra;
@@ -508,10 +838,7 @@ impl<W: Write> PdfStream<W> {
 		// Build the content stream, which assigns each new glyph a Type-3 code and reserves a font-dictionary
 		// object number the first time a font is needed. The used fonts come back so the page's resources can
 		// name them by forward reference, exactly as the page tree forward-references its pages.
-		let (raw, page_font_idxs) = res!(self.build_content(page));
-		let page_fonts: Vec<(usize, usize)> = page_font_idxs.iter()
-			.map(|&k| (k, self.fonts[k].obj))
-			.collect();
+		let (raw, page_fonts) = res!(self.build_content(page));
 
 		// The content stream is now serialised, so its `/Length` is known before the object that wraps it;
 		// only the optional compression is left to do here.
@@ -521,19 +848,25 @@ impl<W: Write> PdfStream<W> {
 			raw
 		};
 
-		self.offsets[page_obj] = self.pos;
+		self.set_extra_offset(page_obj);
 		let annots = match annots_obj {
 			Some(a)	=> fmt!(" /Annots {} 0 R", a),
 			None	=> String::new(),
 		};
+		// A converting mode names its output space for the page's transparency, so a viewer blends in it
+		// and never in RGB. Native and RGB write nothing here, and their bytes are as they were.
+		let group = match self.colour_out.group_space() {
+			Some(cs)	=> fmt!(" /Group << /S /Transparency /CS /{} /I true >>", cs),
+			None		=> String::new(),
+		};
 		let head = fmt!(
 			"{} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] {} \
-				/Contents {} 0 R{} >>\nendobj\n",
+				/Contents {} 0 R{}{} >>\nendobj\n",
 			page_obj, numf(page.width), numf(page.height),
-			resources(page, &img_objs, &page_fonts), content_obj, annots);
+			resources(page, &img_objs, &page_fonts), content_obj, group, annots);
 		res!(self.body(head.as_bytes()));
 
-		self.offsets[content_obj] = self.pos;
+		self.set_extra_offset(content_obj);
 		let filter = if self.compress { " /Filter /FlateDecode" } else { "" };
 		let open = fmt!(
 			"{} 0 obj\n<< /Length {}{} >>\nstream\n", content_obj, bytes.len(), filter);
@@ -545,10 +878,13 @@ impl<W: Write> PdfStream<W> {
 		// written straight after the image object that references it.
 		let mut idx = 0;
 		for d in &page.draws {
-			if let Draw::Image { rgb, alpha, iw, ih, .. } = d {
+			if let Draw::Image { rgb, alpha, tone, iw, ih, .. } = d {
 				let (image_obj, smask_obj) = img_objs[idx];
 				idx += 1;
-				res!(self.write_image(image_obj, rgb, *iw, *ih, smask_obj));
+				match res!(self.colour_out.image(rgb, *iw, *ih, *tone)) {
+					Some((chans, data))	=> res!(self.write_image(image_obj, &data, chans, *iw, *ih, smask_obj)),
+					None				=> res!(self.write_image(image_obj, rgb, 3, *iw, *ih, smask_obj)),
+				}
 				if let (Some(m), Some(a)) = (smask_obj, alpha) {
 					res!(self.write_smask(m, a, *iw, *ih));
 				}
@@ -567,34 +903,46 @@ impl<W: Write> PdfStream<W> {
 	}
 
 	/// Builds one page's content stream: the flip, then every shape's paint. A vector fill or stroke is
-	/// written inline as before; a glyph is shown by a Type-3 text operator against a code assigned here.
-	/// Returns the serialised bytes and the distinct font indices the page used, so the caller can name
-	/// them in the page's `/Resources`.
+	/// written inline; an embedded glyph joins a `TJ` run; an outline glyph is shown by a Type-3 text
+	/// operator against a code assigned here. Returns the serialised bytes and the fonts the page used, by
+	/// resource name and object number, so the caller can name them in the page's `/Resources`.
 	///
-	/// Glyph codes are assigned in draw order, on this (the writer's) thread and in page order across the
-	/// document, so the assignment is a deterministic function of the page sequence. Consecutive glyphs of
-	/// one font, colour and size share a single `BT ... ET` text object; every glyph carries its own text
-	/// matrix, so the font's own advances never move the pen and a per-glyph offset is exact.
-	fn build_content(&mut self, page: &PdfPage) -> Outcome<(Vec<u8>, Vec<usize>)> {
+	/// Codes and fonts are assigned in draw order, on this (the writer's) thread and in page order across
+	/// the document, so the assignment is a deterministic function of the page sequence. Consecutive
+	/// glyphs share a `BT ... ET` text object while nothing else is drawn between them.
+	fn build_content(&mut self, page: &PdfPage) -> Outcome<(Vec<u8>, Vec<(String, usize)>)> {
 		let mut s = String::new();
 		s.push_str(&fmt!("1 0 0 -1 0 {} cm\n", numf(page.height)));
 
-		let translucent = page.draws.iter().any(|d| d.colour().a != 255);
+		let translucent = page.draws.iter().any(|d| d.alpha() != 255);
+		let out = self.colour_out.clone();
+		let mut inks = Inks::new(&out);
 		let mut cur_alpha: Option<u8> = None;
 		let mut img_k = 0;	// the image index, naming each `/Im{k}` XObject in draw order
-		let mut used_fonts: Vec<usize> = Vec::new();
-
-		// The open text object, if any: the font index, colour and size its `BT` set. A glyph reuses it when
-		// all three match, else the block is closed and a fresh one opened.
-		let mut open: Option<(usize, Rgba, f32)> = None;
+		let mut used: Vec<(String, usize)> = Vec::new();
+		let mut ts = TextState::default();
+		let mut saved: Vec<Option<u8>> = Vec::new();	// the alpha in force at each open group, restored by `Q`
 
 		for d in &page.draws {
-			// A non-glyph draw ends any run of glyphs first, so the text object is well formed.
-			if !matches!(d, Draw::Glyph { .. }) && open.is_some() {
-				s.push_str("ET\n");
-				open = None;
+			// A non-text draw ends any text object first, so it is well formed.
+			if !matches!(d, Draw::Glyph { .. } | Draw::Text { .. }) {
+				ts.close(&mut s);
 			}
 			match d {
+				Draw::Push { matrix, clip } => {
+					s.push_str("q\n");
+					saved.push(cur_alpha);
+					let [a, b, c, dd, e, f] = *matrix;
+					s.push_str(&fmt!("{} {} {} {} {} {} cm\n", numf(a), numf(b), numf(c), numf(dd), numf(e), numf(f)));
+					if let Some(path) = clip {
+						path_ops(&mut s, path);
+						s.push_str("W n\n");
+					}
+				},
+				Draw::Pop => {
+					s.push_str("Q\n");
+					cur_alpha = saved.pop().unwrap_or(cur_alpha);
+				},
 				Draw::Image { x, y, w, h, .. } => {
 					// The page CTM already flips y into the engine's top-left frame. An image's sample space
 					// paints the unit square with its top row at the square's top, so mapping it into the
@@ -609,67 +957,150 @@ impl<W: Write> PdfStream<W> {
 				},
 				Draw::Fill { path, colour } => {
 					if translucent {
-						set_alpha(&mut s, &mut cur_alpha, colour.a);
+						set_alpha(&mut s, &mut cur_alpha, colour.alpha());
 					}
-					s.push_str(&fmt!("{} {} {} rg\n",
-						chan(colour.r), chan(colour.g), chan(colour.b)));
+					set_colour(&mut s, res!(inks.get(*colour)), false);
 					path_ops(&mut s, path);
 					// Non-zero winding, to match the SVG writer, whose fill-rule defaults to nonzero.
 					s.push_str("f\n");
 				},
 				Draw::Stroke { path, colour, width } => {
 					if translucent {
-						set_alpha(&mut s, &mut cur_alpha, colour.a);
+						set_alpha(&mut s, &mut cur_alpha, colour.alpha());
 					}
-					s.push_str(&fmt!("{} {} {} RG\n",
-						chan(colour.r), chan(colour.g), chan(colour.b)));
+					set_colour(&mut s, res!(inks.get(*colour)), true);
 					s.push_str(&fmt!("{} w\n", numf(*width)));
 					path_ops(&mut s, path);
 					s.push_str("S\n");
 				},
 				Draw::Glyph { outline, x, y, size, adv, colour, text } => {
-					let (font_idx, code) = self.assign_glyph(outline, *adv, *size, text);
-					if !used_fonts.contains(&font_idx) {
-						used_fonts.push(font_idx);
+					let (font_idx, code, other) = self.assign_glyph(outline, *adv, *size, text);
+					let name = fmt!("F{}", font_idx);
+					let obj = self.fonts[font_idx].obj;
+					if !used.iter().any(|(n, _)| n == &name) {
+						used.push((name.clone(), obj));
 					}
-					// Open a fresh text object when the font, colour or size changes.
-					if open != Some((font_idx, *colour, *size)) {
-						if open.is_some() {
-							s.push_str("ET\n");
-						}
-						if translucent {
-							set_alpha(&mut s, &mut cur_alpha, colour.a);
-						}
-						// Under `d1` a Type-3 glyph paints with the text state's fill colour, set here once.
-						s.push_str(&fmt!("{} {} {} rg\n",
-							chan(colour.r), chan(colour.g), chan(colour.b)));
-						s.push_str(&fmt!("BT\n/F{} {} Tf\n", font_idx, numf32(*size)));
-						open = Some((font_idx, *colour, *size));
-					}
+					ts.flush(&mut s);
+					// Under `d1` a Type-3 glyph paints with the text state's fill colour, set by `begin`.
+					ts.begin(&mut s, translucent, &mut cur_alpha, res!(inks.get(*colour)), &name, *size);
 					// The text matrix places the glyph and flips it back to y up: the page CTM flips the whole
 					// page in y, and this `[1 0 0 -1 x y]` flips the text within it, so the glyph reads upright.
 					// A per-glyph matrix means the font's advance never moves the pen -- the offset is exact.
 					s.push_str(&fmt!("1 0 0 -1 {} {} Tm\n", numf32(*x), numf32(*y)));
+					if other {
+						actual_text(&mut s, text);
+					}
 					s.push_str(&fmt!("<{:02x}> Tj\n", code));
+					if other {
+						s.push_str("EMC\n");
+					}
+				},
+				Draw::Text { font, gid, x, y, size, colour, text } => {
+					let (idx, other) = self.assign_text(font, *gid, text);
+					let name	= fmt!("C{}", idx);
+					let obj		= self.cid_fonts[idx].obj;
+					if !used.iter().any(|(n, _)| n == &name) {
+						used.push((name.clone(), obj));
+					}
+					let colour = res!(inks.get(*colour));
+					if other {
+						// Shown alone in its span, with its own text matrix; the next glyph starts a new run.
+						ts.flush(&mut s);
+						ts.begin(&mut s, translucent, &mut cur_alpha, colour, &name, *size);
+						actual_text(&mut s, text);
+						s.push_str(&fmt!("1 0 0 -1 {} {} Tm\n<{:04X}> Tj\nEMC\n", numf32(*x), numf32(*y), gid));
+						continue;
+					}
+					let same_state = ts.open
+						&& ts.colour == Some(colour)
+						&& ts.font.as_ref().map_or(false, |(n, z)| n == &name && z == size);
+					let same_line = same_state && ts.run.as_ref().map_or(false, |r| r.y == *y);
+					if !same_line {
+						ts.flush(&mut s);
+						ts.begin(&mut s, translucent, &mut cur_alpha, colour, &name, *size);
+						// One text matrix per run, flipped back to y up within the page's flip; the glyphs
+						// after the first are placed by the font's advances and the run's adjustments.
+						s.push_str(&fmt!("1 0 0 -1 {} {} Tm\n", numf32(*x), numf32(*y)));
+						ts.run = Some(TjRun {
+							y:		*y,
+							pen:	((*x as f64) * 1000.0).round() / 1000.0,	// as the `Tm` above writes it
+							items:	String::new(),
+							hex:	false,
+							adj:	false,
+						});
+					}
+					if let Some(run) = ts.run.as_mut() {
+						let z = *size as f64;
+						// The number that moves the pen from where the last advance left it to this glyph's
+						// placed x, in thousandths of the em, positive to the left as `TJ` has it.
+						let adj = if z > 0.0 { ((run.pen - *x as f64) * 1000.0 / z).round() as i64 } else { 0 };
+						if adj != 0 {
+							if run.hex {
+								run.items.push('>');
+								run.hex = false;
+							}
+							run.items.push_str(&fmt!("{}", adj));
+							run.adj = true;
+							run.pen -= adj as f64 * z / 1000.0;
+						}
+						if !run.hex {
+							run.items.push('<');
+							run.hex = true;
+						}
+						run.items.push_str(&fmt!("{:04X}", gid));
+						run.pen += font.width(*gid) as f64 * z / 1000.0;
+					}
 				},
 			}
 		}
-		if open.is_some() {
-			s.push_str("ET\n");
+		ts.close(&mut s);
+		Ok((s.into_bytes(), used))
+	}
+
+	/// Records glyph `gid` of an embedded font as shown, reserving the font's `Type0` dictionary number
+	/// the first time the program is met. The first non-empty source text a glyph arrives with is kept for
+	/// its `/ToUnicode` entry; the flag says this show's text is another, so it needs an `/ActualText`.
+	fn assign_text(&mut self, font: &Arc<FontProgram>, gid: u16, text: &str) -> (usize, bool) {
+		let idx = match self.cid_slots.get(&font.key()) {
+			Some(&i)	=> i,
+			None		=> {
+				let obj = self.next_extra;
+				self.next_extra += 1;
+				self.cid_fonts.push(CidFont { obj, prog: font.clone(), used: BTreeMap::new() });
+				let i = self.cid_fonts.len() - 1;
+				self.cid_slots.insert(font.key(), i);
+				i
+			},
+		};
+		let entry = self.cid_fonts[idx].used.entry(gid).or_default();
+		if entry.is_empty() {
+			*entry = text.to_string();
+			return (idx, false);
 		}
-		Ok((s.into_bytes(), used_fonts))
+		(idx, !text.is_empty() && entry != text)
 	}
 
 	/// Assigns a glyph its Type-3 font index and code, storing the outline once. The key is the content of
 	/// the outline's path operators, so the same shape drawn by any face or size shares one `CharProc`. A
 	/// new glyph takes the next code; each font holds 256 codes, and crossing that boundary reserves a
-	/// fresh font-dictionary object number from the extra-object counter.
-	fn assign_glyph(&mut self, outline: &Path, adv: f32, size: f32, text: &str) -> (usize, u8) {
+	/// fresh font-dictionary object number from the extra-object counter. As for [`assign_text`], the flag
+	/// says a known glyph is shown for a text other than the one its code maps to.
+	///
+	/// [`assign_text`]: Self::assign_text
+	fn assign_glyph(&mut self, outline: &Path, adv: f32, size: f32, text: &str) -> (usize, u8, bool) {
 		let mut ops = String::new();
 		path_ops(&mut ops, outline);
 		let key = fnv1a(ops.as_bytes());
-		if let Some(&slot) = self.glyph_slots.get(&key) {
-			return slot;
+		if let Some(&(font_idx, code)) = self.glyph_slots.get(&key) {
+			let mut other = false;
+			if let Some(g) = self.fonts.get_mut(font_idx).and_then(|f| f.glyphs.get_mut(code as usize)) {
+				if g.text.is_empty() {
+					g.text = text.to_string();
+				} else {
+					other = !text.is_empty() && g.text != text;
+				}
+			}
+			return (font_idx, code, other);
 		}
 		let seq			= self.glyph_slots.len();
 		let font_idx	= seq / 256;
@@ -689,7 +1120,7 @@ impl<W: Write> PdfStream<W> {
 		let wx = if size != 0.0 { (adv / size * GLYPH_UPM).round() as i64 } else { 0 };
 		self.fonts[font_idx].glyphs.push(GlyphEntry { ops, wx, bbox, text: text.to_string() });
 		self.glyph_slots.insert(key, (font_idx, code));
-		(font_idx, code)
+		(font_idx, code, false)
 	}
 
 	/// Writes the Type-3 fonts: for each, its `CharProc` glyph streams, a `/ToUnicode` CMap, and the font
@@ -752,6 +1183,114 @@ impl<W: Write> PdfStream<W> {
 		Ok(())
 	}
 
+	/// Writes the embedded fonts: for each program, a `Type0` font over one `CIDFont` whose CIDs are the
+	/// program's glyph ids (`Identity-H` encoding, and for TrueType an identity `/CIDToGIDMap`), a font
+	/// descriptor naming the subset program, and a `/ToUnicode` CMap from each shown glyph to its text.
+	fn write_cid_fonts(&mut self) -> Outcome<()> {
+		let fonts = std::mem::take(&mut self.cid_fonts);
+		for font in &fonts {
+			let prog = &font.prog;
+			let gids: BTreeSet<u16> = font.used.keys().copied().collect();
+			let file = prog.subset(&gids);
+
+			// The six-letter subset tag, from the program and the glyph set, so it is stable across runs yet
+			// differs between two subsets of one font.
+			let mut h = FNV_BASIS_A ^ prog.key();
+			for g in &gids {
+				for b in g.to_be_bytes() {
+					h ^= b as u64;
+					h = h.wrapping_mul(FNV_PRIME);
+				}
+			}
+			let mut tag = String::new();
+			for _ in 0..6 {
+				tag.push((b'A' + (h % 26) as u8) as char);
+				h /= 26;
+			}
+			let base = fmt!("{}+{}", tag, prog.name());
+
+			let cid_obj	= self.next_extra;
+			let fd_obj	= cid_obj + 1;
+			let ff_obj	= cid_obj + 2;
+			let tu_obj	= cid_obj + 3;
+			self.next_extra += 4;
+
+			self.set_extra_offset(font.obj);
+			let type0 = fmt!(
+				"{} 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /{} /Encoding /Identity-H \
+					/DescendantFonts [{} 0 R] /ToUnicode {} 0 R >>\nendobj\n",
+				font.obj, base, cid_obj, tu_obj);
+			res!(self.body(type0.as_bytes()));
+
+			// Widths, one bracketed run per stretch of consecutive glyph ids.
+			let mut w = String::new();
+			let mut prev: Option<u16> = None;
+			for &g in &gids {
+				match prev {
+					Some(p) if p.checked_add(1) == Some(g) => w.push_str(&fmt!(" {}", prog.width(g))),
+					Some(_) => w.push_str(&fmt!("] {} [{}", g, prog.width(g))),
+					None => w.push_str(&fmt!("{} [{}", g, prog.width(g))),
+				}
+				prev = Some(g);
+			}
+			if prev.is_some() {
+				w.push(']');
+			}
+			let (subtype, extra) = match prog.outlines() {
+				Outlines::TrueType	=> ("CIDFontType2", " /CIDToGIDMap /Identity"),
+				Outlines::Cff		=> ("CIDFontType0", ""),
+			};
+			let cid = fmt!(
+				"{} 0 obj\n<< /Type /Font /Subtype /{} /BaseFont /{} \
+					/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+					/FontDescriptor {} 0 R /W [{}]{} >>\nendobj\n",
+				cid_obj, subtype, base, fd_obj, w, extra);
+			self.set_extra_offset(cid_obj);
+			res!(self.body(cid.as_bytes()));
+
+			// Symbolic (bit 3), since the glyphs are reached by id rather than a standard encoding; fixed
+			// pitch (bit 1) and italic (bit 7) as the program declares them.
+			let mut flags = 4u32;
+			if prog.fixed_pitch() { flags |= 1; }
+			if prog.italic_angle() != 0.0 { flags |= 64; }
+			let bb = prog.bbox();
+			let stem_v = if prog.weight() >= 600 { 120 } else { 80 };
+			let file_key = match file {
+				FontFile::TrueType(_)	=> "FontFile2",
+				_						=> "FontFile3",
+			};
+			let fd = fmt!(
+				"{} 0 obj\n<< /Type /FontDescriptor /FontName /{} /Flags {} /FontBBox [{} {} {} {}] \
+					/ItalicAngle {} /Ascent {} /Descent {} /CapHeight {} /StemV {} /{} {} 0 R >>\nendobj\n",
+				fd_obj, base, flags, bb[0], bb[1], bb[2], bb[3], numf32(prog.italic_angle()),
+				prog.ascent(), prog.descent(), prog.cap_height(), stem_v, file_key, ff_obj);
+			self.set_extra_offset(fd_obj);
+			res!(self.body(fd.as_bytes()));
+
+			// The program itself, always compressed: it is binary whatever the content streams are.
+			let (data, dict) = match &file {
+				FontFile::TrueType(b)	=> (b, fmt!("/Length1 {}", b.len())),
+				FontFile::Cff(b)		=> (b, "/Subtype /CIDFontType0C".to_string()),
+				FontFile::OpenType(b)	=> (b, "/Subtype /OpenType".to_string()),
+			};
+			let packed = res!(deflate(data));
+			self.set_extra_offset(ff_obj);
+			let head = fmt!("{} 0 obj\n<< {} /Length {} /Filter /FlateDecode >>\nstream\n",
+				ff_obj, dict, packed.len());
+			res!(self.body(head.as_bytes()));
+			res!(self.body(&packed));
+			res!(self.body(b"\nendstream\nendobj\n"));
+
+			let maps: Vec<(u32, &str)> = font.used.iter()
+				.filter(|(_, t)| !t.is_empty())
+				.map(|(g, t)| (*g as u32, t.as_str()))
+				.collect();
+			let cmap = tounicode_cmap(2, &maps);
+			res!(self.write_stream(tu_obj, cmap.as_bytes()));
+		}
+		Ok(())
+	}
+
 	/// Writes one body stream object, compressing it and marking `/FlateDecode` when compression is on, and
 	/// records its offset. The bytes are folded into the deterministic `/ID` like all body bytes.
 	fn write_stream(&mut self, obj: usize, raw: &[u8]) -> Outcome<()> {
@@ -771,39 +1310,52 @@ impl<W: Write> PdfStream<W> {
 
 	/// Writes a page's `/Annots` array: one `/Link` annotation per [`LinkAnnot`], its rectangle flipped from
 	/// the engine's top-left, y-down frame into PDF's bottom-left, y-up one, its border drawn away, and its
-	/// action opening the URI. The dictionaries are inlined in the array object, so a page's links cost one
+	/// action opening the URI or its `/Dest` naming the destination. The dictionaries are inlined in the array object, so a page's links cost one
 	/// object however many they are. Only called when the page carries at least one link.
 	fn write_annots(&mut self, obj: usize, page: &PdfPage) -> Outcome<()> {
 		self.set_extra_offset(obj);
 		let mut s = fmt!("{} 0 obj\n[ ", obj);
 		for a in &page.annots {
+			let to = match &a.to {
+				LinkTo::Uri(uri)						=> fmt!("/A << /S /URI /URI {} >>", pdf_text_string(uri)),
+				LinkTo::Named(name) if self.deferred	=> fmt!("/Dest {}", pdf_text_string(name)),
+				LinkTo::Named(_)						=> continue,
+			};
 			// Flip y: a point at engine y lands at PDF `height - y`, so the top edge (smaller engine y)
 			// becomes the upper PDF coordinate and the bottom edge the lower one.
 			let lly = page.height - a.y1;
 			let ury = page.height - a.y0;
 			s.push_str(&fmt!(
-				"<< /Type /Annot /Subtype /Link /Border [0 0 0] /Rect [{} {} {} {}] \
-					/A << /S /URI /URI {} >> >> ",
-				numf(a.x0), numf(lly), numf(a.x1), numf(ury), pdf_text_string(&a.uri)));
+				"<< /Type /Annot /Subtype /Link /Border [0 0 0] /Rect [{} {} {} {}] {} >> ",
+				numf(a.x0), numf(lly), numf(a.x1), numf(ury), to));
 		}
 		s.push_str("]\nendobj\n");
 		res!(self.body(s.as_bytes()));
 		Ok(())
 	}
 
-	/// Writes an image XObject: a straight-RGB, eight-bit `/DeviceRGB` sample stream, always
-	/// zlib-compressed so a photograph does not bloat the file, and pointing at its soft mask when one
-	/// was assigned. The samples are folded into the deterministic `/ID` like all body bytes.
+	/// Writes an image XObject: eight-bit samples of one, three or four channels, named `/DeviceGray`,
+	/// `/DeviceRGB` or `/DeviceCMYK`, always zlib-compressed so a photograph does not bloat the file, and
+	/// pointing at its soft mask when one was assigned. The samples are folded into the deterministic
+	/// `/ID` like all body bytes.
 	fn write_image(
 		&mut self,
 		obj:	usize,
 		rgb:	&[u8],
+		chans:	usize,
 		iw:		usize,
 		ih:		usize,
 		smask:	Option<usize>,
 	)
 		-> Outcome<()>
 	{
+		let space = match chans {
+			1	=> "DeviceGray",
+			3	=> "DeviceRGB",
+			4	=> "DeviceCMYK",
+			n	=> return Err(err!(
+				"An image of {} channels cannot be written; one, three and four can.", n; Invalid, Input, Size)),
+		};
 		let data = res!(deflate(rgb));
 		self.set_extra_offset(obj);
 		let mask = match smask {
@@ -811,9 +1363,9 @@ impl<W: Write> PdfStream<W> {
 			None	=> String::new(),
 		};
 		let head = fmt!(
-			"{} 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB \
+			"{} 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /{} \
 				/BitsPerComponent 8{} /Filter /FlateDecode /Length {} >>\nstream\n",
-			obj, iw, ih, mask, data.len());
+			obj, iw, ih, space, mask, data.len());
 		res!(self.body(head.as_bytes()));
 		res!(self.body(&data));
 		res!(self.body(b"\nendstream\nendobj\n"));
@@ -865,7 +1417,7 @@ impl<W: Write> PdfStream<W> {
 				Some(p)	=> item_base + p,
 				None	=> root,
 			};
-			let page_obj = 3 + 2 * item.page;
+			let page_obj = if self.deferred { self.page_objs[item.page] } else { 3 + 2 * item.page };
 
 			let mut dict = fmt!("{} 0 obj\n<< /Title {} /Parent {} 0 R",
 				obj, pdf_text_string(&item.title), parent);
@@ -896,10 +1448,110 @@ impl<W: Write> PdfStream<W> {
 		self.offsets[obj] = self.pos;
 	}
 
+	/// Closes a stream opened by [`open`](Self::open): the catalogue and the page tree naming every page
+	/// written, the document outline and the Info dictionary, the fonts and the cross-reference table. Each
+	/// outline entry's page must be one written.
+	pub fn close(self, outline: Vec<OutlineItem>, info: Option<PdfInfo>) -> Outcome<W> {
+		self.close_with_dests(outline, Vec::new(), info)
+	}
+
+	/// As [`close`](Self::close), and the catalogue's `/Dests` name tree places every destination a written
+	/// link names, from `dests`. A destination no link names is not written, so a caller may hand over every
+	/// place it knows; the first of a name stands. A link whose name `dests` lacks is left inert.
+	pub fn close_with_dests(
+		mut self,
+		outline:	Vec<OutlineItem>,
+		dests:		Vec<NamedDest>,
+		info:		Option<PdfInfo>,
+	)
+		-> Outcome<W>
+	{
+		if !self.deferred {
+			return Err(err!(
+				"close ends a stream opened by open; a stream opened for a fixed page count is ended by finish.";
+				Invalid, Input));
+		}
+		let n = self.added;
+		for it in &outline {
+			if it.page >= n {
+				return Err(err!(
+					"An outline entry points at page {} (zero-based), but the document has only {} \
+					page(s); its destination could not be named.", it.page, n; Input, Invalid, Range));
+			}
+		}
+		// The destinations some link names, in the byte order a name tree's keys must stand in.
+		let mut placed: BTreeMap<String, NamedDest> = BTreeMap::new();
+		for d in dests {
+			if self.named.contains(&d.name) && !placed.contains_key(&d.name) {
+				if d.page >= n {
+					return Err(err!(
+						"The destination '{}' points at page {} (zero-based), but the document has only {} \
+						page(s).", d.name, d.page, n; Input, Invalid, Range));
+				}
+				placed.insert(d.name.clone(), d);
+			}
+		}
+		self.info = info.filter(|i| !i.is_empty());
+		if !outline.is_empty() {
+			self.outline_root	= self.next_extra;
+			self.next_extra		+= 1 + outline.len();
+			self.outline		= outline;
+		}
+		let dests_obj = if placed.is_empty() {
+			None
+		} else {
+			let d = self.next_extra;
+			self.next_extra += 1;
+			Some(d)
+		};
+		self.set_extra_offset(1);
+		let mut cat = String::from("1 0 obj\n<< /Type /Catalog /Pages 2 0 R");
+		if self.outline_root > 0 {
+			cat.push_str(&fmt!(" /Outlines {} 0 R /PageMode /UseOutlines", self.outline_root));
+		}
+		if let Some(d) = dests_obj {
+			cat.push_str(&fmt!(" /Names << /Dests {} 0 R >>", d));
+		}
+		cat.push_str(" >>\nendobj\n");
+		res!(self.body(cat.as_bytes()));
+		self.set_extra_offset(2);
+		let mut kids = String::new();
+		for (i, p) in self.page_objs.iter().enumerate() {
+			if i > 0 {
+				kids.push(' ');
+			}
+			kids.push_str(&fmt!("{} 0 R", p));
+		}
+		let tree = fmt!("2 0 obj\n<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n", kids, n);
+		res!(self.body(tree.as_bytes()));
+		// The name tree is a single leaf, its keys sorted; each destination puts its point at the top left
+		// of the window, flipped into PDF's y-up frame, and keeps the zoom.
+		if let Some(obj) = dests_obj {
+			self.set_extra_offset(obj);
+			let mut s = fmt!("{} 0 obj\n<< /Names [", obj);
+			for (name, d) in &placed {
+				s.push_str(&fmt!(" {} [{} 0 R /XYZ {} {} null]", pdf_text_string(name),
+					self.page_objs[d.page], numf(d.x), numf(self.heights[d.page] - d.y)));
+			}
+			s.push_str(" ] >>\nendobj\n");
+			res!(self.body(s.as_bytes()));
+		}
+		self.end()
+	}
+
 	/// Closes the file: writes the cross-reference table and the trailer, flushes, and returns the sink.
 	/// The `/ID` is the body hash folded as the body was written, so the file matches
 	/// [`PdfWriter::to_bytes`] to the byte.
-	pub fn finish(mut self) -> Outcome<W> {
+	pub fn finish(self) -> Outcome<W> {
+		if self.deferred {
+			return Err(err!(
+				"A stream opened by open has no page tree until close writes it; end it with close, not finish.";
+				Invalid, Input));
+		}
+		self.end()
+	}
+
+	fn end(mut self) -> Outcome<W> {
 		// The outline objects -- the `/Outlines` dict and one object per entry -- are written after the
 		// pages, on the numbers reserved for them at construction. A document with no outline writes none.
 		if !self.outline.is_empty() {
@@ -913,9 +1565,29 @@ impl<W: Write> PdfStream<W> {
 			res!(self.write_fonts());
 		}
 
-		// The fixed page/content block is `2 + 2n` objects; the outline, every image and soft mask, and the
-		// Type-3 fonts took further numbers past it, so the highest object written is one below the next free
-		// number. A document with no outline, image or text leaves `next_extra` at `2 + 2n + 1`, the original.
+		// The embedded fonts, each subset to the glyphs shown: its Type0 dictionary on the number reserved
+		// at first use, then the CIDFont, descriptor, font file and /ToUnicode on fresh numbers.
+		if !self.cid_fonts.is_empty() {
+			res!(self.write_cid_fonts());
+		}
+
+		// The Info dictionary is the last object, named by the trailer alone. An empty one was dropped at
+		// construction.
+		let info_obj = match self.info.take() {
+			Some(info)	=> {
+				let obj = self.next_extra;
+				self.next_extra += 1;
+				self.set_extra_offset(obj);
+				res!(self.write_info(obj, &info));
+				Some(obj)
+			},
+			None	=> None,
+		};
+
+		// The fixed page/content block is `2 + 2n` objects; the outline, every image and soft mask, the
+		// Type-3 fonts and the Info dictionary took further numbers past it, so the highest object written
+		// is one below the next free number. A document with none of them leaves `next_extra` at
+		// `2 + 2n + 1`.
 		let obj_count = self.next_extra - 1;
 
 		// The identifier is derived from the body already written, never from the clock. The two halves
@@ -932,12 +1604,34 @@ impl<W: Write> PdfStream<W> {
 		for k in 1..=obj_count {
 			tail.push_str(&fmt!("{:010} 00000 n\r\n", self.offsets[k]));
 		}
+		let info_entry = match info_obj {
+			Some(o)	=> fmt!(" /Info {} 0 R", o),
+			None	=> String::new(),
+		};
 		tail.push_str(&fmt!(
-			"trailer\n<< /Size {} /Root 1 0 R /ID [<{}> <{}>] >>\nstartxref\n{}\n%%EOF\n",
-			obj_count + 1, id, id, xref_off));
+			"trailer\n<< /Size {} /Root 1 0 R{} /ID [<{}> <{}>] >>\nstartxref\n{}\n%%EOF\n",
+			obj_count + 1, info_entry, id, id, xref_off));
 		res!(self.out.write_all(tail.as_bytes()));
 		res!(self.out.flush());
 		Ok(self.out)
+	}
+
+	/// Writes the Info dictionary object, one entry per field set, in a fixed order.
+	fn write_info(&mut self, obj: usize, info: &PdfInfo) -> Outcome<()> {
+		let mut dict = fmt!("{} 0 obj\n<<", obj);
+		let field = |key: &str, val: &Option<String>, dict: &mut String| {
+			if let Some(v) = val {
+				dict.push_str(&fmt!(" /{} {}", key, pdf_text_string(v)));
+			}
+		};
+		field("Title",		&info.title,	&mut dict);
+		field("Author",		&info.author,	&mut dict);
+		field("Subject",	&info.subject,	&mut dict);
+		field("Keywords",	&info.keywords,	&mut dict);
+		field("Creator",	&info.creator,	&mut dict);
+		field("Producer",	&info.producer,	&mut dict);
+		dict.push_str(" >>\nendobj\n");
+		self.body(dict.as_bytes())
 	}
 
 	/// Writes a run of body bytes: out to the sink, on to the running offset, and folded into both
@@ -957,32 +1651,41 @@ impl<W: Write> PdfStream<W> {
 }
 
 /// Builds the `/ToUnicode` CMap for a Type-3 font: one `bfchar` mapping per glyph whose source text is
-/// known, the code as a one-byte hex string and the destination as UTF-16BE, so a viewer extracts the
-/// real words rather than the font's private codes. A glyph with no known source (a decoration, or the
-/// tail of a decomposed cluster) is left out. The `bfchar` entries are batched under a hundred, the CMap
-/// operator's limit.
+/// known, the code as a one-byte hex string. A glyph with no known source (a decoration, or the tail of a
+/// decomposed cluster) is left out.
 fn build_tounicode(glyphs: &[GlyphEntry]) -> String {
-	let mut maps: Vec<(usize, String)> = Vec::new();
-	for (code, g) in glyphs.iter().enumerate() {
-		if g.text.is_empty() {
-			continue;
-		}
-		let mut hex = String::new();
-		for u in g.text.encode_utf16() {
-			hex.push_str(&fmt!("{:04X}", u));
-		}
-		maps.push((code, hex));
-	}
+	let maps: Vec<(u32, &str)> = glyphs.iter().enumerate()
+		.filter(|(_, g)| !g.text.is_empty())
+		.map(|(code, g)| (code as u32, g.text.as_str()))
+		.collect();
+	tounicode_cmap(1, &maps)
+}
 
+/// A `/ToUnicode` CMap over codes `width` bytes wide, each mapped to its text as UTF-16BE, so a viewer
+/// extracts the real words rather than the font's private codes. A ligature maps its one code to every
+/// character it joins. The `bfchar` entries are batched under a hundred, the CMap operator's limit.
+fn tounicode_cmap(width: usize, maps: &[(u32, &str)]) -> String {
 	let mut s = String::new();
 	s.push_str("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n");
 	s.push_str("/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n");
 	s.push_str("/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n");
-	s.push_str("1 begincodespacerange\n<00> <FF>\nendcodespacerange\n");
+	if width == 1 {
+		s.push_str("1 begincodespacerange\n<00> <FF>\nendcodespacerange\n");
+	} else {
+		s.push_str("1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n");
+	}
 	for chunk in maps.chunks(100) {
 		s.push_str(&fmt!("{} beginbfchar\n", chunk.len()));
-		for (code, hex) in chunk {
-			s.push_str(&fmt!("<{:02X}> <{}>\n", code, hex));
+		for (code, text) in chunk {
+			let mut hex = String::new();
+			for u in text.encode_utf16() {
+				hex.push_str(&fmt!("{:04X}", u));
+			}
+			if width == 1 {
+				s.push_str(&fmt!("<{:02X}> <{}>\n", code, hex));
+			} else {
+				s.push_str(&fmt!("<{:04X}> <{}>\n", code, hex));
+			}
 		}
 		s.push_str("endbfchar\n");
 	}
@@ -1040,10 +1743,11 @@ fn path_ops(s: &mut String, path: &Path) {
 
 /// The page's `/Resources`: an `/ExtGState` for each distinct alpha when a shape is translucent, an
 /// `/XObject` dict naming each image `/Im{k}` by the object number assigned in [`PdfStream::page`], and a
-/// `/Font` dict naming each Type-3 font `/F{k}` this page shows text from. An all-opaque page with no
+/// `/Font` dict naming each font this page shows text from, `/F{k}` for a Type-3 font and `/C{k}` for an
+/// embedded one. An all-opaque page with no
 /// image and no text carries an empty resource dictionary -- byte for byte the original.
-fn resources(page: &PdfPage, img_objs: &[(usize, Option<usize>)], page_fonts: &[(usize, usize)]) -> String {
-	let translucent = page.draws.iter().any(|d| d.colour().a != 255);
+fn resources(page: &PdfPage, img_objs: &[(usize, Option<usize>)], page_fonts: &[(String, usize)]) -> String {
+	let translucent = page.draws.iter().any(|d| d.alpha() != 255);
 
 	// The image resource dict, `/Im{k}` in draw order to match the content stream's `Do` names.
 	let xobjects = if img_objs.is_empty() {
@@ -1057,13 +1761,13 @@ fn resources(page: &PdfPage, img_objs: &[(usize, Option<usize>)], page_fonts: &[
 		x
 	};
 
-	// The font resource dict, `/F{idx}` by the global font index the content stream names.
+	// The font resource dict, by the names the content stream uses.
 	let fonts = if page_fonts.is_empty() {
 		String::new()
 	} else {
 		let mut f = String::from(" /Font << ");
-		for (idx, obj) in page_fonts {
-			f.push_str(&fmt!("/F{} {} 0 R ", idx, obj));
+		for (name, obj) in page_fonts {
+			f.push_str(&fmt!("/{} {} 0 R ", name, obj));
 		}
 		f.push_str(">>");
 		f
@@ -1078,7 +1782,7 @@ fn resources(page: &PdfPage, img_objs: &[(usize, Option<usize>)], page_fonts: &[
 
 	let mut alphas: Vec<u8> = Vec::new();
 	for d in &page.draws {
-		let a = d.colour().a;
+		let a = d.alpha();
 		if !alphas.contains(&a) {
 			alphas.push(a);
 		}
@@ -1104,6 +1808,22 @@ fn set_alpha(s: &mut String, cur: &mut Option<u8>, a: u8) {
 		s.push_str(&fmt!("/GS{} gs\n", a));
 		*cur = Some(a);
 	}
+}
+
+/// Sets the fill colour, or the stroke colour when `stroke`, in the ink's own space: `g` for a grey, `rg`
+/// for an RGB and `k` for a CMYK, and `G`, `RG` and `K` for the stroke.
+fn set_colour(s: &mut String, ink: Ink, stroke: bool) {
+	let (rgb, grey, cmyk) = if stroke { ("RG", "G", "K") } else { ("rg", "g", "k") };
+	match ink {
+		Ink::Grey { v, .. }				=> s.push_str(&fmt!("{} {}\n", unit(v), grey)),
+		Ink::Rgb(c)						=> s.push_str(&fmt!("{} {} {} {}\n", chan(c.r), chan(c.g), chan(c.b), rgb)),
+		Ink::Cmyk { c, m, y, k, .. }	=> s.push_str(&fmt!("{} {} {} {} {}\n", unit(c), unit(m), unit(y), unit(k), cmyk)),
+	}
+}
+
+/// A float colour component from 0 to 1, clamped, with a component that is no number written as 0.
+fn unit(v: f32) -> String {
+	dec6(if v.is_finite() { v.clamp(0.0, 1.0) as f64 } else { 0.0 })
 }
 
 /// One 8-bit channel as a PDF colour component from 0 to 1.
@@ -1157,6 +1877,7 @@ fn deflate(raw: &[u8]) -> Outcome<Vec<u8>> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::colour::Rgba;
 	use crate::path::{
 		Bounds,
 		PathBuilder,
@@ -1176,6 +1897,68 @@ mod tests {
 		assert!(s.contains("0 0 m"), "the move, found: {}", s);
 		assert!(s.contains(" c\n"), "a cubic operator, found: {}", s);
 		assert!(s.contains("10 10 c"), "the cubic ends where the quadratic did, found: {}", s);
+		Ok(())
+	}
+
+	// Every cross-reference entry of `bytes` names the offset of its own "N 0 obj", and the trailer's /Root
+	// is object 1: the check a reader's repair pass would otherwise hide.
+	fn xref_is_exact(bytes: &[u8]) -> Outcome<usize> {
+		let text	= String::from_utf8_lossy(bytes).to_string();
+		let at		= res!(text.rfind("\nxref\n").ok_or_else(|| err!("no xref"; Missing))) + 1;
+		let mut lines = text[at..].lines();
+		lines.next();
+		let head	= res!(lines.next().ok_or_else(|| err!("no xref head"; Missing)));
+		let count: usize = res!(head.split(' ').nth(1).unwrap_or("0").parse::<usize>());
+		lines.next();	// the free entry
+		for k in 1..count {
+			let entry	= res!(lines.next().ok_or_else(|| err!("short xref"; Missing)));
+			let off: usize = res!(entry[..10].parse::<usize>());
+			let want	= fmt!("{} 0 obj", k);
+			assert!(bytes[off..].starts_with(want.as_bytes()), "object {} is not at its offset {}", k, off);
+		}
+		assert!(text[at..].contains("/Root 1 0 R"), "the trailer names object 1 as the catalogue");
+		Ok(count - 1)
+	}
+
+	#[test]
+	fn test_a_deferred_stream_writes_its_page_tree_and_outline_at_close_02() -> Outcome<()> {
+		let mut s = res!(PdfStream::open(Vec::new(), false));
+		for _ in 0..3 {
+			let mut page = PdfPage::new(100.0, 200.0);
+			page.fill(res!(Path::rect(Bounds::new(10.0, 10.0, 90.0, 90.0))), Rgba::BLACK);
+			res!(s.page(&page));
+		}
+		assert_eq!(s.pages(), 3);
+		let info = PdfInfo { title: Some("T".to_string()), creator: Some("Austenite".to_string()), ..PdfInfo::default() };
+		let outline = vec![
+			OutlineItem { title: "One".to_string(), page: 0, level: 0 },
+			OutlineItem { title: "Two".to_string(), page: 2, level: 1 },
+		];
+		let bytes = res!(s.close(outline, Some(info)));
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(text.starts_with("%PDF-1.7"), "the header");
+		assert!(text.contains("/Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3"), "the tree names the 3 pages, found: {}", text);
+		assert!(text.contains("/Outlines"), "the catalogue names the outline");
+		assert!(text.contains("/Dest [7 0 R /Fit]"), "the second entry jumps to the third page object");
+		assert!(text.contains("/Title (T)"), "the Info dictionary is written");
+		let first_page	= res!(text.find("3 0 obj").ok_or_else(|| err!("no page"; Missing)));
+		let catalogue	= res!(text.find("/Type /Catalog").ok_or_else(|| err!("no catalogue"; Missing)));
+		assert!(catalogue > first_page, "the catalogue follows the pages it was written for");
+		let objects = res!(xref_is_exact(&bytes));
+		assert!(objects >= 10, "the pages, tree, catalogue, outline and Info are all in the xref, found {}", objects);
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_two_ends_of_a_stream_refuse_the_other_mode_03() -> Outcome<()> {
+		let fixed = res!(PdfStream::new(Vec::new(), 0, false));
+		assert!(fixed.close(Vec::new(), None).is_err(), "close refuses a stream with a fixed page count");
+		let open = res!(PdfStream::open(Vec::new(), false));
+		assert!(open.finish().is_err(), "finish refuses a stream whose page tree is still to write");
+		let mut open = res!(PdfStream::open(Vec::new(), false));
+		res!(open.page(&PdfPage::new(10.0, 10.0)));
+		let bad = vec![OutlineItem { title: "x".to_string(), page: 1, level: 0 }];
+		assert!(open.close(bad, None).is_err(), "an outline entry past the last page is refused");
 		Ok(())
 	}
 
@@ -1474,6 +2257,96 @@ mod tests {
 		Ok(())
 	}
 
+	/// Every xref entry of `bytes` points at the object it names.
+	fn xref_lands(bytes: &[u8]) -> Outcome<usize> {
+		let needle = b"xref\n0 ";
+		let marker = match bytes.windows(needle.len()).position(|w| w == needle) {
+			Some(i)	=> i,
+			None	=> return Err(err!("no xref section in the file"; Test)),
+		};
+		let nl2 = match bytes[marker + needle.len()..].iter().position(|&b| b == b'\n') {
+			Some(i)	=> marker + needle.len() + i,
+			None	=> return Err(err!("the xref header is malformed"; Test)),
+		};
+		let count = res!(res!(std::str::from_utf8(&bytes[marker + needle.len()..nl2])).trim().parse::<usize>());
+		let entries = &bytes[nl2 + 1..];
+		for obj in 1..count {
+			let off = res!(res!(std::str::from_utf8(&entries[obj * 20..obj * 20 + 10])).parse::<usize>());
+			let want = fmt!("{} 0 obj", obj);
+			assert!(bytes[off..].starts_with(want.as_bytes()), "object {} is not at offset {}", obj, off);
+		}
+		Ok(count - 1)
+	}
+
+	#[test]
+	fn test_embedded_text_runs_as_one_tj_with_exact_adjustments_15() -> Outcome<()> {
+		// Three glyphs of a TrueType face on one baseline: the second sits exactly where the first's advance
+		// leaves the pen, the third two points further. One text matrix, one TJ, and a single adjustment of
+		// -2pt at 12pt, which is -2 * 1000 / 12 = -167 thousandths of the em.
+		let data = Arc::new(include_bytes!("../../fe2o3_font/fonts/DejaVuSans.ttf").to_vec());
+		let prog = match res!(FontProgram::parse(data)) {
+			Some(p)	=> Arc::new(p),
+			None	=> return Err(err!("DejaVu Sans should be embeddable"; Test)),
+		};
+		let (a, b, c) = (36u16, 37u16, 38u16);
+		let xa = 10.0f32;
+		let xb = xa + prog.width(a) as f32 * 12.0 / 1000.0;
+		let xc = xb + prog.width(b) as f32 * 12.0 / 1000.0 + 2.0;
+		let mut page = PdfPage::new(200.0, 200.0);
+		for (g, x, t) in [(a, xa, "A"), (b, xb, "B"), (c, xc, "C")] {
+			page.text(prog.clone(), g, x, 50.0, 12.0, Rgba::BLACK, t.into());
+		}
+		let mut w = PdfWriter::new();
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert_eq!(text.matches(" Tm\n").count(), 1, "one text matrix for the run");
+		assert!(text.contains("[<00240025>-167<0026>] TJ"), "one TJ with one adjustment, found: {}", text);
+		assert!(text.contains("/Subtype /Type0"), "a composite font");
+		assert!(text.contains("/Subtype /CIDFontType2"), "over a TrueType CIDFont");
+		assert!(text.contains("/CIDToGIDMap /Identity"), "whose CIDs are its glyph ids");
+		assert!(text.contains(&fmt!("/W [36 [{} {} {}]]", prog.width(a), prog.width(b), prog.width(c))),
+			"the widths of the three glyphs, found: {}", text);
+		assert!(text.contains("<0024> <0041>"), "the ToUnicode maps glyph 36 to 'A'");
+		assert!(res!(xref_lands(&bytes)) > 8, "the font objects are in the xref");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_glyph_shown_for_a_second_text_carries_actual_text_15b() -> Outcome<()> {
+		// A face without CJK glyphs maps every missing character to `.notdef`, gid 0. The ToUnicode CMap can
+		// map that glyph to only one text, so each later show of it for different text is wrapped in a
+		// `/Span` marked-content sequence whose `/ActualText` gives the real characters, as Typst does. The
+		// first show, and a repeat of the text already mapped, need no span.
+		let data = Arc::new(include_bytes!("../../fe2o3_font/fonts/DejaVuSans.ttf").to_vec());
+		let prog = match res!(FontProgram::parse(data)) {
+			Some(p)	=> Arc::new(p),
+			None	=> return Err(err!("DejaVu Sans should be embeddable"; Test)),
+		};
+		let mut page = PdfPage::new(200.0, 200.0);
+		for (i, t) in ["\u{5C71}", "\u{6771}", "\u{5C71}", "\u{5927}"].iter().enumerate() {
+			page.text(prog.clone(), 0, 10.0 + 12.0 * i as f32, 50.0, 12.0, Rgba::BLACK, (*t).into());
+		}
+		// The Type-3 path: one outline, so one code, shown for two texts.
+		page.glyph(res!(tri(0.0)), 10.0, 80.0, 12.0, 8.0, Rgba::BLACK, "O".into());
+		page.glyph(res!(tri(0.0)), 20.0, 80.0, 12.0, 8.0, Rgba::BLACK, "Q".into());
+		let mut w = PdfWriter::new();
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(text.contains("<0000> <5C71>"), "the ToUnicode keeps the first text of gid 0");
+		assert!(text.contains("/Span <</ActualText <FEFF6771>>> BDC\n"), "the second text is spanned: {}", text);
+		assert!(text.contains("/Span <</ActualText <FEFF5927>>> BDC\n"), "and the fourth: {}", text);
+		assert!(!text.contains("<FEFF5C71>"), "the mapped text needs no span");
+		assert!(text.contains("<00> <004F>"), "the Type-3 code keeps its first text");
+		assert!(text.contains("/Span <</ActualText <FEFF0051>>> BDC\n"), "its second text is spanned");
+		assert_eq!(text.matches(" BDC\n").count(), 3, "three spans");
+		assert_eq!(text.matches("EMC\n").count(), 3, "each closed");
+		let (bt, et) = (text.matches("BT\n").count(), text.matches("ET\n").count());
+		assert_eq!(bt, et, "text objects balanced");
+		Ok(())
+	}
+
 	#[test]
 	fn test_the_xref_offsets_land_on_their_objects_03() -> Outcome<()> {
 		// The heart of a valid PDF: every offset in the cross-reference table must point at the first
@@ -1521,6 +2394,197 @@ mod tests {
 			assert!(bytes[off..].starts_with(want.as_bytes()),
 				"object {} offset {} does not open with '{}'", obj, off, want);
 		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_deferred_stream_names_the_version_it_is_asked_for_24() -> Outcome<()> {
+		for minor in 4..=7u8 {
+			let mut stream = res!(PdfStream::open_version(Vec::new(), true, minor));
+			let mut page = PdfPage::new(50.0, 50.0);
+			page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+			res!(stream.page(&page));
+			let bytes = res!(stream.close(Vec::new(), None));
+			let want = fmt!("%PDF-1.{}\n", minor);
+			assert!(bytes.starts_with(want.as_bytes()), "the header says 1.{}", minor);
+		}
+		assert!(PdfStream::open_version(Vec::new(), true, 3).is_err(), "1.3 is below what the writer uses");
+		assert!(PdfStream::open_version(Vec::new(), true, 8).is_err(), "1.8 does not exist");
+		assert!(res!(PdfStream::open(Vec::new(), true)).pages() == 0);
+		Ok(())
+	}
+
+	#[test]
+	fn test_no_info_leaves_the_trailer_untouched_16() -> Outcome<()> {
+		// A writer nobody called `with_info` on writes no `/Info` at all -- byte for byte as before the
+		// dictionary existed.
+		let mut w = PdfWriter::new();
+		let mut page = PdfPage::new(50.0, 50.0);
+		page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(!text.contains("/Info"), "no /Info in the trailer, found: {}", text);
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_info_dictionary_carries_only_the_set_fields_17() -> Outcome<()> {
+		let info = PdfInfo {
+			title:		Some("A Title".to_string()),
+			author:		Some("An Author".to_string()),
+			subject:	None,
+			keywords:	None,
+			creator:	Some("Austenite".to_string()),
+			producer:	Some("Austenite".to_string()),
+		};
+		let mut w = PdfWriter::new().with_info(info);
+		let mut page = PdfPage::new(50.0, 50.0);
+		page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(text.contains("/Info"), "the trailer names an /Info object, found: {}", text);
+		assert!(text.contains("/Title (A Title)"), "the title, found: {}", text);
+		assert!(text.contains("/Author (An Author)"), "the author, found: {}", text);
+		assert!(text.contains("/Creator (Austenite)"), "the creator, found: {}", text);
+		assert!(text.contains("/Producer (Austenite)"), "the producer, found: {}", text);
+		assert!(!text.contains("/Subject"), "no /Subject entry for an unset field");
+		assert!(!text.contains("/Keywords"), "no /Keywords entry for an unset field");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_non_ascii_info_field_encodes_as_utf16_18() -> Outcome<()> {
+		// The Info dictionary shares the outline title's own encoder, so a non-Latin subject goes UTF-16BE.
+		let info = PdfInfo {
+			subject: Some("Ünïcödé".to_string()),
+			..Default::default()
+		};
+		let mut w = PdfWriter::new().with_info(info);
+		let mut page = PdfPage::new(50.0, 50.0);
+		page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(text.contains("/Subject <FEFF"), "a UTF-16BE hex string with its BOM, found: {}", text);
+		Ok(())
+	}
+
+	#[test]
+	fn test_an_all_unset_info_writes_no_dictionary_19() -> Outcome<()> {
+		// A `PdfInfo` naming nothing is the same as never calling `with_info` -- no empty `<< >>` object
+		// for the trailer to point at for no reason.
+		let mut w = PdfWriter::new().with_info(PdfInfo::default());
+		let mut page = PdfPage::new(50.0, 50.0);
+		page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(!text.contains("/Info"), "no /Info in the trailer, found: {}", text);
+		Ok(())
+	}
+	// One page of every ink in a fill, a stroke and a glyph, written in `out`.
+	fn inks_page(out: ColourOut) -> Outcome<String> {
+		let mut w = PdfWriter::new().with_colour_out(out);
+		let mut page = PdfPage::new(100.0, 100.0);
+		let r = || Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0));
+		page.fill(res!(r()), Ink::Grey { v: 0.0, a: 255 });
+		page.fill(res!(r()), Ink::Cmyk { c: 0.0, m: 0.0, y: 0.0, k: 1.0, a: 255 });
+		page.fill(res!(r()), Rgba::new(255, 0, 0, 255));
+		page.stroke(res!(r()), Ink::Grey { v: 0.5, a: 255 }, 1.0);
+		page.stroke(res!(r()), Ink::Cmyk { c: 1.0, m: 0.5, y: 0.0, k: 0.0, a: 255 }, 1.0);
+		page.stroke(res!(r()), Rgba::new(255, 0, 0, 255), 1.0);
+		page.glyph(res!(tri(0.0)), 10.0, 20.0, 12.0, 8.0, Ink::Grey { v: 0.25, a: 255 }, "O".into());
+		page.glyph(res!(tri(0.0)), 30.0, 20.0, 12.0, 8.0, Ink::Cmyk { c: 0.0, m: 1.0, y: 1.0, k: 0.0, a: 255 }, "O".into());
+		w.add_page(page);
+		Ok(String::from_utf8_lossy(&res!(w.to_bytes())).into_owned())
+	}
+
+	#[test]
+	fn test_native_mode_writes_each_ink_in_its_own_space_20() -> Outcome<()> {
+		let text = res!(inks_page(ColourOut::Native));
+		for want in [
+			"0 g\n", "0 0 0 1 k\n", "1 0 0 rg\n",
+			"0.5 G\n", "1 0.5 0 0 K\n", "1 0 0 RG\n",
+			"0.25 g\n", "0 1 1 0 k\n",
+		] {
+			assert!(text.contains(want), "the native page lacks {:?}: {}", want, text);
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_rgb_mode_lowers_every_ink_to_rg_21() -> Outcome<()> {
+		let text = res!(inks_page(ColourOut::Rgb));
+		for gone in [" g\n", " k\n", " G\n", " K\n"] {
+			assert!(!text.contains(gone), "the Rgb page holds {:?}: {}", gone, text);
+		}
+		for want in ["0 0 0 rg\n", "1 0 0 rg\n", "1 0 0 RG\n"] {
+			assert!(text.contains(want), "the Rgb page lacks {:?}: {}", want, text);
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_an_unset_mode_is_the_rgb_mode_and_a_grey_equals_its_rgb_there_22() -> Outcome<()> {
+		// The bytes of a file whose inks carry their space are the bytes of one whose colours never did.
+		let page = |ink: Ink| -> Outcome<Vec<u8>> {
+			let mut w = PdfWriter::new();
+			let mut page = PdfPage::new(100.0, 100.0);
+			page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), ink);
+			page.glyph(res!(tri(0.0)), 10.0, 20.0, 12.0, 8.0, ink, "O".into());
+			w.add_page(page);
+			w.to_bytes()
+		};
+		assert_eq!(res!(page(Ink::Grey { v: 0.0, a: 255 })), res!(page(Ink::Rgb(Rgba::BLACK))));
+		assert_eq!(
+			res!(page(Ink::Cmyk { c: 0.0, m: 0.0, y: 0.0, k: 1.0, a: 255 })),
+			res!(page(Ink::Cmyk { c: 0.0, m: 0.0, y: 0.0, k: 1.0, a: 255 }.to_rgba().into())));
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_translucent_grey_keeps_its_alpha_state_in_native_mode_23() -> Outcome<()> {
+		let mut w = PdfWriter::new().with_colour_out(ColourOut::Native);
+		let mut page = PdfPage::new(100.0, 100.0);
+		page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Ink::Grey { v: 0.5, a: 128 });
+		w.add_page(page);
+		let text = String::from_utf8_lossy(&res!(w.to_bytes())).into_owned();
+		assert!(text.contains("/GS128 gs\n0.5 g\n"), "{}", text);
+		assert!(text.contains("/GS128 << /ca "), "{}", text);
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_named_link_jumps_to_its_destination_placed_at_the_close_24() -> Outcome<()> {
+		// Two pages 100 by 200; a link on the first names "b", placed at (5, 30) on the second, so the
+		// destination's top is 200 - 30 = 170. A second destination no link names is not written.
+		let mut s = res!(PdfStream::open(Vec::new(), false));
+		let mut one = PdfPage::new(100.0, 200.0);
+		one.link_named(10.0, 20.0, 30.0, 40.0, "b".to_string());
+		res!(s.page(&one));
+		res!(s.page(&PdfPage::new(100.0, 200.0)));
+		let dests = vec![
+			NamedDest { name: "b".to_string(),		page: 1, x: 5.0, y: 30.0 },
+			NamedDest { name: "unused".to_string(),	page: 0, x: 0.0, y: 0.0 },
+		];
+		let bytes = res!(s.close_with_dests(Vec::new(), dests, None));
+		let text = String::from_utf8_lossy(&bytes);
+		let second = 6;	// after the first page, its content stream and its annotation array
+		assert!(text.contains("/Rect [10 140 40 180] /Dest (b)"), "the link names its destination: {}", text);
+		assert!(text.contains("/Names << /Dests "), "the catalogue names the destinations: {}", text);
+		assert!(text.contains(&fmt!("<< /Names [ (b) [{} 0 R /XYZ 5 170 null] ] >>", second)), "{}", text);
+		assert!(!text.contains("(unused)"), "a destination no link names is left out: {}", text);
+		res!(xref_is_exact(&bytes));
+
+		// A stream with a fixed page count cannot name a destination, so it leaves the named link out.
+		let mut w = PdfWriter::new();
+		let mut page = PdfPage::new(100.0, 200.0);
+		page.link_named(10.0, 20.0, 30.0, 40.0, "b".to_string());
+		w.add_page(page);
+		let text = String::from_utf8_lossy(&res!(w.to_bytes())).to_string();
+		assert!(!text.contains("/Annots"), "no annotation is written: {}", text);
 		Ok(())
 	}
 }

@@ -10,7 +10,7 @@
 //! rectangle. The one returned HBox is unwrapped by the caller: [`doc`](crate::doc) weaves its leaves
 //! into a paragraph line for inline maths, or centres them on their own line for a display equation.
 //!
-//! The MATH-font boundary, stated plainly. Latin Modern Math carries a real OpenType MATH table, and
+//! The MATH-font boundary, stated plainly. New Computer Modern Math carries a real OpenType MATH table, and
 //! this module now sets to it: the maths italic alphabet, the axis height, the fraction rule thickness,
 //! the display-style fraction shifts and gaps, the script shifts and their minima, and the two script
 //! scale-down percentages are all read from the font, and a delimiter or a radical grows to its content
@@ -19,6 +19,19 @@
 //! no MATH table. The inter-atom spacing is still TeX's reduced `mu` table rather than the font's, and a
 //! delimiter taller than the largest pre-drawn variant is not yet assembled from repeating pieces; big
 //! operators, matrices and a maths parser are later work. See the crate's phase notes.
+
+// The evaluator's maths engine, a port of Typst 0.15's maths IR and layout; the `Atom` layout below
+// serves the curated reader until it is retired.
+pub mod class;
+pub mod font;
+pub mod fragment;
+pub mod frame;
+pub mod item;
+pub mod layout;
+pub mod process;
+pub mod props;
+pub mod resolve;
+pub mod style;
 
 use crate::theme::Theme;
 use crate::font::ShapedText;
@@ -42,7 +55,7 @@ use oxedyne_fe2o3_font::{
 	shape::Dir,
 };
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::Ink,
 	path::Path,
 	transform::Transform,
 };
@@ -52,12 +65,14 @@ use std::sync::{
 	OnceLock,
 };
 
-// The maths font: Latin Modern Math, the OpenType form of Computer Modern -- the faces TeX sets
-// mathematics in -- so a variable, an operator and a radical wear the letterforms a reader knows from
-// every mathematics paper. It carries the Mathematical Italic block, the upright operators and the
-// large symbols, and an OpenType MATH table of layout constants and grown-delimiter variants, which
-// this module reads for its shifts, gaps and variants (see the header).
-const MATH_FONT: &[u8] = include_bytes!("../fonts/latinmodern-math.otf");
+// The maths font: New Computer Modern Math, embedded in `crate::fonts` -- Typst's own default for an
+// equation, so a variable, an operator and a radical wear the letterforms the oracle sets. It carries the
+// Mathematical Italic block, the upright operators and the large symbols, and an OpenType MATH table of
+// layout constants and grown-delimiter variants, which this module reads for its shifts, gaps and variants
+// (see the header). Until 2026-09-23 this was Latin Modern Math; some tuning notes below still name it.
+fn math_bytes() -> Outcome<&'static [u8]> {
+	crate::fonts::Embedded::Math.bytes()
+}
 
 /// The parsed maths font, built once and shared. Parsing the face is the costly part, so it is cached
 /// behind a [`OnceLock`]; a lost race merely parses twice and keeps the first.
@@ -66,7 +81,7 @@ fn math_font() -> Outcome<Arc<Font>> {
 	if let Some(f) = MATH.get() {
 		return Ok(f.clone());
 	}
-	let f = Arc::new(res!(Font::new(MATH_FONT.to_vec())));
+	let f = Arc::new(res!(Font::new(res!(math_bytes()).to_vec())));
 	let _ = MATH.set(f.clone());
 	Ok(f)
 }
@@ -79,7 +94,7 @@ fn math_table() -> Outcome<Option<Arc<MathTable>>> {
 	if let Some(t) = TABLE.get() {
 		return Ok(t.clone());
 	}
-	let parsed = res!(MathTable::parse(MATH_FONT)).map(Arc::new);
+	let parsed = res!(MathTable::parse(res!(math_bytes()))).map(Arc::new);
 	let _ = TABLE.set(parsed.clone());
 	Ok(parsed)
 }
@@ -281,8 +296,9 @@ impl Level {
 }
 
 /// The type size at a level: the body size at text, and the two smaller sizes from the maths font's
-/// own `scriptPercentScaleDown` and `scriptScriptPercentScaleDown`. Latin Modern's are 70 and 50, the
-/// plain-TeX ratios, but a font may choose otherwise; the font's word is taken when it has a MATH table.
+/// own `scriptPercentScaleDown` and `scriptScriptPercentScaleDown`. The Computer Modern maths faces use
+/// 70 and 50, the plain-TeX ratios, but a font may choose otherwise; the font's word is taken when it has a
+/// MATH table.
 fn size_for(style: &Theme, level: Level) -> Sp {
 	let body = style.text.body_size.raw();
 	let (s_pct, ss_pct) = script_percents();
@@ -354,6 +370,19 @@ pub fn layout(
 )
 	-> Outcome<Node>
 {
+	Ok(Node::HBox(res!(layout_box(fonts, style, expr, display))))
+}
+
+/// [`layout`]'s box itself, for a caller that weaves its leaves into a line: there is no other shape a
+/// maths layout could take, so the caller has none to fall back from.
+pub fn layout_box(
+	fonts:		Arc<FontSet>,
+	style: &Theme,
+	expr:		&Atom,
+	display:	bool,
+)
+	-> Outcome<BoxNode>
+{
 	let m = res!(build(style, expr, Level::Text, display));
 
 	// The baseline's distance from the box top. A display box stands on its own, so its top is its
@@ -366,7 +395,7 @@ pub fn layout(
 	};
 
 	let (nodes, dims) = emit(m, base);
-	Ok(Node::HBox(BoxNode::new(nodes, dims)))
+	Ok(BoxNode::new(nodes, dims))
 }
 
 /// The body face's ascent at a size: how far the line top sits above the baseline, the reference an
@@ -474,7 +503,7 @@ fn build_bigop(text: &str, size: Sp) -> Outcome<Option<MBox>> {
 	let size_pt		= size.to_pt() as f32;
 	let base		= res!(glyph_id(&font, size, text));
 	// A display big operator is about the next size up; ask for a variant around 1.4x the running size
-	// and take the tallest the font offers below that, which is Latin Modern's display form.
+	// and take the tallest the font offers below that, which is the Computer Modern display form.
 	let target		= Sp(size.raw() * 7 / 5);
 	let variant		= match tb.variant_for(base as u16, target.to_pt() as f32, size_pt) {
 		Some(g) if g as u32 != base	=> g as u32,
@@ -1337,7 +1366,7 @@ fn emit(mbox: MBox, base: Sp) -> (Vec<Node>, Dims) {
 				// A grown delimiter or radical: its flipped outline as a one-op graphic, seated on the
 				// line by the same shift as a glyph. The box is zero-height, so the shift alone seats it.
 				let g = Graphic::new(
-					vec![DrawOp::Fill { path, colour: Rgba::BLACK }],
+					vec![DrawOp::Fill { path, colour: Ink::BLACK }],
 					Dims::new(p.width, Sp::ZERO, Sp::ZERO));
 				nodes.push(Node::Leaf(Leaf::graphic(g).with_shift(shift)));
 			},

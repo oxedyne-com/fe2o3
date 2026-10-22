@@ -201,6 +201,18 @@ impl<
         }
         result
     }
+
+    /// The occupied slots of a ring filled by [`Self::set_and_adv`], oldest first.
+    ///
+    /// Writing advances the pointer past the slot written, so the pointer always
+    /// rests on the oldest entry once the ring is full, and on the first empty slot
+    /// before then. Walking one lap from it therefore visits the entries in the
+    /// order they were written, whichever of the two states the ring is in.
+    /// [`Self::to_vec`] is storage order, which is chronological only until the
+    /// first wrap.
+    pub fn iter_chrono(&self) -> impl Iterator<Item = &D> + '_ {
+        (0..N).filter_map(move |i| self.buf[(self.curr + i) % N].as_ref())
+    }
 }
 
 /// A ring buffer consisting of timestamps.
@@ -397,6 +409,27 @@ mod tests {
         let rps = timer.avg_rps();
         assert!(rps > 5 && rps < 40,
             "expected roughly 16 rps from 60 ms spacing, got {}", rps);
+    }
+
+    #[test]
+    fn test_iter_chrono_is_oldest_first_before_and_after_a_wrap_00() {
+        let mut ring = RingBuffer::<4, u32>::default();
+        assert_eq!(ring.iter_chrono().count(), 0, "an empty ring yields nothing");
+        for v in 1..=3u32 {
+            ring.set_and_adv(v);
+        }
+        let partial: Vec<u32> = ring.iter_chrono().copied().collect();
+        assert_eq!(partial, vec![1, 2, 3], "a part-filled ring must read in write order");
+        for v in 4..=6u32 {
+            ring.set_and_adv(v);
+        }
+        // Six writes into four slots: 1 and 2 are overwritten, and storage order
+        // is now [5, 6, 3, 4], which is not the order they were written in.
+        let wrapped: Vec<u32> = ring.iter_chrono().copied().collect();
+        assert_eq!(wrapped, vec![3, 4, 5, 6],
+            "a wrapped ring must read oldest first, not in storage order");
+        let stored: Vec<u32> = ring.to_vec().into_iter().flatten().collect();
+        assert_ne!(stored, wrapped, "the test must exercise a ring whose storage order differs");
     }
 
     #[test]
