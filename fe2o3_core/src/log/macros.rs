@@ -6,6 +6,7 @@
 macro_rules! log {
     ($level:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: $level,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -19,6 +20,7 @@ macro_rules! log {
     };
     ($level:expr, $stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: $level,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -43,6 +45,7 @@ macro_rules! log {
 macro_rules! error {
     ($e:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Error,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -56,6 +59,7 @@ macro_rules! error {
     };
     ($e:expr, $stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Error,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -69,6 +73,7 @@ macro_rules! error {
     };
     ($stream:expr, $e:expr) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Error,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -82,6 +87,7 @@ macro_rules! error {
     };
     ($e:expr) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Error,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -102,6 +108,7 @@ macro_rules! error {
 macro_rules! fault {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Error,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -115,6 +122,7 @@ macro_rules! fault {
     };
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Error,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -138,6 +146,7 @@ macro_rules! fault {
 macro_rules! warn {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Warn,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -151,6 +160,7 @@ macro_rules! warn {
     };
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Warn,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -168,6 +178,7 @@ macro_rules! warn {
 macro_rules! info {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Info,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -181,6 +192,7 @@ macro_rules! info {
     };
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Info,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -199,6 +211,7 @@ macro_rules! info {
 macro_rules! test {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Test,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -212,6 +225,7 @@ macro_rules! test {
     };
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Test,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -230,6 +244,7 @@ macro_rules! test {
 macro_rules! debug {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Debug,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -243,6 +258,7 @@ macro_rules! debug {
     };
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Debug,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -261,6 +277,7 @@ macro_rules! debug {
 macro_rules! trace {
     ($lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Trace,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
@@ -274,6 +291,7 @@ macro_rules! trace {
     };
     ($stream:expr, $lit:literal $(, $arg:expr)* $(,)?) => {
         LOG.send_in(bot_log::Msg::Log {
+            at: bot_log::stamp(),
             level: LogLevel::Trace,
             src: oxedyne_fe2o3_core::log::base::Source {
                 tid: std::thread::current().id(),
