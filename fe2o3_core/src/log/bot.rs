@@ -35,6 +35,10 @@ use std::{
     sync::{
         Arc,
         RwLock,
+        atomic::{
+            AtomicU64,
+            Ordering,
+        },
     },
     time,
 };
@@ -286,6 +290,7 @@ pub struct LogBot<ETAG: GenTag>
     chan:       Simplex<Msg<ETAG>>,
     pruned:     Option<time::Instant>,  // the last age prune
     unsynced:   Option<time::Instant>,  // the first line written since the last sync
+    dropped:    Arc<AtomicU64>,         // lines senders dropped on a full channel
     #[cfg(test)]
     syncs:      usize,                  // live file syncs, counted for the tests
 }
@@ -305,6 +310,27 @@ impl<ETAG: GenTag> LogBot<ETAG>
 
     pub fn len(&self) -> usize {
         self.chan.len()
+    }
+
+    /// The counter a sender bumps for each line it drops rather than wait on a full channel.
+    /// The bot reports and clears it as the next message arrives.
+    pub fn drop_counter(&self) -> Arc<AtomicU64> {
+        self.dropped.clone()
+    }
+
+    /// Writes one warning for the lines dropped since the last report, if any.
+    fn report_drops(&mut self) {
+        let n = self.dropped.swap(0, Ordering::Relaxed);
+        if n > 0 {
+            let src = Source {
+                tid: std::thread::current().id(),
+                file: file!(),
+                line: line!(),
+            };
+            self.write(stamp(), LogLevel::Warn, &src, Ok(fmt!(
+                "{} log line(s) at info or below were dropped: the log channel was full.", n)),
+                String::new());
+        }
     }
 
     pub fn init(
@@ -657,6 +683,8 @@ impl<ETAG: GenTag> LogBot<ETAG>
                 return false;
             }
         };
+        // Reported as soon as anything arrives, so a count is never lost to a Finish.
+        self.report_drops();
         match next {
             Err(e) => {
                 let e = err!(e,

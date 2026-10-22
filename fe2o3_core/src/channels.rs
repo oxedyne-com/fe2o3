@@ -95,6 +95,17 @@ pub fn simplex<M>() -> Simplex<M> {
     }
 }
 
+/// A simplex holding at most `cap` messages: a send to a full one waits, and
+/// `try_send` reports it full instead.
+pub fn simplex_bounded<M>(cap: usize) -> Simplex<M> {
+    let (tx, rx) = bounded(cap);
+    Simplex {
+        tx: tx,
+        rx: rx,
+        open: Arc::new(RwLock::new(true)),
+    }
+}
+
 #[derive(Debug)]
 /// A channel for communicating in a single direction.  It includes a thread-safe count of
 /// pending messages.
@@ -190,6 +201,18 @@ impl<M: 'static + Debug + Send + Sync> Simplex<M> {
         }
         res!(self.tx().send(msg));
         Ok(true)
+    }
+
+    /// Sends without waiting. Was the message accepted? A full bounded
+    /// channel answers `false` and hands nothing on.
+    pub fn try_send(&self, msg: M) -> Outcome<bool> {
+        match self.tx().try_send(msg) {
+            Ok(())                              => Ok(true),
+            Err(TrySendError::Full(_))          => Ok(false),
+            Err(TrySendError::Disconnected(_))  => Err(err!(
+                "While trying to send without waiting: the channel is disconnected.";
+            Channel, Write)),
+        }
     }
 
     /// Waits until a message is available.
