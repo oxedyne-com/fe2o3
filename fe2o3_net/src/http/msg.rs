@@ -556,18 +556,34 @@ impl HttpMessage {
         // `HeaderFields::insert` refuses a `Content-Length` while a
         // `Transfer-Encoding` stands, so a message that really is chunked keeps
         // its own framing and does not acquire a second, contradictory one.
-        let _ = self.insert(
-            HeaderName::ContentLength,
-            HeaderFieldValue::ContentLength(self.body_len()),
-            Some(HeaderFieldCategory::Entity as u16),
-        );
+        // RFC 9110 8.6 forbids the field on a `1xx` or `204`, and on a `304` it would state
+        // the length of a representation not sent.
+        let bodiless = self.is_bodiless_status();
+        if !bodiless {
+            let _ = self.insert(
+                HeaderName::ContentLength,
+                HeaderFieldValue::ContentLength(self.body_len()),
+                Some(HeaderFieldCategory::Entity as u16),
+            );
+        }
         self.log(log_get_level!());
         let result = stream.write_all(&self.header.as_vec()).await;
         res!(result);
         // The answer to a `HEAD` is the header the matching `GET` would have sent, and nothing
         // after it. `Content-Length` above still counts the body that was built, which is what
         // the field is for -- a caller asking how big a thing is deserves the true answer.
-        if !self.head_only {
+        // A `1xx`, `204` or `304` ends at its header (RFC 9110 6.4.1, 15.3.5, 15.4.5). Bytes
+        // written after it have no `Content-Length` to frame them, so the peer reads them as the
+        // start of whatever comes next on the connection, or a proxy between misreads the reply
+        // itself. The body is held back, as for a `HEAD`, and the handler that built it is named
+        // in the log so it can be put right.
+        if bodiless && self.body_len() > 0 {
+            if let HttpHeadline::Response { status } = &self.header.headline {
+                warn!("A {} response was built with a body of {} bytes; the body is withheld, \
+                    as the status forbids one.", *status as u16, self.body_len());
+            }
+        }
+        if !self.head_only && !bodiless {
             match &self.file {
                 // A body on disk goes to the socket a chunk at a time and is
                 // never gathered into memory, which is the whole point of
@@ -597,6 +613,20 @@ impl HttpMessage {
         match &self.file {
             Some(window)    => window.len as usize,
             None            => self.body.len(),
+        }
+    }
+
+    /// Is this a response whose status forbids a body, and with it a `Content-Length`?
+    ///
+    /// RFC 9110 8.6 forbids the field on a `1xx` or `204`, and on a `304` it would have to
+    /// state the length of the representation not sent, which a zero here would misstate.
+    pub fn is_bodiless_status(&self) -> bool {
+        match &self.header.headline {
+            HttpHeadline::Response { status } => {
+                let code = *status as u16;
+                code < 200 || code == 204 || code == 304
+            }
+            HttpHeadline::Request { .. } => false,
         }
     }
 
@@ -956,6 +986,21 @@ mod body_tests {
 
     fn on_the_wire(msg: HttpMessage) -> Outcome<String> {
         Ok(String::from_utf8_lossy(&res!(on_the_wire_bytes(msg))).to_string())
+    }
+
+    /// A `204`, `304` or `1xx` built with a body still ends at its header: no `Content-Length` and
+    /// not a byte after the blank line, whichever handler made the mistake. RFC 9110 6.4.1.
+    #[test]
+    fn test_a_bodiless_status_sends_no_body_even_when_given_one() -> Outcome<()> {
+        for status in [HttpStatus::NoContent, HttpStatus::NotModified, HttpStatus::Continue] {
+            let msg = HttpMessage::new_response(status).with_body(b"{\"ok\":true}".to_vec());
+            let wire = res!(on_the_wire(msg));
+            assert!(!wire.to_lowercase().contains("content-length"),
+                "a {} carried a length: {:?}", status as u16, wire);
+            assert!(wire.ends_with("\r\n\r\n"),
+                "a {} wrote past its headers: {:?}", status as u16, wire);
+        }
+        Ok(())
     }
 
     /// A `HEAD` answer is the headers the matching `GET` would have sent, and nothing after them
