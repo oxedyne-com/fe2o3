@@ -13,7 +13,7 @@ use std::{
 /// Check that the string contains no path components and is just a filename.
 pub fn is_filename(name: &str) -> bool {
     !name.contains(std::path::MAIN_SEPARATOR) &&
-    cfg!(not(windows)) || !name.contains('/')
+    (cfg!(not(windows)) || !name.contains('/'))
 }
 
 /// Normalise a relative path without reference to the state of the file system by:

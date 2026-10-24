@@ -1,6 +1,9 @@
 use crate::{
     prelude::*,
-    path::NormalPath,
+    path::{
+        is_filename,
+        NormalPath,
+    },
 };
 
 use std::{
@@ -236,6 +239,66 @@ fn mode_bits_of(path: &Path) -> Option<u32> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o777)
+}
+
+// User configuration
+
+pub const CONFIG_VENDOR: &str = "oxedyne"; // Vendor root under the configuration home
+
+/// `XDG_CONFIG_HOME` as given in `x`, only when it is non-empty and absolute,
+/// since the XDG specification says a relative value is to be ignored.
+pub fn xdg_config_home_from(x: Option<OsString>) -> Option<PathBuf> {
+    match x {
+        Some(x) if !x.is_empty() && Path::new(&x).is_absolute() => Some(PathBuf::from(x)),
+        _                                                       => None,
+    }
+}
+
+pub fn xdg_config_home() -> Option<PathBuf> {
+    xdg_config_home_from(std::env::var_os("XDG_CONFIG_HOME"))
+}
+
+/// The user's configuration home: the usable `XDG_CONFIG_HOME` in `xdg`, else
+/// `.config` under the non-empty `HOME` in `home`.
+pub fn config_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Outcome<PathBuf> {
+    if let Some(x) = xdg_config_home_from(xdg) {
+        return Ok(x);
+    }
+    match home {
+        Some(h) if !h.is_empty()    => Ok(PathBuf::from(h).join(".config")),
+        _                           => Err(err!(
+            "Neither XDG_CONFIG_HOME (absolute) nor HOME (non-empty) names a directory, \
+            so there is no user configuration home.";
+            Invalid, Input, Missing)),
+    }
+}
+
+pub fn config_home() -> Outcome<PathBuf> {
+    config_home_from(std::env::var_os("XDG_CONFIG_HOME"), std::env::var_os("HOME"))
+}
+
+/// `<config home>/oxedyne/<app>`, from the given `XDG_CONFIG_HOME` and `HOME`.
+/// Nothing is created: pair it with [`create_secret_dir`] or
+/// [`restrict_secret_dir`].
+pub fn app_config_dir_from(
+    app:    &str,
+    xdg:    Option<OsString>,
+    home:   Option<OsString>,
+)
+    -> Outcome<PathBuf>
+{
+    if app.is_empty() || app == "." || app == ".." || !is_filename(app) {
+        return Err(err!(
+            "The application name {:?} must be a single, non-empty path component, \
+            not '.' or '..'.", app;
+            Invalid, Input));
+    }
+    Ok(res!(config_home_from(xdg, home)).join(CONFIG_VENDOR).join(app))
+}
+
+/// [`app_config_dir_from`] reading `XDG_CONFIG_HOME` and `HOME` from the environment.
+pub fn app_config_dir(app: &str) -> Outcome<PathBuf> {
+    app_config_dir_from(app, std::env::var_os("XDG_CONFIG_HOME"), std::env::var_os("HOME"))
 }
 
 // Secrets
