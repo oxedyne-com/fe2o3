@@ -339,19 +339,47 @@ pub(crate) fn save_secret_aged(
 ///
 /// Only directories this call actually creates get 0700; one that already
 /// exists is left at whatever mode it holds, since narrowing that is
-/// `restrict_secret_dir`'s job. A plain `create_dir_all` off unix, where there
+/// `restrict_secret_dir`'s job. Each new directory's parent is fsynced once it
+/// is made, so the directory is durable before anything is written into it. A plain `create_dir_all` off unix, where there
 /// is no mode to set.
 #[cfg(unix)]
 pub fn create_secret_dir(path: &Path) -> Outcome<()> {
+    create_secret_dir_with(path, sync_parent_dir)
+}
+
+/// [`create_secret_dir`] with the fsync of a new directory's parent given, so
+/// a test can see which directories it was asked for.
+#[cfg(unix)]
+pub(crate) fn create_secret_dir_with<S>(path: &Path, mut sync: S) -> Outcome<()>
+    where S: FnMut(&Path) -> Outcome<()>
+{
     use std::{
         fs::DirBuilder,
+        io::ErrorKind,
         os::unix::fs::DirBuilderExt,
     };
 
-    if let Err(e) = DirBuilder::new().recursive(true).mode(0o700).create(path) {
-        return Err(err!(e,
-            "Could not create key directory {:?} at mode 0700.", path;
-            File, IO, Create));
+    // The components that are not there yet, innermost first.
+    let mut missing = Vec::new();
+    let mut at = Some(path);
+    while let Some(dir) = at {
+        if dir.as_os_str().is_empty() || dir.exists() {
+            break;
+        }
+        missing.push(dir);
+        at = dir.parent();
+    }
+    // Outermost first, each one's entry fsynced in its parent before the next
+    // is made inside it, so a crash never keeps a key whose directory it lost.
+    for dir in missing.into_iter().rev() {
+        match DirBuilder::new().mode(0o700).create(dir) {
+            Ok(())                                                      => res!(sync(dir)),
+            // Another process made it first; its entry is that process's to sync.
+            Err(e) if e.kind() == ErrorKind::AlreadyExists && dir.is_dir() => (),
+            Err(e)                                                      => return Err(err!(e,
+                "Could not create key directory {:?} at mode 0700.", dir;
+                File, IO, Create)),
+        }
     }
     Ok(())
 }
@@ -1063,6 +1091,34 @@ mod tests {
                 "{:?} was 0400 and ended at {:o} after restrict_secret, which should not widen it.",
                 path, mode;
                 Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// Every directory `create_secret_dir` makes has its parent fsynced, so
+    /// the new entry survives a crash before anything is written inside it;
+    /// one that was already there is not asked for.
+    #[test]
+    fn test_create_secret_dir_syncs_the_parent_of_each_new_directory() -> Outcome<()> {
+        let top = scratch_path("secret_dir_sync");
+        res!(fs::create_dir(&top));
+        let path = top.join("a").join("b").join("c");
+        let mut synced = Vec::new();
+        let made = create_secret_dir_with(&path, |p| { synced.push(p.to_path_buf()); Ok(()) });
+        let want = vec![top.join("a"), top.join("a").join("b"), path.clone()];
+        let again = create_secret_dir_with(&path, |p| Err(err!(
+            "{:?} was already there, but its parent was fsynced as new.", p; Test, Mismatch)));
+        let mode = mode_of(&top.join("a").join("b"));
+        let _ = fs::remove_dir_all(&top);
+        res!(made);
+        res!(again);
+        if synced != want {
+            return Err(err!(
+                "create_secret_dir fsynced the parents of {:?}, expected {:?}.", synced, want;
+                Test, Mismatch));
+        }
+        if res!(mode) != 0o700 {
+            return Err(err!("A new key directory is not at mode 0700."; Test, Mismatch));
         }
         Ok(())
     }
