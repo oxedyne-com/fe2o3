@@ -465,24 +465,31 @@ pub fn restrict_secret_dir(_path: &Path) -> Outcome<Option<u32>> {
     Ok(None)
 }
 
-/// Fsyncs the directory holding `path`, after the rename that lands a file
-/// there. Without this, the rename itself can survive a crash while the
-/// directory entry pointing at it does not, which can bring back a file --
-/// or the previous contents of one -- that was already reported saved.
+/// Fsyncs the directory holding `path`, after a rename that lands a file
+/// there or an unlink that removes one. Without this, the change itself can
+/// survive a crash while the directory entry does not, which can bring back a
+/// file -- or the previous contents of one -- that was already reported saved
+/// or removed.
 #[cfg(unix)]
-fn sync_parent_dir(path: &Path) -> Outcome<()> {
+pub fn sync_parent_dir(path: &Path) -> Outcome<()> {
     let dir = parent_dir(path);
     let d = match File::open(dir) {
         Ok(d) => d,
         Err(e) => return Err(err!(e,
-            "Could not open the directory {:?} to fsync it after saving {:?}.", dir, path;
+            "Could not open the directory {:?} to fsync it after changing {:?}.", dir, path;
             File, IO, Write)),
     };
     if let Err(e) = d.sync_all() {
         return Err(err!(e,
-            "Could not fsync the directory {:?} after saving {:?}.", dir, path;
+            "Could not fsync the directory {:?} after changing {:?}.", dir, path;
             File, IO, Write));
     }
+    Ok(())
+}
+
+/// A no-op off unix, where a directory cannot be opened to fsync it.
+#[cfg(not(unix))]
+pub fn sync_parent_dir(_path: &Path) -> Outcome<()> {
     Ok(())
 }
 
