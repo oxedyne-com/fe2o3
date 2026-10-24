@@ -51,6 +51,12 @@ use tokio_rustls::{
     TlsConnector,
 };
 
+pub mod mint;
+pub use mint::{
+    Mint,
+    NameRule,
+};
+
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ BOUNDED SERVER-SIDE TLS ACCEPTOR                                          │
@@ -453,6 +459,10 @@ pub fn default_client_config() -> Outcome<ClientConfig> {
     Ok(ClientConfig::builder()
         .with_root_certificates(store)
         .with_no_client_auth())
+}
+
+pub fn pem_certificate(_der: &[u8]) -> String {
+    String::new()
 }
 
 /// The decoded DER of every `-----BEGIN CERTIFICATE-----` block. A tiny in-tree
