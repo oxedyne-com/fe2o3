@@ -13,5 +13,7 @@ pub mod origin;
 pub mod pct;
 pub mod range;
 #[cfg(feature = "async")]
+pub mod relay;
+#[cfg(feature = "async")]
 pub mod range_source;
 pub mod status;
