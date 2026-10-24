@@ -727,6 +727,145 @@ impl fmt::Display for TextFileState {
 }
 
 
+// Ownership
+
+/// The effective user id of this process, from the `Uid:` line of
+/// `/proc/self/status`, which gives the real, effective, saved and filesystem
+/// ids in that order. The owner of `/proc/self` is not used: the kernel makes
+/// it root for a process that is not dumpable, such as one that changed its ids.
+#[cfg(target_os = "linux")]
+pub fn effective_uid() -> Outcome<u32> {
+    let status = match fs::read_to_string("/proc/self/status") {
+        Ok(s) => s,
+        Err(e) => return Err(err!(e,
+            "Could not read /proc/self/status for the effective user id.";
+            File, IO, Read)),
+    };
+    for line in status.lines() {
+        if let Some(ids) = line.strip_prefix("Uid:") {
+            return match ids.split_whitespace().nth(1).map(|id| id.parse::<u32>()) {
+                Some(Ok(uid)) => Ok(uid),
+                _ => Err(err!(
+                    "The Uid line {:?} of /proc/self/status gives no effective user id.", line;
+                    Decode, Input, Missing)),
+            };
+        }
+    }
+    Err(err!("/proc/self/status has no Uid line."; Decode, Input, Missing))
+}
+
+/// No safe call reads the effective user id on this platform.
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn effective_uid() -> Outcome<u32> {
+    Err(err!(
+        "The effective user id is read from /proc/self/status, which this platform does not have.";
+        Unimplemented))
+}
+
+/// Refuses a symbolic link, a non-directory or a directory another user owns
+/// at each component of `rel` beneath `base`, narrowing each to its owner's
+/// bits, so that key material at `base.join(rel)` is reached only through
+/// directories this user alone controls. `base`, a configuration home every
+/// other application shares, is neither asked nor narrowed. The first
+/// component that does not exist ends the walk, since whatever makes it,
+/// [`create_secret_dir`], makes it this user's at 0700.
+#[cfg(unix)]
+pub fn secure_secret_chain(base: &Path, rel: &Path) -> Outcome<()> {
+    use std::{
+        io::ErrorKind,
+        os::unix::fs::MetadataExt,
+        path::Component,
+    };
+
+    let uid = res!(effective_uid());
+    let mut at = base.to_path_buf();
+    for part in rel.components() {
+        match part {
+            Component::Normal(name) => at.push(name),
+            other => return Err(err!(
+                "The key path {:?} beneath {:?} may hold only plain names, not {:?}.",
+                rel, base, other;
+                Invalid, Input, Path)),
+        }
+        let meta = match fs::symlink_metadata(&at) {
+            Ok(m) => m,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(err!(e,
+                "Could not stat {:?} on the way to key material.", at;
+                File, IO, Read)),
+        };
+        if meta.file_type().is_symlink() {
+            return Err(err!(
+                "{:?} is a symbolic link, and a directory on the way to key material must \
+                be a real one: whoever controls where a link points controls the keys \
+                beneath it. Replace the link with a directory of this user's own.", at;
+                Security, File, Invalid));
+        }
+        if !meta.is_dir() {
+            return Err(err!(
+                "{:?} is on the way to key material and is not a directory.", at;
+                Invalid, Input, File));
+        }
+        if meta.uid() != uid {
+            return Err(err!(
+                "{:?} is owned by user {}, not by user {} who runs this, and the owner of \
+                a directory on the way to key material can replace the keys beneath it. \
+                Make it this user's own.", at, meta.uid(), uid;
+                Security, File, Invalid));
+        }
+        res!(restrict_secret_dir(&at));
+    }
+    Ok(())
+}
+
+/// A no-op off unix, where there is no owner or mode to ask.
+#[cfg(not(unix))]
+pub fn secure_secret_chain(_base: &Path, _rel: &Path) -> Outcome<()> {
+    Ok(())
+}
+
+/// Refuses a key file that is a symbolic link, is not a regular file, or is
+/// owned by another user, who could replace it. A missing one passes, for the
+/// reader to say what absence means.
+#[cfg(unix)]
+pub fn secure_secret_file(path: &Path) -> Outcome<()> {
+    use std::{
+        io::ErrorKind,
+        os::unix::fs::MetadataExt,
+    };
+
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(err!(e,
+            "Could not stat the key file {:?}.", path;
+            File, IO, Read)),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(err!(
+            "The key file {:?} is a symbolic link; key material is read only from a \
+            regular file of this user's own.", path;
+            Security, File, Invalid));
+    }
+    if !meta.is_file() {
+        return Err(err!("The key file {:?} is not a regular file.", path; Invalid, Input, File));
+    }
+    let uid = res!(effective_uid());
+    if meta.uid() != uid {
+        return Err(err!(
+            "The key file {:?} is owned by user {}, not by user {} who runs this, so it \
+            is not read.", path, meta.uid(), uid;
+            Security, File, Invalid));
+    }
+    Ok(())
+}
+
+/// A no-op off unix, where there is no owner to ask.
+#[cfg(not(unix))]
+pub fn secure_secret_file(_path: &Path) -> Outcome<()> {
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
