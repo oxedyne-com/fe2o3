@@ -461,8 +461,17 @@ pub fn default_client_config() -> Outcome<ClientConfig> {
         .with_no_client_auth())
 }
 
-pub fn pem_certificate(_der: &[u8]) -> String {
-    String::new()
+/// A DER certificate as one PEM `CERTIFICATE` block, base64 in 64-column lines.
+pub fn pem_certificate(der: &[u8]) -> String {
+    let b64 = base64::encode(der);
+    let mut out = String::with_capacity(b64.len() + b64.len() / 64 + 64);
+    out.push_str("-----BEGIN CERTIFICATE-----\n");
+    for line in b64.as_bytes().chunks(64) {
+        out.push_str(&String::from_utf8_lossy(line));
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
 }
 
 /// The decoded DER of every `-----BEGIN CERTIFICATE-----` block. A tiny in-tree
