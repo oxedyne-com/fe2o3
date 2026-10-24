@@ -67,7 +67,9 @@ fn test_secure_secret_chain_narrows_each_existing_component() -> Outcome<()> {
     res!(fs::set_permissions(&a, fs::Permissions::from_mode(0o755)));
     res!(fs::set_permissions(a.join("b"), fs::Permissions::from_mode(0o777)));
     // The last component is not there yet, which ends the walk.
-    res!(secure_secret_chain(&s.path, Path::new("a/b/c/d")));
+    let narrowed = res!(secure_secret_chain(&s.path, Path::new("a/b/c/d")));
+    assert_eq!(narrowed, vec![(a.clone(), 0o755), (a.join("b"), 0o777)], "each is reported with its old mode");
+    assert!(res!(secure_secret_chain(&s.path, Path::new("a/b/c/d"))).is_empty(), "and only once");
     assert_eq!(res!(mode(&a)), 0o700);
     assert_eq!(res!(mode(&a.join("b"))), 0o700);
     assert!(!a.join("b").join("c").exists());
@@ -84,7 +86,7 @@ fn test_secure_secret_chain_refuses_a_symbolic_link() -> Outcome<()> {
     let link = s.path.join("a").join("b");
     res!(symlink(&open, &link));
     let msg = match secure_secret_chain(&s.path, Path::new("a/b/c")) {
-        Ok(())  => return Err(err!("A link in the chain was not refused."; Test, Missing)),
+        Ok(_)   => return Err(err!("A link in the chain was not refused."; Test, Missing)),
         Err(e)  => fmt!("{}", e),
     };
     assert!(msg.contains(&fmt!("{:?}", link)), "{}", msg);
@@ -100,7 +102,7 @@ fn test_secure_secret_chain_refuses_another_users_directory() -> Outcome<()> {
         return Ok(());
     }
     let msg = match secure_secret_chain(Path::new("/"), Path::new("tmp/x")) {
-        Ok(())  => return Err(err!("Root's directory was not refused."; Test, Missing)),
+        Ok(_)   => return Err(err!("Root's directory was not refused."; Test, Missing)),
         Err(e)  => fmt!("{}", e),
     };
     assert!(msg.contains("\"/tmp\"") && msg.contains("owned by user 0"), "{}", msg);

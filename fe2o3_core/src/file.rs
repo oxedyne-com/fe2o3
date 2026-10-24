@@ -768,9 +768,10 @@ pub fn effective_uid() -> Outcome<u32> {
 /// directories this user alone controls. `base`, a configuration home every
 /// other application shares, is neither asked nor narrowed. The first
 /// component that does not exist ends the walk, since whatever makes it,
-/// [`create_secret_dir`], makes it this user's at 0700.
+/// [`create_secret_dir`], makes it this user's at 0700. Each directory narrowed
+/// is returned with the mode it had, for the caller to tell its user.
 #[cfg(unix)]
-pub fn secure_secret_chain(base: &Path, rel: &Path) -> Outcome<()> {
+pub fn secure_secret_chain(base: &Path, rel: &Path) -> Outcome<Vec<(PathBuf, u32)>> {
     use std::{
         io::ErrorKind,
         os::unix::fs::MetadataExt,
@@ -778,6 +779,7 @@ pub fn secure_secret_chain(base: &Path, rel: &Path) -> Outcome<()> {
     };
 
     let uid = res!(effective_uid());
+    let mut narrowed = Vec::new();
     let mut at = base.to_path_buf();
     for part in rel.components() {
         match part {
@@ -789,7 +791,7 @@ pub fn secure_secret_chain(base: &Path, rel: &Path) -> Outcome<()> {
         }
         let meta = match fs::symlink_metadata(&at) {
             Ok(m) => m,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(narrowed),
             Err(e) => return Err(err!(e,
                 "Could not stat {:?} on the way to key material.", at;
                 File, IO, Read)),
@@ -813,15 +815,17 @@ pub fn secure_secret_chain(base: &Path, rel: &Path) -> Outcome<()> {
                 Make it this user's own.", at, meta.uid(), uid;
                 Security, File, Invalid));
         }
-        res!(restrict_secret_dir(&at));
+        if let Some(was) = res!(restrict_secret_dir(&at)) {
+            narrowed.push((at.clone(), was));
+        }
     }
-    Ok(())
+    Ok(narrowed)
 }
 
 /// A no-op off unix, where there is no owner or mode to ask.
 #[cfg(not(unix))]
-pub fn secure_secret_chain(_base: &Path, _rel: &Path) -> Outcome<()> {
-    Ok(())
+pub fn secure_secret_chain(_base: &Path, _rel: &Path) -> Outcome<Vec<(PathBuf, u32)>> {
+    Ok(Vec::new())
 }
 
 /// Refuses a key file that is a symbolic link, is not a regular file, or is
