@@ -259,16 +259,23 @@ pub fn xdg_config_home() -> Option<PathBuf> {
 }
 
 /// The user's configuration home: the usable `XDG_CONFIG_HOME` in `xdg`, else
-/// `.config` under the non-empty `HOME` in `home`.
+/// `.config` under the absolute `HOME` in `home`. A relative `HOME` is refused
+/// rather than resolved against the current directory, which would put the
+/// configuration, and any key in it, inside whatever tree the command ran in.
 pub fn config_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Outcome<PathBuf> {
     if let Some(x) = xdg_config_home_from(xdg) {
         return Ok(x);
     }
     match home {
-        Some(h) if !h.is_empty()    => Ok(PathBuf::from(h).join(".config")),
-        _                           => Err(err!(
-            "Neither XDG_CONFIG_HOME (absolute) nor HOME (non-empty) names a directory, \
-            so there is no user configuration home.";
+        Some(h) if Path::new(&h).is_absolute()  => Ok(PathBuf::from(h).join(".config")),
+        Some(h) if !h.is_empty()                => Err(err!(
+            "HOME is {:?}, which is relative, and XDG_CONFIG_HOME names no absolute \
+            directory, so there is no user configuration home. Set HOME or \
+            XDG_CONFIG_HOME to an absolute path.", h;
+            Invalid, Input, Missing)),
+        _                                       => Err(err!(
+            "Neither XDG_CONFIG_HOME (absolute) nor HOME (absolute) names a directory, \
+            so there is no user configuration home. Set one of them to an absolute path.";
             Invalid, Input, Missing)),
     }
 }

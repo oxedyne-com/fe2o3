@@ -65,3 +65,17 @@ fn test_app_config_dir_from_refuses_bad_name() {
         assert!(app_config_dir_from(app, os("/x/cfg"), os("/home/u")).is_err(), "{:?}", app);
     }
 }
+
+/// A relative HOME is refused, as a relative XDG_CONFIG_HOME is ignored: either
+/// would put the configuration home, and the keys in it, under whatever the
+/// current directory happens to be.
+#[test]
+fn test_config_home_refuses_a_relative_home() {
+    for home in [os("rel"), os("./x"), os(".")] {
+        assert!(config_home_from(None, home.clone()).is_err(),
+            "a relative HOME {:?} was accepted", home);
+        assert!(config_home_from(os("rel/cfg"), home.clone()).is_err(),
+            "a relative HOME {:?} behind a relative XDG_CONFIG_HOME was accepted", home);
+    }
+    assert!(config_home_from(os("/x/cfg"), os("rel")).is_ok(), "an absolute XDG_CONFIG_HOME still wins");
+}
