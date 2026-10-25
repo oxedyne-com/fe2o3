@@ -476,6 +476,9 @@ impl MailStore for MaildirStore {
                 "Renaming {:?} -> {:?}.", tmp_path, cur_path;
                 IO, File, Write));
         }
+        // The data is on disk; the entry naming it must be too before the UID is given out,
+        // or a power loss leaves a uidlist naming a message that SMTP acknowledged and lost.
+        res!(sync_parent_dir(&cur_path));
         let view = res!(Self::read_folder(&folder_dir, false, &lock));
         match view.entries.iter().find(|e| e.key == unique) {
             Some(e) => Ok(e.meta.uid),
