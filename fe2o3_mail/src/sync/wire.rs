@@ -11,12 +11,13 @@
 //! Entry    {id, mailbox, uid_validity, uid, message_id?, size?, year?,
 //!           action: "flags"|"move"|"archive"|"trash"|"junk"|"not_junk"|"expunge",
 //!           add?: [..], remove?: [..], to?: "inbox"|"role:<role>"|"path:<name>"}
-//! ActReply {id: "<decimal>", outcome: "done"|"gone"|"superseded"|"lost"|"stuck"|"error", detail?}
+//! ActReply {id, outcome: "done"|"gone"|"superseded"|"lost"|"stuck"|"error", detail?}
 //! ```
 //! A UID set travels as its IMAP wire form, so 10^5 held UIDs cost bytes. `raw` is standard
 //! base64, and may be left out by a reader that keeps the bytes elsewhere (the page hands the
 //! delta to its wasm apply without them). An entry's `id` is read as a number or a decimal
-//! string; a reply's is written as a string, since a JavaScript number holds only 53 bits.
+//! string (a JavaScript number holds only 53 bits), and its reply's `id` is written back in the
+//! same form, so the page matches the two with `===`.
 //!
 //! Decoding is strict where a silent default would lose something: a UID set that does not
 //! parse, an unknown action or target, a number out of range or a flag that is not a string is
@@ -443,6 +444,21 @@ pub fn target_word(t: &Target) -> String {
     }
 }
 
+/// The JSON type an entry's `id` came in, which its reply's `id` is written back in.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IdForm {
+    #[default]
+    Number, // a JSON number
+    Text,   // a decimal string
+}
+
+pub fn id_form(e: &Dat) -> IdForm {
+    match field(e, "id") {
+        Some(Dat::Str(_))   => IdForm::Text,
+        _                   => IdForm::Number,
+    }
+}
+
 /// An entry's `id`, as a number or a decimal string.
 fn entry_id(e: &Dat) -> Outcome<u64> {
     match field(e, "id") {
@@ -545,6 +561,7 @@ pub fn entry_dat(e: &Entry) -> Dat {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActReply {
     pub id:         u64,
+    pub form:       IdForm, // the entry's, so the page's `===` matches
     pub outcome:    std::result::Result<ActOutcome, String>,
 }
 
@@ -558,7 +575,10 @@ pub fn reply_dat(r: &ActReply) -> Dat {
         Err(why)                        => ("error",      Some(why)),
     };
     let mut p = vec![
-        (dat!("id"),        dat!(fmt!("{}", r.id))),
+        (dat!("id"),        match r.form {
+                                IdForm::Number  => num_dat(r.id),
+                                IdForm::Text    => dat!(fmt!("{}", r.id)),
+                            }),
         (dat!("outcome"),   dat!(word)),
     ];
     if let Some(d) = detail {
@@ -580,7 +600,7 @@ pub fn reply_from(d: &Dat) -> Outcome<ActReply> {
         other           => return Err(err!("The outcome '{}' of entry {} is unknown.",
                             other, id; Invalid, Input)),
     };
-    Ok(ActReply { id, outcome })
+    Ok(ActReply { id, form: id_form(d), outcome })
 }
 
 

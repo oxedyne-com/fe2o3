@@ -10,6 +10,7 @@ use oxedyne_fe2o3_mail::sync::{
     wire::{
         self,
         ActReply,
+        IdForm,
     },
     ActOutcome,
     Action,
@@ -241,11 +242,32 @@ fn test_replies_round_trip_every_outcome() -> Outcome<()> {
         Err(fmt!("The mail server could not be reached.")),
     ];
     for o in all {
-        let r = ActReply { id: (1u64 << 60) + 3, outcome: o };
+        let r = ActReply { id: (1u64 << 60) + 3, form: IdForm::Text, outcome: o.clone() };
         let (text, back) = res!(json_trip(&r));
         assert_eq!(back, r);
         assert!(text.contains("\"id\":\"1152921504606846979\""), "{}", text);
+        let r = ActReply { id: 17, form: IdForm::Number, outcome: o };
+        let (text, back) = res!(json_trip(&r));
+        assert_eq!(back, r);
+        assert!(text.contains("\"id\":17"), "{}", text);
     }
     assert!(wire::reply_from(&res!(parse(r#"{"id":"1","outcome":"maybe"}"#))).is_err());
+    Ok(())
+}
+
+/// A reply's id comes back in the type the entry's came in, so the page matches it by `===`:
+/// a number for a number, a decimal string for a string.
+#[test]
+fn test_a_reply_id_has_the_type_of_its_entry_id() -> Outcome<()> {
+    for (entry, want) in [
+        (r#"{"id":7,"mailbox":"INBOX","uid_validity":5,"uid":9,"action":"trash"}"#,   "\"id\":7,"),
+        (r#"{"id":"7","mailbox":"INBOX","uid_validity":5,"uid":9,"action":"trash"}"#, "\"id\":\"7\","),
+    ] {
+        let d = res!(parse(entry));
+        let e = res!(wire::entry_from(&d));
+        let r = ActReply { id: e.id, form: wire::id_form(&d), outcome: Ok(ActOutcome::Done) };
+        let text = res!(wire::reply_dat(&r).json());
+        assert!(text.replace(' ', "").contains(want), "{} answered {}", entry, text);
+    }
     Ok(())
 }
