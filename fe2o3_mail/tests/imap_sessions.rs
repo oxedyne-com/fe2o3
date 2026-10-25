@@ -318,3 +318,44 @@ async fn a_store_error_is_a_no_and_the_session_lives() -> Outcome<()> {
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }
+
+/// A bulk FETCH of bodies marks them \Seen a chunk at a time, under one hold of the folder per
+/// chunk, not one hold and one read of the whole folder per message, O(N^2), and a delivery
+/// gets in meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bulk_fetch_marks_seen_by_chunk() -> Outcome<()> {
+    let n = 1500;
+    let (port, root) = res!(setup("bulkfetch", 0).await);
+    let new = root.join("test.local/alice/new");
+    for i in 0..n {
+        res!(fs::write(new.join(fmt!("1800000000.M{}P1Q{}.seed", i, i)), fmt!("Subject: m{}\r\n\r\nx\r\n", i)), IO, File);
+    }
+    let mut a = res!(Sess::open(port).await);
+    let r2 = root.clone();
+    let delivery = tokio::task::spawn_blocking(move || -> Outcome<Duration> {
+        std::thread::sleep(Duration::from_millis(300));
+        let store = res!(MaildirStore::new(r2, "test.local"));
+        let u = res!(res!(OneUser.lookup("")).ok_or_else(|| err!("No test user."; Test, Bug)));
+        let t = std::time::Instant::now();
+        res!(store.append(&u, &FolderName::new("INBOX"), b"Subject: late\r\n\r\nx\r\n", MessageFlags::default(), None));
+        Ok(t.elapsed())
+    });
+    let t = std::time::Instant::now();
+    let reply = res!(a.cmd(&fmt!("FETCH 1:{} (BODY[])", n)).await);
+    let took = t.elapsed();
+    let waited = match delivery.await {
+        Ok(r)   => res!(r),
+        Err(_)  => return Err(err!("The delivery task failed."; Test, Bug)),
+    };
+    let flags = res!(a.cmd(&fmt!("FETCH 1:{} (FLAGS)", n)).await);
+    let _ = fs::remove_dir_all(&root);
+    assert!(reply.lines().last().map_or(false, |l| l.contains(" OK ")), "FETCH answered:\n{}",
+        reply.lines().last().unwrap_or(""));
+    println!("bulk FETCH of {} took {:?}; the delivery took {:?}", n, took, waited);
+    assert!(took < Duration::from_secs(15), "the bulk FETCH of {} took {:?}", n, took);
+    assert!(waited < Duration::from_secs(5), "the delivery waited {:?} behind the bulk FETCH", waited);
+    assert_eq!(reply.matches("FLAGS (\\Seen)").count(), n, "every FETCH response carries the \\Seen it set");
+    let seen = flags.lines().filter(|l| l.contains("\\Seen")).count();
+    assert_eq!(seen, n, "every message fetched is \\Seen");
+    Ok(())
+}

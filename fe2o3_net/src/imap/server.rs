@@ -30,6 +30,8 @@ use std::{
     collections::{
         BTreeMap,
         BTreeSet,
+        HashMap,
+        HashSet,
     },
     net::SocketAddr,
     sync::Arc,
@@ -69,6 +71,7 @@ pub const IMAP_MAX_LINE: usize = 8 * 1024;              // bytes per command lin
 pub const IMAP_MAX_LITERAL: usize = 20_480_000;         // bytes per `APPEND`
 // Messages a STORE changes under one hold of the folder lock.
 pub const STORE_CHUNK: usize = 500;
+pub const FETCH_CHUNK_BYTES: u64 = 32 * 1024 * 1024; // the most message bytes a FETCH chunk holds at once
 
 
 /// One IMAP listener configuration.
@@ -906,171 +909,216 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
 
         let items = parse_fetch_items(items_raw);
         let indices = resolve_set(seq_set, &session.messages, by_uid);
+        let needs_bytes = items.iter().any(|it| matches!(it,
+            FetchItem::Body { .. } | FetchItem::Rfc822 | FetchItem::Rfc822Header |
+            FetchItem::Rfc822Text | FetchItem::Envelope));
+        // RFC 3501 §6.4.5: BODY[] without PEEK, RFC822 and RFC822.TEXT set \Seen.
+        let marks_seen = !session.read_only && items.iter().any(|it| matches!(it,
+            FetchItem::Body { peek: false, .. } | FetchItem::Rfc822 | FetchItem::Rfc822Text));
 
-        for &idx in &indices {
-            let meta = match session.messages.get(idx) {
-                Some(m) if !session.ghosts.contains(&m.uid.0) => m.clone(),
-                _ => continue, // expunged elsewhere: nothing to fetch, and its EXPUNGE waits
-            };
-            let seq_no = idx + 1;
-
-            // Read raw bytes once if any item needs them.
-            let mut needs_bytes = false;
-            for it in &items {
-                match it {
-                    FetchItem::Body { .. }      |
-                    FetchItem::Rfc822           |
-                    FetchItem::Rfc822Header     |
-                    FetchItem::Rfc822Text       |
-                    FetchItem::Envelope         => needs_bytes = true,
-                    _ => (),
-                }
+        // The live messages of the set, a chunk at a time, so that each chunk is one hold of the
+        // folder for its \Seen and one for its bodies, not one hold and one read of the whole
+        // folder per message, and a delivery gets in between. A chunk's bodies are held at once,
+        // so it is bounded in bytes as well as in messages.
+        let live: Vec<usize> = indices.iter().copied().filter(|&idx| {
+            matches!(session.messages.get(idx), Some(m) if !session.ghosts.contains(&m.uid.0))
+        }).collect(); // a message expunged elsewhere has nothing to fetch, and its EXPUNGE waits
+        let mut chunks: Vec<&[usize]> = Vec::new();
+        let (mut from, mut held) = (0usize, 0u64);
+        for (i, &idx) in live.iter().enumerate() {
+            let size = if needs_bytes { session.messages.get(idx).map_or(0, |m| m.size) } else { 0 };
+            if i > from && (i - from >= STORE_CHUNK || held + size > FETCH_CHUNK_BYTES) {
+                chunks.push(&live[from..i]);
+                from = i;
+                held = 0;
             }
-            let raw: Option<Vec<u8>> = if needs_bytes {
-                let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
-                match res!(self.on_store(move |s| s.fetch_bytes(&user, &folder, uid)).await) {
-                    Some(b) => Some(b),
-                    None    => {
-                        // Expunged since the view was brought up to date.
-                        session.ghosts.insert(meta.uid.0);
-                        continue;
-                    },
-                }
-            } else {
-                None
-            };
+            held += size;
+        }
+        if from < live.len() { chunks.push(&live[from..]); }
 
-            let mut implicit_seen = false;
-
-            // Encode each item as a sequence of segments. Text segments
-            // may be joined with a separating space; literal segments
-            // contain raw byte payloads that must be written
-            // unmodified. We collect segments first and decide whether
-            // to also append a synthetic FLAGS segment after evaluating
-            // implicit \Seen.
-            let mut segments: Vec<FetchSegment> = Vec::new();
-            for it in &items {
-                match it {
-                    FetchItem::Uid => {
-                        segments.push(FetchSegment::Text(fmt!("UID {}", meta.uid.0)));
-                    }
-                    FetchItem::Flags => {
-                        segments.push(FetchSegment::Text(fmt!(
-                            "FLAGS ({})", meta.flags.to_imap_list())));
-                    }
-                    FetchItem::Rfc822Size => {
-                        segments.push(FetchSegment::Text(fmt!(
-                            "RFC822.SIZE {}", meta.size)));
-                    }
-                    FetchItem::InternalDate => {
-                        segments.push(FetchSegment::Text(fmt!(
-                            "INTERNALDATE \"{}\"",
-                            format_internal_date(meta.internal),
-                        )));
-                    }
-                    FetchItem::Envelope => {
-                        if let Some(ref bytes) = raw {
-                            segments.push(FetchSegment::Text(fmt!(
-                                "ENVELOPE {}", build_envelope(bytes))));
+        for chunk in chunks {
+            // Implicit \Seen, added under the folder lock to the flags as they stand, not as last
+            // read, before the responses that show it.
+            let mut seen_now: HashSet<u32> = HashSet::new();
+            if marks_seen {
+                let uids: Vec<MessageUid> = chunk.iter()
+                    .filter_map(|&idx| session.messages.get(idx))
+                    .filter(|m| !m.flags.seen)
+                    .map(|m| m.uid)
+                    .collect();
+                if !uids.is_empty() {
+                    let (user, folder, ask) = (user.clone(), folder.clone(), uids.clone());
+                    let seen = FlagUpdate::Add(MessageFlags { seen: true, ..MessageFlags::default() });
+                    let now = res!(self.on_store(move |s| s.update_flags_many(&user, &folder, &ask, seen)).await);
+                    for (uid, flags) in uids.iter().zip(now) {
+                        match flags {
+                            Some(f) => {
+                                if let Some(m) = session.messages.iter_mut().find(|m| m.uid == *uid) {
+                                    m.flags = f;
+                                }
+                                seen_now.insert(uid.0);
+                            },
+                            None => { session.ghosts.insert(uid.0); }, // expunged meanwhile
                         }
                     }
-                    FetchItem::Body { peek, section } => {
-                        if !peek { implicit_seen = true; }
-                        let bytes = match raw {
-                            Some(ref b) => extract_section(b, section),
-                            None => Vec::new(),
-                        };
-                        let label = section_label(section);
-                        segments.push(FetchSegment::Literal {
-                            prefix: fmt!("BODY[{}] ", label),
-                            payload: bytes,
-                        });
-                    }
-                    FetchItem::Rfc822 => {
-                        implicit_seen = true;
-                        let bytes = match raw {
-                            Some(ref b) => b.clone(),
-                            None => Vec::new(),
-                        };
-                        segments.push(FetchSegment::Literal {
-                            prefix: "RFC822 ".to_string(),
-                            payload: bytes,
-                        });
-                    }
-                    FetchItem::Rfc822Header => {
-                        let bytes = match raw {
-                            Some(ref b) => extract_section(b, &Section::Header),
-                            None => Vec::new(),
-                        };
-                        segments.push(FetchSegment::Literal {
-                            prefix: "RFC822.HEADER ".to_string(),
-                            payload: bytes,
-                        });
-                    }
-                    FetchItem::Rfc822Text => {
-                        implicit_seen = true;
-                        let bytes = match raw {
-                            Some(ref b) => extract_section(b, &Section::Text),
-                            None => Vec::new(),
-                        };
-                        segments.push(FetchSegment::Literal {
-                            prefix: "RFC822.TEXT ".to_string(),
-                            payload: bytes,
-                        });
-                    }
                 }
             }
-
-            // RFC 3501 §6.4.8: every FETCH response triggered by a
-            // UID command must include the UID, even when the client
-            // did not request it. Inject one if it's missing.
-            if by_uid {
-                let already_uid = segments.iter().any(|s| {
-                    matches!(s, FetchSegment::Text(t) if t.starts_with("UID "))
-                });
-                if !already_uid {
-                    segments.insert(0, FetchSegment::Text(fmt!("UID {}", meta.uid.0)));
-                }
+            let mut bodies: HashMap<u32, Vec<u8>> = HashMap::new();
+            if needs_bytes {
+                let uids: Vec<MessageUid> = chunk.iter()
+                    .filter_map(|&idx| session.messages.get(idx))
+                    .filter(|m| !session.ghosts.contains(&m.uid.0))
+                    .map(|m| m.uid)
+                    .collect();
+                let (user, folder) = (user.clone(), folder.clone());
+                bodies = res!(self.on_store(move |s| {
+                    let mut out = HashMap::new();
+                    res!(s.visit_bytes(&user, &folder, &uids, |uid, b| {
+                        out.insert(uid.0, b.to_vec());
+                        Ok(())
+                    }));
+                    Ok(out)
+                }).await);
             }
 
-            // Implicit \Seen, added to the flags as they stand, not as last read.
-            if implicit_seen && !session.read_only && !meta.flags.seen {
-                let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
-                let seen = FlagUpdate::Add(MessageFlags { seen: true, ..MessageFlags::default() });
-                let now = res!(self.on_store(move |s| s.update_flags(&user, &folder, uid, seen)).await);
-                if let Some(flags) = now {
-                    if let Some(m) = session.messages.iter_mut().find(|m| m.uid == meta.uid) {
-                        m.flags = flags;
+            for &idx in chunk {
+                let meta = match session.messages.get(idx) {
+                    Some(m) if !session.ghosts.contains(&m.uid.0) => m.clone(),
+                    _ => continue,
+                };
+                let seq_no = idx + 1;
+                let raw: Option<Vec<u8>> = if needs_bytes {
+                    match bodies.remove(&meta.uid.0) {
+                        Some(b) => Some(b),
+                        None    => {
+                            // Expunged since the view was brought up to date.
+                            session.ghosts.insert(meta.uid.0);
+                            continue;
+                        },
                     }
+                } else {
+                    None
+                };
+
+                // Encode each item as a sequence of segments. Text segments
+                // may be joined with a separating space; literal segments
+                // contain raw byte payloads that must be written
+                // unmodified. We collect segments first and decide whether
+                // to also append a synthetic FLAGS segment after evaluating
+                // implicit \Seen.
+                let mut segments: Vec<FetchSegment> = Vec::new();
+                for it in &items {
+                    match it {
+                        FetchItem::Uid => {
+                            segments.push(FetchSegment::Text(fmt!("UID {}", meta.uid.0)));
+                        }
+                        FetchItem::Flags => {
+                            segments.push(FetchSegment::Text(fmt!(
+                                "FLAGS ({})", meta.flags.to_imap_list())));
+                        }
+                        FetchItem::Rfc822Size => {
+                            segments.push(FetchSegment::Text(fmt!(
+                                "RFC822.SIZE {}", meta.size)));
+                        }
+                        FetchItem::InternalDate => {
+                            segments.push(FetchSegment::Text(fmt!(
+                                "INTERNALDATE \"{}\"",
+                                format_internal_date(meta.internal),
+                            )));
+                        }
+                        FetchItem::Envelope => {
+                            if let Some(ref bytes) = raw {
+                                segments.push(FetchSegment::Text(fmt!(
+                                    "ENVELOPE {}", build_envelope(bytes))));
+                            }
+                        }
+                        FetchItem::Body { section, .. } => {
+                            let bytes = match raw {
+                                Some(ref b) => extract_section(b, section),
+                                None => Vec::new(),
+                            };
+                            let label = section_label(section);
+                            segments.push(FetchSegment::Literal {
+                                prefix: fmt!("BODY[{}] ", label),
+                                payload: bytes,
+                            });
+                        }
+                        FetchItem::Rfc822 => {
+                            let bytes = match raw {
+                                Some(ref b) => b.clone(),
+                                None => Vec::new(),
+                            };
+                            segments.push(FetchSegment::Literal {
+                                prefix: "RFC822 ".to_string(),
+                                payload: bytes,
+                            });
+                        }
+                        FetchItem::Rfc822Header => {
+                            let bytes = match raw {
+                                Some(ref b) => extract_section(b, &Section::Header),
+                                None => Vec::new(),
+                            };
+                            segments.push(FetchSegment::Literal {
+                                prefix: "RFC822.HEADER ".to_string(),
+                                payload: bytes,
+                            });
+                        }
+                        FetchItem::Rfc822Text => {
+                            let bytes = match raw {
+                                Some(ref b) => extract_section(b, &Section::Text),
+                                None => Vec::new(),
+                            };
+                            segments.push(FetchSegment::Literal {
+                                prefix: "RFC822.TEXT ".to_string(),
+                                payload: bytes,
+                            });
+                        }
+                    }
+                }
+
+                // RFC 3501 §6.4.8: every FETCH response triggered by a
+                // UID command must include the UID, even when the client
+                // did not request it. Inject one if it's missing.
+                if by_uid {
+                    let already_uid = segments.iter().any(|s| {
+                        matches!(s, FetchSegment::Text(t) if t.starts_with("UID "))
+                    });
+                    if !already_uid {
+                        segments.insert(0, FetchSegment::Text(fmt!("UID {}", meta.uid.0)));
+                    }
+                }
+
+                // The \Seen just set is shown, if the client did not ask for FLAGS.
+                if seen_now.contains(&meta.uid.0) {
                     let already = segments.iter().any(|s| {
                         matches!(s, FetchSegment::Text(t) if t.starts_with("FLAGS"))
                     });
                     if !already {
                         segments.push(FetchSegment::Text(fmt!(
-                            "FLAGS ({})", flags.to_imap_list())));
+                            "FLAGS ({})", meta.flags.to_imap_list())));
                     }
                 }
-            }
 
-            // Emit `* SEQ FETCH ( ... )\r\n` with a SP between segments.
-            let opener = fmt!("* {} FETCH (", seq_no);
-            res!(write_all(stream, opener.as_bytes()).await);
-            for (i, seg) in segments.iter().enumerate() {
-                if i > 0 {
-                    res!(write_all(stream, b" ").await);
-                }
-                match seg {
-                    FetchSegment::Text(t) => {
-                        res!(write_all(stream, t.as_bytes()).await);
+                // Emit `* SEQ FETCH ( ... )\r\n` with a SP between segments.
+                let opener = fmt!("* {} FETCH (", seq_no);
+                res!(write_all(stream, opener.as_bytes()).await);
+                for (i, seg) in segments.iter().enumerate() {
+                    if i > 0 {
+                        res!(write_all(stream, b" ").await);
                     }
-                    FetchSegment::Literal { prefix, payload } => {
-                        let head = fmt!("{}{{{}}}\r\n", prefix, payload.len());
-                        res!(write_all(stream, head.as_bytes()).await);
-                        res!(write_all(stream, payload).await);
+                    match seg {
+                        FetchSegment::Text(t) => {
+                            res!(write_all(stream, t.as_bytes()).await);
+                        }
+                        FetchSegment::Literal { prefix, payload } => {
+                            let head = fmt!("{}{{{}}}\r\n", prefix, payload.len());
+                            res!(write_all(stream, head.as_bytes()).await);
+                            res!(write_all(stream, payload).await);
+                        }
                     }
                 }
+                res!(write_all(stream, b")\r\n").await);
             }
-            res!(write_all(stream, b")\r\n").await);
         }
         Ok(())
     }
