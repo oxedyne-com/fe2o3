@@ -8,11 +8,15 @@
 //! 2026-10-26 (F2a, D-20261026-01): before this module the server knew ALL, the flags and
 //! `UID <set>`, and answered anything else with the whole mailbox.
 //!
-//! Not yet: MIME encoded words (RFC 2047) in a header are compared as they stand, undecoded.
+//! Header keys (HEADER, FROM, TO, CC, BCC, SUBJECT and TEXT's header part) match the value with
+//! its RFC 2047 encoded-words decoded, so `SUBJECT Grüße` finds `=?UTF-8?B?R3LDvMOfZQ==?=`
+//! (F2a part 2, 2026-10-26). A body is still compared as it is stored, transfer encoding and
+//! all.
 
 use crate::mail::store::MessageMeta;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_text::mime::decode_words;
 
 use std::time::UNIX_EPOCH;
 
@@ -330,46 +334,56 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// What the content keys look at in one message, lower-cased once.
+/// What the content keys look at in one message, decoded and lower-cased once.
 #[derive(Debug)]
 pub struct Content {
-    fields:     Vec<(String, String)>,  // lower-case name, unfolded lower-case value
-    body:       String,
-    text:       String,                 // the whole message
+    fields:     Vec<(String, String)>,  // lower-case name, unfolded, decoded, lower-case value
+    head:       String,                 // the decoded fields as `name: value` lines, for TEXT
+    body:       String,                 // lower case, as stored
     sent:       Option<i64>,            // the Date: field, days since the epoch
 }
 
 impl Content {
     pub fn new(bytes: &[u8]) -> Self {
-        let text = String::from_utf8_lossy(bytes).to_lowercase();
+        // Split and decode before lower-casing: case is meaningful inside a base64 word.
+        let text = String::from_utf8_lossy(bytes);
         let (head, body) = match (text.find("\r\n\r\n"), text.find("\n\n")) {
             (Some(a), Some(b)) if b + 1 < a => (&text[..b], &text[b + 2..]),
             (Some(a), _)                    => (&text[..a], &text[a + 4..]),
             (None, Some(b))                 => (&text[..b], &text[b + 2..]),
             (None, None)                    => (&text[..], ""),
         };
-        let mut fields: Vec<(String, String)> = Vec::new();
+        let mut raw_fields: Vec<(String, String)> = Vec::new();
         for raw in head.split('\n') {
             let line = raw.strip_suffix('\r').unwrap_or(raw);
             if line.starts_with(' ') || line.starts_with('\t') {
-                if let Some(last) = fields.last_mut() {
+                if let Some(last) = raw_fields.last_mut() {
                     last.1.push(' ');
                     last.1.push_str(line.trim());
                 }
                 continue;
             }
             if let Some((n, v)) = line.split_once(':') {
-                fields.push((n.trim().to_string(), v.trim().to_string()));
+                raw_fields.push((n.trim().to_string(), v.trim().to_string()));
             }
+        }
+        let fields: Vec<(String, String)> = raw_fields.iter()
+            .map(|(n, v)| (n.to_ascii_lowercase(), decode_words(v).to_lowercase()))
+            .collect();
+        let mut head = String::new();
+        for (n, v) in &fields {
+            head.push_str(n);
+            head.push_str(": ");
+            head.push_str(v);
+            head.push('\n');
         }
         let sent = fields.iter()
             .find(|(n, _)| n == "date")
             .and_then(|(_, v)| parse_header_date(v));
-        let body = body.to_string();
         Self {
             fields,
-            body,
-            text,
+            head,
+            body:   body.to_lowercase(),
             sent,
         }
     }
@@ -420,7 +434,9 @@ impl SearchKey {
                 None    => false,
             },
             Self::Body(needle)              => content.is_some_and(|c| c.body.contains(needle.as_str())),
-            Self::Text(needle)              => content.is_some_and(|c| c.text.contains(needle.as_str())),
+            Self::Text(needle)              => content.is_some_and(|c| {
+                c.head.contains(needle.as_str()) || c.body.contains(needle.as_str())
+            }),
             Self::Before(d)                 => day() < *d,
             Self::On(d)                     => day() == *d,
             Self::Since(d)                  => day() >= *d,

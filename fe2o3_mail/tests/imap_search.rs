@@ -157,9 +157,10 @@ impl Conn {
     }
 }
 
-#[tokio::test]
-async fn search_finds_exactly_what_matches_and_refuses_what_it_cannot() -> Outcome<()> {
-    let root = std::env::temp_dir().join(fmt!("fe2o3_imap_search_{}", std::process::id()));
+/// A Maildir holding `msgs` (bytes, flags, INTERNALDATE in days after the epoch), served over
+/// a socket, logged in with INBOX selected; with the UIDs given, in order, and the root.
+async fn serve(name: &str, msgs: Vec<(Vec<u8>, MessageFlags, u64)>) -> Outcome<(Conn, Vec<u32>, PathBuf)> {
+    let root = std::env::temp_dir().join(fmt!("fe2o3_imap_{}_{}", name, std::process::id()));
     let _ = fs::remove_dir_all(&root);
     res!(fs::create_dir_all(&root), IO, File);
     let store = res!(MaildirStore::new(PathBuf::from(&root), "test.local"));
@@ -170,17 +171,11 @@ async fn search_finds_exactly_what_matches_and_refuses_what_it_cannot() -> Outco
     res!(store.ensure_user(&user));
     let inbox = FolderName::new("INBOX");
     let mut uids: Vec<u32> = Vec::new();
-    for m in corpus() {
-        let t = UNIX_EPOCH + Duration::from_secs(m.day * 86_400 + 3_600);
-        let MessageUid(u) = res!(store.append(&user, &inbox, &m.bytes(), m.flags, Some(t)));
+    for (bytes, flags, day) in msgs {
+        let t = UNIX_EPOCH + Duration::from_secs(day * 86_400 + 3_600);
+        let MessageUid(u) = res!(store.append(&user, &inbox, &bytes, flags, Some(t)));
         uids.push(u);
     }
-    // Every UID, in corpus order, so `pick(&[0, 2])` is messages 1 and 3.
-    let pick = |ix: &[usize]| -> Vec<u32> {
-        let mut v: Vec<u32> = ix.iter().map(|i| uids[*i]).collect();
-        v.sort();
-        v
-    };
 
     let listener = res!(TcpListener::bind("127.0.0.1:0").await, IO, Network);
     let addr = res!(listener.local_addr(), IO, Network);
@@ -202,6 +197,19 @@ async fn search_finds_exactly_what_matches_and_refuses_what_it_cannot() -> Outco
     res!(c.r.read_line(&mut greeting).await, IO, Network);
     res!(c.cmd(&fmt!("LOGIN {} {}", USER, PASS)).await);
     res!(c.cmd("SELECT INBOX").await);
+    Ok((c, uids, root))
+}
+
+#[tokio::test]
+async fn search_finds_exactly_what_matches_and_refuses_what_it_cannot() -> Outcome<()> {
+    let msgs = corpus().iter().map(|m| (m.bytes(), m.flags, m.day)).collect();
+    let (mut c, uids, root) = res!(serve("search", msgs).await);
+    // Every UID, in corpus order, so `pick(&[0, 2])` is messages 1 and 3.
+    let pick = |ix: &[usize]| -> Vec<u32> {
+        let mut v: Vec<u32> = ix.iter().map(|i| uids[*i]).collect();
+        v.sort();
+        v
+    };
 
     let uid_range = fmt!("UID {}:{}", uids[1], uids[2]);
     let cases: Vec<(&str, Vec<u32>)> = vec![
@@ -281,6 +289,57 @@ async fn search_finds_exactly_what_matches_and_refuses_what_it_cannot() -> Outco
         failures.push(fmt!("SEARCH FROM carol by sequence: {:?}", lines));
     }
     assert!(failures.is_empty(), "SEARCH got these wrong:\n{}", failures.join("\n"));
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// A non-ASCII subject or sender name travels as RFC 2047 encoded-words, and a search must
+/// match what the reader sees, not the encoding.
+#[tokio::test]
+async fn search_matches_header_values_with_their_encoded_words_decoded() -> Outcome<()> {
+    let plain = MessageFlags::default();
+    let msgs = vec![
+        // Subject "Grüße aus Köln", base64.
+        (b"From: Bob <bob@example.org>\r\nTo: alice@test.local\r\n\
+            Subject: =?UTF-8?B?R3LDvMOfZSBhdXMgS8O2bG4=?=\r\n\r\nHallo.\r\n".to_vec(), plain, 19723),
+        // From "Renée Dupont", Q-encoded.
+        (b"From: =?utf-8?Q?Ren=C3=A9e_Dupont?= <renee@example.fr>\r\nTo: alice@test.local\r\n\
+            Subject: Lunch\r\n\r\nMidi ?\r\n".to_vec(), plain, 19724),
+        (b"From: carol@example.net\r\nTo: alice@test.local\r\n\
+            Subject: Plain\r\n\r\nNothing encoded.\r\n".to_vec(), plain, 19725),
+    ];
+    let (mut c, uids, root) = res!(serve("search2047", msgs).await);
+    let mut failures = Vec::new();
+
+    // A non-ASCII needle arrives as a literal, as Thunderbird sends it.
+    for (needle, want) in [("grüße", uids[0]), ("KÖLN", uids[0])] {
+        let n = needle.as_bytes().len();
+        res!(c.w.write_all(fmt!("lit UID SEARCH CHARSET UTF-8 SUBJECT {{{}}}\r\n", n).as_bytes()).await,
+            IO, Network);
+        let mut cont = String::new();
+        res!(c.r.read_line(&mut cont).await, IO, Network);
+        res!(c.w.write_all(needle.as_bytes()).await, IO, Network);
+        res!(c.w.write_all(b"\r\n").await, IO, Network);
+        let lines = res!(read_until_tagged(&mut c.r, "lit").await);
+        if !lines.iter().any(|l| *l == fmt!("* SEARCH {}", want)) {
+            failures.push(fmt!("SUBJECT {}: continuation {:?}, then {:?}", needle, cont, lines));
+        }
+    }
+    let cases: Vec<(&str, Vec<u32>)> = vec![
+        ("FROM \"Dupont\"",                    vec![uids[1]]),
+        ("FROM \"e dupont\"",                  vec![uids[1]]),   // `_` is a space in Q
+        ("HEADER From \"Renee Dupont\"",       vec![]),
+        ("TEXT \"aus k\"",                     vec![uids[0]]),
+        ("SUBJECT \"R3LD\"",                   vec![]),
+        ("SUBJECT plain",                       vec![uids[2]]),
+    ];
+    for (q, want) in &cases {
+        match res!(c.uid_search(q).await) {
+            Ok(got) if &got == want => (),
+            other => failures.push(fmt!("{}: want {:?}, got {:?}", q, want, other)),
+        }
+    }
+    assert!(failures.is_empty(), "SEARCH missed decoded headers:\n{}", failures.join("\n"));
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }
