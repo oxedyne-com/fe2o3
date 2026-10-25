@@ -12,21 +12,31 @@
 //!   .Sent/cur/          sub-folder using Maildir++ '.' prefix
 //!   .Sent/new/
 //!   ...
-//!   dovecot-uidvalidity            8-byte hex marker (mtime is canon)
+//!   dovecot-uidvalidity            8-byte hex, the latest UIDVALIDITY issued
 //!   dovecot-uidvalidity.<hex>      empty companion file
-//!   dovecot-uidlist                "<uid> <filename>" map for UID stability
+//!   dovecot-uidlist                "3 V<validity> N<next>" then "<uid> :<key>" rows
+//!   hematite-folder.lock           flock'd across every change to the folder
 //!   subscriptions                  one folder name per line
 //! ```
 //!
-//! UIDs are assigned monotonically per folder. On open, the store
-//! reads the existing `dovecot-uidlist` if present, scans `cur` and
-//! `new` for any files not yet listed, assigns them fresh UIDs, and
-//! rewrites the file. Subsequent appends increment `uidnext` and
-//! append a new entry. UIDVALIDITY comes from the
-//! `dovecot-uidvalidity.<hex>` filename or, failing that, the current
-//! Unix time at first open.
+//! 2026-10-26 (F2a): a UID names one message for as long as its
+//! UIDVALIDITY lasts. Every reading of a folder, delivery, flag change
+//! and expunge holds an exclusive `flock` on the folder's lock file, so
+//! IMAP sessions and SMTP delivery, in threads or in processes, never
+//! interleave a read-modify-write of the uidlist. The uidlist is
+//! replaced whole (temporary file, fsync, rename), a failed write is an
+//! error, UIDNEXT only moves forward, and a uidlist that is missing or
+//! damaged is answered with a new, larger UIDVALIDITY rather than a
+//! silent renumbering under the old one.
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+    prelude::*,
+    file::{
+        ExclusiveLock,
+        SaveMode,
+        save_atomic,
+    },
+};
 use oxedyne_fe2o3_net::mail::store::{
     FolderName,
     FolderStatus,
@@ -38,14 +48,17 @@ use oxedyne_fe2o3_net::mail::store::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     fs::{
         self,
         File,
+        OpenOptions,
     },
     io::{
-        BufRead,
-        BufReader,
+        ErrorKind,
         Read,
         Write,
     },
@@ -53,7 +66,13 @@ use std::{
         Path,
         PathBuf,
     },
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{
+            AtomicU64,
+            Ordering,
+        },
+    },
     time::{
         SystemTime,
         UNIX_EPOCH,
@@ -61,17 +80,13 @@ use std::{
 };
 
 
-/// File name of the dovecot-compatible UID list.
-const UIDLIST_NAME: &str = "dovecot-uidlist";
-
-/// File name prefix of the dovecot-compatible UID validity marker.
-const UIDVALIDITY_PREFIX: &str = "dovecot-uidvalidity";
-
-/// File name of the subscription list.
-const SUBSCRIPTIONS_NAME: &str = "subscriptions";
-
-/// File written into a sub-mailbox to mark it as a Maildir folder.
-const MAILDIRFOLDER_NAME: &str = "maildirfolder";
+const UIDLIST_NAME:         &str    = "dovecot-uidlist";
+const UIDVALIDITY_PREFIX:   &str    = "dovecot-uidvalidity";
+const SUBSCRIPTIONS_NAME:   &str    = "subscriptions";
+const MAILDIRFOLDER_NAME:   &str    = "maildirfolder";      // marks a Maildir++ sub-folder
+const LOCK_NAME:            &str    = "hematite-folder.lock";
+const NAME_TRIES:           u64     = 16;                   // fresh message names tried in tmp/
+static NAME_SEQ:            AtomicU64 = AtomicU64::new(0);  // the Maildir `Q<n>` delivery counter
 
 
 /// Maildir-backed `MailStore`.
@@ -81,10 +96,50 @@ const MAILDIRFOLDER_NAME: &str = "maildirfolder";
 /// `MailUser::delivery_key` it is handed.
 #[derive(Clone, Debug)]
 pub struct MaildirStore {
-    /// Filesystem root holding `<domain>/<local>/` per-user trees.
-    root: Arc<PathBuf>,
-    /// Hostname appended to generated message filenames.
-    hostname: Arc<String>,
+    root:       Arc<PathBuf>,   // holds the `<domain>/<local>/` trees
+    hostname:   Arc<String>,    // in every message name, `/` and `:` escaped
+}
+
+/// A message on disk with the UID the folder's uidlist gives it.
+#[derive(Clone, Debug)]
+struct Entry {
+    meta:   MessageMeta,
+    path:   PathBuf,
+    key:    String,     // the file name less its `:2,` flags, the uidlist key
+}
+
+/// One reading of a folder, taken under its lock.
+#[derive(Debug)]
+struct FolderView {
+    entries:        Vec<Entry>, // UID order
+    uid_validity:   u32,
+    uid_next:       u32,
+    recent:         u32,
+}
+
+impl FolderView {
+    fn find(&self, uid: MessageUid) -> Option<&Entry> {
+        match self.entries.binary_search_by_key(&uid.0, |e| e.meta.uid.0) {
+            Ok(i)   => self.entries.get(i),
+            Err(_)  => None,
+        }
+    }
+
+    fn messages(&self) -> Vec<MessageMeta> {
+        self.entries.iter().map(|e| e.meta.clone()).collect()
+    }
+}
+
+/// What a folder's `dovecot-uidlist` holds.
+#[derive(Debug, PartialEq)]
+enum Uidlist {
+    Missing,
+    Garbled,
+    Valid {
+        validity:   u32,
+        next:       u32,
+        map:        BTreeMap<String, u32>,
+    },
 }
 
 impl MaildirStore {
@@ -95,9 +150,11 @@ impl MaildirStore {
                 "MaildirStore root {:?} is not a directory.", root;
                 Init, Invalid, Path));
         }
+        // The Maildir specification's escapes, since `/` would make a path and `:` the flags.
+        let hostname = hostname.into().replace('/', "\\057").replace(':', "\\072");
         Ok(Self {
             root:       Arc::new(root),
-            hostname:   Arc::new(hostname.into()),
+            hostname:   Arc::new(hostname),
         })
     }
 
@@ -148,173 +205,176 @@ impl MaildirStore {
         Ok(())
     }
 
-    /// Read the UID validity for a folder, or generate and persist one.
-    fn read_or_init_uidvalidity(folder_dir: &Path) -> Outcome<u32> {
-        // Look for `dovecot-uidvalidity.<hex>` -- the hex suffix is
-        // canonical.
-        if let Ok(rd) = fs::read_dir(folder_dir) {
-            for entry in rd.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if let Some(rest) = name.strip_prefix(&fmt!("{}.", UIDVALIDITY_PREFIX)) {
-                    if let Ok(n) = u32::from_str_radix(rest, 16) {
-                        return Ok(n);
-                    }
-                }
-            }
-        }
-        // Fall back to the contents of dovecot-uidvalidity if present.
-        let plain = folder_dir.join(UIDVALIDITY_PREFIX);
-        if let Ok(s) = fs::read_to_string(&plain) {
-            let s = s.trim();
-            if let Ok(n) = u32::from_str_radix(s, 16) {
-                return Ok(n);
-            }
-            if let Ok(n) = s.parse::<u32>() {
-                return Ok(n);
-            }
-        }
-        // Generate.
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as u32)
-            .unwrap_or(1);
-        let marker = folder_dir.join(fmt!("{}.{:08x}", UIDVALIDITY_PREFIX, now));
-        let _ = File::create(&marker);
-        let mut p = match File::create(&plain) {
-            Ok(f) => f,
-            Err(e) => return Err(err!(e,
-                "Writing {:?}.", plain; IO, File, Write)),
-        };
-        let _ = p.write_all(fmt!("{:08x}", now).as_bytes());
-        Ok(now)
+    /// Waits for and takes the folder's lock, which every reader and writer of its uidlist and
+    /// of its `cur/` and `new/` holds, in this process or another.
+    fn lock_folder(folder_dir: &Path) -> Outcome<ExclusiveLock> {
+        res!(Self::ensure_subdirs(folder_dir));
+        ExclusiveLock::acquire(&folder_dir.join(LOCK_NAME))
     }
 
-    /// Open and refresh the per-folder UID list, returning every
-    /// known message in UID order.
-    fn read_messages(
-        &self,
-        folder_dir: &Path,
-        clear_recent: bool,
+    /// Reads the folder and brings its uidlist up to date: a UID for each file not yet listed,
+    /// none for a file gone. `_lock` is the folder's own, which the caller holds throughout.
+    fn read_folder(
+        folder_dir:     &Path,
+        clear_recent:   bool,
+        _lock:          &ExclusiveLock,
     )
-        -> Outcome<(Vec<MessageMeta>, u32, u32)>
+        -> Outcome<FolderView>
     {
-        res!(Self::ensure_subdirs(folder_dir));
-
-        // Walk cur/ and new/ to find every file currently present.
-        // Files in new/ are RECENT and will be moved to cur/ if we
-        // are clearing the recent flag (a SELECT, not EXAMINE).
-        let mut cur_files: Vec<(String, PathBuf)> = Vec::new();
-        let mut new_files: Vec<(String, PathBuf)> = Vec::new();
+        // Files in new/ are RECENT, and are moved to cur/ when the recent flag is being
+        // cleared (a SELECT, not an EXAMINE).
+        let mut files: Vec<(String, PathBuf, bool)> = Vec::new(); // name, path, recent
         for sub in ["cur", "new"] {
             let dir = folder_dir.join(sub);
-            if let Ok(rd) = fs::read_dir(&dir) {
-                for entry in rd.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        if sub == "cur" {
-                            cur_files.push((name, path));
-                        } else {
-                            new_files.push((name, path));
-                        }
-                    }
-                }
-            }
-        }
-
-        // If clearing recent, move files from new/ into cur/ adding
-        // the `:2,` flag suffix so they parse cleanly.
-        if clear_recent {
-            for (name, path) in std::mem::take(&mut new_files) {
-                let with_flags = if name.contains(":2,") {
-                    name.clone()
-                } else {
-                    fmt!("{}:2,", name)
+            let rd = match fs::read_dir(&dir) {
+                Ok(rd) => rd,
+                Err(e) => return Err(err!(e,
+                    "Reading the Maildir directory {:?}.", dir;
+                    IO, File, Read)),
+            };
+            for entry in rd {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => return Err(err!(e,
+                        "Reading an entry of the Maildir directory {:?}.", dir;
+                        IO, File, Read)),
                 };
-                let target = folder_dir.join("cur").join(&with_flags);
-                if let Err(e) = fs::rename(&path, &target) {
-                    warn!("Failed to move {:?} -> {:?}: {}", path, target, e);
-                    cur_files.push((name, path));
+                let path = entry.path();
+                if !path.is_file() { continue; }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if sub == "new" && clear_recent {
+                    let with_flags = if name.contains(":2,") { name.clone() } else { fmt!("{}:2,", name) };
+                    let target = folder_dir.join("cur").join(&with_flags);
+                    match fs::rename(&path, &target) {
+                        Ok(()) => files.push((with_flags, target, false)),
+                        Err(e) => {
+                            warn!("Failed to move {:?} -> {:?}: {}", path, target, e);
+                            files.push((name, path, true));
+                        },
+                    }
                 } else {
-                    cur_files.push((with_flags, target));
+                    files.push((name, path, sub == "new"));
                 }
             }
         }
 
-        let recent_count = new_files.len();
-        let mut all_files: Vec<(String, PathBuf, bool)> = Vec::new();
-        for (n, p) in &cur_files { all_files.push((n.clone(), p.clone(), false)); }
-        for (n, p) in &new_files { all_files.push((n.clone(), p.clone(), true)); }
-
-        // Read the existing uid list.
         let uidlist_path = folder_dir.join(UIDLIST_NAME);
-        let mut uid_by_name: BTreeMap<String, u32> = BTreeMap::new();
-        let mut uid_next: u32 = 1;
-        if let Ok(file) = File::open(&uidlist_path) {
-            let reader = BufReader::new(file);
-            let mut header_seen = false;
-            for line in reader.lines().flatten() {
-                if !header_seen {
-                    header_seen = true;
-                    // Extract `N<num>` if present.
-                    for tok in line.split_whitespace() {
-                        if let Some(rest) = tok.strip_prefix('N') {
-                            if let Ok(n) = rest.parse::<u32>() {
-                                uid_next = n;
-                            }
-                        }
-                    }
-                    if line.contains(' ') && !line.starts_with(char::is_alphabetic) {
-                        // Treat as data row, not header.
-                        if let Some((u, n)) = parse_uid_line(&line) {
-                            uid_by_name.insert(n, u);
-                            if u >= uid_next { uid_next = u + 1; }
-                        }
-                    }
-                    continue;
+        let mut changed = false;
+        let (validity, mut next, mut map) = match res!(read_uidlist(&uidlist_path)) {
+            Uidlist::Valid { validity, next, map } if validity != 0 => (validity, next, map),
+            Uidlist::Valid { next, map, .. } => {
+                // Written by this store before F2a, which kept the validity only in the
+                // `dovecot-uidvalidity` files: the UIDs stand under the validity issued there.
+                changed = true;
+                let v = match stored_uidvalidity(folder_dir) {
+                    Some(v) => v,
+                    None => {
+                        let v = fresh_uidvalidity(None);
+                        res!(record_uidvalidity(folder_dir, v));
+                        v
+                    },
+                };
+                (v, next, map)
+            },
+            damage => {
+                // Nothing says which UIDs were issued under the old validity, so every message
+                // is numbered afresh under a new and larger one, which tells every client to
+                // forget what it holds.
+                let prev = stored_uidvalidity(folder_dir);
+                let v = fresh_uidvalidity(prev);
+                if damage == Uidlist::Garbled || prev.is_some() {
+                    warn!("The uidlist {:?} is {}: UIDVALIDITY {:?} -> {}.",
+                        uidlist_path,
+                        if damage == Uidlist::Garbled { "damaged" } else { "missing" },
+                        prev, v);
                 }
-                if let Some((u, n)) = parse_uid_line(&line) {
-                    uid_by_name.insert(n, u);
-                    if u >= uid_next { uid_next = u + 1; }
-                }
+                res!(record_uidvalidity(folder_dir, v));
+                changed = true;
+                (v, 1, BTreeMap::new())
+            },
+        };
+        for uid in map.values() {
+            if *uid >= next {
+                next = uid.saturating_add(1);
+                changed = true;
             }
         }
 
-        // Assign UIDs to any new files. dovecot-uidlist keys by the
-        // unique part of the filename (everything before `:2,` if
-        // present), which we mirror here so a flag change does not
-        // re-allocate a UID.
-        let mut by_uid: BTreeMap<u32, MessageMeta> = BTreeMap::new();
-        let mut keys_seen: Vec<String> = Vec::new();
-        for (name, path, recent) in &all_files {
+        // New files take UIDs in name order, which is delivery order for names this store makes.
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut present: BTreeSet<String> = BTreeSet::new();
+        let mut entries: Vec<Entry> = Vec::with_capacity(files.len());
+        for (name, path, recent) in &files {
             let key = key_of(name);
-            keys_seen.push(key.clone());
-            let uid = match uid_by_name.get(&key) {
+            if present.contains(&key) { continue; } // one message seen in both cur/ and new/
+            let uid = match map.get(&key) {
                 Some(u) => *u,
                 None => {
-                    let u = uid_next;
-                    uid_next = uid_next.saturating_add(1);
-                    uid_by_name.insert(key.clone(), u);
+                    if next == u32::MAX {
+                        return Err(err!(
+                            "The folder {:?} has issued every UID under UIDVALIDITY {}.",
+                            folder_dir, validity;
+                            Overflow, Range));
+                    }
+                    let u = next;
+                    next += 1;
+                    map.insert(key.clone(), u);
+                    changed = true;
                     u
-                }
+                },
             };
-            let meta = file_to_meta(path, name, uid, *recent);
-            by_uid.insert(uid, meta);
+            present.insert(key.clone());
+            entries.push(Entry {
+                meta:   file_to_meta(path, name, uid, *recent),
+                path:   path.clone(),
+                key,
+            });
+        }
+        let listed = map.len();
+        map.retain(|k, _| present.contains(k));
+        if map.len() != listed { changed = true; }
+        if changed {
+            res!(write_uidlist(&uidlist_path, validity, next, &map));
         }
 
-        // Rewrite the uid list with current state. Drop any entries
-        // for files that no longer exist on disk.
-        let mut keep: BTreeMap<String, u32> = BTreeMap::new();
-        for k in &keys_seen {
-            if let Some(u) = uid_by_name.get(k) {
-                keep.insert(k.clone(), *u);
+        entries.sort_by_key(|e| e.meta.uid.0);
+        let recent = entries.iter().filter(|e| e.meta.flags.recent).count() as u32;
+        Ok(FolderView {
+            entries,
+            uid_validity:   validity,
+            uid_next:       next,
+            recent,
+        })
+    }
+
+    /// The folder read under its lock, which is released before this returns.
+    fn view(folder_dir: &Path, clear_recent: bool) -> Outcome<FolderView> {
+        let lock = res!(Self::lock_folder(folder_dir));
+        Self::read_folder(folder_dir, clear_recent, &lock)
+    }
+
+    /// Creates a file in `tmp_dir` under a name no other delivery uses, this process's or
+    /// another's: `<secs>.M<usec>P<pid>Q<n>.<host>`, opened with `create_new` so that a
+    /// clash is refused rather than overwritten.
+    fn create_unique(&self, tmp_dir: &Path) -> Outcome<(String, PathBuf, File)> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let pid = std::process::id();
+        for _ in 0..NAME_TRIES {
+            let q = NAME_SEQ.fetch_add(1, Ordering::Relaxed);
+            let unique = fmt!("{}.M{}P{}Q{}.{}",
+                now.as_secs(), now.subsec_micros(), pid, q, self.hostname);
+            let path = tmp_dir.join(&unique);
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(f) => return Ok((unique, path, f)),
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(err!(e,
+                    "Creating the delivery file {:?}.", path;
+                    IO, File, Write)),
             }
         }
-        let _ = write_uidlist(&uidlist_path, &keep, uid_next);
-
-        let messages: Vec<MessageMeta> = by_uid.into_values().collect();
-        Ok((messages, uid_next, recent_count as u32))
+        Err(err!(
+            "Every one of {} fresh message names in {:?} was already taken.", NAME_TRIES, tmp_dir;
+            IO, File, Exists))
     }
 }
 
@@ -334,8 +394,7 @@ impl MailStore for MaildirStore {
                     IO, File, Init));
             }
         }
-        res!(Self::ensure_subdirs(&root));
-        let _ = Self::read_or_init_uidvalidity(&root);
+        res!(Self::view(&root, false));
         // Pre-create the special-use folders so IMAP clients can
         // discover them via LIST + SPECIAL-USE attributes without
         // having to issue CREATE first. This unblocks Thunderbird's
@@ -343,8 +402,8 @@ impl MailStore for MaildirStore {
         // otherwise silently falls back to Local Folders when the
         // target Sent folder does not exist on the server.
         for f in ["Sent", "Drafts", "Trash", "Junk", "Archive"] {
-            let _ = self.create_folder(user, &FolderName::new(f));
-            let _ = self.subscribe(user, &FolderName::new(f));
+            res!(self.create_folder(user, &FolderName::new(f)));
+            res!(self.subscribe(user, &FolderName::new(f)));
         }
         Ok(())
     }
@@ -365,67 +424,57 @@ impl MailStore for MaildirStore {
         }
         res!(Self::ensure_subdirs(&folder_dir));
 
-        // Generate a unique filename. Format:
-        // `<unix>.M<usec>P<pid>.<host>:2,<flags>`
-        let now = SystemTime::now();
-        let secs = now.duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let usec = now.duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_micros())
-            .unwrap_or(0);
-        let pid = std::process::id();
-        let unique = fmt!("{}.M{}P{}.{}", secs, usec, pid, self.hostname);
-        let flag_suffix = flag_suffix(flags);
-        let filename = fmt!("{}:2,{}", unique, flag_suffix);
+        // Written in tmp/ outside the lock, so a large message holds up no reader.
+        let (unique, tmp_path, mut f) = res!(self.create_unique(&folder_dir.join("tmp")));
+        let written = (|| -> Outcome<()> {
+            res!(f.write_all(bytes));
+            // After the write, which sets the mtime, so INTERNALDATE round-trips.
+            if let Some(t) = internal {
+                if let Err(e) = f.set_modified(t) {
+                    warn!("Could not set the INTERNALDATE of {:?}: {}.", tmp_path, e);
+                }
+            }
+            res!(f.sync_all());
+            Ok(())
+        })();
+        drop(f);
+        if let Err(e) = written {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err!(e,
+                "Writing the delivery file {:?}.", tmp_path;
+                IO, File, Write));
+        }
 
-        // Write to tmp then rename into cur/.
-        let tmp_path = folder_dir.join("tmp").join(&filename);
+        let filename = fmt!("{}:2,{}", unique, flag_suffix(flags));
         let cur_path = folder_dir.join("cur").join(&filename);
-        {
-            let mut f = match File::create(&tmp_path) {
-                Ok(f) => f,
-                Err(e) => return Err(err!(e,
-                    "Creating tmp file {:?}.", tmp_path;
-                    IO, File, Write)),
-            };
-            if let Err(e) = f.write_all(bytes) {
-                return Err(err!(e,
-                    "Writing tmp file {:?}.", tmp_path;
-                    IO, File, Write));
-            }
-            if let Err(e) = f.sync_all() {
-                warn!("sync_all on {:?}: {}", tmp_path, e);
-            }
+        let lock = match Self::lock_folder(&folder_dir) {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(e);
+            },
+        };
+        // Every writer of cur/ holds the lock, so nothing can take the name between the test
+        // and the rename.
+        if cur_path.exists() {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err!(
+                "A message named {:?} is already in the folder.", cur_path;
+                IO, File, Exists));
         }
         if let Err(e) = fs::rename(&tmp_path, &cur_path) {
+            let _ = fs::remove_file(&tmp_path);
             return Err(err!(e,
                 "Renaming {:?} -> {:?}.", tmp_path, cur_path;
                 IO, File, Write));
         }
-        // Best-effort: set the file mtime so INTERNALDATE round-trips.
-        if let Some(t) = internal {
-            let _ = filetime_set(&cur_path, t);
+        let view = res!(Self::read_folder(&folder_dir, false, &lock));
+        match view.entries.iter().find(|e| e.key == unique) {
+            Some(e) => Ok(e.meta.uid),
+            None => Err(err!(
+                "The message just filed as {:?} has no UID in {:?}.", cur_path, folder_dir;
+                Bug, Missing)),
         }
-
-        // Reload UID list to allocate the new UID.
-        let (msgs, _next, _rec) = res!(self.read_messages(&folder_dir, false));
-        let mut uid = MessageUid(0);
-        for m in &msgs {
-            if cur_path.file_name().map(|f| f.to_string_lossy().into_owned())
-                == Some(filename.clone())
-            {
-                uid = m.uid;
-                break;
-            }
-        }
-        // If the loop did not find it (because the cur entry was named
-        // differently after we moved it), grab the maximum UID just
-        // assigned.
-        if uid.0 == 0 {
-            if let Some(m) = msgs.last() { uid = m.uid; }
-        }
-        Ok(uid)
     }
 
     fn list_folders(&self, user: &MailUser) -> Outcome<Vec<FolderName>> {
@@ -443,6 +492,7 @@ impl MailStore for MaildirStore {
         Ok(out)
     }
 
+
     fn folder_status(
         &self,
         user:   &MailUser,
@@ -450,16 +500,14 @@ impl MailStore for MaildirStore {
     )
         -> Outcome<FolderStatus>
     {
-        let folder_dir = self.folder_path(user, folder);
-        let uidvalidity = res!(Self::read_or_init_uidvalidity(&folder_dir));
-        let (msgs, next, recent) = res!(self.read_messages(&folder_dir, false));
-        let unseen = msgs.iter().filter(|m| !m.flags.seen).count() as u32;
+        let view = res!(Self::view(&self.folder_path(user, folder), false));
+        let unseen = view.entries.iter().filter(|e| !e.meta.flags.seen).count() as u32;
         Ok(FolderStatus {
-            exists:         msgs.len() as u32,
-            recent,
+            exists:         view.entries.len() as u32,
+            recent:         view.recent,
             unseen,
-            uid_validity:   uidvalidity,
-            uid_next:       next,
+            uid_validity:   view.uid_validity,
+            uid_next:       view.uid_next,
         })
     }
 
@@ -471,9 +519,8 @@ impl MailStore for MaildirStore {
     )
         -> Outcome<Vec<MessageMeta>>
     {
-        let folder_dir = self.folder_path(user, folder);
-        let (msgs, _next, _rec) = res!(self.read_messages(&folder_dir, !read_only));
-        Ok(msgs)
+        let view = res!(Self::view(&self.folder_path(user, folder), !read_only));
+        Ok(view.messages())
     }
 
     fn fetch_bytes(
@@ -485,51 +532,15 @@ impl MailStore for MaildirStore {
         -> Outcome<Vec<u8>>
     {
         let folder_dir = self.folder_path(user, folder);
-        let (msgs, _next, _rec) = res!(self.read_messages(&folder_dir, false));
-        let meta = match msgs.iter().find(|m| m.uid == uid) {
-            Some(m) => m,
+        let lock = res!(Self::lock_folder(&folder_dir));
+        let view = res!(Self::read_folder(&folder_dir, false, &lock));
+        let entry = match view.find(uid) {
+            Some(e) => e,
             None => return Err(err!(
-                "No message with UID {} in folder {}.",
-                uid.0, folder.as_str();
+                "No message with UID {} in folder {}.", uid.0, folder.as_str();
                 Missing, Input)),
         };
-        // The on-disk path is encoded in MessageMeta via the size /
-        // internal date alone -- we need to walk the directory again
-        // and locate the file by UID. Use the uidlist key.
-        let uidlist_path = folder_dir.join(UIDLIST_NAME);
-        let key = read_uidlist_key_for(&uidlist_path, uid.0);
-        let key = match key {
-            Some(k) => k,
-            None => return Err(err!(
-                "UID {} present in cache but not in {:?}.", uid.0, uidlist_path;
-                Bug, Missing)),
-        };
-        // Look in cur/ and new/ for any file whose key matches.
-        for sub in ["cur", "new"] {
-            if let Ok(rd) = fs::read_dir(folder_dir.join(sub)) {
-                for entry in rd.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if key_of(&name) == key {
-                        let mut f = match File::open(entry.path()) {
-                            Ok(f) => f,
-                            Err(e) => return Err(err!(e,
-                                "Opening {:?}.", entry.path();
-                                IO, File, Read)),
-                        };
-                        let mut bytes = Vec::with_capacity(meta.size as usize);
-                        if let Err(e) = f.read_to_end(&mut bytes) {
-                            return Err(err!(e,
-                                "Reading {:?}.", entry.path();
-                                IO, File, Read));
-                        }
-                        return Ok(bytes);
-                    }
-                }
-            }
-        }
-        Err(err!(
-            "Could not locate file for UID {} on disk.", uid.0;
-            Missing, IO, File))
+        read_message(&entry.path, entry.meta.size)
     }
 
     fn set_flags(
@@ -542,33 +553,21 @@ impl MailStore for MaildirStore {
         -> Outcome<MessageFlags>
     {
         let folder_dir = self.folder_path(user, folder);
-        let uidlist_path = folder_dir.join(UIDLIST_NAME);
-        let key = match read_uidlist_key_for(&uidlist_path, uid.0) {
-            Some(k) => k,
+        let lock = res!(Self::lock_folder(&folder_dir));
+        let view = res!(Self::read_folder(&folder_dir, false, &lock));
+        let entry = match view.find(uid) {
+            Some(e) => e,
             None => return Err(err!(
-                "UID {} not in {:?}.", uid.0, uidlist_path; Missing)),
+                "No message with UID {} in folder {}.", uid.0, folder.as_str();
+                Missing, Input)),
         };
-        // Locate the current file.
-        for sub in ["cur", "new"] {
-            if let Ok(rd) = fs::read_dir(folder_dir.join(sub)) {
-                for entry in rd.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if key_of(&name) != key { continue; }
-                    // Build the new filename with updated flag suffix.
-                    let new_name = fmt!("{}:2,{}", key, flag_suffix(flags));
-                    let new_path = folder_dir.join("cur").join(&new_name);
-                    if let Err(e) = fs::rename(entry.path(), &new_path) {
-                        return Err(err!(e,
-                            "Renaming for flag update {:?} -> {:?}.",
-                            entry.path(), new_path;
-                            IO, File, Write));
-                    }
-                    return Ok(flags);
-                }
-            }
+        let new_path = folder_dir.join("cur").join(fmt!("{}:2,{}", entry.key, flag_suffix(flags)));
+        if let Err(e) = fs::rename(&entry.path, &new_path) {
+            return Err(err!(e,
+                "Renaming for flag update {:?} -> {:?}.", entry.path, new_path;
+                IO, File, Write));
         }
-        Err(err!(
-            "No file on disk for UID {}.", uid.0; Missing, IO, File))
+        Ok(flags)
     }
 
     fn expunge(
@@ -579,28 +578,23 @@ impl MailStore for MaildirStore {
         -> Outcome<Vec<MessageUid>>
     {
         let folder_dir = self.folder_path(user, folder);
-        let (msgs, _next, _rec) = res!(self.read_messages(&folder_dir, false));
+        let lock = res!(Self::lock_folder(&folder_dir));
+        let view = res!(Self::read_folder(&folder_dir, false, &lock));
         let mut removed: Vec<MessageUid> = Vec::new();
-        for m in &msgs {
-            if !m.flags.deleted { continue; }
-            let key = match read_uidlist_key_for(&folder_dir.join(UIDLIST_NAME), m.uid.0) {
-                Some(k) => k,
-                None => continue,
-            };
-            for sub in ["cur", "new"] {
-                if let Ok(rd) = fs::read_dir(folder_dir.join(sub)) {
-                    for entry in rd.flatten() {
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        if key_of(&name) == key {
-                            let _ = fs::remove_file(entry.path());
-                        }
-                    }
-                }
+        for e in &view.entries {
+            if !e.meta.flags.deleted { continue; }
+            match fs::remove_file(&e.path) {
+                Ok(()) => removed.push(e.meta.uid),
+                // Gone already, by a hand outside this store: it is expunged all the same.
+                Err(err) if err.kind() == ErrorKind::NotFound => removed.push(e.meta.uid),
+                // Still there, so it is not reported, and stays \Deleted for the next EXPUNGE.
+                Err(err) => warn!("Could not expunge UID {} of {:?}, file {:?}: {}.",
+                    e.meta.uid.0, folder_dir, e.path, err),
             }
-            removed.push(m.uid);
         }
-        // Refresh uidlist.
-        let _ = self.read_messages(&folder_dir, false);
+        if !removed.is_empty() {
+            res!(Self::read_folder(&folder_dir, false, &lock));
+        }
         Ok(removed)
     }
 
@@ -622,10 +616,15 @@ impl MailStore for MaildirStore {
         if !folder.as_str().eq_ignore_ascii_case("INBOX") {
             let marker = folder_dir.join(MAILDIRFOLDER_NAME);
             if !marker.exists() {
-                let _ = File::create(&marker);
+                if let Err(e) = File::create(&marker) {
+                    return Err(err!(e,
+                        "Creating the Maildir++ marker {:?}.", marker;
+                        IO, File, Init));
+                }
             }
         }
-        let _ = Self::read_or_init_uidvalidity(&folder_dir);
+        // Issues the folder's UIDVALIDITY with its first uidlist.
+        res!(Self::view(&folder_dir, false));
         Ok(())
     }
 
@@ -647,19 +646,14 @@ impl MailStore for MaildirStore {
             }
         }
         let imap_name = folder.as_str().to_string();
-        if !current.iter().any(|x| x == &imap_name) {
-            current.push(imap_name);
+        if current.iter().any(|x| x == &imap_name) {
+            return Ok(());
         }
-        let mut f = match File::create(&path) {
-            Ok(f) => f,
-            Err(e) => return Err(err!(e,
-                "Writing {:?}.", path; IO, File, Write)),
-        };
-        for line in &current {
-            let _ = f.write_all(line.as_bytes());
-            let _ = f.write_all(b"\n");
-        }
-        Ok(())
+        current.push(imap_name);
+        let mut text = current.join("\n");
+        text.push('\n');
+        // Whole or not at all: a truncated file would drop every other subscription.
+        save_atomic(&path, text.as_bytes(), SaveMode::Keep)
     }
 
     fn list_subscribed(&self, user: &MailUser) -> Outcome<Vec<FolderName>> {
@@ -754,75 +748,150 @@ fn file_to_meta(path: &Path, name: &str, uid: u32, recent: bool) -> MessageMeta 
     }
 }
 
-/// Parse a single dovecot-uidlist data row into `(uid, key)`. The
-/// first line of the file is a header (`3 V0 N7 [G<guid>]`) that
-/// happens to look superficially like a data row -- we reject it by
-/// requiring the second token to begin with `':'` (uidlist v3
-/// format) or a digit (timestamp prefix used in older formats).
-fn parse_uid_line(line: &str) -> Option<(u32, String)> {
-    let line = line.trim();
-    let mut it = line.splitn(2, ' ');
-    let uid: u32 = ok!(ok!(it.next()).parse().ok());
-    let rest = ok!(it.next());
-    let first = ok!(rest.chars().next());
-    if first != ':' && !first.is_ascii_digit() {
-        return None;
-    }
-    let name = match rest.find(':') {
-        Some(i) => &rest[i + 1..],
-        None => rest,
+fn read_message(path: &Path, size: u64) -> Outcome<Vec<u8>> {
+    let mut f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => return Err(err!(e,
+            "Opening {:?}.", path;
+            IO, File, Read)),
     };
+    let mut bytes = Vec::with_capacity(size as usize);
+    if let Err(e) = f.read_to_end(&mut bytes) {
+        return Err(err!(e,
+            "Reading {:?}.", path;
+            IO, File, Read));
+    }
+    Ok(bytes)
+}
+
+fn read_uidlist(path: &Path) -> Outcome<Uidlist> {
+    match fs::read(path) {
+        Ok(bytes)                                   => Ok(parse_uidlist(&bytes)),
+        Err(e) if e.kind() == ErrorKind::NotFound   => Ok(Uidlist::Missing),
+        Err(e)                                      => Err(err!(e,
+            "Reading the uidlist {:?}.", path;
+            IO, File, Read)),
+    }
+}
+
+/// Reads a version 3 dovecot-uidlist: a header `3 V<validity> N<next> ...` and then one
+/// `<uid> [<extensions>] :<file name>` row per message, UIDs rising. Anything else, a file
+/// cut short (every writer ends it with a newline) included, is `Garbled`.
+fn parse_uidlist(bytes: &[u8]) -> Uidlist {
+    let text = match std::str::from_utf8(bytes) {
+        Ok(t)   => t,
+        Err(_)  => return Uidlist::Garbled,
+    };
+    let body = match text.strip_suffix('\n') {
+        Some(b) => b,
+        None    => return Uidlist::Garbled,
+    };
+    let mut lines = body.split('\n');
+    let mut toks = match lines.next() {
+        Some(h) => h.split_whitespace(),
+        None    => return Uidlist::Garbled,
+    };
+    if toks.next() != Some("3") { return Uidlist::Garbled; }
+    let mut validity: Option<u32> = None;
+    let mut next: Option<u32> = None;
+    for t in toks {
+        let (slot, digits) = match t.split_at_checked(1) {
+            Some(("V", d)) => (&mut validity, d),
+            Some(("N", d)) => (&mut next, d),
+            _ => continue,
+        };
+        match digits.parse::<u32>() {
+            Ok(n)   => *slot = Some(n),
+            Err(_)  => return Uidlist::Garbled,
+        }
+    }
+    let (validity, next) = match (validity, next) {
+        (Some(v), Some(n))  => (v, n),
+        _                   => return Uidlist::Garbled,
+    };
+    let mut map: BTreeMap<String, u32> = BTreeMap::new();
+    let mut last = 0u32;
+    for line in lines {
+        let (uid, key) = match parse_uid_line(line) {
+            Some(row)   => row,
+            None        => return Uidlist::Garbled,
+        };
+        if uid <= last || map.insert(key, uid).is_some() {
+            return Uidlist::Garbled;
+        }
+        last = uid;
+    }
+    Uidlist::Valid { validity, next, map }
+}
+
+/// Parse a single dovecot-uidlist data row, `<uid> [<extensions>] :<file name>`, into
+/// `(uid, key)`.
+fn parse_uid_line(line: &str) -> Option<(u32, String)> {
+    let (uid, rest) = ok!(line.split_once(' '));
+    let uid: u32 = ok!(uid.parse().ok());
+    if uid == 0 { return None; }
+    let name = &rest[ok!(rest.find(':')) + 1..];
+    if name.is_empty() { return None; }
     Some((uid, key_of(name)))
 }
 
-/// Look up the uidlist key for a given UID without keeping the whole
-/// file in memory.
-fn read_uidlist_key_for(path: &Path, uid: u32) -> Option<String> {
-    let file = ok!(File::open(path).ok());
-    let reader = BufReader::new(file);
-    let mut header_seen = false;
-    for line in reader.lines().flatten() {
-        if !header_seen {
-            header_seen = true;
-            // Header lines start with a digit (version) but may also
-            // be a data line in older formats.
-            if let Some((u, k)) = parse_uid_line(&line) {
-                if u == uid { return Some(k); }
-            }
-            continue;
-        }
-        if let Some((u, k)) = parse_uid_line(&line) {
-            if u == uid { return Some(k); }
-        }
-    }
-    None
-}
-
-/// Rewrite the dovecot-uidlist with a fresh map.
-fn write_uidlist(path: &Path, map: &BTreeMap<String, u32>, uidnext: u32) -> Outcome<()> {
-    let mut f = match File::create(path) {
-        Ok(f) => f,
-        Err(e) => return Err(err!(e,
-            "Writing {:?}.", path; IO, File, Write)),
-    };
-    let _ = writeln!(f, "3 V0 N{}", uidnext);
-    let mut by_uid: BTreeMap<u32, String> = BTreeMap::new();
-    for (k, u) in map { by_uid.insert(*u, k.clone()); }
+/// Replaces the uidlist whole, so a reader or a crash finds the old list or the new one,
+/// never an empty or partial file.
+fn write_uidlist(
+    path:       &Path,
+    validity:   u32,
+    next:       u32,
+    map:        &BTreeMap<String, u32>,
+)
+    -> Outcome<()>
+{
+    let by_uid: BTreeMap<u32, &str> = map.iter().map(|(k, u)| (*u, k.as_str())).collect();
+    let mut text = fmt!("3 V{} N{}\n", validity, next);
     for (u, k) in &by_uid {
-        let _ = writeln!(f, "{} :{}", u, k);
+        text.push_str(&fmt!("{} :{}\n", u, k));
+    }
+    res!(save_atomic(path, text.as_bytes(), SaveMode::Keep));
+    Ok(())
+}
+
+/// The largest UIDVALIDITY the folder's `dovecot-uidvalidity` files record.
+fn stored_uidvalidity(folder_dir: &Path) -> Option<u32> {
+    let mut best: Option<u32> = None;
+    let prefix = fmt!("{}.", UIDVALIDITY_PREFIX);
+    if let Ok(rd) = fs::read_dir(folder_dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            if let Some(rest) = name.to_string_lossy().strip_prefix(&prefix) {
+                best = best.max(u32::from_str_radix(rest, 16).ok());
+            }
+        }
+    }
+    if let Ok(s) = fs::read_to_string(folder_dir.join(UIDVALIDITY_PREFIX)) {
+        let s = s.trim();
+        best = best.max(u32::from_str_radix(s, 16).ok().or_else(|| s.parse().ok()));
+    }
+    best
+}
+
+/// A UIDVALIDITY after `prev`: the clock in seconds, or one past `prev` when the clock is not
+/// past it.
+fn fresh_uidvalidity(prev: Option<u32>) -> u32 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(1);
+    now.max(prev.map(|p| p.saturating_add(1)).unwrap_or(1))
+}
+
+/// Records `v` as the folder's latest UIDVALIDITY, so that a uidlist lost later is answered
+/// with a larger one.
+fn record_uidvalidity(folder_dir: &Path, v: u32) -> Outcome<()> {
+    res!(save_atomic(&folder_dir.join(UIDVALIDITY_PREFIX), fmt!("{:08x}", v).as_bytes(), SaveMode::Keep));
+    let marker = folder_dir.join(fmt!("{}.{:08x}", UIDVALIDITY_PREFIX, v));
+    if let Err(e) = OpenOptions::new().write(true).create(true).truncate(false).open(&marker) {
+        return Err(err!(e,
+            "Creating the UIDVALIDITY marker {:?}.", marker;
+            IO, File, Write));
     }
     Ok(())
 }
-
-/// Set a file's mtime to the given SystemTime. Best effort.
-fn filetime_set(path: &Path, t: SystemTime) -> Outcome<()> {
-    let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    // Use the libc utimes via std::fs::File and set_modified.
-    let f = match File::options().write(true).open(path) {
-        Ok(f) => f,
-        Err(_) => return Ok(()),
-    };
-    let _ = f.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(secs));
-    Ok(())
-}
-
