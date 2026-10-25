@@ -13,13 +13,14 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 # which a browser client needs or can build for `wasm32-unknown-unknown`. They are on by
 # default, so every existing consumer is unchanged; a client depends on this crate with
 # `default-features = false` to get only the sans-io `message` module (and the shared
-# primitive types and the outbound spool, both of which need nothing but `fe2o3_core`).
+# primitive types and the outbound spool, both of which need nothing but `fe2o3_core`, and the
+# folder sync engine `sync`, which needs only `fe2o3_net`'s tokio-free IMAP types).
 default = ["server"]
 server = [
 	"oxedyne_fe2o3_hash",
 	"oxedyne_fe2o3_iop_hash",
 	"oxedyne_fe2o3_jdat",
-	"oxedyne_fe2o3_net",
+	"oxedyne_fe2o3_net/default",
 ]
 
 [dependencies]
@@ -28,7 +29,9 @@ oxedyne_fe2o3_text				= { path = "../fe2o3_text" }
 oxedyne_fe2o3_hash 		   		= { path = "../fe2o3_hash", optional = true }
 oxedyne_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash", optional = true }
 oxedyne_fe2o3_jdat 		   		= { path = "../fe2o3_jdat", optional = true }
-oxedyne_fe2o3_net				= { path = "../fe2o3_net", optional = true }
+# Always present for its tokio-free IMAP types (`imap::types`, `imap::uid_set`), which the sync
+# engine holds in a browser; `server` turns on the rest.
+oxedyne_fe2o3_net				= { path = "../fe2o3_net", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full"] }
