@@ -185,8 +185,13 @@ fn a_pair_keeps_its_name_and_marks_only_the_value() -> Outcome<()> {
 	req!(scrub::text(&fmt!("Bearer \t {}", v), false), fmt!("Bearer \t {}", marked("bearer", &v)));
 	let seven = fmt!("Bearer {}", run(7, 73, B64));
 	req!(scrub::text(&seven, false), seven.clone());
-	// The word is case sensitive, and so is the boundary before it.
-	req!(scrub::hit(&fmt!("bearer {}", run(20, 74, B64)), false), false);
+	// `bearer` is case-free, as a scheme is on the wire (SCRUB-ONE); `Basic` and `Token` are not,
+	// since prose uses both words lower case. The boundary before the word holds for all three.
+	let v = run(20, 74, B64);
+	req!(scrub::text(&fmt!("bearer {}", v), false), fmt!("bearer {}", marked("bearer", &v)));
+	req!(scrub::text(&fmt!("BEARER {}", v), false), fmt!("BEARER {}", marked("bearer", &v)));
+	req!(scrub::hit(&fmt!("basic {}", v), false), false);
+	req!(scrub::hit(&fmt!("token {}", v), false), false);
 	req!(scrub::hit(&fmt!("xBearer {}", run(20, 74, B64)), false), false);
 	Ok(())
 }
@@ -239,8 +244,14 @@ fn a_secret_name_against_a_value_is_matched_through_up_to_three_quotes_and_space
 		"API_KEY", "Password"]
 	{
 		let v = run(16, 101, ALNUM);
-		req!(scrub::text(&fmt!("cfg {}: {} end", name, v), false),
-			fmt!("cfg {}: {} end", name, marked("named", &v)), "for {}", name);
+		// A typed name's value is the rest of its line, since a passphrase is words (SCRUB-ONE).
+		let typed = ["passphrase", "password", "mnemonic", "seed_phrase", "seedphrase", "Password"].contains(&name);
+		let want = if typed {
+			fmt!("cfg {}: {}", name, marked("named", &fmt!("{} end", v)))
+		} else {
+			fmt!("cfg {}: {} end", name, marked("named", &v))
+		};
+		req!(scrub::text(&fmt!("cfg {}: {} end", name, v), false), want, "for {}", name);
 		req!(scrub::text(&fmt!("cfg {}=\"{}\"", name, v), false),
 			fmt!("cfg {}=\"{}\"", name, marked("named", &v)), "quoted, for {}", name);
 	}
@@ -248,7 +259,9 @@ fn a_secret_name_against_a_value_is_matched_through_up_to_three_quotes_and_space
 	// Three quotes or spaces either side of the colon, and not four.
 	req!(scrub::text(&fmt!("token\"  : \"'{}", v), false), fmt!("token\"  : \"'{}", marked("named", &v)));
 	req!(scrub::hit(&fmt!("token\"   : {}", v), false), false);
-	req!(scrub::hit(&fmt!("token: \"'\" {}", v), false), false);
+	// A quoted value is taken whole at any length, so a lone quote mark between two is one, and
+	// the run after it is not the value (the JavaScript answers the same).
+	req!(scrub::text(&fmt!("token: \"'\" {}", v), false), fmt!("token: \"{}\" {}", marked("named", "'"), v));
 	// Eight value characters, the alphabet with `.`, `/`, `+` and `=` in it.
 	req!(scrub::text("token=ab.cd/e+=", false), fmt!("token={}", marked("named", "ab.cd/e+=")));
 	req!(scrub::hit("token=abcdefg", false), false);
