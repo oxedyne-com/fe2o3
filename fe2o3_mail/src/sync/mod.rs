@@ -26,6 +26,8 @@ pub mod act;
 pub mod apply;
 #[cfg(feature = "server")]
 pub mod imap;
+#[cfg(feature = "jdat")]
+pub mod wire;
 
 pub use act::{
     act,
@@ -236,7 +238,7 @@ pub struct Cursor {
 }
 
 /// What a device holds of one folder, sent with each sync.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Snapshot {
     pub mailbox:    String,
     pub cursor:     Cursor,
@@ -279,7 +281,7 @@ pub enum LinkKey {
 }
 
 /// A message that arrived since the cursor.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NewMessage {
     pub uid:            u32,
     pub flags:          Vec<String>,
@@ -298,7 +300,7 @@ pub struct FlagState {
     pub flags:  Vec<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Delta {
     pub mailbox:    String,
     pub tier:       Option<Tier>,       // the tier this delta was read by

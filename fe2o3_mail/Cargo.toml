@@ -16,10 +16,12 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 # primitive types and the outbound spool, both of which need nothing but `fe2o3_core`, and the
 # folder sync engine `sync`, which needs only `fe2o3_net`'s tokio-free IMAP types).
 default = ["server"]
+# The JSON wire form of the sync records (`sync::wire`), which a browser client builds too.
+jdat = ["oxedyne_fe2o3_jdat"]
 server = [
+	"jdat",
 	"oxedyne_fe2o3_hash",
 	"oxedyne_fe2o3_iop_hash",
-	"oxedyne_fe2o3_jdat",
 	"oxedyne_fe2o3_net/default",
 ]
 
