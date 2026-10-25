@@ -18,6 +18,11 @@
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
+    ffi::OsString,
+    path::{
+        Path,
+        PathBuf,
+    },
     pin::Pin,
     sync::Arc,
     task::{
@@ -421,44 +426,139 @@ pub fn ensure_crypto_provider() {
         .install_default();
 }
 
-/// The host's CA bundle, and nothing else: the "trust what the operating system
-/// trusts" default every public-internet client wants. A caller needing its own
-/// root store builds the `ClientConfig` itself.
-pub fn default_client_config() -> Outcome<ClientConfig> {
-    ensure_crypto_provider();
-    let ca_paths = [
-        "/etc/ssl/certs/ca-certificates.crt",	// Debian/Ubuntu
-        "/etc/pki/tls/certs/ca-bundle.crt",		// Fedora/RHEL
-        "/etc/ssl/cert.pem",					// Alpine/macOS
-    ];
-    let ca_file = match ca_paths.iter().find(|p| std::path::Path::new(p).exists()) {
-        Some(p) => *p,
-        None => return Err(err!(
-            "No system CA bundle found. Tried: {:?}", ca_paths;
-            Init, Missing, File)),
-    };
-    let pem = match std::fs::read(ca_file) {
-        Ok(d)  => d,
-        Err(e) => return Err(err!(e,
-            "Failed to read CA bundle '{}'.", ca_file;
-            IO, File, Read)),
-    };
-    let mut store = RootCertStore::empty();
-    let mut count = 0u32;
-    for der in parse_pem_certificates(&pem) {
-        let cert = CertificateDer::from(der);
-        if store.add(cert).is_ok() {
-            count += 1;
+/// The system bundle locations, tried in order.
+pub const SYSTEM_CA_BUNDLES: [&str; 3] = [
+    "/etc/ssl/certs/ca-certificates.crt",   // Debian/Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",     // Fedora/RHEL
+    "/etc/ssl/cert.pem",                    // Alpine/macOS
+];
+
+/// The roots a client trusts, gathered before the `ClientConfig` is built, so a caller can add a
+/// private CA to what the operating system trusts rather than build the store itself.
+#[derive(Clone, Debug)]
+pub struct ClientRoots {
+    store: RootCertStore,
+}
+
+impl ClientRoots {
+
+    pub fn empty() -> Self {
+        Self { store: RootCertStore::empty() }
+    }
+
+    /// What the operating system trusts, read as OpenSSL reads it: see [`Self::openssl`] for
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR`.
+    pub fn system() -> Outcome<Self> {
+        Self::openssl(std::env::var_os("SSL_CERT_FILE"), std::env::var_os("SSL_CERT_DIR"))
+    }
+
+    /// The roots OpenSSL would trust given these two environment values. `file` replaces the
+    /// system bundle, and a file it names that cannot be read is an error, not an empty trust.
+    /// `dir` is a colon-separated list of directories whose every file is read for certificates,
+    /// a file holding none and a directory that does not exist passed over, as OpenSSL passes
+    /// over a hashed name it does not find. An empty value is an unset one. No usable root at
+    /// all is an error.
+    pub fn openssl(file: Option<OsString>, dir: Option<OsString>) -> Outcome<Self> {
+        let mut roots = Self::empty();
+        match file.filter(|f| !f.is_empty()) {
+            Some(f) => { res!(roots.add_pem_file(PathBuf::from(f))); },
+            None    => {
+                let bundle = match SYSTEM_CA_BUNDLES.iter().find(|p| Path::new(p).exists()) {
+                    Some(p) => *p,
+                    None    => return Err(err!(
+                        "No system CA bundle found. Tried: {:?}", SYSTEM_CA_BUNDLES;
+                        Init, Missing, File)),
+                };
+                res!(roots.add_pem_file(bundle));
+            },
+        }
+        if let Some(d) = dir.filter(|d| !d.is_empty()) {
+            for one in std::env::split_paths(&d) {
+                if one.is_dir() {
+                    res!(roots.add_pem_dir(&one));
+                }
+            }
+        }
+        if roots.len() == 0 {
+            return Err(err!("No usable root certificate was found."; Init, Missing, File));
+        }
+        Ok(roots)
+    }
+
+    /// Adds every certificate in a PEM text, returning how many. None usable is an error, because
+    /// a caller handing over a CA means it to be trusted.
+    pub fn add_pem(&mut self, pem: &[u8]) -> Outcome<usize> {
+        let n = self.add_pem_quietly(pem);
+        if n == 0 {
+            return Err(err!("The PEM text held no usable certificate."; Invalid, Input));
+        }
+        Ok(n)
+    }
+
+    fn add_pem_quietly(&mut self, pem: &[u8]) -> usize {
+        let mut n = 0usize;
+        for der in parse_pem_certificates(pem) {
+            if self.store.add(CertificateDer::from(der)).is_ok() {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    pub fn add_pem_file<P: AsRef<Path>>(&mut self, path: P) -> Outcome<usize> {
+        let path = path.as_ref();
+        let pem = res!(std::fs::read(path).map_err(|e| err!(e,
+            "Reading CA certificates from '{}'.", path.display(); IO, File, Read)));
+        match self.add_pem(&pem) {
+            Ok(n)  => Ok(n),
+            Err(e) => Err(err!(e,
+                "'{}' held no usable certificate.", path.display(); Init, Invalid, File)),
         }
     }
-    if count == 0 {
-        return Err(err!(
-            "CA bundle '{}' contained no usable certificates.", ca_file;
-            Init, Invalid, File));
+
+    /// Every regular file in `dir`, a file holding no certificate passed over.
+    pub fn add_pem_dir<P: AsRef<Path>>(&mut self, dir: P) -> Outcome<usize> {
+        let dir = dir.as_ref();
+        let entries = res!(std::fs::read_dir(dir).map_err(|e| err!(e,
+            "Reading the CA directory '{}'.", dir.display(); IO, File, Read)));
+        let mut n = 0usize;
+        for entry in entries {
+            let path = res!(entry.map_err(|e| err!(e,
+                "Reading the CA directory '{}'.", dir.display(); IO, File, Read))).path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Ok(pem) = std::fs::read(&path) {
+                n += self.add_pem_quietly(&pem);
+            }
+        }
+        Ok(n)
     }
-    Ok(ClientConfig::builder()
-        .with_root_certificates(store)
-        .with_no_client_auth())
+
+    pub fn len(&self) -> usize {
+        self.store.len()
+    }
+
+    pub fn client_config(self) -> ClientConfig {
+        ensure_crypto_provider();
+        ClientConfig::builder()
+            .with_root_certificates(self.store)
+            .with_no_client_auth()
+    }
+}
+
+/// What the operating system trusts, as [`ClientRoots::system`] reads it, and nothing else: the
+/// default every public-internet client wants.
+pub fn default_client_config() -> Outcome<ClientConfig> {
+    Ok(res!(ClientRoots::system()).client_config())
+}
+
+/// What the operating system trusts plus every certificate in `pem`, for a server vouched for by
+/// a private CA.
+pub fn client_config_trusting(pem: &[u8]) -> Outcome<ClientConfig> {
+    let mut roots = res!(ClientRoots::system());
+    res!(roots.add_pem(pem));
+    Ok(roots.client_config())
 }
 
 /// A DER certificate as one PEM `CERTIFICATE` block, base64 in 64-column lines.
@@ -794,6 +894,8 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 mod upgrade_tests {
     use super::*;
 
+    use std::net::SocketAddr;
+
     use tokio::net::TcpListener;
     use tokio_rustls::rustls::{
         ServerConfig,
@@ -842,6 +944,88 @@ mod upgrade_tests {
                     "a refused certificate read as a dropped connection: {:?}", e.tags());
             },
         }
+        Ok(())
+    }
+
+    // ── Trusted roots ────────────────────────────────────────────
+
+    const PRIVATE_HOST: &str = "mail.world.test";
+
+    /// A server vouched for by a private CA of its own, answering `n` handshakes.
+    async fn private_server(n: usize) -> Outcome<(SocketAddr, String)> {
+        let mint = res!(Mint::new(&[NameRule::Exact(fmt!("{}", PRIVATE_HOST))], 1));
+        let ca   = mint.ca_pem();
+        let scfg = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(mint));
+        let acceptor = TlsAcceptor::from(Arc::new(scfg));
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the test server."; Test, IO)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading its address."; Test, IO)));
+        tokio::spawn(async move {
+            for _ in 0..n {
+                if let Ok((sock, _)) = listener.accept().await {
+                    let _ = acceptor.accept(sock).await;
+                }
+            }
+        });
+        Ok((addr, ca))
+    }
+
+    async fn handshake(addr: SocketAddr, ccfg: ClientConfig) -> Outcome<ClientStream> {
+        let plain = res!(TcpStream::connect(addr).await
+            .map_err(|e| err!(e, "Dialling the test server."; Test, IO)));
+        upgrade(plain, PRIVATE_HOST, Arc::new(ccfg), Duration::from_secs(10)).await
+    }
+
+    /// The system roots do not vouch for a private CA; the same roots with it added do.
+    #[tokio::test]
+    async fn test_a_private_root_is_trusted_only_once_added_00() -> Outcome<()> {
+        ensure_crypto_provider();
+        let (addr, ca) = res!(private_server(2).await);
+        match handshake(addr, res!(default_client_config())).await {
+            Ok(_)  => return Err(err!("A private CA was trusted unasked."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Security),
+                "the refusal was not tagged Security: {:?}", e.tags()),
+        }
+        let mut roots = res!(ClientRoots::system());
+        let before = roots.len();
+        req!(1, res!(roots.add_pem(ca.as_bytes())), "the CA was not added");
+        req!(before + 1, roots.len());
+        res!(handshake(addr, roots.client_config()).await);
+        Ok(())
+    }
+
+    /// As OpenSSL reads them: `SSL_CERT_FILE` replaces the bundle, and every file in each
+    /// `SSL_CERT_DIR` directory (colon separated) is added.
+    #[tokio::test]
+    async fn test_ssl_cert_file_and_dir_are_honoured_as_openssl_does_00() -> Outcome<()> {
+        ensure_crypto_provider();
+        let (addr, ca) = res!(private_server(1).await);
+        let other = res!(Mint::new(&[NameRule::Exact(fmt!("other.world.test"))], 1));
+        let root = std::env::temp_dir().join(fmt!("fe2o3_roots_{}", std::process::id()));
+        let dir  = root.join("dir");
+        res!(std::fs::create_dir_all(&dir).map_err(|e| err!(e, "Making the test dir."; Test, IO)));
+        let file = root.join("ca.pem");
+        res!(std::fs::write(&file, &ca).map_err(|e| err!(e, "Writing the CA."; Test, IO)));
+        res!(std::fs::write(dir.join("other.pem"), other.ca_pem())
+            .map_err(|e| err!(e, "Writing the CA."; Test, IO)));
+        res!(std::fs::write(dir.join("README"), "no certificate here")
+            .map_err(|e| err!(e, "Writing a stray file."; Test, IO)));
+
+        let only_file = res!(ClientRoots::openssl(Some(file.clone().into()), None));
+        req!(1, only_file.len(), "SSL_CERT_FILE did not replace the bundle");
+        let both = res!(ClientRoots::openssl(
+            Some(file.clone().into()),
+            Some(fmt!("{}:{}", root.join("absent").display(), dir.display()).into()),
+        ));
+        req!(2, both.len(), "SSL_CERT_DIR was not added to SSL_CERT_FILE");
+        res!(handshake(addr, both.client_config()).await);
+
+        let missing = ClientRoots::openssl(Some(root.join("absent.pem").into()), None);
+        req!(true, missing.is_err(), "a missing SSL_CERT_FILE was passed over in silence");
+        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 }

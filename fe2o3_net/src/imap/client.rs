@@ -146,6 +146,10 @@ pub struct ImapConfig {
     // and hope for the same answer twice. This field is how it does the last part.
     pub addr:       Option<SocketAddr>,
     pub retries:    u8,         // fresh connections a client may make for dropped ones
+    // The roots the server's certificate is checked against; `None` is what the operating system
+    // trusts (tls::default_client_config, which honours SSL_CERT_FILE and SSL_CERT_DIR). A
+    // private CA is added with tls::ClientRoots or tls::client_config_trusting.
+    pub tls:        Option<Arc<ClientConfig>>,
 }
 
 impl ImapConfig {
@@ -159,7 +163,13 @@ impl ImapConfig {
             timeout:  IMAP_CLIENT_TIMEOUT,
             addr:     None,
             retries:  IMAP_CLIENT_RETRIES,
+            tls:      None,
         }
+    }
+
+    pub fn with_tls(mut self, tls_cfg: Arc<ClientConfig>) -> Self {
+        self.tls = Some(tls_cfg);
+        self
     }
 
     /// Zero turns the retry of a dropped connection off.
@@ -374,14 +384,19 @@ pub fn is_interrupted(e: &Error<ErrTag>) -> bool {
 
 impl ImapClient {
 
-    /// Protects the connection as configured and reads the greeting. Does not authenticate.
+    /// Protects the connection as configured and reads the greeting. Does not authenticate. The
+    /// certificate is checked against [`ImapConfig::tls`] where set, and what the operating system
+    /// trusts otherwise.
     pub async fn connect(cfg: &ImapConfig) -> Outcome<Self> {
-        let tls_cfg = Arc::new(res!(tls::default_client_config()));
+        let tls_cfg = match &cfg.tls {
+            Some(t) => t.clone(),
+            None    => Arc::new(res!(tls::default_client_config())),
+        };
         Self::connect_with(cfg, tls_cfg).await
     }
 
-    /// Connect using a caller-supplied rustls config, for a private CA or
-    /// a pinned root.
+    /// Connect using a caller-supplied rustls config, for a private CA or a pinned root. It
+    /// overrides [`ImapConfig::tls`].
     pub async fn connect_with(
         cfg:        &ImapConfig,
         tls_cfg:    Arc<ClientConfig>,
@@ -2457,6 +2472,52 @@ mod tests {
                     "a refused connection read as a dropped one: {:?}", e.tags());
             },
         }
+        Ok(())
+    }
+
+    /// An implicit-TLS server vouched for by a private CA, which greets each of `n` connections.
+    async fn private_tls_server(n: usize) -> Outcome<(SocketAddr, String)> {
+        use tokio_rustls::{rustls::ServerConfig, TlsAcceptor};
+        let mint = res!(tls::Mint::new(&[tls::NameRule::Exact(fmt!("imap.world.test"))], 1));
+        let ca   = mint.ca_pem();
+        let scfg = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(mint));
+        let acceptor = TlsAcceptor::from(Arc::new(scfg));
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the test server."; Test, IO)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading its address."; Test, IO)));
+        tokio::spawn(async move {
+            for _ in 0..n {
+                if let Ok((sock, _)) = listener.accept().await {
+                    if let Ok(mut s) = acceptor.accept(sock).await {
+                        let _ = s.write_all(GREET.as_bytes()).await;
+                        let _ = s.flush().await;
+                    }
+                }
+            }
+        });
+        Ok((addr, ca))
+    }
+
+    /// The caller's roots reach the handshake through the config: the private CA is refused by
+    /// the default roots and trusted once the config carries it.
+    #[tokio::test]
+    async fn test_a_config_carrying_a_private_root_connects_00() -> Outcome<()> {
+        let (addr, ca) = res!(private_tls_server(2).await);
+        let base = ImapConfig::new(fmt!("imap.world.test"), addr.port(), Security::ImplicitTls)
+            .with_addr(addr)
+            .with_retries(0)
+            .with_timeout(Duration::from_secs(10));
+        match ImapClient::connect(&base).await {
+            Ok(_)  => return Err(err!("A private CA was trusted unasked."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Security),
+                "the refusal was not tagged Security: {:?}", e.tags()),
+        }
+        let tls_cfg = Arc::new(res!(tls::client_config_trusting(ca.as_bytes())));
+        let c = res!(ImapClient::connect(&base.with_tls(tls_cfg)).await);
+        req!(true, c.has_cap("SPECIAL-USE"), "the greeting was not read over TLS");
         Ok(())
     }
 
