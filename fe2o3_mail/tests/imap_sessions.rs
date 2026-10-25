@@ -5,7 +5,10 @@
 //! session's sequence numbers until it has been told (RFC 3501 §7.4.1).
 //! From QA F2a's `qa_imap.rs` (D-20261026-01, M1 and M2).
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+    file::ExclusiveLock,
+    prelude::*,
+};
 use oxedyne_fe2o3_mail::maildir::MaildirStore;
 use oxedyne_fe2o3_net::{
     imap::server::ImapServer,
@@ -91,10 +94,15 @@ impl Sess {
 
 /// A Maildir with `n` messages served on a local port.
 async fn setup(name: &str, n: usize) -> Outcome<(u16, PathBuf)> {
+    setup_waiting(name, n, Duration::from_secs(30)).await
+}
+
+/// As `setup`, with the store's lock wait set to `wait`.
+async fn setup_waiting(name: &str, n: usize, wait: Duration) -> Outcome<(u16, PathBuf)> {
     let root = std::env::temp_dir().join(fmt!("fe2o3_imap_sessions_{}_{}", name, std::process::id()));
     let _ = fs::remove_dir_all(&root);
     res!(fs::create_dir_all(&root), IO, File);
-    let store = res!(MaildirStore::new(root.clone(), "test.local"));
+    let store = res!(MaildirStore::new(root.clone(), "test.local")).with_lock_wait(wait);
     let u = match res!(OneUser.lookup("")) {
         Some(u) => u,
         None    => return Err(err!("The test user did not resolve."; Test, Bug)),
@@ -279,5 +287,34 @@ async fn a_bulk_store_lets_a_delivery_in() -> Outcome<()> {
     println!("bulk STORE of {} took {:?}; the delivery took {:?}", n, took, waited);
     assert!(took < Duration::from_secs(20), "the bulk STORE of {} took {:?}", n, took);
     assert!(waited < Duration::from_secs(5), "the delivery waited {:?} behind the bulk STORE", waited);
+    Ok(())
+}
+
+/// A store error, the lock wait run out here, answers the command `NO [UNAVAILABLE]` and keeps
+/// the session (RFC 5530), where it closed the connection with no reply; a failed SELECT leaves
+/// no mailbox selected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_store_error_is_a_no_and_the_session_lives() -> Outcome<()> {
+    let (port, root) = res!(setup_waiting("unavailable", 2, Duration::from_millis(300)).await);
+    let lockp = root.join("test.local/alice/hematite-folder.lock");
+    for c in ["UID STORE 1 +FLAGS (\\Flagged)", "UID FETCH 1 (BODY[])", "FETCH 1 (BODY[])",
+        "NOOP", "STATUS INBOX (MESSAGES)", "SEARCH ALL", "UID SEARCH ALL", "EXPUNGE",
+        "APPEND INBOX {9}\r\nSubject:\r", "SELECT INBOX"]
+    {
+        let mut s = res!(Sess::open(port).await);
+        let held = res!(ExclusiveLock::acquire(&lockp));
+        let r = s.cmd(c).await;
+        drop(held);
+        let r = res!(r);
+        let last = r.lines().last().unwrap_or("");
+        assert!(last.starts_with(&fmt!("t{} NO [UNAVAILABLE] ", s.n)), "{:?} was answered {:?}", c, r);
+        let after = res!(s.cmd("NOOP").await);
+        assert!(after.lines().last().unwrap_or("").contains(" OK "), "{:?}: then NOOP {:?}", c, after);
+        if c == "SELECT INBOX" {
+            let f = res!(s.cmd("FETCH 1 (FLAGS)").await);
+            assert!(!f.contains(" OK "), "a failed SELECT selected the mailbox: {:?}", f);
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
     Ok(())
 }

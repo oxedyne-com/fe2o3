@@ -174,14 +174,36 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                     continue;
                 }
             };
+            let tag = parsed.tag.clone();
             match self.dispatch(&mut stream, &mut session, parsed, peer).await {
                 Ok(true) => break,
                 Ok(false) => continue,
-                Err(e) => {
+                // The connection itself failed, so there is no one to answer.
+                Err(e) if e.tags().contains(&ErrTag::Network) => {
                     error!(err!(e,
-                        "IMAP dispatch failure for {:?}.", peer;
+                        "IMAP connection failure for {:?}.", peer;
                         IO));
                     break;
+                }
+                // The store failed, a lock wait run out included: the command is answered and
+                // the session kept (RFC 5530), where closing it would cost the client an alert
+                // and a reconnect, and would repeat for as long as the folder stays busy.
+                Err(e) => {
+                    let busy = e.tags().contains(&ErrTag::Timeout);
+                    error!(err!(e,
+                        "IMAP command {} for {:?} failed; answered NO [UNAVAILABLE].", tag, peer;
+                        IO));
+                    let reason = if busy {
+                        "[UNAVAILABLE] The mailbox is busy, try again"
+                    } else {
+                        "[UNAVAILABLE] The mail store failed, try again"
+                    };
+                    if let Err(e) = write_no(&mut stream, &tag, reason).await {
+                        error!(err!(e,
+                            "IMAP connection failure for {:?}.", peer;
+                            IO));
+                        break;
+                    }
                 }
             }
         }
@@ -318,7 +340,14 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 };
                 session.selected = Some(folder);
                 session.read_only = cmd == "EXAMINE";
-                res!(self.load_view(session).await);
+                if let Err(e) = self.load_view(session).await {
+                    // RFC 3501 §6.3.1: a failed SELECT leaves no mailbox selected.
+                    session.selected = None;
+                    session.read_only = false;
+                    session.messages.clear();
+                    session.ghosts.clear();
+                    return Err(e);
+                }
                 res!(self.write_select_status(stream, session).await);
                 let suffix = if session.read_only { "[READ-ONLY]" } else { "[READ-WRITE]" };
                 res!(write_ok(stream, &tag, &fmt!("{} {} completed", suffix, cmd)).await);
