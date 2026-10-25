@@ -19,6 +19,7 @@ use crate::mail::{
         MailUser,
         MessageFlags,
         MessageMeta,
+        MessageUid,
     },
     user::UserStore,
 };
@@ -66,6 +67,8 @@ pub const IDLE_MAX_LINE: usize = 1024;                  // bytes
 // literal cap mirrors the SMTP message size limit.
 pub const IMAP_MAX_LINE: usize = 8 * 1024;              // bytes per command line
 pub const IMAP_MAX_LITERAL: usize = 20_480_000;         // bytes per `APPEND`
+// Messages a STORE changes under one hold of the folder lock.
+pub const STORE_CHUNK: usize = 500;
 
 
 /// One IMAP listener configuration.
@@ -1081,29 +1084,37 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 Invalid, Input)),
         };
 
-        for &idx in &indices {
-            let meta = match session.messages.get(idx) {
-                Some(m) if !session.ghosts.contains(&m.uid.0) => m.clone(),
-                _ => continue, // expunged elsewhere: no effect, and its EXPUNGE waits
-            };
-            let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
-            let final_flags = match res!(self.on_store(move |s| s.update_flags(&user, &folder, uid, update)).await) {
-                Some(f) => f,
-                None    => {
-                    session.ghosts.insert(meta.uid.0);
-                    continue;
-                },
-            };
-            if let Some(m) = session.messages.iter_mut().find(|m| m.uid == meta.uid) {
-                m.flags = final_flags;
+        // The live messages of the set, taken a chunk at a time, so a bulk STORE holds the
+        // folder for one read and a chunk's renames, and a delivery gets in between.
+        let live: Vec<(usize, MessageUid)> = indices.iter().filter_map(|&idx| {
+            match session.messages.get(idx) {
+                Some(m) if !session.ghosts.contains(&m.uid.0) => Some((idx, m.uid)),
+                _ => None, // expunged elsewhere: no effect, and its EXPUNGE waits
             }
-            if !silent {
-                let mut parts = vec![fmt!("FLAGS ({})", final_flags.to_imap_list())];
-                if by_uid {
-                    parts.push(fmt!("UID {}", meta.uid.0));
+        }).collect();
+        for chunk in live.chunks(STORE_CHUNK) {
+            let (user, folder) = (user.clone(), folder.clone());
+            let uids: Vec<MessageUid> = chunk.iter().map(|(_, uid)| *uid).collect();
+            let now = res!(self.on_store(move |s| s.update_flags_many(&user, &folder, &uids, update)).await);
+            for (&(idx, uid), flags) in chunk.iter().zip(now) {
+                let final_flags = match flags {
+                    Some(f) => f,
+                    None    => {
+                        session.ghosts.insert(uid.0);
+                        continue;
+                    },
+                };
+                if let Some(m) = session.messages.get_mut(idx) {
+                    m.flags = final_flags;
                 }
-                let line = fmt!("* {} FETCH ({})\r\n", idx + 1, parts.join(" "));
-                res!(write_all(stream, line.as_bytes()).await);
+                if !silent {
+                    let mut parts = vec![fmt!("FLAGS ({})", final_flags.to_imap_list())];
+                    if by_uid {
+                        parts.push(fmt!("UID {}", uid.0));
+                    }
+                    let line = fmt!("* {} FETCH ({})\r\n", idx + 1, parts.join(" "));
+                    res!(write_all(stream, line.as_bytes()).await);
+                }
             }
         }
         Ok(())

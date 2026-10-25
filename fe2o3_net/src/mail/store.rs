@@ -273,6 +273,25 @@ pub trait MailStore: Clone + Send + Sync + 'static {
     )
         -> Outcome<Option<MessageFlags>>;
 
+    /// [`Self::update_flags`] for each of `uids`, the answers in the same order. A store that
+    /// can should do it under one hold of the folder; a caller bounds `uids`, since no one else
+    /// reaches the folder meanwhile.
+    fn update_flags_many(
+        &self,
+        user:       &MailUser,
+        folder:     &FolderName,
+        uids:       &[MessageUid],
+        op:         FlagUpdate,
+    )
+        -> Outcome<Vec<Option<MessageFlags>>>
+    {
+        let mut out = Vec::with_capacity(uids.len());
+        for uid in uids {
+            out.push(res!(self.update_flags(user, folder, *uid, op)));
+        }
+        Ok(out)
+    }
+
     /// Removes every message flagged `\Deleted`, and returns their UIDs in
     /// removal order, since IMAP wants one untagged `EXPUNGE` per UID in that
     /// same order.

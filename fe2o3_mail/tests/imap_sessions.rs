@@ -245,3 +245,39 @@ async fn a_concurrent_flag_is_never_lost() -> Outcome<()> {
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }
+
+/// "Mark folder read" on 3000 messages while mail arrives: the STORE takes the folder in
+/// chunks, so it finishes in seconds rather than re-reading the folder per message, and the
+/// delivery lands between chunks, well inside the store's lock wait (QA F2a part 3 B, H1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bulk_store_lets_a_delivery_in() -> Outcome<()> {
+    let n = 3000;
+    let (port, root) = res!(setup("bulk", 0).await);
+    let new = root.join("test.local/alice/new");
+    for i in 0..n {
+        res!(fs::write(new.join(fmt!("1800000000.M{}P1Q{}.seed", i, i)), fmt!("Subject: m{}\r\n\r\nx\r\n", i)), IO, File);
+    }
+    let mut a = res!(Sess::open(port).await);
+    let r2 = root.clone();
+    let delivery = tokio::task::spawn_blocking(move || -> Outcome<Duration> {
+        std::thread::sleep(Duration::from_millis(300));
+        let store = res!(MaildirStore::new(r2, "test.local"));
+        let u = res!(res!(OneUser.lookup("")).ok_or_else(|| err!("No test user."; Test, Bug)));
+        let t = std::time::Instant::now();
+        res!(store.append(&u, &FolderName::new("INBOX"), b"Subject: late\r\n\r\nx\r\n", MessageFlags::default(), None));
+        Ok(t.elapsed())
+    });
+    let t = std::time::Instant::now();
+    let reply = res!(a.cmd(&fmt!("STORE 1:{} +FLAGS.SILENT (\\Seen)", n)).await);
+    let took = t.elapsed();
+    let waited = match delivery.await {
+        Ok(r)   => res!(r),
+        Err(_)  => return Err(err!("The delivery task failed."; Test, Bug)),
+    };
+    let _ = fs::remove_dir_all(&root);
+    assert!(reply.lines().last().map_or(false, |l| l.contains(" OK ")), "STORE answered:\n{}", reply);
+    println!("bulk STORE of {} took {:?}; the delivery took {:?}", n, took, waited);
+    assert!(took < Duration::from_secs(20), "the bulk STORE of {} took {:?}", n, took);
+    assert!(waited < Duration::from_secs(5), "the delivery waited {:?} behind the bulk STORE", waited);
+    Ok(())
+}

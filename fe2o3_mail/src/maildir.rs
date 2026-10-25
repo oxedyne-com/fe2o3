@@ -596,24 +596,45 @@ impl MailStore for MaildirStore {
     )
         -> Outcome<Option<MessageFlags>>
     {
+        let mut out = res!(self.update_flags_many(user, folder, &[uid], op));
+        Ok(out.pop().flatten())
+    }
+
+    fn update_flags_many(
+        &self,
+        user:       &MailUser,
+        folder:     &FolderName,
+        uids:       &[MessageUid],
+        op:         FlagUpdate,
+    )
+        -> Outcome<Vec<Option<MessageFlags>>>
+    {
         let folder_dir = self.folder_path(user, folder);
         let lock = res!(self.lock_folder(&folder_dir));
         let view = res!(Self::read_folder(&folder_dir, false, &lock));
-        let entry = match view.find(uid) {
-            Some(e) => e,
-            None    => return Ok(None),
-        };
-        // The file's own name, read under the lock, is the current flag set.
-        let flags = op.apply(entry.meta.flags);
-        let new_path = folder_dir.join("cur").join(fmt!("{}:2,{}", entry.key, flag_suffix(flags)));
-        if new_path != entry.path {
-            if let Err(e) = fs::rename(&entry.path, &new_path) {
-                return Err(err!(e,
-                    "Renaming for flag update {:?} -> {:?}.", entry.path, new_path;
-                    IO, File, Write));
+        let cur = folder_dir.join("cur");
+        let mut out = Vec::with_capacity(uids.len());
+        for uid in uids {
+            let entry = match view.find(*uid) {
+                Some(e) => e,
+                None    => {
+                    out.push(None);
+                    continue;
+                },
+            };
+            // The file's own name, read under the lock, is the current flag set.
+            let flags = op.apply(entry.meta.flags);
+            let new_path = cur.join(fmt!("{}:2,{}", entry.key, flag_suffix(flags)));
+            if new_path != entry.path {
+                if let Err(e) = fs::rename(&entry.path, &new_path) {
+                    return Err(err!(e,
+                        "Renaming for flag update {:?} -> {:?}.", entry.path, new_path;
+                        IO, File, Write));
+                }
             }
+            out.push(Some(flags));
         }
-        Ok(Some(flags))
+        Ok(out)
     }
 
     fn expunge(
