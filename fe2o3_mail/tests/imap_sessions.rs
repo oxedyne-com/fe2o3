@@ -407,3 +407,16 @@ async fn a_session_keeps_its_recent_after_a_store() -> Outcome<()> {
     }
     Ok(())
 }
+
+/// System flags are case-insensitive (RFC 3501 §2.3.2): a client's `\seen` is `\Seen` in a
+/// STORE.
+#[tokio::test(flavor = "multi_thread")]
+async fn flag_names_match_in_any_case() -> Outcome<()> {
+    let (port, root) = res!(setup("flagcase", 1).await);
+    let mut a = res!(Sess::open(port).await);
+    res!(a.cmd("UID STORE 1 +FLAGS (\\seen \\FLAGGED)").await);
+    let f1 = res!(a.cmd("UID FETCH 1 (FLAGS)").await);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(flags_of(&f1, 1).as_deref(), Some("\\Seen \\Flagged"), "STORE (\\seen \\FLAGGED): {:?}", f1);
+    Ok(())
+}

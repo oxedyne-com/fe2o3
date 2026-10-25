@@ -84,31 +84,46 @@ impl MessageFlags {
         out
     }
 
-    /// Is `flag` set? Named with or without its leading backslash; anything
+    /// Which system flag `flag` names, with or without its leading backslash and in any
+    /// case (RFC 3501 §2.3.2), as an index into [`Self::SYSTEM`].
+    fn system_index(flag: &str) -> Option<usize> {
+        let name = flag.strip_prefix('\\').unwrap_or(flag);
+        Self::SYSTEM.iter().position(|s| s.eq_ignore_ascii_case(name))
+    }
+
+    const SYSTEM: [&'static str; 6] = ["Seen", "Answered", "Flagged", "Deleted", "Draft", "Recent"];
+
+    fn field_mut(&mut self, i: usize) -> Option<&mut bool> {
+        match i {
+            0 => Some(&mut self.seen),
+            1 => Some(&mut self.answered),
+            2 => Some(&mut self.flagged),
+            3 => Some(&mut self.deleted),
+            4 => Some(&mut self.draft),
+            5 => Some(&mut self.recent),
+            _ => None,
+        }
+    }
+
+    /// Is `flag` set? Named with or without its leading backslash, in any case; anything
     /// outside the known set reads as clear.
     pub fn has(&self, flag: &str) -> bool {
-        match flag {
-            "\\Seen"     | "Seen"     => self.seen,
-            "\\Answered" | "Answered" => self.answered,
-            "\\Flagged"  | "Flagged"  => self.flagged,
-            "\\Deleted"  | "Deleted"  => self.deleted,
-            "\\Draft"    | "Draft"    => self.draft,
-            "\\Recent"   | "Recent"   => self.recent,
-            _ => false,
+        match Self::system_index(flag) {
+            Some(0) => self.seen,
+            Some(1) => self.answered,
+            Some(2) => self.flagged,
+            Some(3) => self.deleted,
+            Some(4) => self.draft,
+            Some(5) => self.recent,
+            _       => false,
         }
     }
 
     /// A name outside the known set is silently ignored, since a client may
     /// `STORE` a custom keyword the MVP does not carry.
     pub fn set(&mut self, flag: &str, on: bool) {
-        match flag {
-            "\\Seen"     | "Seen"     => self.seen     = on,
-            "\\Answered" | "Answered" => self.answered = on,
-            "\\Flagged"  | "Flagged"  => self.flagged  = on,
-            "\\Deleted"  | "Deleted"  => self.deleted  = on,
-            "\\Draft"    | "Draft"    => self.draft    = on,
-            "\\Recent"   | "Recent"   => self.recent   = on,
-            _ => (),
+        if let Some(b) = Self::system_index(flag).and_then(|i| self.field_mut(i)) {
+            *b = on;
         }
     }
 }
