@@ -13,7 +13,7 @@
 //!   .Sent/new/
 //!   ...
 //!   dovecot-uidvalidity            8-byte hex, the latest UIDVALIDITY issued
-//!   dovecot-uidvalidity.<hex>      empty companion file
+//!   dovecot-uidvalidity.<hex>      empty companion file, exactly one
 //!   dovecot-uidlist                "3 V<validity> N<next>" then "<uid> :<key>" rows
 //!   hematite-folder.lock           flock'd across every change to the folder
 //!   subscriptions                  one folder name per line
@@ -35,6 +35,7 @@ use oxedyne_fe2o3_core::{
         ExclusiveLock,
         SaveMode,
         save_atomic,
+        sync_parent_dir,
     },
 };
 use oxedyne_fe2o3_net::mail::store::{
@@ -906,14 +907,40 @@ fn fresh_uidvalidity(prev: Option<u32>) -> u32 {
 }
 
 /// Records `v` as the folder's latest UIDVALIDITY, so that a uidlist lost later is answered
-/// with a larger one.
+/// with a larger one. Exactly one `dovecot-uidvalidity.<hex>` marker remains, the Dovecot
+/// layout: a reader that takes the first marker it finds (this store before F2a) would
+/// otherwise see an older validity over the new numbering.
 fn record_uidvalidity(folder_dir: &Path, v: u32) -> Outcome<()> {
     res!(save_atomic(&folder_dir.join(UIDVALIDITY_PREFIX), fmt!("{:08x}", v).as_bytes(), SaveMode::Keep));
-    let marker = folder_dir.join(fmt!("{}.{:08x}", UIDVALIDITY_PREFIX, v));
-    if let Err(e) = OpenOptions::new().write(true).create(true).truncate(false).open(&marker) {
-        return Err(err!(e,
+    let name = fmt!("{}.{:08x}", UIDVALIDITY_PREFIX, v);
+    let marker = folder_dir.join(&name);
+    match OpenOptions::new().write(true).create(true).truncate(false).open(&marker) {
+        Ok(f) => if let Err(e) = f.sync_all() {
+            return Err(err!(e,
+                "Syncing the UIDVALIDITY marker {:?}.", marker;
+                IO, File, Write));
+        },
+        Err(e) => return Err(err!(e,
             "Creating the UIDVALIDITY marker {:?}.", marker;
-            IO, File, Write));
+            IO, File, Write)),
     }
-    Ok(())
+    let rd = match fs::read_dir(folder_dir) {
+        Ok(rd) => rd,
+        Err(e) => return Err(err!(e,
+            "Reading the folder {:?} for older UIDVALIDITY markers.", folder_dir;
+            IO, File, Read)),
+    };
+    let prefix = fmt!("{}.", UIDVALIDITY_PREFIX);
+    for entry in rd.flatten() {
+        let other = entry.file_name().to_string_lossy().into_owned();
+        if other.starts_with(&prefix) && other != name {
+            let p = entry.path();
+            if let Err(e) = fs::remove_file(&p) {
+                return Err(err!(e,
+                    "Removing the superseded UIDVALIDITY marker {:?}.", p;
+                    IO, File, Write));
+            }
+        }
+    }
+    sync_parent_dir(&marker)
 }

@@ -301,6 +301,49 @@ fn a_missing_uidlist_changes_uidvalidity() -> Outcome<()> {
     Ok(())
 }
 
+/// The `dovecot-uidvalidity.<hex>` markers in a folder.
+fn markers(dir: &Path) -> Outcome<Vec<String>> {
+    let mut out = Vec::new();
+    for e in res!(fs::read_dir(dir), IO, File) {
+        let name = res!(e, IO, File).file_name().to_string_lossy().into_owned();
+        if name.starts_with("dovecot-uidvalidity.") { out.push(name); }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The Dovecot layout, one marker per folder: the pre-F2a binary reads the first marker
+/// `read_dir` returns, so an older one left beside the new would take UIDVALIDITY backwards.
+/// Removing the uidlist with Steel stopped is also the deploy's one-shot bump, so the
+/// messages must come back numbered afresh in delivery order.
+#[test]
+fn a_uidvalidity_bump_leaves_one_marker_and_numbers_afresh() -> Outcome<()> {
+    let root = res!(fresh_root("one_marker"));
+    let store = res!(MaildirStore::new(root.clone(), "test.local"));
+    let u = user();
+    res!(store.ensure_user(&u));
+    let inbox = FolderName::new("INBOX");
+    for i in 0..3 {
+        res!(store.append(&u, &inbox, &body(&fmt!("b{}", i)), MessageFlags::default(), None));
+    }
+    let dir = inbox_dir(&root);
+    let mut last = res!(store.folder_status(&u, &inbox)).uid_validity;
+    for round in 0..2 {
+        res!(fs::remove_file(dir.join("dovecot-uidlist")), IO, File);
+        let st = res!(store.folder_status(&u, &inbox));
+        assert!(st.uid_validity > last, "round {}: UIDVALIDITY {} -> {}", round, last, st.uid_validity);
+        last = st.uid_validity;
+        let want = vec![fmt!("dovecot-uidvalidity.{:08x}", st.uid_validity)];
+        assert_eq!(res!(markers(&dir)), want, "round {}: markers after a bump", round);
+        let map = res!(uid_map(&store, &u, &inbox));
+        let got: Vec<(u32, String)> = map.into_iter().collect();
+        assert_eq!(got, vec![(1, fmt!("b0")), (2, fmt!("b1")), (3, fmt!("b2"))],
+            "round {}: UIDs after a bump", round);
+    }
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn a_failed_uidlist_write_is_an_error() -> Outcome<()> {
