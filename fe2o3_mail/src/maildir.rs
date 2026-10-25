@@ -717,6 +717,7 @@ impl MailStore for MaildirStore {
         let view = res!(Self::read_folder(&folder_dir, false, &lock));
         let cur = folder_dir.join("cur");
         let mut out = Vec::with_capacity(uids.len());
+        let mut renamed = false;
         for uid in uids {
             let entry = match view.find(*uid) {
                 Some(e) => e,
@@ -734,8 +735,15 @@ impl MailStore for MaildirStore {
                         "Renaming for flag update {:?} -> {:?}.", entry.path, new_path;
                         IO, File, Write));
                 }
+                renamed = true;
             }
             out.push(Some(flags));
+        }
+        // The renames durable before the answer, or a power loss reverts a flag change.
+        if renamed {
+            for sub in ["cur", "new"] {
+                res!(sync_parent_dir(&folder_dir.join(sub).join("x")));
+            }
         }
         Ok(out)
     }
@@ -763,6 +771,11 @@ impl MailStore for MaildirStore {
             }
         }
         if !removed.is_empty() {
+            // The removals durable before the uidlist forgets their keys, or a power loss
+            // brings an expunged message back under a new UID.
+            for sub in ["cur", "new"] {
+                res!(sync_parent_dir(&folder_dir.join(sub).join("x")));
+            }
             res!(Self::read_folder(&folder_dir, false, &lock));
         }
         Ok(removed)

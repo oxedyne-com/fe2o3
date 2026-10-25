@@ -415,7 +415,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         return Ok(false);
                     }
                 };
-                let _ = self.on_store(move |s| s.subscribe(&user, &folder)).await;
+                res!(self.on_store(move |s| s.subscribe(&user, &folder)).await);
                 res!(write_ok(stream, &tag, "SUBSCRIBE completed").await);
                 Ok(false)
             }
@@ -441,10 +441,10 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         return Ok(false);
                     }
                 };
-                let _ = self.on_store(move |s| {
-                    let _ = s.create_folder(&user, &folder);
+                res!(self.on_store(move |s| {
+                    res!(s.create_folder(&user, &folder));
                     s.subscribe(&user, &folder)
-                }).await;
+                }).await);
                 res!(write_ok(stream, &tag, "CREATE completed").await);
                 Ok(false)
             }
@@ -954,7 +954,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         match flags {
                             Some(f) => {
                                 if let Some(m) = session.messages.iter_mut().find(|m| m.uid == *uid) {
-                                    m.flags = f;
+                                    m.flags = keep_recent(f, m.flags);
                                 }
                                 seen_now.insert(uid.0);
                             },
@@ -1181,9 +1181,13 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         continue;
                     },
                 };
-                if let Some(m) = session.messages.get_mut(idx) {
-                    m.flags = final_flags;
-                }
+                let final_flags = match session.messages.get_mut(idx) {
+                    Some(m) => {
+                        m.flags = keep_recent(final_flags, m.flags);
+                        m.flags
+                    },
+                    None => final_flags,
+                };
                 if !silent {
                     let mut parts = vec![fmt!("FLAGS ({})", final_flags.to_imap_list())];
                     if by_uid {
@@ -1880,6 +1884,12 @@ async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> Outcome<Option<Strin
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ MISC HELPERS                                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
+
+/// The store's flags for a message with the session's own `\Recent`, which is session state
+/// (RFC 3501 §2.3.2): another session moving the message out of new/ does not take it away.
+fn keep_recent(store: MessageFlags, view: MessageFlags) -> MessageFlags {
+    MessageFlags { recent: view.recent, ..store }
+}
 
 fn capability_list() -> &'static str {
     "IMAP4rev1 LITERAL+ AUTH=PLAIN AUTH=LOGIN SPECIAL-USE IDLE"

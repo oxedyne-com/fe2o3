@@ -359,3 +359,51 @@ async fn a_bulk_fetch_marks_seen_by_chunk() -> Outcome<()> {
     assert_eq!(seen, n, "every message fetched is \\Seen");
     Ok(())
 }
+
+/// SUBSCRIBE and CREATE whose save fails answer NO, where they answered OK and LSUB then lacked
+/// the folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_subscribe_is_a_no() -> Outcome<()> {
+    let (port, root) = res!(setup_waiting("subscribe", 0, Duration::from_millis(300)).await);
+    let lockp = root.join("test.local/alice/hematite-subscriptions.lock");
+    let mut s = res!(Sess::open(port).await);
+    for c in ["SUBSCRIBE Keep", "CREATE Made"] {
+        let held = res!(ExclusiveLock::acquire(&lockp));
+        let r = s.cmd(c).await;
+        drop(held);
+        let r = res!(r);
+        assert!(r.lines().last().unwrap_or("").starts_with(&fmt!("t{} NO ", s.n)), "{:?} was answered {:?}", c, r);
+    }
+    let l = res!(s.cmd("SUBSCRIBE Keep").await);
+    assert!(l.lines().last().unwrap_or("").contains(" OK "), "the retry: {:?}", l);
+    let l = res!(s.cmd("LSUB \"\" \"*\"").await);
+    assert!(l.contains("Keep"), "LSUB: {:?}", l);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// \Recent is the session's: another session's STORE moves a new message to cur/, and this
+/// session's own STORE and FETCH still show it \Recent, as they did before F2a.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_keeps_its_recent_after_a_store() -> Outcome<()> {
+    let (port, root) = res!(setup("recent", 1).await);
+    let mut a = res!(Sess::open(port).await);
+    let mut b = res!(Sess::open(port).await);
+    let ib = root.join("test.local/alice");
+    res!(fs::write(ib.join("tmp/1900000000.Mx.ext"), b"Subject: r\r\n\r\nid=r\r\n"), IO, File);
+    res!(fs::rename(ib.join("tmp/1900000000.Mx.ext"), ib.join("new/1900000000.Mx.ext")), IO, File);
+    res!(a.cmd("NOOP").await);
+    let f0 = res!(a.cmd("UID FETCH 2 (FLAGS)").await);
+    assert_eq!(flags_of(&f0, 2).as_deref(), Some("\\Recent"), "before: {:?}", f0);
+    res!(b.cmd("NOOP").await);
+    res!(b.cmd("UID STORE 2 +FLAGS (\\Answered)").await);
+    let f1 = res!(a.cmd("UID STORE 2 +FLAGS (\\Flagged)").await);
+    let f2 = res!(a.cmd("UID FETCH 2 (BODY[])").await);
+    let f3 = res!(a.cmd("UID FETCH 2 (FLAGS)").await);
+    let _ = fs::remove_dir_all(&root);
+    for (what, r) in [("STORE", &f1), ("FETCH BODY[]", &f2), ("FETCH", &f3)] {
+        // FETCH BODY[] shows its FLAGS after the literal, on a line of its own.
+        assert!(r.contains("\\Recent)"), "{} dropped \\Recent: {:?}", what, r);
+    }
+    Ok(())
+}
