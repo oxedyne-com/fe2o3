@@ -523,7 +523,25 @@ impl OutboundClient {
                 "OutboundClient::submit called with no recipients.";
                 Invalid, Input, Missing));
         }
+        let mut conv = res!(self.open_submission(cfg).await);
+        let queue_id = res!(transact(&mut conv, mail_from, rcpt_to, body).await);
+        conv.quit().await;
+        Ok(queue_id)
+    }
 
+    /// Does this account work for sending? The conversation `submit` has, up to the transaction
+    /// -- connect, greeting, EHLO, TLS (implicit or STARTTLS), AUTH -- then QUIT. Nothing that
+    /// could begin a message is said, so a check costs the provider a login and no more. Because
+    /// the two share [`Self::open_submission`], a check that passes passed for the reason a send
+    /// would. [`SubmissionFault::of`] names a failure in a person's terms.
+    pub async fn verify(&self, cfg: &SubmissionConfig) -> Outcome<()> {
+        let conv = res!(self.open_submission(cfg).await);
+        conv.quit().await;
+        Ok(())
+    }
+
+    /// An authenticated submission session, ready for MAIL FROM.
+    async fn open_submission(&self, cfg: &SubmissionConfig) -> Outcome<Conversation> {
         let addr = match cfg.addr {
             Some(a) => a,
             None => {
@@ -586,10 +604,7 @@ impl OutboundClient {
         }
 
         res!(authenticate(&mut conv, &ehlo, &cfg.user, &cfg.password).await);
-        let queue_id = res!(transact(&mut conv, mail_from, rcpt_to, body).await);
-
-        conv.quit().await;
-        Ok(queue_id)
+        Ok(conv)
     }
 
     async fn ehlo(&self, conv: &mut Conversation) -> Outcome<SmtpResponse> {
@@ -702,8 +717,8 @@ impl Conversation {
         }
     }
 
-    /// Ends the conversation once the message is accepted. The message is the receiver's by now,
-    /// so a QUIT that stalls or fails is logged and changes nothing.
+    /// Ends the conversation once its work is done: a message accepted, or a login checked. What
+    /// was done stands either way, so a QUIT that stalls or fails is logged and changes nothing.
     async fn quit(mut self) {
         self.timeout = self.timeout.min(QUIT_TIMEOUT);
         let said = match self.command("QUIT").await {
@@ -711,8 +726,8 @@ impl Conversation {
             Err(e) => Err(e),
         };
         if let Err(e) = said {
-            debug!("{} accepted the message and then did not see QUIT through; the message \
-                stands: {}", self.peer, e);
+            debug!("{} did not see QUIT through, which changes nothing already done: {}",
+                self.peer, e);
         }
     }
 
@@ -823,6 +838,52 @@ async fn transact(
     Ok(resp.text)
 }
 
+/// Why a submission session could not be opened, in the four terms a person setting up an
+/// account can act on. Read from the tags each step sets by cause, never from the words.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmissionFault {
+    Unreachable,    // nothing answered, or the line dropped: check the name and port
+    Tls,            // the line could not be encrypted, or its certificate was refused
+    Auth,           // the login was refused, or the server takes none this client can make
+    NotSmtp,        // something answered, and it was not a submission service
+}
+
+impl SubmissionFault {
+
+    pub fn of(e: &Error<ErrTag>) -> Self {
+        let tags = e.tags();
+        let has  = |t: ErrTag| tags.contains(&t);
+        if has(ErrTag::Unauthorised) {
+            return Self::Auth;
+        }
+        if has(ErrTag::Security) {
+            return Self::Tls;
+        }
+        if has(ErrTag::Unreachable) || has(ErrTag::Timeout) || has(ErrTag::Interrupted) {
+            return Self::Unreachable;
+        }
+        // A handshake that failed for any other cause: the peer speaks no TLS.
+        if has(ErrTag::Init) {
+            return Self::Tls;
+        }
+        // `authenticate` finding no AUTH it can use.
+        if has(ErrTag::Missing) || has(ErrTag::Unimplemented) {
+            return Self::Auth;
+        }
+        Self::NotSmtp
+    }
+
+    /// The name a caller puts on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreachable   => "unreachable",
+            Self::Tls           => "tls",
+            Self::Auth          => "auth",
+            Self::NotSmtp       => "not_smtp",
+        }
+    }
+}
+
 /// Is this a permanent rejection -- a 5xx from the receiving server -- that retrying will not
 /// cure?
 ///
@@ -889,14 +950,14 @@ async fn authenticate(
         if resp.code != 334 {
             return Err(err!(
                 "AUTH LOGIN was refused before the username: {} {}", resp.code, resp.text;
-                IO, Network, Wire));
+                IO, Network, Wire, Unauthorised));
         }
         res!(conv.command(&base64::encode(user.as_bytes())).await);
         let resp = res!(conv.reply().await);
         if resp.code != 334 {
             return Err(err!(
                 "The server rejected the username: {} {}", resp.code, resp.text;
-                IO, Network, Wire));
+                IO, Network, Wire, Unauthorised));
         }
         res!(conv.command(&base64::encode(password.as_bytes())).await);
         let resp = res!(conv.reply().await);
@@ -925,7 +986,7 @@ fn check_auth(resp: &SmtpResponse) -> Outcome<()> {
     }
     Err(err!(
         "Authentication failed: {} {}", resp.code, resp.text;
-        IO, Network, Wire))
+        IO, Network, Wire, Unauthorised))
 }
 
 /// One parsed SMTP server response, potentially multi-line.
@@ -2473,6 +2534,104 @@ mod tests {
                 "STARTTLS {}: not tagged Security: {:?}", label, e.tags());
             req!(false, e.tags().contains(&ErrTag::Init),
                 "STARTTLS {}: tagged Init, which reads as a refused certificate: {:?}", label, e.tags());
+        }
+        Ok(())
+    }
+
+    // ── Checking a submission account without sending (D-20261025-10) ──
+
+    async fn verify_err(cfg: &SubmissionConfig) -> Outcome<Error<ErrTag>> {
+        let c = res!(client().await);
+        match c.verify(cfg).await {
+            Ok(())  => Err(err!("A check that should have failed passed."; Test, Invalid)),
+            Err(e)  => Ok(e),
+        }
+    }
+
+    /// The check is the conversation a send has, up to the transaction: EHLO, AUTH, QUIT, and
+    /// nothing that could start a message.
+    #[tokio::test]
+    async fn test_verify_logs_in_and_sends_nothing_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(Provider::accepting()).await);
+        let c = res!(client().await);
+        res!(c.verify(&cfg(addr, Security::Plain)).await);
+        let lines = res!(lines_of(&seen));
+        let at = |want: &str| lines.iter().position(|l| l.to_uppercase().starts_with(want));
+        let ehlo = res!(at("EHLO").ok_or_else(|| err!("No EHLO was sent."; Test, Missing)));
+        let auth = res!(at("AUTH").ok_or_else(|| err!("No AUTH was sent."; Test, Missing)));
+        let quit = res!(at("QUIT").ok_or_else(|| err!("No QUIT was sent."; Test, Missing)));
+        req!(true, ehlo < auth && auth < quit, "out of order: {:?}", lines);
+        for verb in ["MAIL", "RCPT", "DATA"] {
+            req!(true, at(verb).is_none(), "the check said {}: {:?}", verb, lines);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_verify_names_a_refused_login_as_auth_00() -> Outcome<()> {
+        for mechs in ["PLAIN LOGIN", "LOGIN"] {
+            let p = Provider { mechs, auth_ok: false, ..Provider::accepting() };
+            let (addr, seen) = res!(provider(p).await);
+            let e = res!(verify_err(&cfg(addr, Security::Plain)).await);
+            req!(SubmissionFault::Auth, SubmissionFault::of(&e), "{}: {:?}", mechs, e.tags());
+            req!(true, res!(lines_of(&seen)).iter().all(|l| !l.to_uppercase().starts_with("MAIL")));
+        }
+        // A server that takes no login at all is no submission account either.
+        for mechs in ["", "XOAUTH2"] {
+            let p = Provider { mechs, ..Provider::accepting() };
+            let (addr, _) = res!(provider(p).await);
+            let e = res!(verify_err(&cfg(addr, Security::Plain)).await);
+            req!(SubmissionFault::Auth, SubmissionFault::of(&e), "'{}': {:?}", mechs, e.tags());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_verify_names_an_unencrypted_line_as_tls_00() -> Outcome<()> {
+        for starttls in [false, true] {
+            let p = Provider { starttls, starttls_ok: false, ..Provider::accepting() };
+            let (addr, seen) = res!(provider(p).await);
+            let e = res!(verify_err(&cfg(addr, Security::StartTls)).await);
+            req!(SubmissionFault::Tls, SubmissionFault::of(&e), "{:?}", e.tags());
+            req!(false, password_crossed(&res!(lines_of(&seen))), "the password was sent");
+        }
+        // TLS from the first byte to a server that speaks none.
+        let (addr, _) = res!(provider(Provider::accepting()).await);
+        let e = res!(verify_err(&cfg(addr, Security::ImplicitTls)).await);
+        req!(SubmissionFault::Tls, SubmissionFault::of(&e), "{:?}", e.tags());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_verify_names_nothing_listening_as_unreachable_00() -> Outcome<()> {
+        let addr = {
+            let l = res!(TcpListener::bind("127.0.0.1:0").await
+                .map_err(|e| err!(e, "Binding a port to free."; Test, IO)));
+            res!(l.local_addr().map_err(|e| err!(e, "Reading its address."; Test, IO)))
+        };
+        let e = res!(verify_err(&cfg(addr, Security::Plain)).await);
+        req!(SubmissionFault::Unreachable, SubmissionFault::of(&e), "{:?}", e.tags());
+        Ok(())
+    }
+
+    /// A web server on the port, and an SMTP server that will not serve: neither is a
+    /// submission service, whatever is listening.
+    #[tokio::test]
+    async fn test_verify_names_a_stranger_as_not_smtp_00() -> Outcome<()> {
+        for greeting in [&b"HTTP/1.1 400 Bad Request\r\n\r\n"[..], &b"554 no service here\r\n"[..]] {
+            let listener = res!(TcpListener::bind("127.0.0.1:0").await
+                .map_err(|e| err!(e, "Binding a stranger."; Test, IO)));
+            let addr = res!(listener.local_addr()
+                .map_err(|e| err!(e, "Reading its address."; Test, IO)));
+            tokio::spawn(async move {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    let _ = sock.write_all(greeting).await;
+                    let mut buf = [0u8; 256];
+                    let _ = sock.read(&mut buf).await;
+                }
+            });
+            let e = res!(verify_err(&cfg(addr, Security::Plain)).await);
+            req!(SubmissionFault::NotSmtp, SubmissionFault::of(&e), "{:?}", e.tags());
         }
         Ok(())
     }

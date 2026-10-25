@@ -20,10 +20,27 @@ use oxedyne_fe2o3_core::{
 };
 use oxedyne_fe2o3_net::{
     imap::client::Security,
-    smtp::client::{
-        OutboundClient,
-        SubmissionConfig,
+    mail::{
+        store::MailUser,
+        user::UserStore,
     },
+    smtp::{
+        client::{
+            OutboundClient,
+            SubmissionConfig,
+            SubmissionFault,
+        },
+        handler::{
+            HandlerOutcome,
+            SmtpHandler,
+            SmtpTransaction,
+        },
+        server::{
+            SmtpMode,
+            SmtpServer,
+        },
+    },
+    tls::BoundedTlsAcceptor,
 };
 
 use std::{
@@ -42,6 +59,19 @@ use tokio::{
         BufReader,
     },
     net::TcpListener,
+};
+use tokio_rustls::{
+    TlsAcceptor,
+    rustls::{
+        ClientConfig,
+        RootCertStore,
+        ServerConfig,
+        pki_types::{
+            CertificateDer,
+            PrivateKeyDer,
+            PrivatePkcs8KeyDer,
+        },
+    },
 };
 
 
@@ -164,6 +194,105 @@ fn cfg(addr: SocketAddr) -> SubmissionConfig {
         .with_timeout(Duration::from_secs(10))
 }
 
+
+// ── fe2o3's own submission server, for the account check ──
+
+/// Counts what reaches it, so a test can prove nothing was submitted.
+#[derive(Clone, Default)]
+struct Counting {
+    submitted: Arc<Mutex<usize>>,
+}
+
+impl SmtpHandler for Counting {
+    fn deliver_inbound(&self, _txn: SmtpTransaction) -> Outcome<HandlerOutcome> {
+        Ok(HandlerOutcome::RejectPermanent(fmt!("not this port")))
+    }
+    fn submit_outbound(&self, _txn: SmtpTransaction) -> Outcome<HandlerOutcome> {
+        match self.submitted.lock() {
+            Ok(mut n) => *n += 1,
+            Err(_)    => return Err(err!("The submission count was poisoned."; Lock, Poisoned)),
+        }
+        Ok(HandlerOutcome::Accepted(fmt!("REAL1")))
+    }
+    fn rcpt_acceptable(&self, _address: &str) -> bool { true }
+}
+
+/// One account, `USER` with `PASS`.
+#[derive(Clone)]
+struct OneUser;
+
+impl UserStore for OneUser {
+    fn authenticate(&self, address: &str, password: &str) -> Outcome<Option<MailUser>> {
+        if !address.eq_ignore_ascii_case(USER) || password != PASS {
+            return Ok(None);
+        }
+        self.lookup(address)
+    }
+    fn lookup(&self, _address: &str) -> Outcome<Option<MailUser>> {
+        Ok(Some(MailUser {
+            local:          fmt!("alice"),
+            domain:         fmt!("example.com"),
+            delivery_key:   fmt!("alice"),
+            send_as:        Vec::new(),
+        }))
+    }
+}
+
+/// fe2o3's `SmtpServer` in submission mode, STARTTLS before AUTH, with a certificate for
+/// `localhost` that the returned client trusts and no public root would.
+async fn real_submission() -> Outcome<(SocketAddr, OutboundClient, Arc<Mutex<usize>>)> {
+    oxedyne_fe2o3_net::tls::ensure_crypto_provider();
+    let cert = res!(rcgen::generate_simple_self_signed(vec![fmt!("localhost")])
+        .map_err(|e| err!(e, "Making a test certificate."; Test, Init)));
+    let der  = res!(cert.serialize_der()
+        .map_err(|e| err!(e, "Serialising the test certificate."; Test, Encode)));
+    let key  = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.serialize_private_key_der()));
+    let scfg = res!(ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![CertificateDer::from(der.clone())], key)
+        .map_err(|e| err!(e, "Building the test server config."; Test, Init)));
+    let mut roots = RootCertStore::empty();
+    res!(roots.add(CertificateDer::from(der))
+        .map_err(|e| err!(e, "Trusting the test certificate."; Test, Init)));
+    let ccfg = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+
+    let handler = Counting::default();
+    let submitted = handler.submitted.clone();
+    let server = SmtpServer {
+        handler,
+        users:          OneUser,
+        tls_acceptor:   Some(BoundedTlsAcceptor::unbounded(TlsAcceptor::from(Arc::new(scfg)))),
+        hostname:       Arc::new(fmt!("localhost")),
+        mode:           SmtpMode::Submission,
+    };
+    let listener = res!(TcpListener::bind("127.0.0.1:0").await
+        .map_err(|e| err!(e, "Binding the submission server."; Test, IO)));
+    let addr = res!(listener.local_addr()
+        .map_err(|e| err!(e, "Reading its address."; Test, IO)));
+    tokio::spawn(async move {
+        while let Ok((sock, peer)) = listener.accept().await {
+            let s = server.clone();
+            tokio::spawn(async move { let _ = s.run(sock, peer).await; });
+        }
+    });
+    let mut client = res!(OutboundClient::with_system_roots("daimond.test"));
+    client.tls_config = Arc::new(ccfg);
+    Ok((addr, client, submitted))
+}
+
+fn real_cfg(addr: SocketAddr, password: &str) -> SubmissionConfig {
+    SubmissionConfig::new("localhost", addr.port(), Security::StartTls, USER, password)
+        .with_addr(addr)
+        .with_timeout(Duration::from_secs(10))
+}
+
+fn count(n: &Arc<Mutex<usize>>) -> Outcome<usize> {
+    match n.lock() {
+        Ok(g)  => Ok(*g),
+        Err(_) => Err(err!("The submission count was poisoned."; Lock, Poisoned)),
+    }
+}
+
 pub fn test_smtp_submit(filter: &'static str) -> Outcome<()> {
 
 
@@ -276,6 +405,34 @@ pub fn test_smtp_submit(filter: &'static str) -> Outcome<()> {
                     "The client claimed to submit through a server whose only mechanism it cannot \
                     speak."; Test, Invalid));
             }
+            Ok(())
+        })
+    }));
+
+
+    res!(test_it(filter, &["Verify against fe2o3's own submission server", "all", "smtp", "submit", "verify"], || {
+        res!(runtime()).block_on(async {
+            let (addr, client, submitted) = res!(real_submission().await);
+            res!(client.verify(&real_cfg(addr, PASS)).await);
+            req!(0, res!(count(&submitted)), "the check submitted a message");
+            // The same account sends, so the check passed for the reason a send would.
+            let qid = res!(client.submit(&real_cfg(addr, PASS), USER,
+                &[fmt!("bob@example.net")], &body()).await);
+            req!(true, qid.contains("REAL1"), "the queue id: {}", qid);
+            req!(1, res!(count(&submitted)));
+            Ok(())
+        })
+    }));
+
+    res!(test_it(filter, &["Verify names a refused password as auth", "all", "smtp", "submit", "verify"], || {
+        res!(runtime()).block_on(async {
+            let (addr, client, submitted) = res!(real_submission().await);
+            let e = match client.verify(&real_cfg(addr, "not-the-password")).await {
+                Ok(())  => return Err(err!("A wrong password passed the check."; Test, Invalid)),
+                Err(e)  => e,
+            };
+            req!(SubmissionFault::Auth, SubmissionFault::of(&e), "{:?}: {}", e.tags(), e);
+            req!(0, res!(count(&submitted)));
             Ok(())
         })
     }));
