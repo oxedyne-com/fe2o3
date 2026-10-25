@@ -62,11 +62,10 @@ fn qa_child() -> Outcome<()> {
     Ok(())
 }
 
-/// About 2 min, so ignored. Run it alone:
+/// About 4 min in a debug build, so ignored. Run it alone:
 /// `cargo test -p oxedyne_fe2o3_mail --test qa_stress -- --ignored --nocapture qa_stress_processes`.
-/// On 2026-10-26 (head 7aa1bc65) no UID named two messages and UIDVALIDITY held, but 1 to 3
-/// of the 12 workers failed with File Lock Timeout after 30 s: acquire_within polls, so a
-/// waiter can be passed over for the whole wait while the others take the folder lock.
+/// Before the fair ExclusiveLock wait (2ed9d149) 1 to 3 of the 12 workers failed with File Lock
+/// Timeout after 30 s, passed over by polling; after it, three runs gave uids=600 bad=0.
 #[test]
 #[ignore]
 fn qa_stress_processes() -> Outcome<()> {
