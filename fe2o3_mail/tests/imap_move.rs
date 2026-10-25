@@ -426,3 +426,50 @@ async fn a_stale_copy_or_move_sends_no_empty_copyuid() -> Outcome<()> {
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_failed_copy_leaves_the_target_as_it_was() -> Outcome<()> {
+    // QA F2b-A defect 2, RFC 3501 §6.4.7: the second message cannot be read, so the COPY
+    // fails, and the copy of the first must not stay to be filed again on the retry.
+    let (addr, store, uids, root) = res!(serve("copyfail", "f", 3).await);
+    let path = res!(file_of(&root, "f1").ok_or_else(|| err!("No file for f1."; Test, Missing)));
+    res!(fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o000)), IO, File);
+    if fs::read(&path).is_ok() {
+        // Run as root: the file stays readable, and the failure cannot be made.
+        let _ = fs::remove_dir_all(&root);
+        return Ok(());
+    }
+    let mut c = res!(Conn::open(addr, "INBOX").await);
+    let lines = res!(c.cmd(&fmt!("UID COPY {}:{} Archive", uids[0], uids[2])).await);
+    assert!(last(&lines).contains(" NO "), "a failing COPY: {:?}", lines);
+    assert!(res!(uid_map(&store, "Archive")).is_empty(), "a failed COPY left copies: {:?}",
+        res!(uid_map(&store, "Archive")));
+
+    res!(fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)), IO, File);
+    let lines = res!(c.cmd(&fmt!("UID COPY {}:{} Archive", uids[0], uids[2])).await);
+    assert!(last(&lines).contains(" OK "), "the retried COPY: {:?}", lines);
+    let tags: Vec<String> = res!(uid_map(&store, "Archive")).into_values().collect();
+    assert_eq!(tags, vec![fmt!("f0"), fmt!("f1"), fmt!("f2")], "the retry filed one of each");
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_folder_read_keeps_a_tmp_file_with_an_old_mtime() -> Outcome<()> {
+    // The tmp/ sweep goes by creation time: an APPEND writing outside the lock sets its file's
+    // mtime to the INTERNALDATE, which may be years old, and must not lose it to a reader.
+    let (addr, _store, _uids, root) = res!(serve("tmpkeep", "t", 1).await);
+    let inbox = res!(file_of(&root, "t0").ok_or_else(|| err!("No file for t0."; Test, Missing)));
+    let tmp = res!(inbox.parent().and_then(|d| d.parent()).map(|d| d.join("tmp"))
+        .ok_or_else(|| err!("No folder above {:?}.", inbox; Test, Missing)));
+    let held = tmp.join("in-progress");
+    res!(fs::write(&held, b"partial"), IO, File);
+    let f = res!(fs::File::options().write(true).open(&held), IO, File);
+    let old = std::time::SystemTime::now() - Duration::from_secs(3 * 365 * 86400);
+    res!(f.set_modified(old), IO, File);
+    let mut c = res!(Conn::open(addr, "INBOX").await);
+    res!(c.cmd("NOOP").await);
+    assert!(held.exists(), "a folder read swept a tmp/ file made a moment ago");
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}

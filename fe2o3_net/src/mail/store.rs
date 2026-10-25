@@ -338,6 +338,8 @@ pub trait MailStore: Clone + Send + Sync + 'static {
     /// Files a copy of each message of `uids` in `from` into `to`, flags and INTERNALDATE
     /// kept, and returns `(source UID, new UID)` for each, in source UID order: the pairs
     /// RFC 4315's `COPYUID` names. A UID `from` no longer holds is skipped. `to` must exist.
+    /// All or nothing (RFC 3501 §6.4.7): on an error `to` holds none of the copies, and any
+    /// UID one took is retired, which is safe as UIDNEXT only rises.
     fn copy(
         &self,
         user:   &MailUser,

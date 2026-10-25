@@ -106,6 +106,7 @@ const HEAD_MAX:             usize   = 64 * 1024;            // read for a Messag
 const LOCK_NAME:            &str    = "hematite-folder.lock";
 const SUBS_LOCK_NAME:       &str    = "hematite-subscriptions.lock"; // at the user root
 const LOCK_WAIT:            Duration = Duration::from_secs(30);     // then a Timeout error
+const TMP_MAX_AGE:          u64     = 36 * 3600;            // seconds a tmp/ file may stand, the Maildir convention
 const NAME_TRIES:           u64     = 16;                   // fresh message names tried in tmp/
 static NAME_SEQ:            AtomicU64 = AtomicU64::new(0);  // the Maildir `Q<n>` delivery counter
 
@@ -252,6 +253,7 @@ impl MaildirStore {
     )
         -> Outcome<FolderView>
     {
+        sweep_tmp(&folder_dir.join("tmp"));
         // Files in new/ are RECENT, and are moved to cur/ when the recent flag is being
         // cleared (a SELECT, not an EXAMINE).
         let mut files: Vec<(String, PathBuf, bool)> = Vec::new(); // name, path, recent
@@ -908,10 +910,10 @@ impl MailStore for MaildirStore {
         let view = res!(Self::read_folder(&src_dir, false, &src_lock));
         // Each copy is a new file of its own, written whole in tmp/ and renamed into cur/,
         // so a crash leaves a complete copy or none.
-        let mut filed: Vec<(MessageUid, String)> = Vec::new();
+        let mut filed: Vec<(MessageUid, String, PathBuf)> = Vec::new(); // source UID, key, file
         let mut failure: Option<Error<ErrTag>> = None;
         for e in Self::present(&view, uids) {
-            let outcome = (|| -> Outcome<String> {
+            let outcome = (|| -> Outcome<(String, PathBuf)> {
                 let bytes = res!(read_message(&e.path, e.meta.size));
                 let (unique, tmp_path) = res!(self.write_tmp(&dst_dir, &bytes, Some(e.meta.internal)));
                 let mut flags = e.meta.flags;
@@ -923,29 +925,38 @@ impl MailStore for MaildirStore {
                         "Renaming {:?} -> {:?}.", tmp_path, cur_path;
                         IO, File, Write));
                 }
-                Ok(unique)
+                Ok((unique, cur_path))
             })();
             match outcome {
-                Ok(key) => filed.push((e.meta.uid, key)),
+                Ok((key, path)) => filed.push((e.meta.uid, key, path)),
                 Err(err) => {
                     failure = Some(err);
                     break;
                 },
             }
         }
-        // The copies' entries durable before their UIDs are given out.
+        // A COPY is all or nothing (RFC 3501 §6.4.7): on a failure the copies already filed
+        // are taken back, under the lock still held and before any is numbered, so a client
+        // told to try again never files one twice.
+        if failure.is_some() {
+            for (_, _, path) in &filed {
+                if let Err(e) = fs::remove_file(path) {
+                    warn!("Taking back the copy {:?} of a failed COPY: {}", path, e);
+                }
+            }
+        }
+        // The copies' entries, or their removal, durable before any UID is given out.
         if !filed.is_empty() {
             res!(sync_parent_dir(&dst_dir.join("cur").join("x")));
         }
-        // The copies made are numbered even when a later one failed, so none is left
-        // without a UID until some other reading of the folder.
         let dst_view = res!(Self::read_folder(&dst_dir, false, dst_lock));
         if let Some(err) = failure {
             return Err(err!(err,
-                "Copying from {} to {}: {} of {} copied.", from.as_str(), to.as_str(),
+                "Copying from {} to {}: {} of {} copied and taken back.", from.as_str(), to.as_str(),
                 filed.len(), uids.len();
                 IO, File, Write));
         }
+        let filed: Vec<(MessageUid, String)> = filed.into_iter().map(|(u, k, _)| (u, k)).collect();
         Self::pairs(&dst_view, &filed, &dst_dir)
     }
 
@@ -1386,4 +1397,30 @@ fn record_uidvalidity(folder_dir: &Path, v: u32) -> Outcome<()> {
         }
     }
     sync_parent_dir(&marker)
+}
+
+
+/// Removes the files in a folder's `tmp/` created over 36 hours ago, the writes a crash cut
+/// short (the Maildir convention), so they cannot gather without bound. The age is the file's
+/// creation time, never its mtime, which a write sets to the INTERNALDATE and so may be old for
+/// a write still in progress outside the lock. Where the file system keeps no creation time,
+/// nothing is removed.
+fn sweep_tmp(tmp_dir: &Path) {
+    let rd = match fs::read_dir(tmp_dir) {
+        Ok(rd)  => rd,
+        Err(_)  => return,
+    };
+    let max_age = Duration::from_secs(TMP_MAX_AGE);
+    let now = SystemTime::now();
+    for entry in rd.flatten() {
+        let born = match entry.metadata().and_then(|m| m.created()) {
+            Ok(t)   => t,
+            Err(_)  => continue,
+        };
+        if now.duration_since(born).map(|age| age > max_age).unwrap_or(false) {
+            if let Err(e) = fs::remove_file(entry.path()) {
+                warn!("Sweeping the stale tmp file {:?}: {}", entry.path(), e);
+            }
+        }
+    }
 }
