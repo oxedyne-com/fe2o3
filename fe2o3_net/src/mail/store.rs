@@ -18,6 +18,22 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::time::SystemTime;
 
 
+/// Runs the synchronous `f` on tokio's blocking pool and awaits it, so a store or user
+/// lookup that waits on a lock or the disk stalls only its own session, never a runtime
+/// worker and every other task queued on it.
+#[cfg(feature = "async")]
+pub async fn blocking<T, F>(f: F) -> Outcome<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Outcome<T> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result)  => result,
+        Err(e)      => Err(err!(e, "A blocking mail store call panicked or was cancelled."; Thread)),
+    }
+}
+
+
 /// Always the plain UTF-8, user-facing form. Folder names travel the wire in
 /// IMAP modified UTF-7, and the conversion happens at the wire layer.
 #[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -145,9 +161,9 @@ impl MailUser {
 
 /// Every method takes a `MailUser`, so one store hosts many accounts.
 ///
-/// The trait is deliberately synchronous: the IMAP and SMTP servers wrap each
-/// call in `tokio::task::spawn_blocking` so the underlying I/O does not block
-/// the runtime. Async would force every implementation through
+/// The trait is deliberately synchronous: the IMAP server runs each call through
+/// [`blocking`], on tokio's blocking pool, so a call that waits (a Maildir folder
+/// read queues behind the folder's flock) holds no runtime worker. Async would force every implementation through
 /// `Pin<Box<dyn Future>>` for no practical gain on a single-host mailbox.
 pub trait MailStore: Clone + Send + Sync + 'static {
     /// Creates the folders, INBOX included. Idempotent.

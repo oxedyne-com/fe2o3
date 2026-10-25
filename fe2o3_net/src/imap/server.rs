@@ -11,7 +11,9 @@
 use crate::imap::search;
 use crate::mail::{
     store::{
+        blocking,
         FolderName,
+        FolderStatus,
         MailStore,
         MailUser,
         MessageFlags,
@@ -99,6 +101,27 @@ impl ImapSession {
 
 
 impl<M: MailStore, U: UserStore> ImapServer<M, U> {
+
+    /// Runs `f` against the store on the blocking pool, so a folder read queued behind
+    /// another session's lock holds no runtime worker. Every store call goes through here.
+    async fn on_store<T, F>(&self, f: F) -> Outcome<T>
+        where
+            T: Send + 'static,
+            F: FnOnce(&M) -> Outcome<T> + Send + 'static,
+    {
+        let store = self.store.clone();
+        blocking(move || f(&store)).await
+    }
+
+    /// As [`Self::on_store`], for the user store.
+    async fn on_users<T, F>(&self, f: F) -> Outcome<T>
+        where
+            T: Send + 'static,
+            F: FnOnce(&U) -> Outcome<T> + Send + 'static,
+    {
+        let users = self.users.clone();
+        blocking(move || f(&users)).await
+    }
 
     /// Runs until the client logs out or the connection drops.
     pub async fn run<S: AsyncRead + AsyncWrite + Unpin + Send>(
@@ -225,7 +248,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         return Ok(false);
                     }
                 };
-                let result = self.users.authenticate(&user, &pass);
+                let result = self.on_users(move |u| u.authenticate(&user, &pass)).await;
                 let mu = match result {
                     Ok(Some(u)) => u,
                     Ok(None) => {
@@ -238,7 +261,8 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         return Ok(false);
                     }
                 };
-                if let Err(e) = self.store.ensure_user(&mu) {
+                let mu2 = mu.clone();
+                if let Err(e) = self.on_store(move |s| s.ensure_user(&mu2)).await {
                     warn!("ensure_user error for {}: {}", mu.address(), e);
                 }
                 session.user = Some(mu);
@@ -275,7 +299,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 // RFC 3501 §6.4.2: if not read-only, expunge first.
                 if let (Some(user), Some(folder)) = (session.user.clone(), session.selected.clone()) {
                     if !session.read_only {
-                        let _ = self.store.expunge(&user, &folder);
+                        let _ = self.on_store(move |s| s.expunge(&user, &folder)).await;
                     }
                 }
                 session.selected = None;
@@ -295,11 +319,12 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 let mut it = ArgIter::new(&args);
                 let _refname = it.next_string().unwrap_or_default();
                 let pattern = it.next_string().unwrap_or_default();
-                let folders = if cmd == "LSUB" {
-                    res!(self.store.list_subscribed(&user))
+                let lsub = cmd == "LSUB";
+                let folders = res!(self.on_store(move |s| if lsub {
+                    s.list_subscribed(&user)
                 } else {
-                    res!(self.store.list_folders(&user))
-                };
+                    s.list_folders(&user)
+                }).await);
                 for f in &folders {
                     if !match_imap_pattern(&pattern, f.as_str()) {
                         continue;
@@ -328,7 +353,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         return Ok(false);
                     }
                 };
-                let _ = self.store.subscribe(&user, &folder);
+                let _ = self.on_store(move |s| s.subscribe(&user, &folder)).await;
                 res!(write_ok(stream, &tag, "SUBSCRIBE completed").await);
                 Ok(false)
             }
@@ -354,8 +379,10 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         return Ok(false);
                     }
                 };
-                let _ = self.store.create_folder(&user, &folder);
-                let _ = self.store.subscribe(&user, &folder);
+                let _ = self.on_store(move |s| {
+                    let _ = s.create_folder(&user, &folder);
+                    s.subscribe(&user, &folder)
+                }).await;
                 res!(write_ok(stream, &tag, "CREATE completed").await);
                 Ok(false)
             }
@@ -382,7 +409,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                     }
                 };
                 let items = it.next_paren_list().unwrap_or_default();
-                let status = res!(self.store.folder_status(&user, &folder));
+                let status = res!(self.folder_status(&user, &folder).await);
                 let mut parts: Vec<String> = Vec::new();
                 for item in items.split_whitespace() {
                     match item.to_uppercase().as_str() {
@@ -495,7 +522,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         return Ok(false);
                     }
                 };
-                let removed = res!(self.store.expunge(&user, &folder));
+                let removed = res!(self.on_store(move |s| s.expunge(&user, &folder)).await);
                 // For each expunged UID we send an untagged EXPUNGE
                 // with the *sequence number* (1-based index in the
                 // pre-expunge list). We use the cached message list.
@@ -619,7 +646,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
 
         res!(write_all(stream, b"+ idling\r\n").await);
 
-        let mut last_exists = res!(self.store.folder_status(&user, &folder)).exists;
+        let mut last_exists = res!(self.folder_status(&user, &folder).await).exists;
         let mut pending: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 256];
         let mut waited = Duration::from_secs(0);
@@ -668,7 +695,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 Err(_elapsed) => {
                     waited = waited.saturating_add(IDLE_POLL_INTERVAL);
 
-                    let status = res!(self.store.folder_status(&user, &folder));
+                    let status = res!(self.folder_status(&user, &folder).await);
                     if status.exists != last_exists {
                         last_exists = status.exists;
                         res!(self.refresh_selected(session, false).await);
@@ -694,6 +721,11 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         }
     }
 
+    async fn folder_status(&self, user: &MailUser, folder: &FolderName) -> Outcome<FolderStatus> {
+        let (user, folder) = (user.clone(), folder.clone());
+        self.on_store(move |s| s.folder_status(&user, &folder)).await
+    }
+
     async fn refresh_selected(
         &self,
         session:    &mut ImapSession,
@@ -710,7 +742,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             None => return Ok(()),
         };
         let read_only = !clear_rec || session.read_only;
-        let messages = res!(self.store.list_messages(&user, &folder, read_only));
+        let messages = res!(self.on_store(move |s| s.list_messages(&user, &folder, read_only)).await);
         session.messages = messages;
         Ok(())
     }
@@ -732,7 +764,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             Some(f) => f.clone(),
             None => return Ok(()),
         };
-        let status = res!(self.store.folder_status(&user, &folder));
+        let status = res!(self.folder_status(&user, &folder).await);
         let lines = [
             fmt!("* {} EXISTS\r\n", status.exists),
             fmt!("* {} RECENT\r\n", status.recent),
@@ -795,7 +827,8 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 }
             }
             let raw: Option<Vec<u8>> = if needs_bytes {
-                Some(res!(self.store.fetch_bytes(&user, &folder, meta.uid)))
+                let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
+                Some(res!(self.on_store(move |s| s.fetch_bytes(&user, &folder, uid)).await))
             } else {
                 None
             };
@@ -897,7 +930,8 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             if implicit_seen && !session.read_only && !meta.flags.seen {
                 let mut new_flags = meta.flags;
                 new_flags.seen = true;
-                let _ = self.store.set_flags(&user, &folder, meta.uid, new_flags);
+                let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
+                let _ = self.on_store(move |s| s.set_flags(&user, &folder, uid, new_flags)).await;
                 if let Some(m) = session.messages.iter_mut().find(|m| m.uid == meta.uid) {
                     m.flags.seen = true;
                 }
@@ -983,7 +1017,8 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         Invalid, Input));
                 }
             }
-            let final_flags = res!(self.store.set_flags(&user, &folder, meta.uid, flags));
+            let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
+            let final_flags = res!(self.on_store(move |s| s.set_flags(&user, &folder, uid, flags)).await);
             if let Some(m) = session.messages.iter_mut().find(|m| m.uid == meta.uid) {
                 m.flags = final_flags;
             }
@@ -1041,21 +1076,27 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         };
         res!(self.refresh_selected(session, false).await);
         let msgs = &session.messages;
-        let mut hits: Vec<usize> = Vec::new();
+        let mut hits: Vec<usize>;
         if key.needs_content() {
             let (user, folder) = match (&session.user, &session.selected) {
                 (Some(u), Some(f)) => (u.clone(), f.clone()),
                 _ => return write_no(stream, tag, "No mailbox selected").await,
             };
-            let uids: Vec<crate::mail::store::MessageUid> = msgs.iter().map(|m| m.uid).collect();
-            res!(self.store.visit_bytes(&user, &folder, &uids, |uid, bytes| {
-                if let Ok(idx) = msgs.binary_search_by_key(&uid.0, |m| m.uid.0) {
-                    if key.matches(idx, msgs, Some(&search::Content::new(bytes))) {
-                        hits.push(idx);
+            // Every message is read and matched off the runtime, in one look at the folder.
+            let metas = msgs.clone();
+            hits = res!(self.on_store(move |s| {
+                let mut hits: Vec<usize> = Vec::new();
+                let uids: Vec<crate::mail::store::MessageUid> = metas.iter().map(|m| m.uid).collect();
+                res!(s.visit_bytes(&user, &folder, &uids, |uid, bytes| {
+                    if let Ok(idx) = metas.binary_search_by_key(&uid.0, |m| m.uid.0) {
+                        if key.matches(idx, &metas, Some(&search::Content::new(bytes))) {
+                            hits.push(idx);
+                        }
                     }
-                }
-                Ok(())
-            }));
+                    Ok(())
+                }));
+                Ok(hits)
+            }).await);
             hits.sort();
         } else {
             hits = (0..msgs.len()).filter(|i| key.matches(*i, msgs, None)).collect();
@@ -1136,8 +1177,8 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         let mut tail = [0u8; 2];
         let _ = stream.read_exact(&mut tail).await;
 
-        let uid = res!(self.store.append(user, &folder, &buf, flags, internal));
-        let _ = uid;
+        let user = user.clone();
+        res!(self.on_store(move |s| s.append(&user, &folder, &buf, flags, internal)).await);
         res!(write_ok(stream, tag, "APPEND completed").await);
         Ok(false)
     }
