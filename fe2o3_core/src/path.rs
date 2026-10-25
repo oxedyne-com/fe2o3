@@ -16,6 +16,50 @@ pub fn is_filename(name: &str) -> bool {
     cfg!(not(windows)) || !name.contains('/')
 }
 
+/// Canonicalise a path that need not exist yet.
+///
+/// The longest ancestor that exists is canonicalised by the file system, so a symlink in it is
+/// followed to where it really points; the components below it, which cannot be symlinks because
+/// they do not exist, are appended lexically, with `.` dropped and `..` taking one step up. A
+/// relative path is taken from the current directory. This is what a containment check needs for
+/// a file about to be read or written: `std::fs::canonicalize` refuses a path that is not there,
+/// and lexical normalisation alone is fooled by a symlink.
+pub fn canonicalise_allow_missing(path: &Path) -> Outcome<PathBuf> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(d)  => d.join(path),
+            Err(e) => return Err(err!(e,
+                "Cannot read the current directory to place {:?}.", path; IO, File)),
+        }
+    };
+    let comps: Vec<Component> = abs.components().collect();
+    // Find the longest existing prefix, walking back from the whole path.
+    let mut n = comps.len();
+    let mut base = loop {
+        let prefix: PathBuf = comps[..n].iter().collect();
+        match std::fs::canonicalize(&prefix) {
+            Ok(c) => break c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && n > 1 => n -= 1,
+            Err(e) => return Err(err!(e,
+                "Cannot canonicalise {:?}, the existing part of {:?}.", prefix, path;
+                IO, File)),
+        }
+    };
+    for comp in &comps[n..] {
+        match comp {
+            Component::CurDir       => (),
+            Component::ParentDir    => { base.pop(); },
+            Component::Normal(c)    => base.push(c),
+            Component::RootDir | Component::Prefix(_) => return Err(err!(
+                "Unexpected root component {:?} inside {:?}.", comp, path;
+                Bug, Unexpected)),
+        }
+    }
+    Ok(base)
+}
+
 /// Normalise a relative path without reference to the state of the file system by:
 /// - Ensure path begins with "." or "..", e.g. /a/b -> ./a/b, ./../a -> ../a
 /// - Eliminate redundant path components, e.g. a/b/../c -> ./a/c
