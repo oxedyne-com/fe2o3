@@ -5,6 +5,13 @@
 //! `/etc/resolv.conf`, with no caching, no recursion fallback, no
 //! truncation handling, no DNSSEC.
 //!
+//! An A lookup answers from the hosts file first, as the system resolver does under
+//! `hosts: files dns`: `localhost` and any `*.localhost` are loopback (RFC 6761 6.3), a name the
+//! hosts file holds is answered from it alone, and only then is DNS asked. Until 26 Oct 2026 it
+//! asked DNS only, so a name that every other program on the machine reached through
+//! `/etc/hosts` did not resolve here (found by the mail world, D-20261026-01). [`Resolver`] names
+//! a hosts file and a nameserver of the caller's own, for a test or a network namespace.
+//!
 //! The motivation is to keep Hematite free of a third-party resolver
 //! crate. Outbound SMTP needs MX lookups and `std::net` does not expose
 //! them; rather than add `hickory-resolver` we own the ~250 lines.
@@ -20,6 +27,10 @@ use std::{
         Ipv4Addr,
         SocketAddr,
         UdpSocket,
+    },
+    path::{
+        Path,
+        PathBuf,
     },
     time::Duration,
 };
@@ -60,7 +71,7 @@ pub fn system_resolver() -> SocketAddr {
 /// RFC 5321 §5.1.
 pub fn lookup_mx(domain: &str) -> Outcome<Vec<MxRecord>> {
     let resolver = system_resolver();
-    let response = res!(query(domain, QTYPE_MX, resolver));
+    let response = res!(query(domain, QTYPE_MX, resolver, DNS_TIMEOUT));
     let mut records = res!(parse_mx_response(&response));
     if records.is_empty() {
         records.push(MxRecord {
@@ -72,16 +83,95 @@ pub fn lookup_mx(domain: &str) -> Outcome<Vec<MxRecord>> {
     Ok(records)
 }
 
-/// Every IPv4 answer, in the order the server sent them.
+/// Every IPv4 answer, in the order the server sent them, from the hosts file where it holds the
+/// name and from DNS otherwise; see [`Resolver::lookup_a`].
 ///
 /// An empty list is a name that exists but has no A record, which is also what an IPv6-only host
 /// looks like. A name that does not exist (RCODE 3, NXDOMAIN) is an error tagged `Permanent`, so a
 /// caller can tell the two apart: asking again will not make the second one appear, but may well
 /// change the first.
 pub fn lookup_a(host: &str) -> Outcome<Vec<Ipv4Addr>> {
-    let resolver = system_resolver();
-    let response = res!(query(host, QTYPE_A, resolver));
-    parse_a_response(&response)
+    Resolver::system().lookup_a(host)
+}
+
+pub const HOSTS_FILE:       &str        = "/etc/hosts";
+pub const DNS_TIMEOUT:      Duration    = Duration::from_secs(5);
+
+/// Where names are looked up: a hosts file, then a nameserver.
+#[derive(Clone, Debug)]
+pub struct Resolver {
+    pub hosts:      PathBuf,        // read on every lookup, as glibc does; a missing file holds nothing
+    pub nameserver: SocketAddr,
+    pub timeout:    Duration,       // per DNS read, which is tried twice
+}
+
+impl Resolver {
+
+    /// `/etc/hosts`, and the first nameserver in `/etc/resolv.conf`.
+    pub fn system() -> Self {
+        Self {
+            hosts:      PathBuf::from(HOSTS_FILE),
+            nameserver: system_resolver(),
+            timeout:    DNS_TIMEOUT,
+        }
+    }
+
+    pub fn with_hosts<P: AsRef<Path>>(mut self, path: P) -> Self {
+        self.hosts = path.as_ref().to_path_buf();
+        self
+    }
+
+    pub fn with_nameserver(mut self, ns: SocketAddr) -> Self {
+        self.nameserver = ns;
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// An address literal is itself; `localhost` and `*.localhost` are loopback; a name the hosts
+    /// file holds is answered from it alone, every matching IPv4 line in file order; anything else
+    /// is asked of DNS. An unreadable hosts file is one that holds nothing, as it is to glibc.
+    pub fn lookup_a(&self, host: &str) -> Outcome<Vec<Ipv4Addr>> {
+        if let Ok(ip) = host.parse::<Ipv4Addr>() {
+            return Ok(vec![ip]);
+        }
+        let name = host.trim_end_matches('.').to_ascii_lowercase();
+        if name == "localhost" || name.ends_with(".localhost") {
+            return Ok(vec![Ipv4Addr::LOCALHOST]);
+        }
+        if let Ok(text) = std::fs::read_to_string(&self.hosts) {
+            let found = hosts_a(&text, &name);
+            if !found.is_empty() {
+                return Ok(found);
+            }
+        }
+        let response = res!(query(host, QTYPE_A, self.nameserver, self.timeout));
+        parse_a_response(&response)
+    }
+}
+
+/// The IPv4 addresses a hosts file gives `name` (lower case, no trailing dot), in file order.
+/// Each line is an address, a canonical name and any aliases, with `#` starting a comment.
+pub fn hosts_a(text: &str, name: &str) -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = match line.find('#') {
+            Some(i) => &line[..i],
+            None    => line,
+        };
+        let mut words = line.split_whitespace();
+        let ip = match words.next().map(|w| w.parse::<Ipv4Addr>()) {
+            Some(Ok(ip)) => ip,
+            _            => continue, // blank, or an IPv6 line
+        };
+        if words.any(|w| w.trim_end_matches('.').eq_ignore_ascii_case(name)) && !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
 }
 
 
@@ -103,7 +193,7 @@ const RTYPE_CNAME:  u16 = 5;
 const RTYPE_MX:     u16 = 15;
 
 /// The raw response bytes.  One retry on timeout, and no more.
-fn query(name: &str, qtype: u16, resolver: SocketAddr) -> Outcome<Vec<u8>> {
+fn query(name: &str, qtype: u16, resolver: SocketAddr, wait: Duration) -> Outcome<Vec<u8>> {
     let id: u16 = (std::process::id() as u16) ^ (qtype as u16);
     let mut packet = Vec::with_capacity(64);
     packet.extend_from_slice(&id.to_be_bytes());
@@ -121,7 +211,7 @@ fn query(name: &str, qtype: u16, resolver: SocketAddr) -> Outcome<Vec<u8>> {
         Err(e) => return Err(err!(e,
             "Binding UDP socket for DNS query."; IO, Network, Init)),
     };
-    if let Err(e) = socket.set_read_timeout(Some(Duration::from_secs(5))) {
+    if let Err(e) = socket.set_read_timeout(Some(wait)) {
         return Err(err!(e,
             "Setting DNS read timeout."; IO, Network, Init));
     }
@@ -400,6 +490,64 @@ mod tests {
     fn test_an_a_answer_is_returned_00() -> Outcome<()> {
         let v = res!(parse_a_response(&response(0, &[(1, &[192, 0, 2, 7])])));
         req!(vec![Ipv4Addr::new(192, 0, 2, 7)], v, "the A address was not returned");
+        Ok(())
+    }
+
+    // ── The hosts file ───────────────────────────────────────────
+
+    /// A resolver whose nameserver is a port nothing answers on, so that a lookup reaching DNS
+    /// fails, and a hosts file written for the test, never the machine's own.
+    fn offline(hosts: &str, tag: &str) -> Outcome<(Resolver, std::path::PathBuf)> {
+        let path = std::env::temp_dir().join(fmt!("fe2o3_hosts_{}_{}", std::process::id(), tag));
+        res!(std::fs::write(&path, hosts)
+            .map_err(|e| err!(e, "Writing the test hosts file."; IO, File, Write)));
+        let dead = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9);
+        Ok((Resolver::system().with_hosts(&path).with_nameserver(dead).with_timeout(
+            Duration::from_millis(200)), path))
+    }
+
+    /// A name in the hosts file is answered from it and DNS is never asked, as every system
+    /// resolver does under `hosts: files dns`.
+    #[test]
+    fn test_a_hosts_file_entry_wins_over_dns_00() -> Outcome<()> {
+        let (r, path) = res!(offline(
+            "# test\n127.0.0.1\tlocalhost\n10.9.8.7  mail.world.test  mail # alias\n\
+             ::1 mail.world.test\n10.9.8.8 MAIL.world.test.\n", "wins"));
+        let v = res!(r.lookup_a("mail.world.test"));
+        let _ = std::fs::remove_file(&path);
+        req!(vec![Ipv4Addr::new(10, 9, 8, 7), Ipv4Addr::new(10, 9, 8, 8)], v,
+            "the hosts file was not answered first, in order and without case");
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_hosts_file_alias_is_a_name_00() -> Outcome<()> {
+        let (r, path) = res!(offline("10.9.8.7 mail.world.test mail\n", "alias"));
+        let v = res!(r.lookup_a("mail."));
+        let _ = std::fs::remove_file(&path);
+        req!(vec![Ipv4Addr::new(10, 9, 8, 7)], v, "an alias was not answered");
+        Ok(())
+    }
+
+    /// `localhost` is loopback (RFC 6761 6.3) with no hosts file at all, and so is an address
+    /// literal, which is no name.
+    #[test]
+    fn test_localhost_and_a_literal_need_no_lookup_00() -> Outcome<()> {
+        let (r, path) = res!(offline("", "local"));
+        let _ = std::fs::remove_file(&path);
+        req!(vec![Ipv4Addr::LOCALHOST], res!(r.lookup_a("localhost")));
+        req!(vec![Ipv4Addr::LOCALHOST], res!(r.lookup_a("imap.localhost")));
+        req!(vec![Ipv4Addr::new(192, 0, 2, 1)], res!(r.lookup_a("192.0.2.1")));
+        Ok(())
+    }
+
+    /// A name the hosts file does not hold goes on to DNS, which here does not answer.
+    #[test]
+    fn test_a_name_not_in_the_hosts_file_asks_dns_00() -> Outcome<()> {
+        let (r, path) = res!(offline("10.9.8.7 mail.world.test\n", "dns"));
+        let out = r.lookup_a("other.world.test");
+        let _ = std::fs::remove_file(&path);
+        req!(true, out.is_err(), "a name in no hosts file was answered without DNS: {:?}", out);
         Ok(())
     }
 }
