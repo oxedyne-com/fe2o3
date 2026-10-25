@@ -37,4 +37,5 @@ pub mod client;
 pub mod search;
 #[cfg(feature = "async")]
 pub mod server;
+pub mod types;
 pub mod uid_set;
