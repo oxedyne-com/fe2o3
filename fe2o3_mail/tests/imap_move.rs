@@ -378,3 +378,51 @@ async fn opposite_moves_neither_deadlock_nor_lose_mail() -> Outcome<()> {
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }
+
+/// The file under `dir` whose message carries the tag, at any depth.
+fn file_of(dir: &std::path::Path, tag: &str) -> Option<PathBuf> {
+    for e in fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(f) = file_of(&p, tag) { return Some(f); }
+        } else if fs::read(&p).map(|b| tag_of(&b) == tag).unwrap_or(false) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+#[tokio::test]
+async fn a_stale_copy_or_move_sends_no_empty_copyuid() -> Outcome<()> {
+    // QA F2b-A defect 1: B moves a message A's view still holds; A's COPY and MOVE of it
+    // must not answer [COPYUID v  ], and A learns in that response that it left.
+    let (addr, _store, uids, root) = res!(serve("stale", "s", 3).await);
+    let mut a = res!(Conn::open(addr, "INBOX").await);
+    let mut b = res!(Conn::open(addr, "INBOX").await);
+    let lines = res!(b.cmd(&fmt!("UID MOVE {} Archive", uids[1])).await);
+    assert!(last(&lines).contains(" OK "), "B's MOVE: {:?}", lines);
+
+    let lines = res!(a.cmd(&fmt!("UID COPY {} Archive", uids[1])).await);
+    assert!(code(&lines, "COPYUID").is_none(), "a stale COPY answered COPYUID: {:?}", lines);
+    assert!(last(&lines).contains(" NO [EXPUNGEISSUED]"), "a stale COPY: {:?}", lines);
+    assert!(lines.iter().any(|l| l == "* 2 EXPUNGE"), "a stale COPY announced nothing: {:?}", lines);
+
+    // Again, with the message gone from a fresh view and one more stale: B moves s2 too.
+    let lines = res!(b.cmd(&fmt!("UID MOVE {} Archive", uids[2])).await);
+    assert!(last(&lines).contains(" OK "), "B's second MOVE: {:?}", lines);
+    let lines = res!(a.cmd(&fmt!("UID MOVE {},{} Archive", uids[0], uids[2])).await);
+    let cu = code(&lines, "COPYUID").unwrap_or_default();
+    let parts: Vec<&str> = cu.split_whitespace().collect();
+    assert_eq!(parts.len(), 3, "a partly stale MOVE's COPYUID: {:?}", lines);
+    assert_eq!(expand(parts[1]), vec![uids[0]]);
+    assert!(last(&lines).contains(" OK "), "a partly stale MOVE: {:?}", lines);
+    assert!(lines.iter().filter(|l| l.ends_with(" EXPUNGE")).count() == 2,
+        "the moved and the vanished message both announced: {:?}", lines);
+
+    // Announced, s2 has left A's view, so a UID MOVE of it now names no message at all.
+    let lines = res!(a.cmd(&fmt!("UID MOVE {} Archive", uids[2])).await);
+    assert!(code(&lines, "COPYUID").is_none() && last(&lines).contains(" OK "),
+        "a MOVE of a UID already announced gone: {:?}", lines);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}

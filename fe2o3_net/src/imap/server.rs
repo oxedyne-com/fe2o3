@@ -1370,6 +1370,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         if uids.is_empty() {
             return write_ok(stream, tag, &fmt!("{} completed, nothing to do", verb)).await;
         }
+        let asked = uids.len();
         let (u, f) = (user.clone(), from.clone());
         let outcome = self.on_store(move |s| {
             let pairs = if is_move {
@@ -1393,14 +1394,32 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         };
         let src: Vec<u32> = pairs.iter().map(|(a, _)| a.0).collect();
         let dst: Vec<u32> = pairs.iter().map(|(_, b)| b.0).collect();
-        let copyuid = fmt!("[COPYUID {} {} {}]", validity, uid_set(&src), uid_set(&dst));
+        // Derived from what the store filed, so an empty set, which RFC 4315's grammar
+        // forbids, is never formatted.
+        let copyuid = match (uid_set(&src), uid_set(&dst)) {
+            (Some(s), Some(d))  => Some(fmt!("[COPYUID {} {} {}]", validity, s, d)),
+            _                   => None,
+        };
         if is_move {
-            res!(write_all(stream, fmt!("* OK {} Moved\r\n", copyuid).as_bytes()).await);
+            if let Some(c) = &copyuid {
+                res!(write_all(stream, fmt!("* OK {} Moved\r\n", c).as_bytes()).await);
+            }
             let moved: Vec<MessageUid> = pairs.iter().map(|(a, _)| *a).collect();
             res!(Self::forget(stream, session, &moved).await);
-            write_ok(stream, tag, &fmt!("{} completed", verb)).await
-        } else {
-            write_ok(stream, tag, &fmt!("{} {} completed", copyuid, verb)).await
+        }
+        // A message the view still held had left the folder, moved or expunged by another
+        // session: it is announced in this response.
+        if pairs.len() < asked {
+            res!(self.sync_view(stream, session, true).await);
+        }
+        match copyuid {
+            None    => write_no(stream, tag,
+                "[EXPUNGEISSUED] Some of the requested messages no longer exist").await,
+            Some(c) => if is_move {
+                write_ok(stream, tag, &fmt!("{} completed", verb)).await
+            } else {
+                write_ok(stream, tag, &fmt!("{} {} completed", c, verb)).await
+            },
         }
     }
 
@@ -1944,8 +1963,10 @@ fn resolve_set(set: &str, msgs: &[MessageMeta], by_uid: bool) -> Vec<usize> {
 }
 
 /// A UID set in the order given, with each run of consecutive UIDs as `lo:hi`, so that
-/// `COPYUID`'s source and target sets expand to matching lists.
-fn uid_set(uids: &[u32]) -> String {
+/// `COPYUID`'s source and target sets expand to matching lists; `None` for no UIDs, which is
+/// no set.
+fn uid_set(uids: &[u32]) -> Option<String> {
+    if uids.is_empty() { return None; }
     let mut out = String::new();
     let mut i = 0;
     while i < uids.len() {
@@ -1961,7 +1982,7 @@ fn uid_set(uids: &[u32]) -> String {
         }
         i = j + 1;
     }
-    out
+    Some(out)
 }
 
 fn parse_set_number(s: &str, by_uid: bool, max_seq: u32, max_uid: u32) -> u32 {
