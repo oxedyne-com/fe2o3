@@ -76,9 +76,10 @@ enum Class {
 	Caps,		// [A-Z0-9 ]
 	Quote,		// a quote mark or white space
 	Space,		// white space
+	Blank,		// a space or a tab, `[ \t]`
 }
 
-const CLASSES: usize = 13;
+const CLASSES: usize = 14;
 
 impl Class {
 
@@ -88,6 +89,7 @@ impl Class {
 								&& !js_space(c),
 			Self::Quote		=> c == 0x22 || c == 0x27 || js_space(c),
 			Self::Space		=> js_space(c),
+			Self::Blank		=> c == 0x20 || c == 0x09,
 			_ if c > 127	=> false,
 			_				=> {
 				let b = c as u8;
@@ -115,6 +117,11 @@ fn js_space(c: u16) -> bool {
 	matches!(c,
 		0x09..=0x0d | 0x20 | 0xa0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f
 		| 0x3000 | 0xfeff)
+}
+
+// What JavaScript's `.` does not match: the four line terminators.
+fn js_line_end(c: u16) -> bool {
+	matches!(c, 0x0a | 0x0d | 0x2028 | 0x2029)
 }
 
 // JavaScript's `\w`, which is ASCII alone.
@@ -348,13 +355,16 @@ fn jwt(t: &mut Text, i: usize) -> Option<(usize, usize)> {
 // Daimond's `SCRUB_PAIRS`, where the name survives and only the value goes. Each answers with
 // the span of the value alone.
 
-// An `Authorization` header, however it was spelled into the text.
+// An `Authorization` header, however it was spelled into the text. `bearer` in any case, since a
+// header name and its scheme are case-free on the wire; `Basic` and `Token` capitalised only, as
+// prose uses both words lower case.
 fn bearer(t: &mut Text, i: usize) -> Option<(usize, usize)> {
 	if !t.boundary(i) {
 		return None;
 	}
 	for word in ["Bearer", "Basic", "Token"] {
-		if t.lit(i, word) {
+		let here = if word == "Bearer" { t.lit_ci(i, word) } else { t.lit(i, word) };
+		if here {
 			let at = i + word.len();
 			let sp = t.run(at, Class::Space);
 			if sp == 0 {
@@ -394,10 +404,126 @@ fn urlarg(t: &mut Text, i: usize) -> Option<(usize, usize)> {
 	None
 }
 
+// Daimond's `SCRUB_NAME`, in its order: every name the `named` rules look for against a value.
 const NAMED: &[&str] = &[
-	"api~key", "apikey", "auth~token", "access~token", "token", "secret", "passphrase", "password",
-	"master~key", "private~key", "mnemonic", "seed~phrase", "salt", "sealed", "wrapped",
+	"api~key", "apikey", "auth~token", "access~token", "token", "secret", "master~key",
+	"private~key", "salt", "sealed", "wrapped", "passphrase", "password", "passwd", "mnemonic",
+	"seed~phrase",
 ];
+
+// Its `SCRUB_NAME_TYPED`: the names whose value a person types, and which runs to the end of the
+// line, since a passphrase is words.
+const TYPED: &[&str] = &["passphrase", "password", "passwd", "mnemonic", "seed~phrase"];
+
+// What a marker opens with. A value that opens on one is not taken again, so a second pass over
+// scrubbed text changes nothing. JavaScript's `(?!\[redacted )` under `/i`.
+const MARKED: &str = "[redacted ";
+
+// The optional quote after a name, up to three units of `class`, a colon or an equals sign, and
+// up to three more: where the value starts, if all of that stands here. Each step is decided
+// without giving anything back, since what follows a run of `class` is never of the class.
+fn joint(t: &mut Text, e: usize, class: Class) -> Option<usize> {
+	let mut p = e;
+	if t.is(p, b'"') || t.is(p, b'\'') {
+		p += 1;
+	}
+	let n = t.count(p, class, 4);
+	if n > 3 {
+		return None;
+	}
+	p += n;
+	if !(t.is(p, b':') || t.is(p, b'=')) {
+		return None;
+	}
+	p += 1;
+	let n = t.count(p, class, 4);
+	if n > 3 {
+		return None;
+	}
+	Some(p + n)
+}
+
+// A secret's name and a quoted value, whole up to the closing quote, at any length, with an
+// escaped quote kept inside. The JavaScript is, for `q` a double quote,
+// `NAME["']?\s{0,3}[:=]\s{0,3}"((?!\[redacted )(?:[^"\\\r\n]|\\.)+)(?=")`. Nothing it takes is
+// an unescaped `q`, so the closing quote is the first unit its loop cannot take, and a stop on
+// anything else is a miss that giving back cannot mend.
+fn quoted(t: &mut Text, i: usize, q: u8) -> Option<(usize, usize)> {
+	for name in NAMED {
+		let e = match t.name(i, name) {
+			Some(e)	=> e,
+			None	=> continue,
+		};
+		let o = match joint(t, e, Class::Space) {
+			Some(o)	=> o,
+			None	=> continue,
+		};
+		if !t.is(o, q) {
+			continue;
+		}
+		let v = o + 1;
+		if t.lit_ci(v, MARKED) {
+			continue;
+		}
+		let mut p = v;
+		let closed = loop {
+			match t.at(p) {
+				Some(c) if c == q as u16	=> break true,
+				Some(0x5c)					=> match t.at(p + 1) {
+					Some(c) if !js_line_end(c)	=> p += 2,
+					_							=> break false,
+				},
+				Some(0x0a) | Some(0x0d) | None	=> break false,
+				Some(_)							=> p += 1,
+			}
+		};
+		if closed && p > v {
+			return Some((v, p));
+		}
+	}
+	None
+}
+
+fn quoted_double(t: &mut Text, i: usize) -> Option<(usize, usize)> {
+	quoted(t, i, b'"')
+}
+
+fn quoted_single(t: &mut Text, i: usize) -> Option<(usize, usize)> {
+	quoted(t, i, b'\'')
+}
+
+// A typed secret's name and the rest of its line, which is what a passphrase of words needs. The
+// JavaScript is `TYPED["']?[ \t]{0,3}[:=][ \t]{0,3}((?!["']|\[redacted )\S(?:[^\r\n]*\S)?)`: a
+// first unit that is no space, then up to the last unit before the line's end that is no space.
+fn typed(t: &mut Text, i: usize) -> Option<(usize, usize)> {
+	for name in TYPED {
+		let e = match t.name(i, name) {
+			Some(e)	=> e,
+			None	=> continue,
+		};
+		let v = match joint(t, e, Class::Blank) {
+			Some(v)	=> v,
+			None	=> continue,
+		};
+		match t.at(v) {
+			Some(c) if !js_space(c) && c != 0x22 && c != 0x27 && !t.lit_ci(v, MARKED) => (),
+			_ => continue,
+		}
+		let mut end = v + 1;
+		let mut p = v + 1;
+		while let Some(c) = t.at(p) {
+			if c == 0x0a || c == 0x0d {
+				break;
+			}
+			p += 1;
+			if !js_space(c) {
+				end = p;
+			}
+		}
+		return Some((v, end));
+	}
+	None
+}
 
 // What follows a name: up to three quote marks or spaces, a colon or an equals sign, and up to
 // three more. Where more than three stand, the JavaScript's greedy count takes three and meets
@@ -418,8 +544,9 @@ fn after_name(t: &mut Text, i: usize) -> Option<usize> {
 	Some(c + 1 + q2)
 }
 
-// A secret's name sitting against a value, which is what a bare `looksSecret` used to answer yes
-// or no to, with the value cut out so that the message stays readable.
+// A secret's name sitting against a run of eight or more of a token's characters, which is what a
+// bare `looksSecret` used to answer yes or no to, with the value cut out so that the message stays
+// readable. It runs after the quoted and the typed rules, which take what it once let through.
 fn named(t: &mut Text, i: usize) -> Option<(usize, usize)> {
 	for name in NAMED {
 		let e = match t.name(i, name) {
@@ -624,6 +751,9 @@ fn go(s: &str, is_id: bool) -> Option<Vec<u16>> {
 	}
 	hit |= pass(&mut cur, "bearer", bearer);
 	hit |= pass(&mut cur, "urlarg", urlarg);
+	hit |= pass(&mut cur, "named", quoted_double);
+	hit |= pass(&mut cur, "named", quoted_single);
+	hit |= pass(&mut cur, "named", typed);
 	hit |= pass(&mut cur, "named", named);
 	let mut skip = 0;
 	hit |= pass(&mut cur, "awssec", |t, i| aws_id(t, i, &mut skip));

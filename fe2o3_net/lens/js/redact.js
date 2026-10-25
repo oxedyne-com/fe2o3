@@ -24,7 +24,21 @@ export const SECRET_RE = /(?:^|[_.-])(?:apikey|api_key|key|token|secret|passphra
 // also take a field such as `tokenStats`.
 export const SECRET_RE_LOOSE = /token|secret|passphrase|password|key$/i;
 
-/// Does this field name look like a secret? `loose` adds `SECRET_RE_LOOSE`.
+// The fields whose value is something a person typed and remembers: a passphrase, a password, a
+// mailbox's app password (Daimond's `mail.js` posts it as `password` and keeps it sealed as `pass`), a
+// recovery phrase. Matched at the END of the name, so `smtpPassword` and `newPassphrase` go while
+// `passAt` and `passwordHint` stay, and `pass` only whole, so `bypass` and `compass` stay. Such a value
+// is marked with no head (`typedMark`): the six characters `fingerprint` keeps to tell two keys apart
+// are the first word of a passphrase. SCRUB-ONE, D-20261006-24.
+export const SECRET_KEY_TYPED = /(?:pass(?:word|wd|phrase)|mnemonic|seed[_-]?phrase)$|^pass$/i;
+
+/// Is this field name one whose value a person typed (`SECRET_KEY_TYPED`)?
+export function typedName(name) {
+	return SECRET_KEY_TYPED.test(String(name));
+}
+
+/// Does this field name look like a secret? `loose` adds `SECRET_RE_LOOSE`. A typed name
+/// (`typedName`) is covered by the walks as well, and is not counted here, which is `SECRET_RE` alone.
 export function secretName(name, loose) {
 	var n = String(name);
 	return SECRET_RE.test(n) || (!!loose && SECRET_RE_LOOSE.test(n));
@@ -109,22 +123,39 @@ var SCRUB_SHAPES = [
 	{ k: 'tune',   re: /\btune-[0-9a-f]{32}/g },
 ];
 
+// The secret NAMES the `named` rules look for against a value, as regex source:
+// every one, and the typed ones whose value runs to the end of the line.
+var SCRUB_NAME_TYPED = '(?:passphrase|password|passwd|mnemonic|seed[_-]?phrase)';
+var SCRUB_NAME = '(?:api[_-]?key|apikey|auth[_-]?token|access[_-]?token|token|secret|'
+	+ 'master[_-]?key|private[_-]?key|salt|sealed|wrapped|' + SCRUB_NAME_TYPED.slice(3, -1) + ')';
+
 // The shapes where the NAME must survive and only the value goes. A scrubbed
 // `?token=` is still a legible URL, and a console line with the value cut out of it
 // still says what the code was doing -- which fingerprinting the whole line, as
 // `looksSecret` did, did not.
 var SCRUB_PAIRS = [
-	// An `Authorization` header, however it was spelled into the text.
-	{ k: 'bearer', g: 3, re: /\b(Bearer|Basic|Token)(\s+)([A-Za-z0-9._~+/=-]{8,})/g },
+	// An `Authorization` header, however it was spelled into the text. `bearer` in
+	// any case, since a header name and its scheme are case-free on the wire;
+	// `Basic` and `Token` capitalised only, as prose uses both words lower case.
+	{ k: 'bearer', g: 3, re: /\b([Bb][Ee][Aa][Rr][Ee][Rr]|Basic|Token)(\s+)([A-Za-z0-9._~+/=-]{8,})/g },
 	// A credential in a URL's query or fragment. `[` and `]` are excluded from the
 	// value so a marker already placed here is not taken for a value and marked a
 	// second time: the lens runs this block AGAIN on ingest, over output the client
 	// has already scrubbed, and a rule that is not idempotent nests its own markers.
 	{ k: 'urlarg', g: 2, re: /([?&#](?:access_token|refresh_token|id_token|token|api[_-]?key|apikey|key|auth|secret|password|passwd|sig|signature)=)([^&\s"'#<>\[\]]{4,})/gi },
-	// A secret NAME sitting against a value. This is the shape `looksSecret` used
-	// to answer yes or no about; answering with the value cut out keeps the message
-	// readable instead.
-	{ k: 'named',  g: 2, re: /((?:api[_-]?key|apikey|auth[_-]?token|access[_-]?token|token|secret|passphrase|password|master[_-]?key|private[_-]?key|mnemonic|seed[_-]?phrase|salt|sealed|wrapped)["'\s]{0,3}[:=]["'\s]{0,3})([A-Za-z0-9_\-./+=]{8,})/gi },
+	// A secret NAME sitting against a value, with the value cut out so the message
+	// still reads. Quoted first, single or double, whole up to the closing quote
+	// (an escaped one does not close it) and at any length. Then, for the names
+	// whose value a person types (a passphrase, a password, a recovery phrase), the
+	// rest of the line: a passphrase is words, and the run-of-eight rule that once
+	// stood alone here let `passphrase: correct horse battery staple` through whole
+	// (SCRUB-ONE, D-20261006-24). Last, the run-of-eight for the names whose value is
+	// a token. A value that opens on a quote or on a marker is left to the quoted
+	// rule or as it is, so a second pass over scrubbed text changes nothing.
+	{ k: 'named',  g: 2, re: new RegExp('(' + SCRUB_NAME + '["\']?\\s{0,3}[:=]\\s{0,3}")((?!\\[redacted )(?:[^"\\\\\\r\\n]|\\\\.)+)(?=")', 'gi') },
+	{ k: 'named',  g: 2, re: new RegExp("(" + SCRUB_NAME + "[\"']?\\s{0,3}[:=]\\s{0,3}')((?!\\[redacted )(?:[^'\\\\\\r\\n]|\\\\.)+)(?=')", 'gi') },
+	{ k: 'named',  g: 2, re: new RegExp('(' + SCRUB_NAME_TYPED + '["\']?[ \\t]{0,3}[:=][ \\t]{0,3})((?!["\']|\\[redacted )\\S(?:[^\\r\\n]*\\S)?)', 'gi') },
+	{ k: 'named',  g: 2, re: new RegExp('(' + SCRUB_NAME + '["\'\\s]{0,3}[:=]["\'\\s]{0,3})([A-Za-z0-9_\\-./+=]{8,})', 'gi') },
 	// An AWS secret is forty characters of base64 wearing no prefix at all, so it
 	// is only recognisable NEXT TO the access-key id or the name it belongs to.
 	{ k: 'awssec', g: 2, re: /((?:AKIA|ASIA)[0-9A-Z]{12,}[\s\S]{0,200}?["'\s:=,])([A-Za-z0-9/+=]{40})(?![A-Za-z0-9/+=])/g },
@@ -236,9 +267,18 @@ function scrubText(s, isId, cfg) {
 	return s;
 }
 
+/// `fingerprint`, except for a field `SECRET_KEY_TYPED` names, whose non-empty string value is
+/// marked with no head at all (`[redacted named #<hash>/<length>]`). A value already marked passes
+/// as it is, so a second pass over what a client sent changes nothing.
+function typedMark(k, v, head) {
+	if (!SECRET_KEY_TYPED.test(k) || typeof v !== 'string' || v === '') return fingerprint(v, head);
+	if (v.indexOf('[redacted') === 0) return v;
+	return scrubMark('named', v);
+}
+
 /// A deep copy of a payload with `scrubText` applied to every string in it, keys
-/// included -- a key can be a chat id or a model name, and nothing stops a future
-/// one being a token. Cycle-safe and depth-bounded like the redactors beside it,
+/// included, and a field `SECRET_KEY_TYPED` names marked whole -- a key can be a chat
+/// id or a model name, and nothing stops a future one being a token. Cycle-safe and depth-bounded like the redactors beside it,
 /// since what it walks is arbitrary state.
 function scrubDeep(obj, seen, depth, isId, cfg) {
 	seen = seen || [];
@@ -254,10 +294,16 @@ function scrubDeep(obj, seen, depth, isId, cfg) {
 		for (i = 0; i < obj.length; i++) arr[i] = scrubDeep(obj[i], seen, depth + 1, isId, cfg);
 		return arr;
 	}
-	var out = {}, keys = Object.keys(obj);
+	var out = {}, keys = Object.keys(obj), k, v;
 	for (i = 0; i < keys.length; i++) {
-		out[scrubText(keys[i], false, cfg)] = scrubDeep(obj[keys[i]], seen, depth + 1,
-			SCRUB_ID_KEYS[keys[i]] === 1 || !!(cfg && cfg.idKeys && cfg.idKeys[keys[i]] === 1), cfg);
+		k = keys[i];
+		v = obj[k];
+		// A typed secret held as a field, a mailbox's app password in a posted body,
+		// has no name beside it in its own string for `named` to find.
+		out[scrubText(k, false, cfg)] = (typeof v === 'string' && SECRET_KEY_TYPED.test(k))
+			? typedMark(k, v)
+			: scrubDeep(v, seen, depth + 1,
+				SCRUB_ID_KEYS[k] === 1 || !!(cfg && cfg.idKeys && cfg.idKeys[k] === 1), cfg);
 	}
 	return out;
 }
@@ -285,6 +331,7 @@ export {
 	scrubMark,
 	scrubSafeRun,
 	scrubText,
+	typedMark,
 };
 
 // ── The word-run test ────────────────────────────────────────────────
@@ -433,6 +480,9 @@ function isMarker(s) {
 ///   head   the characters of a value a fingerprint shows (six, or 0 for a passphrase);
 ///   loose  also apply `SECRET_RE_LOOSE` (for a free-form config object).
 ///
+/// A field `SECRET_KEY_TYPED` names (`password`, `pass`, `newPassphrase`) is covered too, and its
+/// value marked with no head, as `[redacted named #<hash>/<length>]`.
+///
 /// `value(x)` returns a deep copy and never mutates; `text(s)` answers a fingerprint when the
 /// caller's test calls `s` secret and null otherwise. The walk is cycle-safe and stops at forty
 /// levels, as the Rust `lens::Redact` does.
@@ -460,10 +510,12 @@ export function createRedactor(opts) {
 
 	function fp(v) { return fingerprint(v, head); }
 
-	// A secret-named or denied field: fingerprint a scalar, note a structured value as present.
-	function cover(v) {
+	// A secret-named or denied field: fingerprint a scalar, note a structured value as present. A
+	// typed field's scalar (`SECRET_KEY_TYPED`) is marked with no head, whatever `head` says.
+	function cover(v, k) {
 		if (v != null && typeof v === 'object') return OBJECT;
 		if (isMarker(v)) return v;
+		if (k != null && typedName(k) && v != null && v !== '') return scrubMark('named', String(v));
 		return fp(v);
 	}
 
@@ -480,7 +532,7 @@ export function createRedactor(opts) {
 			var nk = key(k);
 			while (Object.prototype.hasOwnProperty.call(out, nk)) nk += '~';
 			path.push(k);
-			out[nk] = (secretName(k, loose) || denied(path)) ? cover(v[k]) : value(v[k], path, seen, depth + 1);
+			out[nk] = (secretName(k, loose) || typedName(k) || denied(path)) ? cover(v[k], k) : value(v[k], path, seen, depth + 1);
 			path.pop();
 		});
 		return out;
@@ -491,5 +543,6 @@ export function createRedactor(opts) {
 		text:        function (s) { return (test && typeof s === 'string' && !isMarker(s) && test(s)) ? fp(s) : null; },
 		fingerprint: fp,
 		secret:      function (name) { return secretName(name, loose); },
+		typed:       typedName,
 	};
 }
