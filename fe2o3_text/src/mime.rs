@@ -167,16 +167,27 @@ fn hex2(a: u8, b: u8) -> Option<u8> {
 // │ PARTS                                                                     │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-const MAX_DEPTH: usize = 8; // multipart nesting followed, against a hostile message
+const MAX_DEPTH: usize = 16; // nesting followed, against a hostile message
 
-/// One leaf of a MIME message: a part that is not itself a multipart, with its headers read
-/// and its body still in its transfer encoding.
+/// One entity of a MIME message, a part or the message itself, with its headers read and its
+/// body still in its transfer encoding.
 #[derive(Clone, Debug)]
 pub struct Part<'a> {
     pub ctype:          String,     // the Content-Type value, `text/plain` when absent
     pub encoding:       String,     // Content-Transfer-Encoding, lower case, empty when absent
     pub disposition:    String,     // Content-Disposition, as given
+    pub head:           &'a [u8],   // the header block
     pub body:           &'a [u8],
+    pub structure:      Structure<'a>,
+}
+
+/// What an entity holds, by RFC 2046: content, a multipart's parts, or an encapsulated
+/// message, which is a message in its own right and not part of its parent's text.
+#[derive(Clone, Debug)]
+pub enum Structure<'a> {
+    Leaf,
+    Multipart(Vec<Part<'a>>),
+    Message(Box<Part<'a>>),
 }
 
 impl<'a> Part<'a> {
@@ -189,6 +200,17 @@ impl<'a> Part<'a> {
         self.media_type().starts_with("text/")
     }
 
+    /// Is this an encapsulated message (`message/rfc822`, or RFC 6532's `message/global`),
+    /// whether or not its body could be read as one?
+    pub fn is_message(&self) -> bool {
+        matches!(self.media_type().as_str(), "message/rfc822" | "message/global")
+    }
+
+    /// The first value of a header field of this entity, `name` in lower case.
+    pub fn header(&self, name: &str) -> Option<String> {
+        field(&header_fields(self.head), name)
+    }
+
     /// The name of the file the part carries, from Content-Type's `name` or
     /// Content-Disposition's `filename`, encoded-words decoded.
     pub fn filename(&self) -> Option<String> {
@@ -198,56 +220,156 @@ impl<'a> Part<'a> {
             .filter(|n| !n.is_empty())
     }
 
-    /// Is this what a reader means by an attachment: a part with a file name, or one
-    /// disposed as `attachment`?
+    /// Is the part disposed as an `attachment`, or named as a file with a disposition other
+    /// than `inline`?
+    fn is_disposed_attachment(&self) -> bool {
+        let d = self.disposition.trim_start().to_ascii_lowercase();
+        d.starts_with("attachment") || (!d.is_empty() && !d.starts_with("inline") && self.filename().is_some())
+    }
+
+    /// Is this what a reader means by an attachment: a part with a file name, one disposed
+    /// as `attachment`, or an encapsulated message?
     pub fn is_attachment(&self) -> bool {
         self.filename().is_some()
+            || self.is_message()
             || self.disposition.trim_start().to_ascii_lowercase().starts_with("attachment")
+    }
+
+    /// The name a reader is shown for this part as an attachment: its file name, else for an
+    /// encapsulated message its Subject, else `forwarded message` or `attachment`.
+    pub fn attachment_name(&self) -> String {
+        if let Some(n) = self.filename() { return n; }
+        if !self.is_message() { return String::from("attachment"); }
+        let subject = match &self.structure {
+            Structure::Message(inner)   => inner.header("subject"),
+            // Encoded against RFC 2046 §5.2.1, so read once decoded.
+            _ => {
+                let bytes = match self.encoding.as_str() {
+                    "base64"            => decode_base64_lenient(self.body),
+                    "quoted-printable"  => decode_qp(self.body),
+                    _                   => self.body.to_vec(),
+                };
+                field(&headers(&bytes), "subject")
+            }
+        };
+        subject.map(|s| decode_words(s.trim()))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| String::from("forwarded message"))
     }
 
     /// The body out of its transfer encoding and its charset, as UTF-8.
     pub fn text(&self) -> String {
         decode_body(self.body, &self.encoding, param(&self.ctype, "charset").as_deref())
     }
+
+    /// The `text/plain` and `text/html` leaves a reader is shown as this entity's body, in
+    /// order, by RFC 2046: of a `multipart/alternative` the plain version among its own parts,
+    /// else the last that shows anything; of a `multipart/related` its root (RFC 2387); of any
+    /// other multipart each part in turn. An attachment, and anything inside an encapsulated
+    /// message, is never shown, nor is a leaf with no text.
+    pub fn display_parts(&self) -> Vec<&Part<'a>> {
+        let mut out = Vec::new();
+        self.display_into(&mut out);
+        out
+    }
+
+    fn display_into<'s>(&'s self, out: &mut Vec<&'s Part<'a>>) {
+        match &self.structure {
+            Structure::Leaf => {
+                let media = self.media_type();
+                // A multipart left a leaf, with no boundary or too deep, is shown as the text
+                // it is rather than not at all.
+                let shown = media == "text/plain" || media == "text/html" || media.starts_with("multipart/");
+                // A file name alone does not make a text part an attachment to the reader:
+                // with no disposition it is shown inline, as other readers do (RFC 2183 §2).
+                if shown
+                    && !self.is_disposed_attachment()
+                    && !self.text().trim().is_empty()
+                {
+                    out.push(self);
+                }
+            }
+            Structure::Message(_) => (),
+            Structure::Multipart(kids) => match self.media_type().as_str() {
+                "multipart/alternative" => {
+                    let plain = kids.iter()
+                        .filter(|k| matches!(k.structure, Structure::Leaf) && k.media_type() == "text/plain")
+                        .map(|k| k.display_parts())
+                        .find(|v| !v.is_empty());
+                    let chosen = plain.or_else(|| kids.iter().rev()
+                        .map(|k| k.display_parts())
+                        .find(|v| !v.is_empty()));
+                    if let Some(v) = chosen { out.extend(v); }
+                }
+                "multipart/related" => {
+                    let start = param(&self.ctype, "start");
+                    let root = start.and_then(|s| kids.iter().find(|k|
+                            k.header("content-id").map(|id| id.trim() == s.trim()).unwrap_or(false)))
+                        .or_else(|| kids.first());
+                    if let Some(r) = root { r.display_into(out); }
+                }
+                _ => for k in kids { k.display_into(out); },
+            },
+        }
+    }
 }
 
-/// Every leaf part of `raw`, a whole message, in the order it holds them: each multipart is
-/// walked by its boundary and each `message/rfc822` read as a message, to a depth of eight.
-/// A message that is not multipart is its own one leaf. The preamble and epilogue of a
-/// multipart are not parts.
-pub fn leaf_parts(raw: &[u8]) -> Vec<Part<'_>> {
-    let mut out = Vec::new();
-    walk(raw, 0, &mut out);
-    out
+/// The MIME structure of `raw`, a whole message: each multipart split by its boundary and each
+/// encapsulated message read as a message, to a depth of sixteen, below which an entity is a
+/// leaf. The preamble and epilogue of a multipart are not parts.
+pub fn entity(raw: &[u8]) -> Part<'_> {
+    read_entity(raw, 0)
 }
 
-fn walk<'a>(entity: &'a [u8], depth: usize, out: &mut Vec<Part<'a>>) {
-    let (head, body) = split_entity(entity);
+fn read_entity(raw: &[u8], depth: usize) -> Part<'_> {
+    let (head, body) = split_entity(raw);
     let hs = header_fields(head);
     let ctype = match field(&hs, "content-type") {
         Some(c) if !c.trim().is_empty() => c,
         _                               => String::from("text/plain"),
     };
+    let encoding = field(&hs, "content-transfer-encoding").unwrap_or_default().trim().to_ascii_lowercase();
     let media = media_type(&ctype);
+    let mut structure = Structure::Leaf;
     if depth < MAX_DEPTH {
         if media.starts_with("multipart/") {
             if let Some(b) = param(&ctype, "boundary") {
-                for part in multipart_bodies(body, b.as_bytes()) {
-                    walk(part, depth + 1, out);
-                }
-                return;
+                structure = Structure::Multipart(multipart_bodies(body, b.as_bytes()).into_iter()
+                    .map(|p| read_entity(p, depth + 1))
+                    .collect());
             }
-        } else if media == "message/rfc822" {
-            walk(body, depth + 1, out);
-            return;
+        } else if (media == "message/rfc822" || media == "message/global")
+            // An encoded message (RFC 2046 §5.2.1 forbids it) stays a leaf: its bytes would
+            // have to be decoded into a buffer the parts could not borrow from.
+            && matches!(encoding.as_str(), "" | "7bit" | "8bit" | "binary")
+        {
+            structure = Structure::Message(Box::new(read_entity(body, depth + 1)));
         }
     }
-    out.push(Part {
+    Part {
         ctype,
-        encoding:       field(&hs, "content-transfer-encoding").unwrap_or_default().trim().to_ascii_lowercase(),
+        encoding,
         disposition:    field(&hs, "content-disposition").unwrap_or_default(),
+        head,
         body,
-    });
+        structure,
+    }
+}
+
+/// Every leaf of `raw`, a whole message, in the order it holds them, inside encapsulated
+/// messages too, as SEARCH reads them. A message that is not multipart is its own one leaf.
+pub fn leaf_parts(raw: &[u8]) -> Vec<Part<'_>> {
+    let mut out = Vec::new();
+    flatten(entity(raw), &mut out);
+    out
+}
+
+fn flatten<'a>(mut p: Part<'a>, out: &mut Vec<Part<'a>>) {
+    match std::mem::replace(&mut p.structure, Structure::Leaf) {
+        Structure::Leaf             => out.push(p),
+        Structure::Multipart(kids)  => for k in kids { flatten(k, out); },
+        Structure::Message(inner)   => flatten(*inner, out),
+    }
 }
 
 /// The bodies of a multipart's parts, each without the line break that belongs to the
@@ -345,27 +467,126 @@ fn media_type(ctype: &str) -> String {
     ctype.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
 }
 
-/// The value of a `name=value` or `name="value"` parameter of a header field, matched on the
-/// whole parameter name in any case.
+/// The value of the parameter `name` of a header field, matched in any case: a token, or a
+/// quoted string with its backslash escapes (RFC 2045 §5.1), or an RFC 2231 value, extended
+/// (`name*=charset'lang'%xx`) or continued (`name*0`, `name*1*`, ...), which is preferred to a
+/// plain one of the same name.
 pub fn param(header: &str, name: &str) -> Option<String> {
-    for piece in header.split(';').skip(1) {
-        let (k, v) = match piece.split_once('=') {
-            Some(kv)    => kv,
-            None        => continue,
-        };
-        if !k.trim().eq_ignore_ascii_case(name) { continue; }
-        let v = v.trim();
-        let v = match v.strip_prefix('"') {
-            Some(q) => match q.find('"') {
-                Some(end)   => &q[..end],
-                None        => q,
-            },
-            None => v,
-        };
-        if v.is_empty() { return None; }
-        return Some(v.to_string());
+    let ps = params(header);
+    let name = name.to_ascii_lowercase();
+    let ext = format!("{}*", name);
+    // RFC 2231 sections: (index, extended, value).
+    let mut secs: Vec<(usize, bool, &str)> = Vec::new();
+    for (k, v) in &ps {
+        if *k == ext {
+            secs.push((0, true, v));
+        } else if let Some(rest) = k.strip_prefix(&ext) {
+            let (n, extended) = match rest.strip_suffix('*') {
+                Some(n) => (n, true),
+                None    => (rest, false),
+            };
+            if let Ok(i) = n.parse::<usize>() {
+                secs.push((i, extended, v));
+            }
+        }
     }
-    None
+    let v = if secs.is_empty() {
+        ps.into_iter().find(|(k, _)| *k == name).map(|(_, v)| v)
+    } else {
+        secs.sort_by_key(|s| s.0);
+        let mut bytes = Vec::new();
+        let mut charset: Option<&str> = None;
+        for (i, (_, extended, v)) in secs.iter().enumerate() {
+            if !*extended {
+                bytes.extend_from_slice(v.as_bytes());
+                continue;
+            }
+            let mut v: &str = v;
+            // The first section names the charset and language: `utf-8'en'`.
+            if i == 0 {
+                let mut it = v.splitn(3, '\'');
+                if let (Some(cs), Some(_), Some(rest)) = (it.next(), it.next(), it.next()) {
+                    if !cs.is_empty() { charset = Some(cs); }
+                    v = rest;
+                }
+            }
+            bytes.extend(percent_decode(v));
+        }
+        Some(to_utf8(&bytes, charset))
+    };
+    v.filter(|v| !v.is_empty())
+}
+
+/// The parameters of a header field, after its first `;`, as `(lower-case name, value)` in
+/// order, a quoted value unquoted. A quote left open runs to the end.
+pub fn params(header: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut chars = header.chars().peekable();
+    // The field's own value, before the first `;`.
+    while let Some(c) = chars.next() {
+        if c == ';' { break; }
+    }
+    loop {
+        let mut name = String::new();
+        let mut has_value = false;
+        while let Some(c) = chars.next() {
+            match c {
+                ';' => break,
+                '=' => { has_value = true; break; }
+                _   => name.push(c),
+            }
+        }
+        let name = name.trim().to_ascii_lowercase();
+        if !has_value {
+            if chars.peek().is_none() { return out; }
+            continue;
+        }
+        while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) { chars.next(); }
+        let mut value = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            while let Some(c) = chars.next() {
+                match c {
+                    '"'     => break,
+                    '\\'    => if let Some(q) = chars.next() { value.push(q); },
+                    _       => value.push(c),
+                }
+            }
+            // Anything after the closing quote, up to the next `;`, is not part of it.
+            while let Some(c) = chars.next() {
+                if c == ';' { break; }
+            }
+        } else {
+            while let Some(c) = chars.next() {
+                if c == ';' { break; }
+                value.push(c);
+            }
+            value = value.trim().to_string();
+        }
+        if !name.is_empty() {
+            out.push((name, value));
+        }
+        if chars.peek().is_none() { return out; }
+    }
+}
+
+/// `%xx` escapes to bytes; a `%` not followed by two hex digits stands for itself.
+fn percent_decode(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Some(x) = hex2(b[i + 1], b[i + 2]) {
+                out.push(x);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
 }
 
 /// A body out of its Content-Transfer-Encoding and its charset, as UTF-8.
@@ -378,10 +599,19 @@ pub fn decode_body(body: &[u8], encoding: &str, charset: Option<&str>) -> String
     to_utf8(&bytes, charset)
 }
 
-/// Bytes in `charset` as UTF-8. ISO-8859-1, ISO-8859-15 and Windows-1252 are transcoded;
-/// any other charset, or none, is read as UTF-8 with invalid sequences replaced.
+/// Bytes in `charset` as UTF-8. ISO-8859-1, ISO-8859-15 and Windows-1252 are transcoded,
+/// unless the bytes are already valid UTF-8; any other charset, or none, is read as UTF-8 with
+/// invalid sequences replaced.
 pub fn to_utf8(bytes: &[u8], charset: Option<&str>) -> String {
     let cs = charset.map(|c| c.trim().trim_matches('"').to_ascii_lowercase()).unwrap_or_default();
+    // A body labelled with a single-byte charset that is valid UTF-8 with non-ASCII in it was
+    // written in UTF-8 and mislabelled: real Latin-1 text almost never forms valid UTF-8
+    // sequences (`Ã©` and the like), so reading it by its label would only make mojibake.
+    if !bytes.is_ascii() {
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            return s.to_string();
+        }
+    }
     match cs.as_str() {
         "iso-8859-1" | "iso8859-1" | "iso_8859-1" | "latin1" | "latin-1" | "l1"
             => bytes.iter().map(|b| *b as char).collect(),

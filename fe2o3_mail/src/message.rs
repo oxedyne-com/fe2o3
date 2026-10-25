@@ -25,7 +25,9 @@ use oxedyne_fe2o3_text::{
     base64,
     mime::{
         decode_words,
-        leaf_parts,
+        entity,
+        Part,
+        Structure,
     },
 };
 
@@ -50,7 +52,7 @@ pub struct ParsedMessage {
     pub in_reply_to: String,
     pub references:  String,
     pub body:        String,    // readable text of the message
-    pub attachments: Vec<String>,   // filenames of the non-text parts
+    pub attachments: Vec<String>,   // file names, an attached message by its Subject
 }
 
 impl ParsedMessage {
@@ -88,22 +90,20 @@ fn hget(hs: &[(String, String)], name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The readable text of a message: its first `text/plain` part that is not an attachment
-/// and says something, or failing that its first `text/html` part reduced to text, at any
-/// depth of multipart nesting.
+/// The readable text of a message, by its MIME structure (RFC 2046): of a
+/// `multipart/alternative` the plain version, else the richest, and of a `mixed` each inline
+/// text part in order, so a list footer follows the body it is appended to. HTML is reduced
+/// to text; nothing inside an attached message is ever this message's text.
 pub fn readable_text(raw: &[u8]) -> String {
-    let parts = leaf_parts(raw);
-    let readable = |media: &str| parts.iter()
-        .filter(|p| !p.is_attachment() && p.media_type() == media)
-        .map(|p| p.text())
-        .find(|t| !t.trim().is_empty());
-    if let Some(t) = readable("text/plain") {
-        return norm_lines(t.trim());
-    }
-    match readable("text/html") {
-        Some(h) => norm_lines(strip_html(&h).trim()),
-        None    => String::new(),
-    }
+    let top = entity(raw);
+    let texts: Vec<String> = top.display_parts().iter()
+        .map(|p| match p.media_type().as_str() {
+            "text/html" => norm_lines(strip_html(&p.text()).trim()),
+            _           => norm_lines(p.text().trim()),
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+    texts.join("\n\n")
 }
 
 /// Line endings a reader wants: a message's `\r\n` and bare `\r` reduced to `\n`, so the
@@ -112,13 +112,20 @@ fn norm_lines(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// The file names of the attachments, a part disposed as one without a name counting as
-/// `attachment`.
+/// The names of the attachments, in order: each part with a file name or disposed as an
+/// attachment, and each attached message as one, named by its file name or its Subject and
+/// never looked inside.
 fn attachment_names(raw: &[u8]) -> Vec<String> {
-    leaf_parts(raw).iter()
-        .filter(|p| p.is_attachment())
-        .map(|p| p.filename().unwrap_or_else(|| fmt!("attachment")))
-        .collect()
+    let mut out = Vec::new();
+    names_into(&entity(raw), &mut out);
+    out
+}
+
+fn names_into(p: &Part<'_>, out: &mut Vec<String>) {
+    match &p.structure {
+        Structure::Multipart(kids)  => for k in kids { names_into(k, out); },
+        _                           => if p.is_attachment() { out.push(p.attachment_name()); },
+    }
 }
 
 /// Reduce HTML to its readable text.  A mail body is the least trustworthy string a reader
