@@ -360,7 +360,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 // RFC 3501 §6.4.2: if not read-only, expunge first.
                 if let (Some(user), Some(folder)) = (session.user.clone(), session.selected.clone()) {
                     if !session.read_only {
-                        let _ = self.on_store(move |s| s.expunge(&user, &folder)).await;
+                        let _ = self.on_store(move |s| s.expunge(&user, &folder, None)).await;
                     }
                 }
                 session.selected = None;
@@ -491,7 +491,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 res!(write_ok(stream, &tag, "STATUS completed").await);
                 Ok(false)
             }
-            "FETCH" | "UID" | "STORE" | "SEARCH" | "EXPUNGE" | "APPEND" => {
+            "FETCH" | "UID" | "STORE" | "SEARCH" | "EXPUNGE" | "APPEND" | "COPY" | "MOVE" => {
                 // Group the remaining commands together so the
                 // borrow checker keeps `session` mutably available.
                 self.dispatch_data_command(stream, session, &tag, &cmd, &args).await
@@ -570,33 +570,11 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 Ok(false)
             }
             "EXPUNGE" => {
-                let user = match &session.user {
-                    Some(u) => u.clone(),
-                    None => {
-                        res!(write_no(stream, tag, "Authenticate first").await);
-                        return Ok(false);
-                    }
-                };
-                let folder = match &session.selected {
-                    Some(f) => f.clone(),
-                    None => {
-                        res!(write_no(stream, tag, "No mailbox selected").await);
-                        return Ok(false);
-                    }
-                };
-                res!(self.sync_view(stream, session, true).await);
-                let removed = res!(self.on_store(move |s| s.expunge(&user, &folder)).await);
-                // For each expunged UID we send an untagged EXPUNGE
-                // with the *sequence number* (1-based index in the
-                // pre-expunge list). We use the cached message list.
-                for uid in &removed {
-                    if let Some(idx) = session.messages.iter().position(|m| m.uid == *uid) {
-                        let line = fmt!("* {} EXPUNGE\r\n", idx + 1);
-                        res!(write_all(stream, line.as_bytes()).await);
-                        session.messages.remove(idx);
-                    }
-                }
-                res!(write_ok(stream, tag, "EXPUNGE completed").await);
+                res!(self.do_expunge(stream, session, tag, None).await);
+                Ok(false)
+            }
+            "COPY" | "MOVE" => {
+                res!(self.do_copy(stream, session, tag, args, false, cmd == "MOVE").await);
                 Ok(false)
             }
             "APPEND" => {
@@ -611,7 +589,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 Ok(false)
             }
             "UID" => {
-                // UID FETCH / UID STORE / UID SEARCH / UID COPY.
+                // UID FETCH, STORE, SEARCH, COPY, MOVE and EXPUNGE.
                 let mut it = ArgIter::new(args);
                 let sub = match it.next_atom() {
                     Some(s) => s.to_uppercase(),
@@ -654,6 +632,19 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                     }
                     "SEARCH" => {
                         res!(self.do_search(stream, session, tag, it.rest(), true).await);
+                    }
+                    "COPY" | "MOVE" => {
+                        res!(self.do_copy(stream, session, tag, it.rest(), true, sub == "MOVE").await);
+                    }
+                    "EXPUNGE" => {
+                        let set = match it.next_atom() {
+                            Some(s) => s,
+                            None => {
+                                res!(write_bad(stream, tag, "UID EXPUNGE requires a UID set").await);
+                                return Ok(false);
+                            }
+                        };
+                        res!(self.do_expunge(stream, session, tag, Some(&set)).await);
                     }
                     _ => {
                         res!(write_bad(stream, tag, "UID subcommand not supported").await);
@@ -1285,6 +1276,134 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         write_ok(stream, tag, if by_uid { "UID SEARCH completed" } else { "SEARCH completed" }).await
     }
 
+    /// `EXPUNGE`, or with `set` RFC 4315's `UID EXPUNGE`, which removes only the `\\Deleted`
+    /// messages the UID set names. One untagged `EXPUNGE` per message removed, by its
+    /// sequence number at that moment, in the order removed.
+    async fn do_expunge<S: AsyncRead + AsyncWrite + Unpin + Send>(
+        &self,
+        stream:     &mut S,
+        session:    &mut ImapSession,
+        tag:        &str,
+        set:        Option<&str>,
+    )
+        -> Outcome<()>
+    {
+        let (user, folder) = match (&session.user, &session.selected) {
+            (Some(u), Some(f)) => (u.clone(), f.clone()),
+            _ => return write_no(stream, tag, "No mailbox selected").await,
+        };
+        if session.read_only {
+            return write_no(stream, tag, "The mailbox is read-only").await;
+        }
+        // Another session's expunges first, so the sequence numbers below are the client's.
+        res!(self.sync_view(stream, session, true).await);
+        let only: Option<Vec<MessageUid>> = set.map(|set| {
+            resolve_set(set, &session.messages, true).iter()
+                .filter_map(|i| session.messages.get(*i).map(|m| m.uid))
+                .collect()
+        });
+        let removed = res!(self.on_store(move |s| s.expunge(&user, &folder, only.as_deref())).await);
+        res!(Self::forget(stream, session, &removed).await);
+        write_ok(stream, tag, if set.is_some() { "UID EXPUNGE completed" } else { "EXPUNGE completed" }).await
+    }
+
+    /// The messages gone from the folder by this session's own command become ghosts, and
+    /// every ghost is announced, which an EXPUNGE or MOVE may do (RFC 3501 §7.4.1).
+    async fn forget<S: AsyncWrite + Unpin>(
+        stream:     &mut S,
+        session:    &mut ImapSession,
+        gone:       &[MessageUid],
+    )
+        -> Outcome<()>
+    {
+        for uid in gone {
+            session.ghosts.insert(uid.0);
+        }
+        Self::announce_expunged(stream, session).await
+    }
+
+    /// `COPY` and RFC 6851 `MOVE`, by sequence number or by UID, answered with RFC 4315's
+    /// `COPYUID`. A MOVE sends the code untagged first, then an `EXPUNGE` for each message
+    /// that left. The session never enables QRESYNC, so it is never sent `VANISHED`.
+    async fn do_copy<S: AsyncRead + AsyncWrite + Unpin + Send>(
+        &self,
+        stream:     &mut S,
+        session:    &mut ImapSession,
+        tag:        &str,
+        args:       &str,
+        by_uid:     bool,
+        is_move:    bool,
+    )
+        -> Outcome<()>
+    {
+        let verb = match (by_uid, is_move) {
+            (false, false)  => "COPY",
+            (false, true)   => "MOVE",
+            (true,  false)  => "UID COPY",
+            (true,  true)   => "UID MOVE",
+        };
+        let (user, from) = match (&session.user, &session.selected) {
+            (Some(u), Some(f)) => (u.clone(), f.clone()),
+            _ => return write_no(stream, tag, "No mailbox selected").await,
+        };
+        let mut it = ArgIter::new(args);
+        let (set, to) = match (it.next_atom(), it.next_string()) {
+            (Some(set), Some(to))   => (set, FolderName::new(to)),
+            _                       => return write_bad(stream, tag,
+                &fmt!("{} requires a message set and a mailbox", verb)).await,
+        };
+        if is_move && session.read_only {
+            return write_no(stream, tag, "The mailbox is read-only").await;
+        }
+        // A ghost has left the folder already, so it is neither copied nor moved.
+        let uids: Vec<MessageUid> = resolve_set(&set, &session.messages, by_uid).iter()
+            .filter_map(|i| session.messages.get(*i).map(|m| m.uid))
+            .filter(|u| !session.ghosts.contains(&u.0))
+            .collect();
+        let (u, t) = (user.clone(), to.clone());
+        let folders = res!(self.on_store(move |s| s.list_folders(&u)).await);
+        let exists = folders.iter().any(|f| f == &t
+            || (t.as_str().eq_ignore_ascii_case("INBOX") && f.as_str().eq_ignore_ascii_case("INBOX")));
+        if !exists {
+            return write_no(stream, tag, "[TRYCREATE] No such mailbox").await;
+        }
+        if uids.is_empty() {
+            return write_ok(stream, tag, &fmt!("{} completed, nothing to do", verb)).await;
+        }
+        let (u, f) = (user.clone(), from.clone());
+        let outcome = self.on_store(move |s| {
+            let pairs = if is_move {
+                res!(s.move_to(&u, &f, &uids, &t))
+            } else {
+                res!(s.copy(&u, &f, &uids, &t))
+            };
+            let validity = res!(s.folder_status(&u, &t)).uid_validity;
+            Ok((pairs, validity))
+        }).await;
+        let (pairs, validity) = match outcome {
+            Ok(v) => v,
+            Err(e) => {
+                // Some messages may have left before the failure: they are announced as
+                // expunged, and the error is answered NO [UNAVAILABLE] by run.
+                if is_move { res!(self.sync_view(stream, session, true).await); }
+                return Err(err!(e,
+                    "IMAP {} {} -> {}.", verb, from.as_str(), to.as_str();
+                    IO));
+            },
+        };
+        let src: Vec<u32> = pairs.iter().map(|(a, _)| a.0).collect();
+        let dst: Vec<u32> = pairs.iter().map(|(_, b)| b.0).collect();
+        let copyuid = fmt!("[COPYUID {} {} {}]", validity, uid_set(&src), uid_set(&dst));
+        if is_move {
+            res!(write_all(stream, fmt!("* OK {} Moved\r\n", copyuid).as_bytes()).await);
+            let moved: Vec<MessageUid> = pairs.iter().map(|(a, _)| *a).collect();
+            res!(Self::forget(stream, session, &moved).await);
+            write_ok(stream, tag, &fmt!("{} completed", verb)).await
+        } else {
+            write_ok(stream, tag, &fmt!("{} {} completed", copyuid, verb)).await
+        }
+    }
+
     async fn do_append<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         stream:     &mut S,
@@ -1349,8 +1468,13 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         let _ = stream.read_exact(&mut tail).await;
 
         let user = user.clone();
-        res!(self.on_store(move |s| s.append(&user, &folder, &buf, flags, internal)).await);
-        res!(write_ok(stream, tag, "APPEND completed").await);
+        let (validity, uid) = res!(self.on_store(move |s| {
+            let uid = res!(s.append(&user, &folder, &buf, flags, internal));
+            let validity = res!(s.folder_status(&user, &folder)).uid_validity;
+            Ok((validity, uid))
+        }).await);
+        // RFC 4315: the UIDVALIDITY of the target and the UID the message took there.
+        res!(write_ok(stream, tag, &fmt!("[APPENDUID {} {}] APPEND completed", validity, uid.0)).await);
         Ok(false)
     }
 }
@@ -1819,6 +1943,27 @@ fn resolve_set(set: &str, msgs: &[MessageMeta], by_uid: bool) -> Vec<usize> {
     out
 }
 
+/// A UID set in the order given, with each run of consecutive UIDs as `lo:hi`, so that
+/// `COPYUID`'s source and target sets expand to matching lists.
+fn uid_set(uids: &[u32]) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    while i < uids.len() {
+        let mut j = i;
+        while j + 1 < uids.len() && uids[j + 1] == uids[j].saturating_add(1) {
+            j += 1;
+        }
+        if !out.is_empty() { out.push(','); }
+        if j > i {
+            out.push_str(&fmt!("{}:{}", uids[i], uids[j]));
+        } else {
+            out.push_str(&fmt!("{}", uids[i]));
+        }
+        i = j + 1;
+    }
+    out
+}
+
 fn parse_set_number(s: &str, by_uid: bool, max_seq: u32, max_uid: u32) -> u32 {
     if s == "*" { if by_uid { max_uid } else { max_seq } }
     else { s.parse().unwrap_or(0) }
@@ -1892,7 +2037,7 @@ fn keep_recent(store: MessageFlags, view: MessageFlags) -> MessageFlags {
 }
 
 fn capability_list() -> &'static str {
-    "IMAP4rev1 LITERAL+ AUTH=PLAIN AUTH=LOGIN SPECIAL-USE IDLE"
+    "IMAP4rev1 LITERAL+ AUTH=PLAIN AUTH=LOGIN SPECIAL-USE IDLE MOVE UIDPLUS"
 }
 
 /// The RFC 6154 SPECIAL-USE attribute of a well-known folder name, with its leading backslash

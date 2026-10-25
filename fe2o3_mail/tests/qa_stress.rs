@@ -43,7 +43,7 @@ fn work(root: PathBuf, who: String, rounds: usize) -> Outcome<Vec<String>> {
                 let _ = res!(store.update_flags(&u, &inbox, m.uid, FlagUpdate::Add(f)));
             }
         }
-        res!(store.expunge(&u, &inbox));
+        res!(store.expunge(&u, &inbox, None));
         let st = res!(store.folder_status(&u, &inbox));
         seen.push(fmt!("V {} {}", st.uid_validity, st.uid_next));
     }

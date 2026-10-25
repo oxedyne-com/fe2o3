@@ -398,7 +398,7 @@ fn expunge_reports_only_what_it_removed() -> Outcome<()> {
     }
     let cur = inbox_dir(&root).join("cur");
     res!(set_mode(&cur, 0o555));
-    let outcome = store.expunge(&u, &inbox);
+    let outcome = store.expunge(&u, &inbox, None);
     res!(set_mode(&cur, 0o755));
     let removed = res!(outcome);
     assert!(removed.is_empty(), "expunge reported {:?}, but no file could be removed", removed);
@@ -513,7 +513,7 @@ fn a_redelivery_by_message_id_is_filed_once() -> Outcome<()> {
     // Expunged, the copy is gone, and a later delivery is filed afresh.
     res!(store.update_flags(&u, &inbox, first, FlagUpdate::Add(MessageFlags {
         deleted: true, ..MessageFlags::default() })));
-    res!(store.expunge(&u, &inbox));
+    res!(store.expunge(&u, &inbox, None));
     let after = res!(store.deliver(&u, &inbox, &with_id("<a@x>", "a3"), flags, None));
     assert!(after.0 > first.0, "filed afresh under a new UID");
 

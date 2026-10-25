@@ -324,15 +324,40 @@ pub trait MailStore: Clone + Send + Sync + 'static {
         Ok(out)
     }
 
-    /// Removes every message flagged `\Deleted`, and returns their UIDs in
-    /// removal order, since IMAP wants one untagged `EXPUNGE` per UID in that
-    /// same order.
+    /// Removes every message flagged `\Deleted`, or with `only` those of them it names
+    /// (RFC 4315 `UID EXPUNGE`), and returns their UIDs in removal order, since IMAP wants
+    /// one untagged `EXPUNGE` per UID in that same order.
     fn expunge(
         &self,
         user:   &MailUser,
         folder: &FolderName,
+        only:   Option<&[MessageUid]>,
     )
         -> Outcome<Vec<MessageUid>>;
+
+    /// Files a copy of each message of `uids` in `from` into `to`, flags and INTERNALDATE
+    /// kept, and returns `(source UID, new UID)` for each, in source UID order: the pairs
+    /// RFC 4315's `COPYUID` names. A UID `from` no longer holds is skipped. `to` must exist.
+    fn copy(
+        &self,
+        user:   &MailUser,
+        from:   &FolderName,
+        uids:   &[MessageUid],
+        to:     &FolderName,
+    )
+        -> Outcome<Vec<(MessageUid, MessageUid)>>;
+
+    /// As [`Self::copy`], but each message leaves `from` (RFC 6851 `MOVE`). A message is in
+    /// exactly one of the two folders at every moment, a crash included, and takes in `to`
+    /// a UID above any that folder has issued.
+    fn move_to(
+        &self,
+        user:   &MailUser,
+        from:   &FolderName,
+        uids:   &[MessageUid],
+        to:     &FolderName,
+    )
+        -> Outcome<Vec<(MessageUid, MessageUid)>>;
 
     /// Idempotent.
     fn create_folder(

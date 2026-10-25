@@ -398,25 +398,7 @@ impl MaildirStore {
         res!(Self::ensure_subdirs(&folder_dir));
 
         // Written in tmp/ outside the lock, so a large message holds up no reader.
-        let (unique, tmp_path, mut f) = res!(self.create_unique(&folder_dir.join("tmp")));
-        let written = (|| -> Outcome<()> {
-            res!(f.write_all(bytes));
-            // After the write, which sets the mtime, so INTERNALDATE round-trips.
-            if let Some(t) = internal {
-                if let Err(e) = f.set_modified(t) {
-                    warn!("Could not set the INTERNALDATE of {:?}: {}.", tmp_path, e);
-                }
-            }
-            res!(f.sync_all());
-            Ok(())
-        })();
-        drop(f);
-        if let Err(e) = written {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(err!(e,
-                "Writing the delivery file {:?}.", tmp_path;
-                IO, File, Write));
-        }
+        let (unique, tmp_path) = res!(self.write_tmp(&folder_dir, bytes, internal));
 
         let filename = fmt!("{}:2,{}", unique, flag_suffix(flags));
         let cur_path = folder_dir.join("cur").join(&filename);
@@ -549,16 +531,21 @@ impl MaildirStore {
         Self::read_folder(folder_dir, clear_recent, &lock)
     }
 
-    /// Creates a file in `tmp_dir` under a name no other delivery uses, this process's or
-    /// another's: `<secs>.M<usec>P<pid>Q<n>.<host>`, opened with `create_new` so that a
+    /// A message name no other delivery uses, this process's or another's:
+    /// `<secs>.M<usec>P<pid>Q<n>.<host>`. `n` is zero-padded, so names made in one second
+    /// sort in the order they were made, which is the order their folder numbers them in.
+    fn fresh_key(&self, now: Duration) -> String {
+        let q = NAME_SEQ.fetch_add(1, Ordering::Relaxed);
+        fmt!("{}.M{}P{}Q{:010}.{}",
+            now.as_secs(), now.subsec_micros(), std::process::id(), q, self.hostname)
+    }
+
+    /// Creates a file in `tmp_dir` under a fresh name, opened with `create_new` so that a
     /// clash is refused rather than overwritten.
     fn create_unique(&self, tmp_dir: &Path) -> Outcome<(String, PathBuf, File)> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-        let pid = std::process::id();
         for _ in 0..NAME_TRIES {
-            let q = NAME_SEQ.fetch_add(1, Ordering::Relaxed);
-            let unique = fmt!("{}.M{}P{}Q{}.{}",
-                now.as_secs(), now.subsec_micros(), pid, q, self.hostname);
+            let unique = self.fresh_key(now);
             let path = tmp_dir.join(&unique);
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(f) => return Ok((unique, path, f)),
@@ -571,6 +558,99 @@ impl MaildirStore {
         Err(err!(
             "Every one of {} fresh message names in {:?} was already taken.", NAME_TRIES, tmp_dir;
             IO, File, Exists))
+    }
+
+    /// Writes `bytes` to a new file in the folder's `tmp/`, synced, with `internal` as its
+    /// mtime (the INTERNALDATE), and returns its name and path. Nothing reads `tmp/`, so no
+    /// lock is needed.
+    fn write_tmp(
+        &self,
+        folder_dir: &Path,
+        bytes:      &[u8],
+        internal:   Option<SystemTime>,
+    )
+        -> Outcome<(String, PathBuf)>
+    {
+        let (unique, tmp_path, mut f) = res!(self.create_unique(&folder_dir.join("tmp")));
+        let written = (|| -> Outcome<()> {
+            res!(f.write_all(bytes));
+            // After the write, which sets the mtime, so INTERNALDATE round-trips.
+            if let Some(t) = internal {
+                if let Err(e) = f.set_modified(t) {
+                    warn!("Could not set the INTERNALDATE of {:?}: {}.", tmp_path, e);
+                }
+            }
+            res!(f.sync_all());
+            Ok(())
+        })();
+        drop(f);
+        match written {
+            Ok(()) => Ok((unique, tmp_path)),
+            Err(e) => {
+                let _ = fs::remove_file(&tmp_path);
+                Err(err!(e,
+                    "Writing the delivery file {:?}.", tmp_path;
+                    IO, File, Write))
+            },
+        }
+    }
+
+    /// A folder other than INBOX exists once CREATE (or a delivery) has made its `cur/`.
+    fn require_folder(folder_dir: &Path, folder: &FolderName) -> Outcome<()> {
+        if folder_dir.join("cur").is_dir() {
+            Ok(())
+        } else {
+            Err(err!(
+                "The folder {} does not exist.", folder.as_str();
+                Missing, Input))
+        }
+    }
+
+    /// The locks of two folders, taken in path order so that two callers wanting the same
+    /// pair, either way round, cannot each hold one and wait for the other. One folder named
+    /// twice is locked once, since a second flock on it would wait for the first.
+    fn lock_both(&self, a: &Path, b: &Path) -> Outcome<(ExclusiveLock, Option<ExclusiveLock>)> {
+        if a == b {
+            return Ok((res!(self.lock_folder(a)), None));
+        }
+        if a < b {
+            let la = res!(self.lock_folder(a));
+            let lb = res!(self.lock_folder(b));
+            Ok((la, Some(lb)))
+        } else {
+            let lb = res!(self.lock_folder(b));
+            let la = res!(self.lock_folder(a));
+            Ok((la, Some(lb)))
+        }
+    }
+
+    /// The `(source UID, new UID)` pairs for the messages filed in `to` under the names
+    /// given, after its uidlist has numbered them.
+    fn pairs(
+        view:   &FolderView,
+        filed:  &[(MessageUid, String)],
+        to_dir: &Path,
+    )
+        -> Outcome<Vec<(MessageUid, MessageUid)>>
+    {
+        let mut out = Vec::with_capacity(filed.len());
+        for (src, key) in filed {
+            match view.entries.iter().find(|e| &e.key == key) {
+                Some(e) => out.push((*src, e.meta.uid)),
+                None    => return Err(err!(
+                    "The message just filed as {} has no UID in {:?}.", key, to_dir;
+                    Bug, Missing)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The UIDs of `uids` the folder holds, in rising order, each once.
+    fn present<'a>(view: &'a FolderView, uids: &[MessageUid]) -> Vec<&'a Entry> {
+        let mut want: Vec<u32> = uids.iter().map(|u| u.0).collect();
+        want.sort_unstable();
+        want.dedup();
+        want.iter().filter_map(|u| view.find(MessageUid(*u))).collect()
     }
 }
 
@@ -777,6 +857,7 @@ impl MailStore for MaildirStore {
         &self,
         user:   &MailUser,
         folder: &FolderName,
+        only:   Option<&[MessageUid]>,
     )
         -> Outcome<Vec<MessageUid>>
     {
@@ -786,6 +867,9 @@ impl MailStore for MaildirStore {
         let mut removed: Vec<MessageUid> = Vec::new();
         for e in &view.entries {
             if !e.meta.flags.deleted { continue; }
+            if let Some(set) = only {
+                if !set.contains(&e.meta.uid) { continue; }
+            }
             match fs::remove_file(&e.path) {
                 Ok(()) => removed.push(e.meta.uid),
                 // Gone already, by a hand outside this store: it is expunged all the same.
@@ -804,6 +888,134 @@ impl MailStore for MaildirStore {
             res!(Self::read_folder(&folder_dir, false, &lock));
         }
         Ok(removed)
+    }
+
+    fn copy(
+        &self,
+        user:   &MailUser,
+        from:   &FolderName,
+        uids:   &[MessageUid],
+        to:     &FolderName,
+    )
+        -> Outcome<Vec<(MessageUid, MessageUid)>>
+    {
+        let src_dir = self.folder_path(user, from);
+        let dst_dir = self.folder_path(user, to);
+        res!(Self::require_folder(&src_dir, from));
+        res!(Self::require_folder(&dst_dir, to));
+        let (src_lock, dst_lock) = res!(self.lock_both(&src_dir, &dst_dir));
+        let dst_lock = dst_lock.as_ref().unwrap_or(&src_lock);
+        let view = res!(Self::read_folder(&src_dir, false, &src_lock));
+        // Each copy is a new file of its own, written whole in tmp/ and renamed into cur/,
+        // so a crash leaves a complete copy or none.
+        let mut filed: Vec<(MessageUid, String)> = Vec::new();
+        let mut failure: Option<Error<ErrTag>> = None;
+        for e in Self::present(&view, uids) {
+            let outcome = (|| -> Outcome<String> {
+                let bytes = res!(read_message(&e.path, e.meta.size));
+                let (unique, tmp_path) = res!(self.write_tmp(&dst_dir, &bytes, Some(e.meta.internal)));
+                let mut flags = e.meta.flags;
+                flags.recent = false;
+                let cur_path = dst_dir.join("cur").join(fmt!("{}:2,{}", unique, flag_suffix(flags)));
+                if let Err(err) = fs::rename(&tmp_path, &cur_path) {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(err!(err,
+                        "Renaming {:?} -> {:?}.", tmp_path, cur_path;
+                        IO, File, Write));
+                }
+                Ok(unique)
+            })();
+            match outcome {
+                Ok(key) => filed.push((e.meta.uid, key)),
+                Err(err) => {
+                    failure = Some(err);
+                    break;
+                },
+            }
+        }
+        // The copies' entries durable before their UIDs are given out.
+        if !filed.is_empty() {
+            res!(sync_parent_dir(&dst_dir.join("cur").join("x")));
+        }
+        // The copies made are numbered even when a later one failed, so none is left
+        // without a UID until some other reading of the folder.
+        let dst_view = res!(Self::read_folder(&dst_dir, false, dst_lock));
+        if let Some(err) = failure {
+            return Err(err!(err,
+                "Copying from {} to {}: {} of {} copied.", from.as_str(), to.as_str(),
+                filed.len(), uids.len();
+                IO, File, Write));
+        }
+        Self::pairs(&dst_view, &filed, &dst_dir)
+    }
+
+    fn move_to(
+        &self,
+        user:   &MailUser,
+        from:   &FolderName,
+        uids:   &[MessageUid],
+        to:     &FolderName,
+    )
+        -> Outcome<Vec<(MessageUid, MessageUid)>>
+    {
+        let src_dir = self.folder_path(user, from);
+        let dst_dir = self.folder_path(user, to);
+        res!(Self::require_folder(&src_dir, from));
+        res!(Self::require_folder(&dst_dir, to));
+        let (src_lock, dst_lock) = res!(self.lock_both(&src_dir, &dst_dir));
+        let dst_lock = dst_lock.as_ref().unwrap_or(&src_lock);
+        let view = res!(Self::read_folder(&src_dir, false, &src_lock));
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        // One rename(2) per message, from the source's cur/ or new/ to the target's cur/, so
+        // at every moment the file is in one folder or the other. It takes a fresh name, which
+        // no uidlist has ever listed: the target numbers it above every UID it has issued
+        // even when a crash comes before the uidlists are written, and even when the message
+        // once lived there under the name it has now.
+        let mut filed: Vec<(MessageUid, String)> = Vec::new();
+        let mut failure: Option<Error<ErrTag>> = None;
+        for e in Self::present(&view, uids) {
+            let key = self.fresh_key(now);
+            let mut flags = e.meta.flags;
+            flags.recent = false;
+            let cur_path = dst_dir.join("cur").join(fmt!("{}:2,{}", key, flag_suffix(flags)));
+            // Every writer of cur/ holds the lock, so nothing takes the name after this test.
+            if cur_path.exists() {
+                failure = Some(err!(
+                    "A message named {:?} is already in the folder.", cur_path;
+                    IO, File, Exists));
+                break;
+            }
+            match fs::rename(&e.path, &cur_path) {
+                Ok(()) => filed.push((e.meta.uid, key)),
+                Err(err) => {
+                    failure = Some(err!(err,
+                        "Moving {:?} -> {:?}.", e.path, cur_path;
+                        IO, File, Write));
+                    break;
+                },
+            }
+        }
+        // The renames durable before either uidlist records them, or a power loss could
+        // bring a moved message back in the source under a new UID beside its target copy.
+        if !filed.is_empty() {
+            res!(sync_parent_dir(&dst_dir.join("cur").join("x")));
+            for sub in ["cur", "new"] {
+                res!(sync_parent_dir(&src_dir.join(sub).join("x")));
+            }
+        }
+        // Both uidlists, each tried even when the other fails: the source forgets the files
+        // gone, the target numbers the files come.
+        let src_read = Self::read_folder(&src_dir, false, &src_lock);
+        let dst_read = Self::read_folder(&dst_dir, false, dst_lock);
+        let dst_view = res!(dst_read);
+        res!(src_read);
+        if let Some(err) = failure {
+            return Err(err!(err,
+                "Moving from {} to {}: {} of {} moved.", from.as_str(), to.as_str(),
+                filed.len(), uids.len();
+                IO, File, Write));
+        }
+        Self::pairs(&dst_view, &filed, &dst_dir)
     }
 
     fn create_folder(
