@@ -19,7 +19,15 @@ use oxedyne_fe2o3_mail::{
 };
 use oxedyne_fe2o3_net::{
     dkim::DkimSigner,
-    mail::user::UserStore,
+    mail::{
+        store::{
+            FolderName,
+            MailStore,
+            MailUser,
+            MessageFlags,
+        },
+        user::UserStore,
+    },
     smtp::{
         client::OutboundClient,
         handler::{
@@ -64,39 +72,24 @@ impl std::fmt::Debug for AppMailHandler {
 impl SmtpHandler for AppMailHandler {
 
     fn deliver_inbound(&self, txn: SmtpTransaction) -> Outcome<HandlerOutcome> {
-        // For each recipient resolve the local mailbox and append.
+        // Materialise the bytes the way the IMAP server will read them: prepend a Received
+        // header so the audit trail is useful and the message is a valid RFC 5322 document.
+        let mut bytes = build_received_header(&txn).into_bytes();
+        bytes.extend_from_slice(&txn.raw_message);
         let mut accepted = 0u32;
         for rcpt in &txn.rcpt_to {
             let user = match self.users.lookup(rcpt) {
                 Ok(Some(u)) => u,
-                _ => {
+                Ok(None) => {
+                    // Refused at RCPT time, so only a user removed since then reaches here.
                     warn!("Inbound delivery: unknown recipient {}", rcpt);
                     continue;
-                }
+                },
+                Err(e) => return Ok(self.deferred(e, rcpt)),
             };
-            // Materialise the bytes the way the IMAP server will read
-            // them: prepend a Received header so the audit trail is
-            // useful and the message is a valid RFC 5322 document.
-            let received = build_received_header(&txn);
-            let mut bytes = received.into_bytes();
-            bytes.extend_from_slice(&txn.raw_message);
-            use oxedyne_fe2o3_net::mail::store::{FolderName, MailStore, MessageFlags};
-            let flags = MessageFlags { recent: true, ..Default::default() };
-            let internal = Some(SystemTime::now());
-            let result = self.store.append(
-                &user,
-                &FolderName::new("INBOX"),
-                &bytes,
-                flags,
-                internal,
-            );
-            match result {
-                Ok(_uid) => { accepted += 1; }
-                Err(e) => {
-                    error!(err!(e,
-                        "Failed to append inbound mail for {}.", rcpt;
-                        IO));
-                }
+            match self.deliver_local(&user, &bytes) {
+                Ok(())  => accepted += 1,
+                Err(e)  => return Ok(self.deferred(e, rcpt)),
             }
         }
         if accepted == 0 {
@@ -151,28 +144,20 @@ impl SmtpHandler for AppMailHandler {
             }
         }
 
-        // Local delivery first.
+        // Local delivery first, and the remote copies are queued only once every local one
+        // has landed, so a deferral leaves nothing queued that the client's retry would queue
+        // again.
         for rcpt in &local {
             let user = match self.users.lookup(rcpt) {
                 Ok(Some(u)) => u,
-                _ => {
+                Ok(None) => {
                     warn!("Submission: local recipient {} not in user store", rcpt);
                     continue;
-                }
+                },
+                Err(e) => return Ok(self.deferred(e, rcpt)),
             };
-            use oxedyne_fe2o3_net::mail::store::{FolderName, MailStore, MessageFlags};
-            let flags = MessageFlags { recent: true, ..Default::default() };
-            let internal = Some(SystemTime::now());
-            if let Err(e) = self.store.append(
-                &user,
-                &FolderName::new("INBOX"),
-                &signed_bytes,
-                flags,
-                internal,
-            ) {
-                error!(err!(e,
-                    "Local delivery to {} failed.", rcpt;
-                    IO));
+            if let Err(e) = self.deliver_local(&user, &signed_bytes) {
+                return Ok(self.deferred(e, rcpt));
             }
         }
 
@@ -203,6 +188,26 @@ impl SmtpHandler for AppMailHandler {
     }
 }
 
+impl AppMailHandler {
+
+    /// Files `bytes` in the user's INBOX.
+    fn deliver_local(&self, user: &MailUser, bytes: &[u8]) -> Outcome<()> {
+        let flags = MessageFlags { recent: true, ..Default::default() };
+        res!(self.store.append(user, &FolderName::new("INBOX"), bytes, flags, Some(SystemTime::now())));
+        Ok(())
+    }
+
+    /// A message that cannot be filed is deferred whole with `451 4.3.0`, never refused with a
+    /// `550` the sender would bounce, and never dropped for one recipient while the others are
+    /// answered `250`: the sender retries.
+    fn deferred(&self, e: Error<ErrTag>, rcpt: &str) -> HandlerOutcome {
+        error!(err!(e,
+            "Local delivery to {} failed; the message is deferred.", rcpt;
+            IO));
+        HandlerOutcome::RejectTemporary(fmt!(
+            "4.3.0 Mailbox temporarily unavailable, try again later"))
+    }
+}
 
 /// Sweeps the spool every thirty seconds and pushes each message that is due through the outbound
 /// SMTP client. Runs forever. What becomes of a failure, whether it waits, is retried or ends
