@@ -85,12 +85,12 @@
 "config api-key: {{16:202:alnum}} done"	"config api-key: [redacted named #6d1972b8/16] done"	0
 "config auth_token: {{16:203:alnum}} done"	"config auth_token: [redacted named #a24921b5/16] done"	0
 "config access-token: {{16:204:alnum}} done"	"config access-token: [redacted named #458f912b/16] done"	0
-"config passphrase: {{16:205:alnum}} done"	"config passphrase: [redacted named #338daec6/16] done"	0
-"config password: {{16:206:alnum}} done"	"config password: [redacted named #e5ec2fa8/16] done"	0
+"config passphrase: {{16:205:alnum}} done"	"config passphrase: [redacted named #25a3a74c/21]"	0
+"config password: {{16:206:alnum}} done"	"config password: [redacted named #a640056e/21]"	0
 "config master_key: {{16:207:alnum}} done"	"config master_key: [redacted named #3ee461b7/16] done"	0
 "config private-key: {{16:208:alnum}} done"	"config private-key: [redacted named #a0abb82a/16] done"	0
-"config mnemonic: {{16:209:alnum}} done"	"config mnemonic: [redacted named #b5f05e47/16] done"	0
-"config seed_phrase: {{16:210:alnum}} done"	"config seed_phrase: [redacted named #16b41c5d/16] done"	0
+"config mnemonic: {{16:209:alnum}} done"	"config mnemonic: [redacted named #d8f52f6d/21]"	0
+"config seed_phrase: {{16:210:alnum}} done"	"config seed_phrase: [redacted named #93112b43/21]"	0
 "config salt: {{16:211:alnum}} done"	"config salt: [redacted named #8237707d/16] done"	0
 "config sealed: {{16:212:alnum}} done"	"config sealed: [redacted named #f9d49c68/16] done"	0
 "config wrapped: {{16:213:alnum}} done"	"config wrapped: [redacted named #532e2b9b/16] done"	0
@@ -128,3 +128,38 @@
 "short"	"short"	0
 "       "	"       "	0
 "plain prose with no credential at all, only words and a number 12345 and a path /usr/local/bin"	"plain prose with no credential at all, only words and a number 12345 and a path /usr/local/bin"	0
+"passphrase: correct horse battery staple"	"passphrase: [redacted named #3e4a1a9c/28]"	0
+"[id] unlock with passphrase: correct horse battery staple"	"[id] unlock with passphrase: [redacted named #3e4a1a9c/28]"	0
+"mnemonic = correct horse battery staple again"	"mnemonic = [redacted named #f22d223c/34]"	0
+"PASSPHRASE=correct horse battery staple"	"PASSPHRASE=[redacted named #3e4a1a9c/28]"	0
+"Password: hunter2"	"Password: [redacted named #625bbd4d/7]"	0
+"login password = tr0ub4dor"	"login password = [redacted named #76b31e4b/9]"	0
+"passwd=s3cr3t pa55"	"passwd=[redacted named #4a8d3ee2/11]"	0
+"PASSWD: s3cr3t pa55"	"PASSWD: [redacted named #4a8d3ee2/11]"	0
+"newPassword: abc"	"newPassword: [redacted named #b885c8b/3]"	0
+"seed-phrase:\tcorrect horse battery staple  \nnext line"	"seed-phrase:\t[redacted named #3e4a1a9c/28]  \nnext line"	0
+"password: \"correct horse battery staple\""	"password: \"[redacted named #3e4a1a9c/28]\""	0
+"passphrase='correct horse battery staple'"	"passphrase='[redacted named #3e4a1a9c/28]'"	0
+"password: \"pa\\\"ss wo rd\""	"password: \"[redacted named #40d74fb6/12]\""	0
+"config password=\"hunter2\" set"	"config password=\"[redacted named #625bbd4d/7]\" set"	0
+"{\"user\":\"me\",\"password\":\"correct horse battery staple\",\"port\":993}"	"{\"user\":\"me\",\"password\":\"[redacted named #3e4a1a9c/28]\",\"port\":993}"	0
+"{\"address\":\"me@x.org\",\"host\":\"imap.x.org\",\"user\":\"me\",\"password\":\"abcd efgh ijkl mnop\"}"	"{\"address\":\"me@x.org\",\"host\":\"imap.x.org\",\"user\":\"me\",\"password\":\"[redacted named #792b344d/19]\"}"	0
+"token = 'ab cd' and secret: \"xy\""	"token = '[redacted named #f109b6f/5]' and secret: \"[redacted named #597a36/2]\""	0
+"secret: \"xy\" after"	"secret: \"[redacted named #597a36/2]\" after"	0
+"api_key: \"{{6:256:alnum}}\""	"api_key: \"[redacted named #15267110/6]\""	0
+"authorization: bearer {{20:257:b64}}"	"authorization: bearer [redacted bearer #fccd6ed7/20]"	0
+"AUTHORIZATION: BEARER {{20:258:b64}}"	"AUTHORIZATION: BEARER [redacted bearer #b1d01f24/20]"	0
+"BeArEr {{12:259:b64}} mixed"	"BeArEr [redacted bearer #6332c59b/12] mixed"	0
+"Forgot your password? Reset it from the sign-in screen."	"Forgot your password? Reset it from the sign-in screen."	0
+"the password was wrong"	"the password was wrong"	0
+"Password must be at least 12 characters"	"Password must be at least 12 characters"	0
+"Enter your passphrase:"	"Enter your passphrase:"	0
+"passphrase:    "	"passphrase:    "	0
+"Change password"	"Change password"	0
+"Set a passphrase, then confirm it"	"Set a passphrase, then confirm it"	0
+"the compass bypass passes"	"the compass bypass passes"	0
+"password:     four spaces"	"password:     four spaces"	0
+"password: \"unterminated value"	"password: \"[redacted named #c85cb395/12] value"	0
+"password: [REDACTED by hand]"	"password: [REDACTED by hand]"	0
+"basic auth then token words"	"basic auth then token words"	0
+"passphrase: [redacted named #1a2b3c4d/28] and password=\"[redacted named #5e6f7a8b/7]\""	"passphrase: [redacted named #1a2b3c4d/28] and password=\"[redacted named #5e6f7a8b/7]\""	0
