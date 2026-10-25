@@ -988,7 +988,11 @@ impl<
     }
 
     /// The part key of the value now at `k`, when that value is chunked, with the metadata of
-    /// its bunch key.  The read is a whole read, so a store pays it only where it must know.
+    /// its bunch key.  The read is a whole read, so a store pays it only where it must know.  A
+    /// record whose bytes fail their checksum on every attempt cannot say whether it was
+    /// chunked, and replacing or deleting it is how a caller is rid of it, so it answers `None`:
+    /// the key is written over, and a chunk set it may have headed is left to the orphan sweep.
+    /// Any other failure is an error.
     pub(crate) fn chunk_set_of(
         &self,
         k:      &Dat,
@@ -996,9 +1000,18 @@ impl<
     )
         -> Outcome<Option<(PartKey, Meta<UIDL, UID>)>>
     {
-        match res!(self.get_head_wait(k, schms2)) {
-            Some((Dat::Tup5u64(tup), meta)) => Ok(Some((PartKey(tup), meta))),
-            _ => Ok(None),
+        match self.get_head_wait(k, schms2) {
+            Ok(Some((Dat::Tup5u64(tup), meta)))                     => Ok(Some((PartKey(tup), meta))),
+            Ok(_)                                                   => Ok(None),
+            Err(e) if e.tags().contains(&ErrTag::Mismatch)          => {
+                warn!("{}: Writing over {:?}, whose record does not read back, so any chunks it \
+                    headed are left to the orphan sweep: {}", self.ozid(), k, e);
+                Ok(None)
+            },
+            Err(e)                                                  => Err(err!(e,
+                "{}: Writing over {:?}, its current value could not be read to learn whether it \
+                is chunked.", self.ozid(), k;
+                Read)),
         }
     }
 

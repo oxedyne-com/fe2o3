@@ -350,6 +350,7 @@ impl<
         // A failed append is cut back off, so the next record starts where this one began.  The
         // sizes are those of the pair the append went to, after any rollover, since a failure
         // leaves them unchanged.
+        hooks::write_hold();
         let start = match self.write_to_file(FileType::Data, vec![&kbyts[..], &vstored[..]]) {
             Ok(start) => start,
             Err(e) => {

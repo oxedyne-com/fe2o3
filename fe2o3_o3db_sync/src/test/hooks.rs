@@ -85,6 +85,9 @@ static HEAD_DROPS:       AtomicBool = AtomicBool::new(false); // a chunked store
 static SYNCER_CHUNK_US:  AtomicU64  = AtomicU64::new(0);      // before a syncer takes in a store's chunk
 static BARRIERS:         Mutex<BTreeMap<(usize, usize), u64>> = Mutex::new(BTreeMap::new()); // completed, by (zone, writer)
 static HALT:             Mutex<Option<(Halt, std::path::PathBuf)>> = Mutex::new(None); // where to wait for a kill
+static HOLD_SKIP:        AtomicU64  = AtomicU64::new(0);      // records appended before the held one
+static HOLD_MS:          AtomicU64  = AtomicU64::new(0);      // the hold, zero when disarmed
+static HOLDS_TAKEN:      AtomicU64  = AtomicU64::new(0);      // records held so far
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
 /// of a busy disk's writes would be held.
@@ -189,6 +192,22 @@ pub fn set_owed_drop(on: bool) {
 
 pub(crate) fn owed_dropped() -> bool {
     OWED_DROPS.load(Ordering::SeqCst)
+}
+
+/// Holds ONE record's append for `d`, as a writer stuck in a write to a disk that has stopped
+/// completing would be held: the first `skip` records appended from now pass, the next is held,
+/// and then the hook disarms itself.  The held record is appended once the hold ends, after its
+/// caller has been told that whether it lands is not known (WSTALL, 2026-10-16), which is the case
+/// a caller retrying an unknown outcome has to survive.  `Duration::ZERO` disarms it.
+pub fn set_write_hold(skip: u64, d: Duration) {
+    HOLD_MS.store(0, Ordering::Relaxed);
+    HOLD_SKIP.store(skip, Ordering::Relaxed);
+    HOLD_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// How many records `set_write_hold` has held so far, each counted when its hold begins.
+pub fn write_holds_taken() -> u64 {
+    HOLDS_TAKEN.load(Ordering::Relaxed)
 }
 
 /// Makes the supervisor panic once it has brought the bots up, before the database is ready, as a
@@ -562,6 +581,22 @@ pub(crate) fn schedule_delay() {
     if SCHEDULE_DELAY_MS.load(Ordering::Relaxed) > 0 {
         pause(&SCHEDULE_DELAY_MS);
         SCHEDULES_HELD.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn write_hold() {
+    let ms = HOLD_MS.load(Ordering::Relaxed);
+    if ms == 0 {
+        return;
+    }
+    // A record still to pass takes one off the count; only the first to find it at nought, and
+    // the hold still armed, is held.
+    if HOLD_SKIP.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)).is_ok() {
+        return;
+    }
+    if HOLD_MS.compare_exchange(ms, 0, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        HOLDS_TAKEN.fetch_add(1, Ordering::Relaxed);
+        thread::sleep(Duration::from_millis(ms));
     }
 }
 
