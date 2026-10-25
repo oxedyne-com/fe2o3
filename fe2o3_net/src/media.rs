@@ -566,6 +566,7 @@ pub enum Text {
     Csv,
     Html,
     Javascript,
+    Vtt,
     Xml,
 }
 
@@ -577,6 +578,7 @@ impl Display for Text {
             Self::Csv           => "csv",
             Self::Html          => "html",
             Self::Javascript    => "javascript",
+            Self::Vtt           => "vtt",
             Self::Xml           => "xml",
         })
     }
@@ -592,6 +594,7 @@ impl FromStr for Text {
             "csv"               => Self::Csv,
             "html"              => Self::Html,
             "javascript"        => Self::Javascript,
+            "vtt"               => Self::Vtt,
             "xml"               => Self::Xml,
             _ => return Err(err!(
                 "Unrecognised Text Media subtype '{}'.", s;

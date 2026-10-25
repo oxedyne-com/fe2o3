@@ -261,6 +261,13 @@ impl RequestPath {
                 MediaType::Text(Text::Plain),
                 Some(Charset::Utf_8),
             )),
+            // Subtitles for a `<track>`.  Firefox loads no track served as
+            // anything else, and steel adds `nosniff`, so `text/plain` here is a
+            // video with its subtitles silently missing.  IANA: text/vtt.
+            Some("vtt") => ContentTypeValue::MediaType((
+                MediaType::Text(Text::Vtt),
+                Some(Charset::Utf_8),
+            )),
             Some("csv") => ContentTypeValue::MediaType((
                 MediaType::Text(Text::Csv),
                 Some(Charset::Utf_8),
@@ -306,6 +313,7 @@ mod tests {
             ("track.wav",   "audio/wav"),
             ("track.flac",  "audio/flac"),
             ("track.aac",   "audio/aac"),
+            ("film.en.vtt", "text/vtt; charset=utf-8"),
         ] {
             let got = fmt!("{}", RequestPath::content_type(Path::new(name)));
             assert_eq!(got, expected, "{} was served as {}", name, got);
