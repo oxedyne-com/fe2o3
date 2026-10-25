@@ -369,8 +369,56 @@ impl ApiRoute {
         Self::resolve_file_only(&intermediate, root)
     }
 
-    /// Resolve only `{env:VAR[:default]}` placeholders.
-    fn resolve_env_refs(value: &str) -> Outcome<String> {
+    /// Every file a [`ApiRoute::resolve_headers`] and [`ApiRoute::resolve_config`] would read,
+    /// in order of appearance, without reading any of them.
+    ///
+    /// Each `{file:}` and `{file?:}` path is taken after `{env:}` resolution and joined to `root`
+    /// exactly as the resolve joins it, so an absolute path stays absolute. A caller that must vet
+    /// where secrets come from can then refuse a path before anything is read from it.
+    pub fn config_file_sources(&self, root: &Path) -> Outcome<Vec<PathBuf>> {
+        let mut out = Vec::new();
+        for (_name, value) in self.headers.iter().chain(self.config.iter()) {
+            res!(Self::file_sources_into(value, root, &mut out));
+        }
+        Ok(out)
+    }
+
+    /// Append the `{file:}`/`{file?:}` paths of one value, after `{env:}` resolution, to `out`.
+    fn file_sources_into(value: &str, root: &Path, out: &mut Vec<PathBuf>) -> Outcome<()> {
+        let resolved = res!(Self::resolve_env_refs(value));
+        let mut pos = 0;
+        while let Some((start, end, marker_len)) = res!(Self::first_file_ref(&resolved[pos..], value)) {
+            out.push(root.join(&resolved[pos + start + marker_len..pos + end]));
+            pos += end + 1;
+        }
+        Ok(())
+    }
+
+    /// The earliest `{file:}` or `{file?:}` placeholder in `s`, as its start, the index of its
+    /// closing brace and the marker length (6 required, 7 optional). `value` is the original
+    /// config value, named in the error.
+    fn first_file_ref(s: &str, value: &str) -> Outcome<Option<(usize, usize, usize)>> {
+        // The required '{file:' is not a substring of the optional '{file?:' -- the sixth byte
+        // is ':' against '?' -- so a plain search for one never matches the other, and the two
+        // positions can never coincide.
+        let (start, marker_len) = match (s.find("{file:"), s.find("{file?:")) {
+            (None,    None)             => return Ok(None),
+            (Some(r), None)             => (r, 6),
+            (None,    Some(o))          => (o, 7),
+            (Some(r), Some(o)) if o < r => (o, 7),
+            (Some(r), Some(_))          => (r, 6),
+        };
+        match s[start..].find('}') {
+            Some(i) => Ok(Some((start, start + i, marker_len))),
+            None    => Err(err!(
+                "Config: unclosed '{{file{}:' placeholder in value '{}'.",
+                if marker_len == 7 { "?" } else { "" }, value;
+                Invalid, Input)),
+        }
+    }
+
+    /// Resolve only `{env:VAR[:default]}` placeholders, reading no file.
+    pub fn resolve_env_refs(value: &str) -> Outcome<String> {
         let mut result = value.to_string();
         while let Some(start) = result.find("{env:") {
             let end = match result[start..].find('}') {
@@ -408,28 +456,9 @@ impl ApiRoute {
     /// swallowed.
     fn resolve_file_only(value: &str, root: &Path) -> Outcome<String> {
         let mut result = value.to_string();
-        loop {
-            // Find the earliest of the two markers. The required '{file:' is
-            // not a substring of the optional '{file?:' — the sixth byte is
-            // ':' against '?' — so a plain search for one never matches the
-            // other, and the two positions can never coincide.
-            let required = result.find("{file:");
-            let optional = result.find("{file?:");
-            let (start, marker_len, is_optional) = match (required, optional) {
-                (None,    None)              => break,
-                (Some(r), None)              => (r, 6, false),
-                (None,    Some(o))           => (o, 7, true),
-                (Some(r), Some(o)) if o < r  => (o, 7, true),
-                (Some(r), Some(_))           => (r, 6, false),
-            };
+        while let Some((start, end, marker_len)) = res!(Self::first_file_ref(&result, value)) {
+            let is_optional = marker_len == 7;
             let opt_mark = if is_optional { "?" } else { "" };
-            let end = match result[start..].find('}') {
-                Some(i) => start + i,
-                None => return Err(err!(
-                    "Config: unclosed '{{file{}:' placeholder in value '{}'.",
-                    opt_mark, value;
-                    Invalid, Input)),
-            };
             let rel_path = result[start + marker_len..end].to_string();
             let abs_path = root.join(&rel_path);
             let content = match std::fs::read_to_string(&abs_path) {
@@ -557,6 +586,16 @@ impl WebhookRoute {
             *value = res!(ApiRoute::resolve_file_refs(value, root));
         }
         Ok(())
+    }
+
+    /// Every file [`WebhookRoute::resolve_config`] would read, without reading any. See
+    /// [`ApiRoute::config_file_sources`].
+    pub fn config_file_sources(&self, root: &Path) -> Outcome<Vec<PathBuf>> {
+        let mut out = Vec::new();
+        for (_name, value) in &self.config {
+            res!(ApiRoute::file_sources_into(value, root, &mut out));
+        }
+        Ok(out)
     }
 
     pub fn get_config(&self, key: &str) -> Option<&str> {
