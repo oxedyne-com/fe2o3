@@ -12,7 +12,9 @@
 //! - `LOGIN` with a password, or `AUTHENTICATE XOAUTH2` with a bearer
 //!   token, whichever the account requires.
 //! - `CAPABILITY`, `LIST`, `SELECT`/`EXAMINE`, `UID SEARCH`, `UID FETCH`,
-//!   `UID STORE`, `APPEND`, `LOGOUT`.
+//!   `UID STORE` (as `+FLAGS`/`-FLAGS` deltas only), `UID COPY`, `UID MOVE`,
+//!   `UID EXPUNGE`, `APPEND` (with `APPENDUID`), `LOGOUT`, over a range-compressed
+//!   [`UidSet`].
 //!
 //! A failure says what kind it is in its tags, so a caller explaining it to a
 //! person reads the tags and never the words, which for a dropped connection
@@ -55,14 +57,14 @@
 //!
 //! ```no_run
 //! # use oxedyne_fe2o3_core::prelude::*;
-//! # use oxedyne_fe2o3_net::imap::client::{FetchWhat, ImapClient, ImapConfig, Security};
+//! # use oxedyne_fe2o3_net::imap::client::{FetchWhat, ImapClient, ImapConfig, Security, UidSet};
 //! # async fn f() -> Outcome<()> {
 //! let cfg = ImapConfig::new("imap.example.com", 993, Security::ImplicitTls);
 //! let mut c = res!(ImapClient::connect(&cfg).await);
 //! res!(c.login("alice@example.com", "app-password").await);
 //! let inbox = res!(c.select("INBOX").await);
 //! let uids  = res!(c.uid_search(&fmt!("UID {}:*", inbox.uid_next.saturating_sub(10))).await);
-//! for msg in res!(c.uid_fetch(&uids, FetchWhat::Full).await) {
+//! for msg in res!(c.uid_fetch(&UidSet::from(&uids), FetchWhat::Full).await) {
 //!     println!("{} bytes, flags {:?}", msg.body.len(), msg.flags);
 //! }
 //! res!(c.logout().await);
@@ -73,9 +75,12 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::tls::{
-    self,
-    ClientStream,
+use crate::{
+    imap::uid_set,
+    tls::{
+        self,
+        ClientStream,
+    },
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -105,6 +110,9 @@ use tokio::{
 use tokio_rustls::rustls::ClientConfig;
 
 
+pub use crate::imap::uid_set::UidSet;
+
+
 // Generous, because a large `UID FETCH` against a slow mailbox is a legitimate
 // multi-second read.
 pub const IMAP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -116,6 +124,9 @@ pub const MAX_LITERAL_BYTES: usize = 64 * 1024 * 1024;
 // One fresh connection per client for a dropped one. A second drop is the server's or the
 // network's state, not chance, and the caller is told.
 pub const IMAP_CLIENT_RETRIES: u8 = 1;
+
+// A `COPYUID` naming more pairs than this is not believed.
+pub const MAX_COPYUID_PAIRS: usize = 1_000_000;
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -293,24 +304,18 @@ pub struct FetchedMessage {
     pub body:           Vec<u8>,        // whole message, header block, or empty, per FetchWhat
 }
 
-/// What a `UID STORE` does to the named flags.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FlagOp {
-    Add,        // leaving the others alone
-    Remove,     // leaving the others alone
-    Set,        // replacing the flag set entirely
+/// Where `UID COPY` or `UID MOVE` put each message, from the `UIDPLUS` `COPYUID` response code.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CopyUid {
+    pub uid_validity:   u32,                // of the destination
+    pub pairs:          Vec<(u32, u32)>,    // source UID, destination UID
 }
 
-impl FlagOp {
-    /// `.SILENT` throughout: the client already knows what it asked for, and the untagged FETCH
-    /// the server would otherwise send back is a round trip spent on nothing.
-    fn item(&self) -> &'static str {
-        match self {
-            Self::Add    => "+FLAGS.SILENT",
-            Self::Remove => "-FLAGS.SILENT",
-            Self::Set    => "FLAGS.SILENT",
-        }
-    }
+/// The new message's place, from the `UIDPLUS` `APPENDUID` response code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AppendUid {
+    pub uid_validity:   u32,
+    pub uid:            u32,
 }
 
 /// The completion status of a tagged command.
@@ -756,11 +761,11 @@ impl ImapClient {
         Ok(uids)
     }
 
-    /// An empty `uids` is a no-op rather than a command, because `UID FETCH ` with no set is a
+    /// An empty set is a no-op rather than a command, because `UID FETCH ` with no set is a
     /// syntax error and a caller passing an empty search result is not doing anything wrong.
     pub async fn uid_fetch(
         &mut self,
-        uids:   &[u32],
+        uids:   &UidSet,
         what:   FetchWhat,
     )
         -> Outcome<Vec<FetchedMessage>>
@@ -769,7 +774,7 @@ impl ImapClient {
             return Ok(Vec::new());
         }
         // `BODY.PEEK`, so a repeat changes nothing and is safe after a drop.
-        let cmd  = fmt!("UID FETCH {} {}", uid_set(uids), what.items());
+        let cmd  = fmt!("UID FETCH {} {}", uids, what.items());
         let resp = res!(self.read_command(&cmd).await);
         let mut out: Vec<FetchedMessage> = Vec::new();
         for line in &resp.untagged {
@@ -783,36 +788,86 @@ impl ImapClient {
     /// `None` where the server does not return it: expunged between the search and the fetch,
     /// which is a race the caller cannot prevent and should not treat as an error.
     pub async fn uid_fetch_one(&mut self, uid: u32) -> Outcome<Option<FetchedMessage>> {
-        let mut msgs = res!(self.uid_fetch(&[uid], FetchWhat::Full).await);
+        let mut msgs = res!(self.uid_fetch(&UidSet::from([uid]), FetchWhat::Full).await);
         Ok(if msgs.is_empty() { None } else { Some(msgs.remove(0)) })
     }
 
+    /// Adds `add` and removes `remove`, leaving every other flag as it is: a `+FLAGS` and a
+    /// `-FLAGS`, each sent only when it names a flag. There is deliberately no absolute set,
+    /// which would overwrite a flag another client has changed since this one looked. A UID no
+    /// longer in the mailbox is passed over by the server, which is not an error.
     pub async fn uid_store_flags(
         &mut self,
-        uids:   &[u32],
-        op:     FlagOp,
-        flags:  &[&str],
+        uids:   &UidSet,
+        add:    &[&str],
+        remove: &[&str],
     )
         -> Outcome<()>
     {
         if uids.is_empty() {
             return Ok(());
         }
-        let cmd = fmt!("UID STORE {} {} ({})",
-            uid_set(uids), op.item(), flags.join(" "));
-        res!(self.command(&cmd).await);
+        // `.SILENT` throughout: the client already knows what it asked for, and the untagged
+        // FETCH the server would otherwise send back is a round trip spent on nothing.
+        for (item, flags) in [("+FLAGS.SILENT", add), ("-FLAGS.SILENT", remove)] {
+            if flags.is_empty() {
+                continue;
+            }
+            let cmd = fmt!("UID STORE {} {} ({})", uids, item, flags.join(" "));
+            res!(self.command(&cmd).await);
+        }
+        Ok(())
+    }
+
+    /// `None` from a server without `UIDPLUS`, which says nothing of where the copies went.
+    pub async fn uid_copy(&mut self, uids: &UidSet, to: &str) -> Outcome<Option<CopyUid>> {
+        if uids.is_empty() {
+            return Ok(None);
+        }
+        let resp = res!(self.command(&fmt!("UID COPY {} {}", uids, quoted(to))).await);
+        copy_uid_of(&resp)
+    }
+
+    /// RFC 6851 `MOVE`, refused before anything is sent to a server that does not offer it: the
+    /// fallback (`UID COPY`, `+FLAGS \Deleted`, `UID EXPUNGE`) is the caller's to choose.
+    pub async fn uid_move(&mut self, uids: &UidSet, to: &str) -> Outcome<Option<CopyUid>> {
+        if !self.has_cap("MOVE") {
+            return Err(err!(
+                "IMAP server {} does not offer MOVE.", self.host;
+                Unimplemented, Mismatch));
+        }
+        if uids.is_empty() {
+            return Ok(None);
+        }
+        let resp = res!(self.command(&fmt!("UID MOVE {} {}", uids, quoted(to))).await);
+        copy_uid_of(&resp)
+    }
+
+    /// Removes exactly these UIDs where they are `\Deleted`. Refused before anything is sent to a
+    /// server without `UIDPLUS`, because the only other expunge removes every `\Deleted` message
+    /// in the mailbox, including ones another client marked and meant to keep a while.
+    pub async fn uid_expunge(&mut self, uids: &UidSet) -> Outcome<()> {
+        if !self.has_cap("UIDPLUS") {
+            return Err(err!(
+                "IMAP server {} does not offer UIDPLUS, so it cannot expunge by UID.", self.host;
+                Unimplemented, Mismatch));
+        }
+        if uids.is_empty() {
+            return Ok(());
+        }
+        res!(self.command(&fmt!("UID EXPUNGE {}", uids)).await);
         Ok(())
     }
 
     /// `body` is a raw RFC 5322 message: this is how a sent message is filed in `Sent` after
-    /// SMTP has delivered it.
+    /// SMTP has delivered it. The new UID where the server has `UIDPLUS`, and `None` otherwise.
     pub async fn append(
         &mut self,
         mailbox:    &str,
         flags:      &[&str],
         body:       &[u8],
     )
-        -> Outcome<()>
+        -> Outcome<Option<AppendUid>>
     {
         let tag  = self.next_tag();
         let flag_part = if flags.is_empty() {
@@ -836,8 +891,17 @@ impl ImapClient {
         res!(self.write_all(b"\r\n").await);
 
         let resp = res!(self.read_until_tag(&tag, "APPEND").await);
-        let _ = resp;
-        Ok(())
+        let code = match response_code(&resp.text, "APPENDUID") {
+            Some(c) => c,
+            None    => return Ok(None),
+        };
+        let mut it = code.split_whitespace();
+        match (it.next().map(|v| v.parse::<u32>()), it.next().map(|u| u.parse::<u32>())) {
+            (Some(Ok(uid_validity)), Some(Ok(uid))) => Ok(Some(AppendUid { uid_validity, uid })),
+            _ => Err(err!(
+                "IMAP server {} sent a malformed APPENDUID: {}", self.host, resp.text;
+                IO, Network, Decode)),
+        }
     }
 
     pub async fn logout(&mut self) -> Outcome<()> {
@@ -1467,33 +1531,48 @@ fn parse_fetch_line(line: &RawLine) -> Outcome<Option<FetchedMessage>> {
     Ok(Some(msg))
 }
 
-/// Render a UID list as a compact IMAP sequence set, collapsing runs into
-/// ranges: `[1,2,3,7,9,10]` becomes `1:3,7,9:10`. A mailbox synced after a
-/// week away yields a set of thousands of consecutive UIDs, and a server
-/// is entitled to reject a command line that long.
-fn uid_set(uids: &[u32]) -> String {
-    let mut sorted: Vec<u32> = uids.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
-
-    let mut out   = String::new();
-    let mut i     = 0usize;
-    while i < sorted.len() {
-        let start = sorted[i];
-        let mut end = start;
-        while i + 1 < sorted.len() && sorted[i + 1] == end + 1 {
-            i += 1;
-            end = sorted[i];
+/// The text of the `[NAME ...]` response code in `text`, after the name; `Some("")` for a bare
+/// `[NAME]`.
+fn response_code(text: &str, name: &str) -> Option<String> {
+    let up  = text.to_uppercase();
+    let pat = fmt!("[{}", name);
+    let mut from = 0usize;
+    while let Some(i) = up[from..].find(&pat) {
+        let start = from + i + pat.len();
+        match up[start..].chars().next() {
+            Some(' ') | Some(']') => {
+                let end = ok!(text[start..].find(']'));
+                return Some(text[start..start + end].trim().to_string());
+            },
+            _ => from = start,
         }
-        if !out.is_empty() { out.push(','); }
-        if start == end {
-            out.push_str(&fmt!("{}", start));
-        } else {
-            out.push_str(&fmt!("{}:{}", start, end));
-        }
-        i += 1;
     }
-    out
+    None
+}
+
+/// The `COPYUID` of a `COPY` or `MOVE`, on the completion line or, for a `MOVE`, an untagged `OK`.
+fn copy_uid_of(resp: &Response) -> Outcome<Option<CopyUid>> {
+    let code = resp.untagged.iter().map(|l| l.text.as_str())
+        .chain(std::iter::once(resp.text.as_str()))
+        .find_map(|t| response_code(t, "COPYUID"));
+    let code = match code {
+        Some(c) => c,
+        None    => return Ok(None),
+    };
+    let parts: Vec<&str> = code.split_whitespace().collect();
+    if parts.len() != 3 {
+        return Err(err!("A malformed COPYUID: [COPYUID {}]", code; Invalid, Input, Decode));
+    }
+    let uid_validity = res!(parts[0].parse::<u32>().map_err(|e| err!(e,
+        "A malformed COPYUID: [COPYUID {}]", code; Invalid, Input, Decode)));
+    let src = res!(uid_set::uid_list(parts[1], MAX_COPYUID_PAIRS));
+    let dst = res!(uid_set::uid_list(parts[2], MAX_COPYUID_PAIRS));
+    if src.len() != dst.len() {
+        return Err(err!(
+            "A COPYUID naming {} source and {} destination UIDs: [COPYUID {}]",
+            src.len(), dst.len(), code; Invalid, Input, Decode));
+    }
+    Ok(Some(CopyUid { uid_validity, pairs: src.into_iter().zip(dst).collect() }))
 }
 
 /// An IMAP quoted-string, with the two characters that need escaping escaped.
@@ -1872,7 +1951,7 @@ mod tests {
         let (addr, _) = res!(scripted(GREET, script).await);
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.select("INBOX").await);
-        let msgs = res!(c.uid_fetch(&[9], FetchWhat::Full).await);
+        let msgs = res!(c.uid_fetch(&UidSet::from([9]), FetchWhat::Full).await);
         req!(1, msgs.len(), "the FETCH reply was lost");
         req!(body.as_bytes().to_vec(), msgs[0].body,
             "the literal came back changed: {:?}", String::from_utf8_lossy(&msgs[0].body));
@@ -1895,7 +1974,7 @@ mod tests {
         ).await);
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.select("INBOX").await);
-        let msg = match c.uid_fetch(&[9], FetchWhat::Full).await {
+        let msg = match c.uid_fetch(&UidSet::from([9]), FetchWhat::Full).await {
             Err(e) => fmt!("{}", e),
             Ok(_)  => return Err(err!(
                 "A 64 MiB literal was accepted from a server that never sent it.";
@@ -1985,7 +2064,7 @@ mod tests {
         ).await);
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.select("INBOX").await);
-        res!(c.uid_fetch(&[1, 2, 3, 7, 9, 10], FetchWhat::Meta).await);
+        res!(c.uid_fetch(&UidSet::from([1, 2, 3, 7, 9, 10]), FetchWhat::Meta).await);
         let lines = res!(lines_of(&seen));
         req!(true, lines.iter().any(|l| l.contains("UID FETCH 1:3,7,9:10")),
             "the UID set was not collapsed on the wire: {:?}", lines);
@@ -2001,8 +2080,8 @@ mod tests {
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.select("INBOX").await);
         let before = res!(lines_of(&seen)).len();
-        req!(true, res!(c.uid_fetch(&[], FetchWhat::Full).await).is_empty());
-        res!(c.uid_store_flags(&[], FlagOp::Add, &["\\Seen"]).await);
+        req!(true, res!(c.uid_fetch(&UidSet::new(), FetchWhat::Full).await).is_empty());
+        res!(c.uid_store_flags(&UidSet::new(), &["\\Seen"], &[]).await);
         req!(before, res!(lines_of(&seen)).len(),
             "a command was sent for an empty UID set");
         Ok(())
@@ -2076,7 +2155,7 @@ mod tests {
         ).await);
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.select("INBOX").await);
-        res!(c.uid_store_flags(&[4, 5], FlagOp::Add, &["\\Seen"]).await);
+        res!(c.uid_store_flags(&UidSet::from([4, 5]), &["\\Seen"], &[]).await);
         let lines = res!(lines_of(&seen));
         req!(true, lines.iter().any(|l| l.contains("UID STORE 4:5 +FLAGS.SILENT (\\Seen)")),
             "the STORE was not what was expected: {:?}", lines);
@@ -2125,20 +2204,12 @@ mod tests {
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         let msg = match c.append("Sent", &[], body).await {
             Err(e) => fmt!("{}", e),
-            Ok(())  => return Err(err!("A refused APPEND was a success."; Test, Invalid)),
+            Ok(_)   => return Err(err!("A refused APPEND was a success."; Test, Invalid)),
         };
         req!(true, msg.contains("OVERQUOTA"), "the server's words were dropped: {}", msg);
         req!(false, res!(lines_of(&seen)).iter().any(|l| l.starts_with("<literal ")),
             "the body was sent to a mailbox that had refused it");
         Ok(())
-    }
-
-    #[test]
-    fn test_uid_set_collapses_runs() {
-        assert_eq!(uid_set(&[1, 2, 3, 7, 9, 10]), "1:3,7,9:10");
-        assert_eq!(uid_set(&[5]),                 "5");
-        assert_eq!(uid_set(&[3, 1, 2]),           "1:3");
-        assert_eq!(uid_set(&[]),                  "");
     }
 
     #[test]
@@ -2414,7 +2485,7 @@ mod tests {
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.login(USER, PASS).await);
         res!(c.select("INBOX").await);
-        match c.uid_store_flags(&[3], FlagOp::Add, &["\\Seen"]).await {
+        match c.uid_store_flags(&UidSet::from([3]), &["\\Seen"], &[]).await {
             Ok(())  => return Err(err!("A dropped STORE was reported done."; Test, Invalid)),
             Err(e)  => req!(true, e.tags().contains(&ErrTag::Interrupted),
                 "the dropped STORE was not tagged Interrupted: {:?}", e.tags()),
@@ -2539,6 +2610,131 @@ mod tests {
             },
         }
         req!(2, res!(connections_of(&seen)), "the dropped handshake was not tried once more");
+        Ok(())
+    }
+
+    // ── Deltas, copies, moves and expunges (F1) ─────────────────────
+
+    /// A greeting from a server with the extensions a modern Dovecot offers.
+    const GREET_PLUS: &str = "* OK [CAPABILITY IMAP4rev1 SPECIAL-USE UIDPLUS MOVE ENABLE \
+                              CONDSTORE QRESYNC ID] ready\r\n";
+    const SELECT_OK: &str  = "%T% OK [READ-WRITE] SELECT completed\r\n";
+
+    /// Flags go as deltas, one `+FLAGS` and one `-FLAGS`, never an absolute list, which would
+    /// overwrite a flag set elsewhere since the client last looked.
+    #[tokio::test]
+    async fn test_a_flag_change_goes_as_deltas_only_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec![
+            SELECT_OK, "%T% OK STORE done\r\n", "%T% OK STORE done\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        res!(c.uid_store_flags(&UidSet::from([3, 4]), &["\\Seen"], &["\\Flagged", "$Junk"]).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.ends_with("UID STORE 3:4 +FLAGS.SILENT (\\Seen)")),
+            "no +FLAGS: {:?}", lines);
+        req!(true, lines.iter().any(|l| l.ends_with("UID STORE 3:4 -FLAGS.SILENT (\\Flagged $Junk)")),
+            "no -FLAGS: {:?}", lines);
+        req!(false, lines.iter().any(|l| l.contains(" FLAGS.SILENT")),
+            "an absolute FLAGS was sent: {:?}", lines);
+        Ok(())
+    }
+
+    /// RFC 4315's example: `COPYUID` pairs each source UID with its new one, by position.
+    #[tokio::test]
+    async fn test_uid_copy_reads_copyuid_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            SELECT_OK, "%T% OK [COPYUID 38505 304,319:320 3956:3958] Done\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let got = res!(c.uid_copy(&res!(UidSet::parse("304,319:320")), "Archive/2026").await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.ends_with("UID COPY 304,319:320 \"Archive/2026\"")),
+            "the COPY was not what was expected: {:?}", lines);
+        let got = res!(got.ok_or_else(|| err!("No COPYUID was read."; Test, Missing)));
+        req!(38505, got.uid_validity);
+        req!(vec![(304, 3956), (319, 3957), (320, 3958)], got.pairs);
+        Ok(())
+    }
+
+    /// Without `UIDPLUS` there is no `COPYUID`, which is no answer rather than an error.
+    #[tokio::test]
+    async fn test_a_copy_without_uidplus_has_no_copyuid_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(GREET, vec![SELECT_OK, "%T% OK COPY done\r\n"]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        req!(true, res!(c.uid_copy(&UidSet::from([5]), "Trash").await).is_none());
+        Ok(())
+    }
+
+    /// RFC 6851's example: a `MOVE` carries `COPYUID` on an untagged `OK`, before the expunges.
+    #[tokio::test]
+    async fn test_uid_move_reads_copyuid_from_the_untagged_ok_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            SELECT_OK,
+            "* OK [COPYUID 432432 42:43 11:12]\r\n* 22 EXPUNGE\r\n* 22 EXPUNGE\r\n\
+             %T% OK Move completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let got = res!(c.uid_move(&UidSet::from([42, 43]), "Junk").await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.ends_with("UID MOVE 42:43 \"Junk\"")),
+            "the MOVE was not what was expected: {:?}", lines);
+        let got = res!(got.ok_or_else(|| err!("No COPYUID was read."; Test, Missing)));
+        req!(vec![(42, 11), (43, 12)], got.pairs);
+        Ok(())
+    }
+
+    /// A server without `MOVE` is not sent one: the fallback is the caller's to choose.
+    #[tokio::test]
+    async fn test_a_move_is_not_sent_to_a_server_without_it_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec![SELECT_OK]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let before = res!(lines_of(&seen)).len();
+        match c.uid_move(&UidSet::from([1]), "Trash").await {
+            Ok(_)  => return Err(err!("A MOVE went to a server without it."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Unimplemented), "{:?}", e.tags()),
+        }
+        req!(before, res!(lines_of(&seen)).len(), "a command was sent");
+        Ok(())
+    }
+
+    /// `UID EXPUNGE` removes only the UIDs named. Without `UIDPLUS` it is refused, never replaced
+    /// by a plain `EXPUNGE`, which would remove every `\Deleted` message in the mailbox.
+    #[tokio::test]
+    async fn test_uid_expunge_names_its_uids_or_is_refused_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            SELECT_OK, "* 3 EXPUNGE\r\n* 3 EXPUNGE\r\n* 3 EXPUNGE\r\n%T% OK Expunge completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        res!(c.uid_expunge(&res!(UidSet::parse("3000:3002"))).await);
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l.ends_with("UID EXPUNGE 3000:3002")));
+
+        let (addr, seen) = res!(scripted(GREET, vec![SELECT_OK]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        match c.uid_expunge(&UidSet::from([7])).await {
+            Ok(())  => return Err(err!("An expunge went to a server without UIDPLUS."; Test, Invalid)),
+            Err(e)  => req!(true, e.tags().contains(&ErrTag::Unimplemented), "{:?}", e.tags()),
+        }
+        req!(false, res!(lines_of(&seen)).iter().any(|l| l.contains("EXPUNGE")),
+            "an EXPUNGE was sent");
+        Ok(())
+    }
+
+    /// RFC 4315's example: `APPENDUID` names the new message.
+    #[tokio::test]
+    async fn test_append_returns_appenduid_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(GREET_PLUS, vec![
+            "+ Ready for literal data\r\n", "%T% OK [APPENDUID 38505 3955] APPEND completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let got = res!(c.append("Sent", &["\\Seen"], b"Subject: x\r\n\r\ny\r\n").await);
+        req!(Some(AppendUid { uid_validity: 38505, uid: 3955 }), got);
         Ok(())
     }
 

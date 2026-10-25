@@ -13,6 +13,7 @@ use oxedyne_fe2o3_net::imap::client::{
     ImapClient,
     ImapConfig,
     Security,
+    UidSet,
 };
 
 #[tokio::main]
@@ -50,7 +51,7 @@ async fn main() -> Outcome<()> {
 
     let from = st.uid_next.saturating_sub(3).max(1);
     let uids = res!(c.uid_search(&fmt!("UID {}:*", from)).await);
-    for msg in res!(c.uid_fetch(&uids, FetchWhat::Headers).await) {
+    for msg in res!(c.uid_fetch(&UidSet::from(&uids), FetchWhat::Headers).await) {
         let head = String::from_utf8_lossy(&msg.body);
         let subj = head.lines()
             .find(|l| l.to_lowercase().starts_with("subject:"))

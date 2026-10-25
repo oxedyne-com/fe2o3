@@ -16,7 +16,7 @@ use oxedyne_fe2o3_net::{
     imap::{
         client::{
             FetchWhat,
-            FlagOp,
+            UidSet,
             ImapClient,
             ImapConfig,
             Security,
@@ -156,7 +156,7 @@ async fn imap_client_reads_what_the_imap_server_serves() -> Outcome<()> {
     assert_eq!(uids.len(), 3, "UID SEARCH ALL found {} of 3", uids.len());
 
     // ── The whole point: the bytes come back byte-identical ──────
-    let msgs = res!(c.uid_fetch(&uids, FetchWhat::Full).await);
+    let msgs = res!(c.uid_fetch(&UidSet::from(&uids), FetchWhat::Full).await);
     assert_eq!(msgs.len(), 3, "UID FETCH returned {} of 3", msgs.len());
     for (i, msg) in msgs.iter().enumerate() {
         assert_eq!(msg.body, bodies[i],
@@ -170,7 +170,7 @@ async fn imap_client_reads_what_the_imap_server_serves() -> Outcome<()> {
 
     // Headers-only: the body stops at the blank line, and the size still
     // describes the whole message.
-    let heads = res!(c.uid_fetch(&uids[..1], FetchWhat::Headers).await);
+    let heads = res!(c.uid_fetch(&UidSet::from(&uids[..1]), FetchWhat::Headers).await);
     assert_eq!(heads.len(), 1);
     let head = String::from_utf8_lossy(&heads[0].body).into_owned();
     assert!(head.contains("Subject: message 1"), "header block missing subject: {:?}", head);
@@ -178,8 +178,8 @@ async fn imap_client_reads_what_the_imap_server_serves() -> Outcome<()> {
     assert_eq!(heads[0].size as usize, bodies[0].len());
 
     // ── Flags round-trip ─────────────────────────────────────────
-    res!(c.uid_store_flags(&uids[..1], FlagOp::Add, &["\\Seen"]).await);
-    let after = res!(c.uid_fetch(&uids[..1], FetchWhat::Meta).await);
+    res!(c.uid_store_flags(&UidSet::from(&uids[..1]), &["\\Seen"], &[]).await);
+    let after = res!(c.uid_fetch(&UidSet::from(&uids[..1]), FetchWhat::Meta).await);
     assert!(after[0].flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")),
         "\\Seen did not stick: {:?}", after[0].flags);
 
