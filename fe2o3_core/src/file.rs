@@ -701,6 +701,23 @@ impl ExclusiveLock {
         }
     }
 
+    /// Takes the lock on `path`, waiting for whoever holds it, creating the file if need be.
+    /// Threads of one process exclude each other too, since each opens its own file.
+    pub fn acquire(path: &Path) -> Outcome<Self> {
+        let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path) {
+            Ok(f) => f,
+            Err(e) => return Err(err!(e,
+                "Could not open the lock file {:?}.", path;
+                File, IO, Lock)),
+        };
+        if let Err(e) = file.lock() {
+            return Err(err!(e,
+                "Could not take the lock on {:?}.", path;
+                File, IO, Lock));
+        }
+        Ok(Self { file, path: path.to_path_buf() })
+    }
+
     pub fn path(&self) -> &Path { &self.path }
 
     /// Releases the lock now rather than at drop.
@@ -917,6 +934,31 @@ mod tests {
         drop(again);
         if res!(ExclusiveLock::try_acquire(&path)).is_none() {
             return Err(err!("The lock on {:?} was still held after its drop.", path; Test, Lock));
+        }
+        let _ = fs::remove_file(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn test_exclusive_lock_acquire_waits_for_the_holder() -> Outcome<()> {
+        let path = scratch_path("lock_wait");
+        let first = res!(ExclusiveLock::acquire(&path));
+        let p2 = path.clone();
+        let waiter = thread::spawn(move || -> Outcome<Instant> {
+            let l = res!(ExclusiveLock::acquire(&p2));
+            let at = Instant::now();
+            drop(l);
+            Ok(at)
+        });
+        thread::sleep(Duration::from_millis(150));
+        let released = Instant::now();
+        res!(first.release());
+        let took = match waiter.join() {
+            Ok(r)   => res!(r),
+            Err(_)  => return Err(err!("The waiting thread panicked."; Test, Bug)),
+        };
+        if took < released {
+            return Err(err!("A second acquire of {:?} took the lock while it was held.", path; Test, Lock));
         }
         let _ = fs::remove_file(&path);
         Ok(())
