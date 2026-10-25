@@ -10,13 +10,18 @@
 //!
 //! Header keys (HEADER, FROM, TO, CC, BCC, SUBJECT and TEXT's header part) match the value with
 //! its RFC 2047 encoded-words decoded, so `SUBJECT Grüße` finds `=?UTF-8?B?R3LDvMOfZQ==?=`
-//! (F2a part 2, 2026-10-26). A body is still compared as it is stored, transfer encoding and
-//! all.
+//! (F2a part 2, 2026-10-26). BODY and TEXT's body part match the decoded text of the message's
+//! text parts, walked by boundary, out of base64 or quoted-printable and their charset, so
+//! neither the encoding, a multipart's preamble nor an attachment is searched (F2b, 2026-10-26).
 
 use crate::mail::store::MessageMeta;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_text::mime::decode_words;
+use oxedyne_fe2o3_text::mime::{
+    decode_words,
+    headers,
+    leaf_parts,
+};
 
 use std::time::UNIX_EPOCH;
 
@@ -337,36 +342,15 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
 pub struct Content {
     fields:     Vec<(String, String)>,  // lower-case name, unfolded, decoded, lower-case value
     head:       String,                 // the decoded fields as `name: value` lines, for TEXT
-    body:       String,                 // lower case, as stored
+    body:       String,                 // the decoded text parts, lower case
     sent:       Option<i64>,            // the Date: field, days since the epoch
 }
 
 impl Content {
     pub fn new(bytes: &[u8]) -> Self {
-        // Split and decode before lower-casing: case is meaningful inside a base64 word.
-        let text = String::from_utf8_lossy(bytes);
-        let (head, body) = match (text.find("\r\n\r\n"), text.find("\n\n")) {
-            (Some(a), Some(b)) if b + 1 < a => (&text[..b], &text[b + 2..]),
-            (Some(a), _)                    => (&text[..a], &text[a + 4..]),
-            (None, Some(b))                 => (&text[..b], &text[b + 2..]),
-            (None, None)                    => (&text[..], ""),
-        };
-        let mut raw_fields: Vec<(String, String)> = Vec::new();
-        for raw in head.split('\n') {
-            let line = raw.strip_suffix('\r').unwrap_or(raw);
-            if line.starts_with(' ') || line.starts_with('\t') {
-                if let Some(last) = raw_fields.last_mut() {
-                    last.1.push(' ');
-                    last.1.push_str(line.trim());
-                }
-                continue;
-            }
-            if let Some((n, v)) = line.split_once(':') {
-                raw_fields.push((n.trim().to_string(), v.trim().to_string()));
-            }
-        }
-        let fields: Vec<(String, String)> = raw_fields.iter()
-            .map(|(n, v)| (n.to_ascii_lowercase(), decode_words(v).to_lowercase()))
+        // Decode before lower-casing: case is meaningful inside a base64 word.
+        let fields: Vec<(String, String)> = headers(bytes).into_iter()
+            .map(|(n, v)| (n, decode_words(&v).to_lowercase()))
             .collect();
         let mut head = String::new();
         for (n, v) in &fields {
@@ -378,10 +362,15 @@ impl Content {
         let sent = fields.iter()
             .find(|(n, _)| n == "date")
             .and_then(|(_, v)| parse_header_date(v));
+        let mut body = String::new();
+        for p in leaf_parts(bytes).iter().filter(|p| p.is_text()) {
+            body.push_str(&p.text().to_lowercase());
+            body.push('\n');
+        }
         Self {
             fields,
             head,
-            body:   body.to_lowercase(),
+            body,
             sent,
         }
     }
