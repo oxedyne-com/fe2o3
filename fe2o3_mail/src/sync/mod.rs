@@ -248,7 +248,7 @@ pub struct Snapshot {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Budget {
     pub max_count:      usize,  // new messages per delta
-    pub max_bytes:      u64,    // of whole bodies per delta; past it, headers only
+    pub max_bytes:      u64,    // of bodies and headers per delta; a body past it comes as its header
     pub bodies:         bool,   // fetch whole new messages, where they fit
     pub sweep_every:    u32,    // a full-reconcile poll re-reads every held flag this often
 }
@@ -429,30 +429,52 @@ pub async fn sync_folder<S: MailSession>(
 
     // Newest first, within the count; whole bodies within the byte budget, else headers.
     let mut whole = UidSet::new();
-    let mut heads = UidSet::new();
+    let mut heads: Vec<(u32, u32)> = Vec::new();
     let mut bytes = 0u64;
-    let mut taken = 0usize;
-    for (uid, size) in sizes.iter().rev() {
-        if taken >= budget.max_count {
-            break;
-        }
+    for (uid, size) in sizes.iter().rev().take(budget.max_count) {
         if budget.bodies && bytes + (*size as u64) <= budget.max_bytes {
             bytes += *size as u64;
             whole.insert(*uid);
         } else {
-            heads.insert(*uid);
+            heads.push((*uid, *size));
         }
-        taken += 1;
     }
     let mut got = Vec::new();
     if !whole.is_empty() {
-        got.extend(res!(s.uid_fetch(&whole, FetchWhat::Full).await).into_iter().map(|m| (m, true)));
+        got.extend(res!(s.uid_fetch(&whole, FetchWhat::Full).await).into_iter()
+            .filter(|m| whole.contains(m.uid))
+            .map(|m| (m, true)));
     }
-    if !heads.is_empty() {
-        got.extend(res!(s.uid_fetch(&heads, FetchWhat::Headers).await).into_iter().map(|m| (m, false)));
+    // Headers count against the same budget. A header's length is unknown until it arrives but
+    // never exceeds its message's size, so each batch is sized by that bound against what is
+    // left, and what is left is then charged with what actually came. The first message of a
+    // request moves however big its header, so no request is empty while any is due.
+    let mut asked = whole.clone();
+    let mut i = 0;
+    while i < heads.len() {
+        let left = budget.max_bytes.saturating_sub(bytes);
+        let mut batch = UidSet::new();
+        let mut bound = 0u64;
+        while i < heads.len() {
+            let size = heads[i].1 as u64;
+            if bound + size > left && !(batch.is_empty() && asked.is_empty()) {
+                break;
+            }
+            bound += size;
+            batch.insert(heads[i].0);
+            i += 1;
+        }
+        if batch.is_empty() {
+            break;
+        }
+        for m in res!(s.uid_fetch(&batch, FetchWhat::Headers).await) {
+            if batch.contains(m.uid) {
+                bytes += m.body.len() as u64;
+                got.push((m, false));
+            }
+        }
+        asked = asked.union(&batch);
     }
-    let asked = whole.union(&heads);
-    got.retain(|(m, _)| asked.contains(m.uid));
     got.sort_by(|a, b| b.0.uid.cmp(&a.0.uid));
     got.dedup_by(|a, b| a.0.uid == b.0.uid);
     for (m, w) in got {

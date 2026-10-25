@@ -589,6 +589,46 @@ async fn test_new_messages_bounded_newest_first_none_lost_00() -> Outcome<()> {
     Ok(())
 }
 
+/// Header fetches count against `max_bytes` as bodies do, so a request's bytes are bounded by
+/// the budget and not by `max_count` times the header size; nothing is skipped meanwhile.
+#[tokio::test]
+async fn test_header_bytes_count_against_the_byte_budget_00() -> Outcome<()> {
+    for bodies in [false, true] {
+        let mut s = Server::new(QRESYNC);
+        for i in 1..=12 {
+            s.deliver("INBOX", &fmt!("m{}@x", i));
+        }
+        let mut st = Store::default();
+        let b = Budget { max_count: 200, max_bytes: 250, bodies, ..Budget::default() };
+        let mut rounds = 0;
+        loop {
+            let d = res!(round(&mut s, &mut st, &b, &[]).await);
+            let bytes: u64 = d.new.iter().map(|m| m.raw.len() as u64).sum();
+            req!(true, bytes <= b.max_bytes, "round {} carried {} bytes", rounds, bytes);
+            req!(true, !d.new.is_empty() || !d.more);
+            rounds += 1;
+            if !d.more || rounds > 20 {
+                break;
+            }
+        }
+        req!(true, rounds > 1);
+        req!(12, st.names("INBOX").len());
+    }
+    // A single header over the whole budget still moves: one message per request.
+    let mut s = Server::new(QRESYNC);
+    for i in 1..=3 {
+        s.deliver("INBOX", &fmt!("m{}@x", i));
+    }
+    let mut st = Store::default();
+    let b = Budget { max_count: 200, max_bytes: 10, ..Budget::default() };
+    for want in [vec![3], vec![2], vec![1]] {
+        let d = res!(round(&mut s, &mut st, &b, &[]).await);
+        req!(want, d.new.iter().map(|m| m.uid).collect::<Vec<_>>());
+    }
+    req!(3, st.names("INBOX").len());
+    Ok(())
+}
+
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ RESET, REPLAY, THE CURSOR AND THE JOURNAL                                 │
