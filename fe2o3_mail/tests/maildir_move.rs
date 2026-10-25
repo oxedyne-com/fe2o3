@@ -17,11 +17,19 @@ use oxedyne_fe2o3_net::mail::store::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     fs,
     path::{
         Path,
         PathBuf,
+    },
+    thread,
+    time::{
+        Duration,
+        Instant,
     },
 };
 
@@ -127,5 +135,90 @@ fn a_crash_mid_move_leaves_one_copy_under_a_fresh_uid() -> Outcome<()> {
     assert!(res!(uid_map(&store, &archive)).values().all(|t| t != "i1"), "left in Archive too");
     assert_eq!(back.len(), 3);
     let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// MOVE-heavy stress: two threads move everything from INBOX to Archive, two move it back,
+/// and one delivers, all at once. No (folder, UID) may name two messages, no UIDVALIDITY may
+/// move, nothing may deadlock, and at the end every message is in exactly one folder.
+#[test]
+fn opposite_moves_and_deliveries_keep_every_message_once() -> Outcome<()> {
+    let root = std::env::temp_dir().join(fmt!("fe2o3_maildir_move_stress_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    res!(fs::create_dir_all(&root), IO, File);
+    let store = res!(MaildirStore::new(root.clone(), "argonaut"));
+    let u = user();
+    let (inbox, arch) = (FolderName::new("INBOX"), FolderName::new("Archive"));
+    res!(store.ensure_user(&u));
+    let mut tags: BTreeSet<String> = BTreeSet::new();
+    for i in 0..20 {
+        let t = fmt!("seed{}", i);
+        res!(store.append(&u, &inbox, &body(&t), MessageFlags::default(), None));
+        tags.insert(t);
+    }
+    let v0 = (res!(store.folder_status(&u, &inbox)).uid_validity,
+        res!(store.folder_status(&u, &arch)).uid_validity);
+    let start = Instant::now();
+    let mut hs = Vec::new();
+    for w in 0..5usize {
+        let r = root.clone();
+        hs.push(thread::spawn(move || -> Outcome<(Vec<(u8, u32, String)>, Vec<String>)> {
+            let store = res!(MaildirStore::new(r, "argonaut"));
+            let u = user();
+            let (inbox, arch) = (FolderName::new("INBOX"), FolderName::new("Archive"));
+            let mut seen = Vec::new();
+            let mut sent = Vec::new();
+            for i in 0..30 {
+                if w == 4 {
+                    let t = fmt!("new{}", i);
+                    res!(store.append(&u, &inbox, &body(&t), MessageFlags::default(), None));
+                    sent.push(t);
+                    continue;
+                }
+                let (from, to, fi) = if w < 2 { (&inbox, &arch, 0u8) } else { (&arch, &inbox, 1u8) };
+                let msgs = res!(store.list_messages(&u, from, false));
+                for m in &msgs {
+                    // None: moved by another worker since the listing.
+                    if let Some(b) = res!(store.fetch_bytes(&u, from, m.uid)) {
+                        seen.push((fi, m.uid.0, tag_of(&b)));
+                    }
+                }
+                let uids: Vec<MessageUid> = msgs.iter().map(|m| m.uid).collect();
+                if !uids.is_empty() {
+                    res!(store.move_to(&u, from, &uids, to));
+                }
+            }
+            Ok((seen, sent))
+        }));
+    }
+    let mut by_key: BTreeMap<(u8, u32), String> = BTreeMap::new();
+    let mut bad = Vec::new();
+    for h in hs {
+        let (seen, sent) = match h.join() {
+            Ok(r)   => res!(r),
+            Err(_)  => return Err(err!("A worker panicked."; Test)),
+        };
+        tags.extend(sent);
+        for (f, uid, t) in seen {
+            match by_key.get(&(f, uid)) {
+                Some(prev) if prev != &t => bad.push(fmt!("folder {} UID {} named {} and {}", f, uid, prev, t)),
+                Some(_) => (),
+                None    => { by_key.insert((f, uid), t); },
+            }
+        }
+    }
+    let took = start.elapsed();
+    let a = res!(uid_map(&store, &inbox));
+    let b = res!(uid_map(&store, &arch));
+    let v1 = (res!(store.folder_status(&u, &inbox)).uid_validity,
+        res!(store.folder_status(&u, &arch)).uid_validity);
+    let mut held: Vec<String> = a.values().chain(b.values()).cloned().collect();
+    held.sort();
+    let want: Vec<String> = tags.into_iter().collect();
+    let _ = fs::remove_dir_all(&root);
+    assert!(bad.is_empty(), "UIDs reused: {:?}", &bad[..bad.len().min(5)]);
+    assert_eq!(v0, v1, "UIDVALIDITY moved");
+    assert_eq!(held, want, "every message in exactly one folder");
+    assert!(took < Duration::from_secs(60), "took {:?}", took);
     Ok(())
 }
