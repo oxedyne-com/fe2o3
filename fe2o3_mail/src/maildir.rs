@@ -16,6 +16,7 @@
 //!   dovecot-uidvalidity.<hex>      empty companion file, exactly one
 //!   dovecot-uidlist                "3 V<validity> N<next>" then "<uid> :<key>" rows
 //!   hematite-folder.lock           flock'd across every change to the folder
+//!   hematite-subscriptions.lock    flock'd across a change to subscriptions
 //!   subscriptions                  one folder name per line
 //! ```
 //!
@@ -94,6 +95,7 @@ const UIDVALIDITY_PREFIX:   &str    = "dovecot-uidvalidity";
 const SUBSCRIPTIONS_NAME:   &str    = "subscriptions";
 const MAILDIRFOLDER_NAME:   &str    = "maildirfolder";      // marks a Maildir++ sub-folder
 const LOCK_NAME:            &str    = "hematite-folder.lock";
+const SUBS_LOCK_NAME:       &str    = "hematite-subscriptions.lock"; // at the user root
 const LOCK_WAIT:            Duration = Duration::from_secs(30);     // then a Timeout error
 const NAME_TRIES:           u64     = 16;                   // fresh message names tried in tmp/
 static NAME_SEQ:            AtomicU64 = AtomicU64::new(0);  // the Maildir `Q<n>` delivery counter
@@ -108,7 +110,7 @@ static NAME_SEQ:            AtomicU64 = AtomicU64::new(0);  // the Maildir `Q<n>
 pub struct MaildirStore {
     root:       Arc<PathBuf>,   // holds the `<domain>/<local>/` trees
     hostname:   Arc<String>,    // in every message name, `/` and `:` escaped
-    lock_wait:  Duration,       // longest wait for a folder's lock
+    lock_wait:  Duration,       // longest wait for a folder's or the subscriptions' lock
 }
 
 /// A message on disk with the UID the folder's uidlist gives it.
@@ -679,7 +681,10 @@ impl MailStore for MaildirStore {
     )
         -> Outcome<()>
     {
-        let path = self.user_root(user).join(SUBSCRIPTIONS_NAME);
+        let user_root = self.user_root(user);
+        let path = user_root.join(SUBSCRIPTIONS_NAME);
+        // The list is read, added to and saved whole, so two at once would lose a name.
+        let _lock = res!(ExclusiveLock::acquire_within(&user_root.join(SUBS_LOCK_NAME), self.lock_wait));
         let mut current: Vec<String> = Vec::new();
         if let Ok(s) = fs::read_to_string(&path) {
             for line in s.lines() {

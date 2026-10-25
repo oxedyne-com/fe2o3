@@ -407,6 +407,46 @@ fn expunge_reports_only_what_it_removed() -> Outcome<()> {
     Ok(())
 }
 
+/// Two clients subscribing at once each read, add and save the whole list; without the
+/// user's lock one of them saves a list lacking the other's name.
+#[test]
+fn concurrent_subscribes_keep_every_name() -> Outcome<()> {
+    let root = res!(fresh_root("subscribe"));
+    let store = res!(MaildirStore::new(root.clone(), "test.local"));
+    let u = user();
+    res!(store.ensure_user(&u));
+    let threads = 8;
+    let each = 25;
+    let mut handles = Vec::new();
+    for t in 0..threads {
+        let (store, u) = (store.clone(), u.clone());
+        handles.push(thread::spawn(move || -> Outcome<()> {
+            for i in 0..each {
+                res!(store.subscribe(&u, &FolderName::new(fmt!("F{}_{}", t, i))));
+            }
+            Ok(())
+        }));
+    }
+    for h in handles {
+        match h.join() {
+            Ok(r)   => res!(r),
+            Err(_)  => return Err(err!("A subscribing thread panicked."; Test, Bug)),
+        }
+    }
+    let subs = res!(store.list_subscribed(&u));
+    let mut missing = Vec::new();
+    for t in 0..threads {
+        for i in 0..each {
+            let name = fmt!("F{}_{}", t, i);
+            if !subs.iter().any(|f| f.as_str() == name) { missing.push(name); }
+        }
+    }
+    assert!(missing.is_empty(), "{} of {} subscriptions lost: {:?}",
+        missing.len(), threads * each, missing);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
 /// A holder that never lets go of a folder must show up as an error, not as every session
 /// and delivery on the folder hanging.
 #[test]
