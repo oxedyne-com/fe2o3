@@ -41,7 +41,10 @@ use crate::{
         },
     },
     mail::{
-        store::MailUser,
+        store::{
+            blocking,
+            MailUser,
+        },
         user::UserStore,
     },
 };
@@ -260,6 +263,28 @@ pub struct SmtpServer<H: SmtpHandler, U: UserStore> {
 }
 
 impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
+
+    /// Runs `f` against the handler on the blocking pool, so a delivery queued behind a
+    /// folder's lock holds no runtime worker. Every handler call goes through here.
+    async fn on_handler<T, F>(&self, f: F) -> Outcome<T>
+        where
+            T: Send + 'static,
+            F: FnOnce(&H) -> Outcome<T> + Send + 'static,
+    {
+        let handler = self.handler.clone();
+        blocking(move || f(&handler)).await
+    }
+
+    /// As [`Self::on_handler`], for the user store. The call's own error, its tags
+    /// included, comes back untouched.
+    async fn on_users<T, F>(&self, f: F) -> Outcome<T>
+        where
+            T: Send + 'static,
+            F: FnOnce(&U) -> Outcome<T> + Send + 'static,
+    {
+        let users = self.users.clone();
+        blocking(move || f(&users)).await
+    }
 
     /// Runs to the end of the session, an in-session STARTTLS upgrade included.
     pub async fn run(
@@ -497,9 +522,11 @@ impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
                         ).await);
                         continue;
                     }
-                    if self.mode == SmtpMode::Receive
-                        && !self.handler.rcpt_acceptable(&addr)
-                    {
+                    let acceptable = self.mode != SmtpMode::Receive || {
+                        let a = addr.clone();
+                        res!(self.on_handler(move |h| Ok(h.rcpt_acceptable(&a))).await)
+                    };
+                    if !acceptable {
                         res!(write_response(
                             stream,
                             SmtpResponseCode::MailboxUnavailableOrAccessDenied,
@@ -559,10 +586,11 @@ impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
                         tls:            stream.is_tls(),
                         raw_message:    body,
                     };
-                    let outcome = match self.mode {
-                        SmtpMode::Receive    => self.handler.deliver_inbound(txn),
-                        SmtpMode::Submission => self.handler.submit_outbound(txn),
-                    };
+                    let mode = self.mode;
+                    let outcome = self.on_handler(move |h| match mode {
+                        SmtpMode::Receive    => h.deliver_inbound(txn),
+                        SmtpMode::Submission => h.submit_outbound(txn),
+                    }).await;
                     match outcome {
                         Ok(HandlerOutcome::Accepted(qid)) => {
                             res!(write_response(
@@ -729,7 +757,7 @@ impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
                     Some(p) => p,
                     None => return Ok(None),
                 };
-                self.users.authenticate(&user, &pass)
+                self.on_users(move |u| u.authenticate(&user, &pass)).await
             }
             "LOGIN" => {
                 // RFC ietf-sasl-login: server prompts for username then
@@ -764,7 +792,7 @@ impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
                 };
                 let user = String::from_utf8_lossy(&user_bytes).to_string();
                 let pass = String::from_utf8_lossy(&pass_bytes).to_string();
-                self.users.authenticate(&user, &pass)
+                self.on_users(move |u| u.authenticate(&user, &pass)).await
             }
             _ => {
                 Ok(None)

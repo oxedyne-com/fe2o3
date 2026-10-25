@@ -40,10 +40,10 @@ pub enum HandlerOutcome {
 }
 
 /// Implementations are expected to be cheap to clone, typically via an internal
-/// `Arc`, so one handler serves every accept loop without contention. Both
-/// methods are synchronous: the server calls them inside a
-/// `tokio::task::spawn_blocking` so the underlying I/O does not block the
-/// runtime.
+/// `Arc`, so one handler serves every accept loop without contention. The
+/// methods are synchronous: the server runs each call through
+/// [`crate::mail::store::blocking`], on tokio's blocking pool, so a delivery that
+/// waits on a mailbox lock or the disk holds no runtime worker.
 pub trait SmtpHandler: Clone + Send + Sync + 'static {
     /// The port 25 path: deliver into every local mailbox `rcpt_to` names. A
     /// recipient that does not resolve locally is refused at `RCPT` time, so
