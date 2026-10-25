@@ -130,9 +130,31 @@ use std::{
 use std::convert::From;
 
 
-#[allow(non_camel_case_types)] 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ErrTag {
+/// Declares `ErrTag` together with `ErrTag::ALL`, a static table of every tag, so the table cannot
+/// fall out of step with the enum.
+macro_rules! err_tags {
+    ($($tag:ident),* $(,)?) => {
+        #[allow(non_camel_case_types)]
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        pub enum ErrTag {
+            $($tag),*
+        }
+
+        impl ErrTag {
+            /// Every tag, in declaration order.
+            pub const ALL: &'static [ErrTag] = &[$(ErrTag::$tag),*];
+
+            /// The tag's name, which is also its `Display` form.
+            pub fn name(&self) -> &'static str {
+                match self {
+                    $(ErrTag::$tag => stringify!($tag),)*
+                }
+            }
+        }
+    };
+}
+
+err_tags! {
     Async,
     Borrow,
     Bug, // The fault is with the developer, not the user.
@@ -213,6 +235,139 @@ pub enum ErrTag {
     Value,
     Version,
     ZeroDenominator,
+}
+
+impl ErrTag {
+    /// The tag of the given name, borrowed from `ErrTag::ALL`, so a decoded error needs no leak.
+    pub fn from_name(name: &str) -> Option<&'static ErrTag> {
+        Self::ALL.iter().find(|tag| tag.name() == name)
+    }
+}
+
+impl std::str::FromStr for ErrTag {
+    type Err = Error<ErrTag>;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match Self::from_name(name) {
+            Some(tag)   => Ok(tag.clone()),
+            None        => Err(err!("There is no error tag named '{}'.", name; Input, Unknown)),
+        }
+    }
+}
+
+/// An error as plain data, for the wire: each frame's words and tag names, its cause and any
+/// collection, outermost first. Decoding maps each tag name back to its `&'static` tag through
+/// `ErrTag::ALL`. A name no tag answers to is kept in the frame's words rather than dropped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ErrWire {
+    Frame {
+        msg:    String,
+        tags:   Vec<String>,
+        cause:  Option<Box<ErrWire>>,
+    },
+    Collection(Vec<ErrWire>),
+}
+
+impl Error<ErrTag> {
+
+    /// The error as plain data. A foreign cause keeps its `Display` words, and the first error of
+    /// ours found beneath it becomes its cause.
+    pub fn to_wire(&self) -> ErrWire {
+        match self {
+            Error::Local(m) | Error::Other(m) => ErrWire::Frame {
+                msg:    m.msg.clone(),
+                tags:   m.tags.iter().map(|t| t.name().to_string()).collect(),
+                cause:  None,
+            },
+            Error::Upstream(arc_e, m) => ErrWire::Frame {
+                msg:    m.msg.clone(),
+                tags:   m.tags.iter().map(|t| t.name().to_string()).collect(),
+                cause:  Some(Box::new(Self::foreign_to_wire(arc_e.as_ref()))),
+            },
+            Error::Collection(boxerrs) => ErrWire::Collection(
+                boxerrs.iter().map(|e| e.to_wire()).collect()
+            ),
+        }
+    }
+
+    fn foreign_to_wire(e: &(dyn std::error::Error + 'static)) -> ErrWire {
+        if let Some(ours) = e.downcast_ref::<Error<ErrTag>>() {
+            return ours.to_wire();
+        }
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = e.source();
+        let mut found = None;
+        while let Some(c) = cause {
+            if let Some(ours) = c.downcast_ref::<Error<ErrTag>>() {
+                found = Some(Box::new(ours.to_wire()));
+                break;
+            }
+            cause = c.source();
+        }
+        ErrWire::Frame {
+            msg:    fmt!("{}", e),
+            tags:   Vec::new(),
+            cause:  found,
+        }
+    }
+}
+
+impl ErrWire {
+
+    /// The error back from its wire form. A frame of several tags becomes a chain of frames, one
+    /// tag each, the extra frames wordless, so `tags()`, `msgs()` and `plain()` read as before.
+    pub fn to_error(&self) -> Error<ErrTag> {
+        match self {
+            ErrWire::Collection(list) => Error::Collection(
+                list.iter().map(|w| Box::new(w.to_error())).collect()
+            ),
+            ErrWire::Frame { msg, tags, cause } => {
+                let mut known: Vec<&'static ErrTag> = Vec::new();
+                let mut unknown: Vec<&str> = Vec::new();
+                for name in tags {
+                    match ErrTag::from_name(name) {
+                        Some(tag)   => known.push(tag),
+                        None        => unknown.push(name),
+                    }
+                }
+                let msg = if unknown.is_empty() {
+                    msg.clone()
+                } else {
+                    fmt!("{} [unknown tags: {}]", msg, unknown.join(", "))
+                };
+                let mut inner = match cause {
+                    Some(w) => Some(w.to_error()),
+                    None    => None,
+                };
+                for tag in known.iter().skip(1).rev() {
+                    inner = Some(Self::wrap(inner, String::new(), std::slice::from_ref(*tag)));
+                }
+                let first: &'static [ErrTag] = match known.first() {
+                    Some(tag)   => std::slice::from_ref(*tag),
+                    None        => &[],
+                };
+                Self::wrap(inner, msg, first)
+            },
+        }
+    }
+
+    fn wrap(inner: Option<Error<ErrTag>>, msg: String, tags: &'static [ErrTag]) -> Error<ErrTag> {
+        match inner {
+            Some(e) => Error::Upstream(Arc::new(e), ErrMsg { msg, tags }),
+            None    => Error::Local(ErrMsg { msg, tags }),
+        }
+    }
+}
+
+impl From<&Error<ErrTag>> for ErrWire {
+    fn from(e: &Error<ErrTag>) -> Self {
+        e.to_wire()
+    }
+}
+
+impl From<&ErrWire> for Error<ErrTag> {
+    fn from(w: &ErrWire) -> Self {
+        w.to_error()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -336,8 +491,21 @@ impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
                     // One of ours, so its words are reachable and are gathered in turn.
                     Some(e) => e.gather(out),
                     // Somebody else's, so all we have is what it says of itself. `Display` is the
-                    // right form here: a foreign error has no ANSI colour of ours in it.
-                    None => push_words(out, &fmt!("{}", arc_e)),
+                    // right form here: a foreign error has no ANSI colour of ours in it. It may
+                    // itself wrap one of ours, so the walk goes on through it to the first error
+                    // of ours, as `gather_tags` does, and the words and tags read one chain.
+                    None => {
+                        push_words(out, &fmt!("{}", arc_e));
+                        let mut cause: Option<&(dyn std::error::Error + 'static)> =
+                            arc_e.source();
+                        while let Some(c) = cause {
+                            if let Some(e) = c.downcast_ref::<Error<T>>() {
+                                e.gather(out);
+                                break;
+                            }
+                            cause = c.source();
+                        }
+                    },
                 }
             },
             Error::Collection(boxerrs) => {

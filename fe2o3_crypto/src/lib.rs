@@ -72,6 +72,7 @@ pub mod kem;
 pub mod keys;
 pub mod keystore;
 pub mod linkring;
+pub mod mac;
 #[cfg(feature = "p256")]
 pub mod p256;
 pub mod pqc;

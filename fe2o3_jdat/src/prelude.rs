@@ -12,8 +12,10 @@ pub use crate::{
     try_extract_dat,
     try_extract_dat_as,
     Dat,
+    FromDat,
     FromDatMap,
     Kind,
+    ToDat,
     ToDatMap,
     conv::{ // traits
         FromDat,

@@ -157,6 +157,7 @@ pub struct O3db<
     chan_inbox: Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
     api:        OzoneApi<UIDL, UID, ENC, KH, PR, CS>,
     closing:    Arc<Mutex<Closing>>,
+    ns_lane:    Arc<crate::ns::Lane>, // every `ns` mutation on this handle and its clones, in turn
 }
 
 #[derive(Debug)]
@@ -245,11 +246,13 @@ impl<
                 done:   false,
                 lock:   None,
             })),
+            ns_lane: Arc::new(crate::ns::Lane::default()),
         })
     }
 
     pub fn db_root(&self)       -> &Path { &self.db_root }
     pub fn api(&self)           -> &OzoneApi<UIDL, UID, ENC, KH, PR, CS> { &self.api }
+    pub fn ns_lane(&self)       -> &crate::ns::Lane { &self.ns_lane }
     pub fn api_mut(&mut self)   -> &mut OzoneApi<UIDL, UID, ENC, KH, PR, CS> { &mut self.api }
 
     /// Thread-safe mutable sharing of the API.

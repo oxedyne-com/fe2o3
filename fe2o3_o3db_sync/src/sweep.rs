@@ -365,3 +365,49 @@ fn zone_data_bytes(root: &Path) -> Outcome<u64> {
     }
     Ok(total)
 }
+
+
+/// The values and directory index records of one `ns` space that no live chain of entries from
+/// the root reaches: what a crash part way through a mutation leaves behind.  It walks the
+/// whole store, so it is for a background sweep only, never a request path, with its deadline
+/// named by the caller.  Each candidate is confirmed under the space's mutation lane.
+pub fn ns_orphans<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>(
+    ns:     &crate::ns::Ns<UIDL, UID, ENC, KH, PR, CS>,
+    wait:   Wait,
+)
+    -> Outcome<crate::ns::Orphans>
+{
+    let opts = ScanOpts::with_str_prefix(fmt!("ns:{}:", ns.space()));
+    let entries = res!(ns.db().api().scan_with_wait(&opts, None, wait));
+    ns.confirm_orphans(entries.into_iter().map(|(k, _, _)| k).collect())
+}
+
+
+/// Deletes the values and directory index records of one `ns` space that [`ns_orphans`] would
+/// list, re-confirming each under the space's mutation lane in the same hold as its delete, so a
+/// put that makes a torn key live again is never undone.  It walks the whole store, so it is for
+/// a background sweep only, never a request path.  What was deleted.
+pub fn ns_sweep_orphans<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    PR:     Hasher + 'static,
+    CS:     Checksummer + 'static,
+>(
+    ns:     &crate::ns::Ns<UIDL, UID, ENC, KH, PR, CS>,
+    wait:   Wait,
+)
+    -> Outcome<crate::ns::Orphans>
+{
+    let opts = ScanOpts::with_str_prefix(fmt!("ns:{}:", ns.space()));
+    let entries = res!(ns.db().api().scan_with_wait(&opts, None, wait));
+    ns.delete_orphans(entries.into_iter().map(|(k, _, _)| k).collect())
+}

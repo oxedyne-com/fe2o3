@@ -3227,6 +3227,7 @@ dependencies = [
  "flate2",
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_text",
 ]
 
@@ -3301,6 +3302,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde_json",
  "syn 1.0.109",
+ "tokio",
 ]
 
 [[package]]
@@ -3390,6 +3392,7 @@ dependencies = [
  "oxedyne_fe2o3_namex",
  "oxedyne_fe2o3_net",
  "oxedyne_fe2o3_num",
+ "oxedyne_fe2o3_o3db_sync",
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_syntax",
  "oxedyne_fe2o3_sys",

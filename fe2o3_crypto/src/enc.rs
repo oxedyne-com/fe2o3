@@ -24,7 +24,10 @@ use std::{
 };
 
 use aes_gcm::{
-    aead::Aead,
+    aead::{
+        Aead,
+        Payload,
+    },
     Aes256Gcm,
     KeyInit,
     Nonce,
@@ -280,6 +283,83 @@ impl EncryptionScheme {
         Ok(Self::AES_256_GCM(Keys::new(None, sks)))
     }
 
+    /// The AES-GCM authentication tag, which follows the ciphertext.
+    pub const AES_256_GCM_TAG_BYTES:    usize = 16;
+
+    /// AES-256-GCM under a caller's key and nonce, binding `aad` as additional data. Answers
+    /// `ciphertext || tag`, with the nonce left OUT, so the caller frames it where its own wire
+    /// format puts it (WebCrypto's `encrypt({ name: 'AES-GCM', iv, additionalData })` answers the
+    /// same bytes). [`Encrypter::encrypt`] appends a random nonce and binds nothing, which is a
+    /// different format; this is the primitive a format that is not Hematite's own is built on.
+    ///
+    /// The nonce must never repeat under one key. Draw it at random, as
+    /// [`Self::aes_256_gcm_nonce`] does, or derive it from the plaintext (a synthetic IV) where
+    /// equal plaintexts may be seen to be equal.
+    pub fn aes_256_gcm_seal(
+        key:    &[u8],
+        nonce:  &[u8],
+        aad:    &[u8],
+        plain:  &[u8],
+    )
+        -> Outcome<Vec<u8>>
+    {
+        let cipher = res!(Self::aes_256_gcm_cipher(key, nonce));
+        match cipher.encrypt(Nonce::from_slice(nonce), Payload { msg: plain, aad }) {
+            Ok(ct) => Ok(ct),
+            Err(e) => Err(err!(e,
+                "While sealing {} bytes with AES-256-GCM.", plain.len();
+            Encrypt)),
+        }
+    }
+
+    /// Opens what [`Self::aes_256_gcm_seal`] sealed, under the same key, nonce and `aad`.
+    /// Fails on a wrong key, a changed byte or a different `aad`, which the tag cannot tell apart.
+    pub fn aes_256_gcm_open(
+        key:    &[u8],
+        nonce:  &[u8],
+        aad:    &[u8],
+        sealed: &[u8],
+    )
+        -> Outcome<Vec<u8>>
+    {
+        if sealed.len() < Self::AES_256_GCM_TAG_BYTES {
+            return Err(err!(
+                "AES-256-GCM input of {} bytes is shorter than its {} byte tag.",
+                sealed.len(), Self::AES_256_GCM_TAG_BYTES;
+            Decrypt, Invalid, Input));
+        }
+        let cipher = res!(Self::aes_256_gcm_cipher(key, nonce));
+        match cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: sealed, aad }) {
+            Ok(pt) => Ok(pt),
+            Err(e) => Err(err!(e,
+                "AES-256-GCM refused {} bytes: a wrong key, a changed byte or different \
+                additional data.", sealed.len();
+            Decrypt)),
+        }
+    }
+
+    /// A fresh random AES-GCM nonce.
+    pub fn aes_256_gcm_nonce() -> [u8; Self::AES_256_GCM_NONCE_BYTES] {
+        let mut n = [0u8; Self::AES_256_GCM_NONCE_BYTES];
+        OsRng.fill_bytes(&mut n);
+        n
+    }
+
+    fn aes_256_gcm_cipher(key: &[u8], nonce: &[u8]) -> Outcome<Aes256Gcm> {
+        if key.len() != Self::AES_256_GCM_SK_LEN {
+            return Err(err!(
+                "An AES-256-GCM key is {} bytes, not {}.", Self::AES_256_GCM_SK_LEN, key.len();
+            Invalid, Input, Key, Size));
+        }
+        if nonce.len() != Self::AES_256_GCM_NONCE_BYTES {
+            return Err(err!(
+                "An AES-256-GCM nonce is {} bytes, not {}.",
+                Self::AES_256_GCM_NONCE_BYTES, nonce.len();
+            Invalid, Input, Size));
+        }
+        Ok(res!(Aes256Gcm::new_from_slice(key)))
+    }
+
     /// The increase in the length of the encrypted data due to inclusion of essential metadata
     /// (e.g. in the case of AES-GCM, the nonce).
     pub fn len_inc(&self) -> usize {
@@ -303,6 +383,40 @@ mod tests {
             let result = res!(aes.decrypt(&encrypted));
             assert_eq!(result, plain, "Length of plain data = {}", len);
         }
+        Ok(())
+    }
+
+    // NIST GCM test vector (gcmEncryptExtIV256, Count 0 of the 96-bit IV, 128-bit PT/AAD set):
+    // the bytes WebCrypto answers for the same inputs.
+    #[test]
+    fn test_aes_256_gcm_seal_known_answer() -> Outcome<()> {
+        fn unhex(s: &str) -> Vec<u8> {
+            (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap_or(0)).collect()
+        }
+        let key = unhex("92e11dcdaa866f5ce790fd24501f92509aacf4cb8b1339d50c9c1240935dd08b");
+        let iv  = unhex("ac93a1a6145299bde902f21a");
+        let pt  = unhex("2d71bcfa914e4ac045b2aa60955fad24");
+        let aad = unhex("1e0889016f67601c8ebea4943bc23ad6");
+        let ct  = res!(EncryptionScheme::aes_256_gcm_seal(&key, &iv, &aad, &pt));
+        req!(ct, unhex("8995ae2e6df3dbf96fac7b7137bae67feca5aa77d51d4a0a14d9c51e1da474ab"));
+        req!(res!(EncryptionScheme::aes_256_gcm_open(&key, &iv, &aad, &ct)), pt);
+        Ok(())
+    }
+
+    #[test]
+    fn test_aes_256_gcm_open_refuses_wrong_aad_and_tamper() -> Outcome<()> {
+        let key = [7u8; 32];
+        let iv = EncryptionScheme::aes_256_gcm_nonce();
+        let ct = res!(EncryptionScheme::aes_256_gcm_seal(&key, &iv, b"purpose/a", b"hello"));
+        req!(res!(EncryptionScheme::aes_256_gcm_open(&key, &iv, b"purpose/a", &ct)), b"hello".to_vec());
+        req!(EncryptionScheme::aes_256_gcm_open(&key, &iv, b"purpose/b", &ct).is_err(), true);
+        req!(EncryptionScheme::aes_256_gcm_open(&key, &iv, b"", &ct).is_err(), true);
+        let mut bad = ct.clone();
+        bad[0] ^= 1;
+        req!(EncryptionScheme::aes_256_gcm_open(&key, &iv, b"purpose/a", &bad).is_err(), true);
+        req!(EncryptionScheme::aes_256_gcm_open(&key, &iv, b"purpose/a", &ct[..15]).is_err(), true);
+        req!(EncryptionScheme::aes_256_gcm_seal(&key[..31], &iv, b"", b"x").is_err(), true);
+        req!(EncryptionScheme::aes_256_gcm_seal(&key, &iv[..11], b"", b"x").is_err(), true);
         Ok(())
     }
 }

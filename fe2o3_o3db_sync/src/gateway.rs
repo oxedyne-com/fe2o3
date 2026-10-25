@@ -1,4 +1,5 @@
-//! Opening an Ozone store under the gateway's own parameterisation, for an operator tool.
+//! Opening an Ozone store under the gateway's own parameterisation, for an operator tool, and that
+//! parameterisation for a process that starts its own store ([`rest_schemes`], [`Ns`]).
 //!
 //! Steel and Daimond keep their stores with 16-byte `u128` user ids, AES-256-GCM at rest and CRC-32
 //! checksums. A store written under a different parameterisation will not read back. The tools
@@ -27,6 +28,8 @@ use std::{
 
 pub type Uid = IdDat<16, u128>;
 pub type Db  = O3db<16, Uid, EncryptionScheme, HashScheme, HashScheme, ChecksumScheme>;
+/// A path namespace over a [`Db`].
+pub type Ns  = crate::ns::Ns<16, Uid, EncryptionScheme, HashScheme, HashScheme, ChecksumScheme>;
 
 pub const DB_KEY_LEN: usize = 32;
 
@@ -51,6 +54,22 @@ pub fn load_key(path: &Path) -> Outcome<[u8; DB_KEY_LEN]> {
     Ok(key)
 }
 
+/// The schemes a store is kept under, from its at-rest `key`: AES-256-GCM at rest, CRC-32
+/// checksums, and the default hashers.  For a process that starts a store of its own, so it keeps
+/// it exactly as the gateway and its tools read it.
+pub fn rest_schemes(key: &[u8; DB_KEY_LEN])
+    -> Outcome<RestSchemesInput<EncryptionScheme, HashScheme, HashScheme, ChecksumScheme>>
+{
+    let aes_gcm = res!(EncryptionScheme::new_aes_256_gcm_with_key(&key[..]));
+    let crc32 = ChecksumScheme::new_crc32();
+    Ok(RestSchemesInput::new(
+        Some(aes_gcm),
+        None::<HashScheme>,
+        None::<HashScheme>,
+        Some(crc32),
+    ))
+}
+
 /// Opens and starts a store, leaving garbage collection off unless asked, and says how many of its
 /// bots answered a ping. `cfg_opt` is the configuration of a store being created, and None reads
 /// the store's own. The store is returned whatever the count, as `o3db_migrate` and `o3db_sweep`
@@ -65,14 +84,7 @@ pub fn open_store(
 )
     -> Outcome<(Db, usize)>
 {
-    let aes_gcm = res!(EncryptionScheme::new_aes_256_gcm_with_key(&key[..]));
-    let crc32 = ChecksumScheme::new_crc32();
-    let schms_input = RestSchemesInput::new(
-        Some(aes_gcm),
-        None::<HashScheme>,
-        None::<HashScheme>,
-        Some(crc32),
-    );
+    let schms_input = res!(rest_schemes(key));
     let mut db: Db = res!(O3db::new(root, cfg_opt, schms_input, Uid::default()));
     res!(db.start(label.to_string()));
     // State the collector explicitly, so that a read never collects.
@@ -96,4 +108,22 @@ pub fn require_answer(
         return Err(err!("{}: no bot of the store at {:?} answered.", label, root; Missing, Data));
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A caller that starts its own store gets the gateway's schemes from the key alone: AES-256-GCM
+    /// at rest, CRC-32 checksums, and the default hashers.
+    #[test]
+    fn rest_schemes_are_the_gateways() {
+        let schemes = match rest_schemes(&[7u8; DB_KEY_LEN]) {
+            Ok(s)   => s,
+            Err(e)  => panic!("the gateway's schemes from a key: {}", e),
+        };
+        assert!(schemes.enc.is_some(), "an encrypter");
+        assert!(schemes.hash.is_none() && schemes.prnd.is_none(), "the default hashers");
+        assert!(schemes.csum.is_some(), "a checksummer");
+    }
 }

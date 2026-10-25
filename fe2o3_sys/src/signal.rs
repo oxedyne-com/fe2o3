@@ -40,7 +40,7 @@ pub enum Signal {
 }
 
 impl Signal {
-    fn nix(&self) -> Sig {
+    pub(crate) fn nix(&self) -> Sig {
         match self {
             Self::Hangup    => Sig::SIGHUP,
             Self::Interrupt => Sig::SIGINT,

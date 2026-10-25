@@ -18,6 +18,9 @@ dist = []
 # The libtest benches (`#![feature(test)]`), which build only on nightly:
 # `cargo +nightly bench -p oxedyne_fe2o3_o3db_sync --features nightly`.
 nightly = []
+# The test hooks that build a crashed ns tree (`test::hooks::set_ns_tear`), for this crate's own
+# tests only, which turn it on through the dev-dependency on the crate itself below.
+test-hooks = []
 
 [dependencies]
 oxedyne_fe2o3_bot 		   		= { path = "../fe2o3_bot" }
@@ -58,6 +61,7 @@ seahash = "4.0.1"
 nix = { version = "0.31", default-features = false, features = ["fs"] }
 
 [dev-dependencies]
+oxedyne_fe2o3_o3db_sync			= { path = ".", features = ["test-hooks"] }
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
 oxedyne_fe2o3_sys 				= { path = "../fe2o3_sys" }
 

@@ -38,6 +38,8 @@ pub mod resident;
 #[cfg(all(target_os = "linux", feature = "signal"))]
 pub mod signal;
 pub mod snapshot;
+#[cfg(all(target_os = "linux", feature = "supervise"))]
+pub mod supervise;
 pub mod uptime;
 
 /// Root under which every Linux metric source lives.

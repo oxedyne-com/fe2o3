@@ -158,6 +158,7 @@ pub mod gateway; // The gateway's own Ozone parameterisation, and opening a stor
 pub mod test;
 
 pub mod db;
+pub mod ns; // A path namespace: values under paths, a per-directory index, one mutation lane.
 pub mod migrate; // Live-set store migration and compaction (drops orphaned chunk records).
 pub mod textscan; // Read-only check of the JDAT text a store holds against the decoder's refusals.
 pub mod verify; // Read-only check that every live value reads back whole (a torn chunked value fails).
