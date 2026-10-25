@@ -343,3 +343,28 @@ async fn search_matches_header_values_with_their_encoded_words_decoded() -> Outc
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }
+
+#[tokio::test]
+async fn sent_keys_read_a_date_whose_weekday_has_no_comma() -> Outcome<()> {
+    let plain = MessageFlags::default();
+    let msgs = vec![
+        (b"From: bob@example.org\r\nTo: alice@test.local\r\nSubject: comma\r\n\
+            Date: Tue, 27 Oct 2026 10:00:00 +0000\r\n\r\nA.\r\n".to_vec(), plain, 20388),
+        // Not RFC 5322, but sent by some clients.
+        (b"From: bob@example.org\r\nTo: alice@test.local\r\nSubject: bare\r\n\
+            Date: Tue 27 Oct 2026 10:00:00 +0000\r\n\r\nB.\r\n".to_vec(), plain, 20388),
+        (b"From: bob@example.org\r\nTo: alice@test.local\r\nSubject: none\r\n\
+            Date: 27 Oct 2026 10:00:00 +0000\r\n\r\nC.\r\n".to_vec(), plain, 20388),
+    ];
+    let (mut c, uids, root) = res!(serve("sentweekday", msgs).await);
+    let mut failures = Vec::new();
+    for q in ["SENTON 27-Oct-2026", "SENTSINCE 27-Oct-2026", "SENTBEFORE 28-Oct-2026"] {
+        match res!(c.uid_search(q).await) {
+            Ok(got) if got == uids => (),
+            other => failures.push(fmt!("{}: want {:?}, got {:?}", q, uids, other)),
+        }
+    }
+    assert!(failures.is_empty(), "SENT* missed a Date:\n{}", failures.join("\n"));
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}

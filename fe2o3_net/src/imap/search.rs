@@ -307,11 +307,9 @@ fn parse_search_date(s: &str) -> Option<i64> {
 /// The date of an RFC 5322 `Date:` field, `[Day,] d Mon yyyy hh:mm[:ss] zone`, as days since the
 /// epoch. Time and zone are disregarded, as RFC 3501 asks of the SENT keys.
 fn parse_header_date(s: &str) -> Option<i64> {
-    let s = match s.find(',') {
-        Some(i) => &s[i + 1..],
-        None    => s,
-    };
-    let mut it = s.split_whitespace();
+    // The weekday is optional, and some clients omit its comma (`Tue 27 Oct 2026`).
+    let mut it = s.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).peekable();
+    if it.peek().map_or(false, |t| t.chars().all(|c| c.is_ascii_alphabetic())) { it.next(); }
     let d: u32 = ok!(ok!(it.next()).parse().ok());
     let m = ok!(month_number(ok!(it.next())));
     let y_str = ok!(it.next());
