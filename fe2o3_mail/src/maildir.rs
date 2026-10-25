@@ -45,6 +45,7 @@ use oxedyne_fe2o3_core::{
     },
 };
 use oxedyne_fe2o3_net::mail::store::{
+    FlagUpdate,
     FolderName,
     FolderStatus,
     MailStore,
@@ -572,31 +573,33 @@ impl MailStore for MaildirStore {
         Ok(())
     }
 
-    fn set_flags(
+    fn update_flags(
         &self,
         user:       &MailUser,
         folder:     &FolderName,
         uid:        MessageUid,
-        flags:      MessageFlags,
+        op:         FlagUpdate,
     )
-        -> Outcome<MessageFlags>
+        -> Outcome<Option<MessageFlags>>
     {
         let folder_dir = self.folder_path(user, folder);
         let lock = res!(Self::lock_folder(&folder_dir));
         let view = res!(Self::read_folder(&folder_dir, false, &lock));
         let entry = match view.find(uid) {
             Some(e) => e,
-            None => return Err(err!(
-                "No message with UID {} in folder {}.", uid.0, folder.as_str();
-                Missing, Input)),
+            None    => return Ok(None),
         };
+        // The file's own name, read under the lock, is the current flag set.
+        let flags = op.apply(entry.meta.flags);
         let new_path = folder_dir.join("cur").join(fmt!("{}:2,{}", entry.key, flag_suffix(flags)));
-        if let Err(e) = fs::rename(&entry.path, &new_path) {
-            return Err(err!(e,
-                "Renaming for flag update {:?} -> {:?}.", entry.path, new_path;
-                IO, File, Write));
+        if new_path != entry.path {
+            if let Err(e) = fs::rename(&entry.path, &new_path) {
+                return Err(err!(e,
+                    "Renaming for flag update {:?} -> {:?}.", entry.path, new_path;
+                    IO, File, Write));
+            }
         }
-        Ok(flags)
+        Ok(Some(flags))
     }
 
     fn expunge(

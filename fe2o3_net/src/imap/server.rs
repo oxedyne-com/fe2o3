@@ -11,6 +11,7 @@
 use crate::imap::search;
 use crate::mail::{
     store::{
+        FlagUpdate,
         blocking,
         FolderName,
         FolderStatus,
@@ -926,21 +927,22 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 }
             }
 
-            // Implicit \Seen.
+            // Implicit \Seen, added to the flags as they stand, not as last read.
             if implicit_seen && !session.read_only && !meta.flags.seen {
-                let mut new_flags = meta.flags;
-                new_flags.seen = true;
                 let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
-                let _ = self.on_store(move |s| s.set_flags(&user, &folder, uid, new_flags)).await;
-                if let Some(m) = session.messages.iter_mut().find(|m| m.uid == meta.uid) {
-                    m.flags.seen = true;
-                }
-                let already = segments.iter().any(|s| {
-                    matches!(s, FetchSegment::Text(t) if t.starts_with("FLAGS"))
-                });
-                if !already {
-                    segments.push(FetchSegment::Text(fmt!(
-                        "FLAGS ({})", new_flags.to_imap_list())));
+                let seen = FlagUpdate::Add(MessageFlags { seen: true, ..MessageFlags::default() });
+                let now = res!(self.on_store(move |s| s.update_flags(&user, &folder, uid, seen)).await);
+                if let Some(flags) = now {
+                    if let Some(m) = session.messages.iter_mut().find(|m| m.uid == meta.uid) {
+                        m.flags = flags;
+                    }
+                    let already = segments.iter().any(|s| {
+                        matches!(s, FetchSegment::Text(t) if t.starts_with("FLAGS"))
+                    });
+                    if !already {
+                        segments.push(FetchSegment::Text(fmt!(
+                            "FLAGS ({})", flags.to_imap_list())));
+                    }
                 }
             }
 
@@ -988,37 +990,33 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         };
         res!(self.refresh_selected(session, false).await);
         let indices = resolve_set(seq_set, &session.messages, by_uid);
-        let silent = op.to_uppercase().ends_with(".SILENT");
-        let base = op.trim_end_matches(".SILENT").trim_end_matches(".silent");
-        let new_flag_names: Vec<&str> = flags_raw
-            .split_whitespace()
-            .collect();
+        let op_upper = op.to_ascii_uppercase();
+        let silent = op_upper.ends_with(".SILENT");
+        let base = op_upper.trim_end_matches(".SILENT");
+        let mut mask = MessageFlags::default();
+        for f in flags_raw.split_whitespace() { mask.set(f, true); }
+        // The client's own operation goes to the store, which applies it to the flags as they
+        // stand under the folder lock; a set computed here from a read would undo a flag
+        // another session changed in between.
+        let update = match base {
+            "+FLAGS"    => FlagUpdate::Add(mask),
+            "-FLAGS"    => FlagUpdate::Remove(mask),
+            "FLAGS"     => FlagUpdate::Replace(mask),
+            _ => return Err(err!(
+                "STORE op '{}' not understood.", op;
+                Invalid, Input)),
+        };
 
         for &idx in &indices {
             let meta = match session.messages.get(idx) {
                 Some(m) => m.clone(),
                 None => continue,
             };
-            let mut flags = meta.flags;
-            match base {
-                "+FLAGS" | "+flags" => {
-                    for f in &new_flag_names { flags.set(f, true); }
-                }
-                "-FLAGS" | "-flags" => {
-                    for f in &new_flag_names { flags.set(f, false); }
-                }
-                "FLAGS"  | "flags"  => {
-                    flags = MessageFlags::default();
-                    for f in &new_flag_names { flags.set(f, true); }
-                }
-                _ => {
-                    return Err(err!(
-                        "STORE op '{}' not understood.", op;
-                        Invalid, Input));
-                }
-            }
             let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
-            let final_flags = res!(self.on_store(move |s| s.set_flags(&user, &folder, uid, flags)).await);
+            let final_flags = match res!(self.on_store(move |s| s.update_flags(&user, &folder, uid, update)).await) {
+                Some(f) => f,
+                None    => continue, // expunged by another session meanwhile
+            };
             if let Some(m) = session.messages.iter_mut().find(|m| m.uid == meta.uid) {
                 m.flags = final_flags;
             }

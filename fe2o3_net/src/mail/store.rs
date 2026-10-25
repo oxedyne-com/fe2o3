@@ -113,6 +113,35 @@ impl MessageFlags {
     }
 }
 
+/// A flag change as the client asked for it (RFC 3501 §6.4.6 `+FLAGS`, `-FLAGS`, `FLAGS`),
+/// applied to the stored flags at the moment of writing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FlagUpdate {
+    Add(MessageFlags),
+    Remove(MessageFlags),
+    Replace(MessageFlags),
+}
+
+impl FlagUpdate {
+    /// The flags after this change to `cur`. `\Recent` belongs to the session and no STORE
+    /// alters it.
+    pub fn apply(&self, cur: MessageFlags) -> MessageFlags {
+        let (m, op): (&MessageFlags, fn(bool, bool) -> bool) = match self {
+            Self::Add(m)        => (m, |c, x| c || x),
+            Self::Remove(m)     => (m, |c, x| c && !x),
+            Self::Replace(m)    => (m, |_, x| x),
+        };
+        MessageFlags {
+            seen:       op(cur.seen,        m.seen),
+            answered:   op(cur.answered,    m.answered),
+            flagged:    op(cur.flagged,     m.flagged),
+            deleted:    op(cur.deleted,     m.deleted),
+            draft:      op(cur.draft,       m.draft),
+            recent:     cur.recent,
+        }
+    }
+}
+
 /// Answers FETCH FLAGS, INTERNALDATE, RFC822.SIZE and UID without re-reading
 /// the raw message bytes.
 #[derive(Clone, Debug)]
@@ -230,16 +259,17 @@ pub trait MailStore: Clone + Send + Sync + 'static {
         Ok(())
     }
 
-    /// The flag set returned may differ from the one given, where the
-    /// implementation enforces an invariant such as always-clear `\Recent`.
-    fn set_flags(
+    /// Applies `op` to the message's flags as they stand when the store holds the folder,
+    /// not as a session last read them, so a flag another session set meanwhile survives.
+    /// `None` when the message is gone, expunged by another session.
+    fn update_flags(
         &self,
         user:       &MailUser,
         folder:     &FolderName,
         uid:        MessageUid,
-        flags:      MessageFlags,
+        op:         FlagUpdate,
     )
-        -> Outcome<MessageFlags>;
+        -> Outcome<Option<MessageFlags>>;
 
     /// Removes every message flagged `\Deleted`, and returns their UIDs in
     /// removal order, since IMAP wants one untagged `EXPUNGE` per UID in that

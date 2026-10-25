@@ -9,6 +9,7 @@
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_mail::maildir::MaildirStore;
 use oxedyne_fe2o3_net::mail::store::{
+    FlagUpdate,
     FolderName,
     MailStore,
     MailUser,
@@ -382,9 +383,9 @@ fn expunge_reports_only_what_it_removed() -> Outcome<()> {
     for i in 0..2 {
         uids.push(res!(store.append(&u, &inbox, &body(&fmt!("e{}", i)), MessageFlags::default(), None)));
     }
-    let del = MessageFlags { deleted: true, ..MessageFlags::default() };
+    let del = FlagUpdate::Add(MessageFlags { deleted: true, ..MessageFlags::default() });
     for uid in &uids {
-        res!(store.set_flags(&u, &inbox, *uid, del));
+        res!(store.update_flags(&u, &inbox, *uid, del));
     }
     let cur = inbox_dir(&root).join("cur");
     res!(set_mode(&cur, 0o555));
