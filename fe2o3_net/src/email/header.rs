@@ -118,6 +118,21 @@ pub fn header_fields(headers: &[u8]) -> Outcome<Vec<(String, String)>> {
     Ok(out)
 }
 
+/// The message's `Message-ID`, the first such field's value with its white space removed, or
+/// `None` when it has none or its header section cannot be read as [`header_fields`] reads it.
+/// Only the header section is looked at, so a caller may pass the head of a message alone.
+pub fn message_id(message: &[u8]) -> Option<String> {
+    let (head, _) = split_headers_body(message);
+    let fields = match header_fields(head) {
+        Ok(f)   => f,
+        Err(_)  => return None,
+    };
+    fields.iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("Message-ID"))
+        .map(|(_, v)| v.chars().filter(|c| !c.is_whitespace()).collect::<String>())
+        .filter(|id| !id.is_empty())
+}
+
 /// The addresses in an address-list field such as `From`, `Sender` or `To`, each as its bare
 /// addr-spec, in order, with comments and folding white space removed.
 ///

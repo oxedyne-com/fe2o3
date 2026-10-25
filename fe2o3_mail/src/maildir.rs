@@ -15,6 +15,7 @@
 //!   dovecot-uidvalidity            8-byte hex, the latest UIDVALIDITY issued
 //!   dovecot-uidvalidity.<hex>      empty companion file, exactly one
 //!   dovecot-uidlist                "3 V<validity> N<next>" then "<uid> :<key>" rows
+//!   hematite-msgids                "<key>\t<Message-ID>" rows, deliver's index, rebuilt at will
 //!   hematite-folder.lock           flock'd across every change to the folder
 //!   hematite-subscriptions.lock    flock'd across a change to subscriptions
 //!   subscriptions                  one folder name per line
@@ -45,15 +46,18 @@ use oxedyne_fe2o3_core::{
         sync_parent_dir,
     },
 };
-use oxedyne_fe2o3_net::mail::store::{
-    FlagUpdate,
-    FolderName,
-    FolderStatus,
-    MailStore,
-    MailUser,
-    MessageFlags,
-    MessageMeta,
-    MessageUid,
+use oxedyne_fe2o3_net::{
+    email::header::message_id,
+    mail::store::{
+        FlagUpdate,
+        FolderName,
+        FolderStatus,
+        MailStore,
+        MailUser,
+        MessageFlags,
+        MessageMeta,
+        MessageUid,
+    },
 };
 
 use std::{
@@ -94,6 +98,8 @@ const UIDLIST_NAME:         &str    = "dovecot-uidlist";
 const UIDVALIDITY_PREFIX:   &str    = "dovecot-uidvalidity";
 const SUBSCRIPTIONS_NAME:   &str    = "subscriptions";
 const MAILDIRFOLDER_NAME:   &str    = "maildirfolder";      // marks a Maildir++ sub-folder
+const MSGIDS_NAME:          &str    = "hematite-msgids";
+const HEAD_MAX:             usize   = 64 * 1024;            // read for a Message-ID, at most
 const LOCK_NAME:            &str    = "hematite-folder.lock";
 const SUBS_LOCK_NAME:       &str    = "hematite-subscriptions.lock"; // at the user root
 const LOCK_WAIT:            Duration = Duration::from_secs(30);     // then a Timeout error
@@ -369,6 +375,149 @@ impl MaildirStore {
         })
     }
 
+    /// Files a message in the folder: `append`, and `deliver` with the message's Message-ID as
+    /// `once`, which files nothing when the folder already holds that Message-ID.
+    fn file_message(
+        &self,
+        user:       &MailUser,
+        folder:     &FolderName,
+        bytes:      &[u8],
+        flags:      MessageFlags,
+        internal:   Option<SystemTime>,
+        once:       Option<&str>,
+    )
+        -> Outcome<MessageUid>
+    {
+        let folder_dir = self.folder_path(user, folder);
+        if !folder_dir.exists() {
+            res!(self.create_folder(user, folder));
+        }
+        res!(Self::ensure_subdirs(&folder_dir));
+
+        // Written in tmp/ outside the lock, so a large message holds up no reader.
+        let (unique, tmp_path, mut f) = res!(self.create_unique(&folder_dir.join("tmp")));
+        let written = (|| -> Outcome<()> {
+            res!(f.write_all(bytes));
+            // After the write, which sets the mtime, so INTERNALDATE round-trips.
+            if let Some(t) = internal {
+                if let Err(e) = f.set_modified(t) {
+                    warn!("Could not set the INTERNALDATE of {:?}: {}.", tmp_path, e);
+                }
+            }
+            res!(f.sync_all());
+            Ok(())
+        })();
+        drop(f);
+        if let Err(e) = written {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err!(e,
+                "Writing the delivery file {:?}.", tmp_path;
+                IO, File, Write));
+        }
+
+        let filename = fmt!("{}:2,{}", unique, flag_suffix(flags));
+        let cur_path = folder_dir.join("cur").join(&filename);
+        let lock = match self.lock_folder(&folder_dir) {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(e);
+            },
+        };
+        // A copy already filed, by an attempt the sender was told failed, is the answer.
+        if let Some(id) = once {
+            let view = match Self::read_folder(&folder_dir, false, &lock) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(e);
+                },
+            };
+            match Self::find_message_id(&folder_dir, &view, id, &lock) {
+                Ok(Some(uid)) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Ok(uid);
+                },
+                Ok(None) => {},
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(e);
+                },
+            }
+        }
+        // Every writer of cur/ holds the lock, so nothing can take the name between the test
+        // and the rename.
+        if cur_path.exists() {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err!(
+                "A message named {:?} is already in the folder.", cur_path;
+                IO, File, Exists));
+        }
+        if let Err(e) = fs::rename(&tmp_path, &cur_path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err!(e,
+                "Renaming {:?} -> {:?}.", tmp_path, cur_path;
+                IO, File, Write));
+        }
+        // The data is on disk; the entry naming it must be too before the UID is given out,
+        // or a power loss leaves a uidlist naming a message that SMTP acknowledged and lost.
+        res!(sync_parent_dir(&cur_path));
+        let view = res!(Self::read_folder(&folder_dir, false, &lock));
+        match view.entries.iter().find(|e| e.key == unique) {
+            Some(e) => Ok(e.meta.uid),
+            None => Err(err!(
+                "The message just filed as {:?} has no UID in {:?}.", cur_path, folder_dir;
+                Bug, Missing)),
+        }
+    }
+
+    /// The UID of the message in `view` whose Message-ID is `id`. The folder's Message-IDs are
+    /// kept in `hematite-msgids`, beside the uidlist and under the same lock, so a delivery reads
+    /// the header of only a message not yet listed there, a copy another hand dropped into new/
+    /// included; a missing or damaged index is rebuilt the same way, and a message gone leaves
+    /// it. The index is only ever a cache of the files, so a failed save is a warning.
+    fn find_message_id(
+        folder_dir: &Path,
+        view:       &FolderView,
+        id:         &str,
+        _lock:      &ExclusiveLock,
+    )
+        -> Outcome<Option<MessageUid>>
+    {
+        let path = folder_dir.join(MSGIDS_NAME);
+        let mut index = read_msgids(&path);
+        let mut changed = false;
+        let mut found = None;
+        for e in &view.entries {
+            let listed = match index.get(&e.key) {
+                Some(m) => m.as_str() == id,
+                None    => {
+                    let m = res!(read_head(&e.path)).and_then(|h| message_id(&h)).unwrap_or_default();
+                    let hit = m == id;
+                    index.insert(e.key.clone(), m);
+                    changed = true;
+                    hit
+                },
+            };
+            if listed && found.is_none() {
+                found = Some(e.meta.uid);
+            }
+        }
+        let before = index.len();
+        index.retain(|k, _| view.entries.iter().any(|e| &e.key == k));
+        if index.len() != before { changed = true; }
+        if changed {
+            let mut text = String::new();
+            for (k, m) in &index {
+                text.push_str(&fmt!("{}\t{}\n", k, m));
+            }
+            if let Err(e) = save_atomic(&path, text.as_bytes(), SaveMode::Keep) {
+                warn!("Could not save the Message-ID index {:?}: {}.", path, e);
+            }
+        }
+        Ok(found)
+    }
+
     /// The folder read under its lock, which is released before this returns.
     fn view(&self, folder_dir: &Path, clear_recent: bool) -> Outcome<FolderView> {
         let lock = res!(self.lock_folder(folder_dir));
@@ -440,66 +589,20 @@ impl MailStore for MaildirStore {
     )
         -> Outcome<MessageUid>
     {
-        let folder_dir = self.folder_path(user, folder);
-        if !folder_dir.exists() {
-            res!(self.create_folder(user, folder));
-        }
-        res!(Self::ensure_subdirs(&folder_dir));
+        self.file_message(user, folder, bytes, flags, internal, None)
+    }
 
-        // Written in tmp/ outside the lock, so a large message holds up no reader.
-        let (unique, tmp_path, mut f) = res!(self.create_unique(&folder_dir.join("tmp")));
-        let written = (|| -> Outcome<()> {
-            res!(f.write_all(bytes));
-            // After the write, which sets the mtime, so INTERNALDATE round-trips.
-            if let Some(t) = internal {
-                if let Err(e) = f.set_modified(t) {
-                    warn!("Could not set the INTERNALDATE of {:?}: {}.", tmp_path, e);
-                }
-            }
-            res!(f.sync_all());
-            Ok(())
-        })();
-        drop(f);
-        if let Err(e) = written {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(err!(e,
-                "Writing the delivery file {:?}.", tmp_path;
-                IO, File, Write));
-        }
-
-        let filename = fmt!("{}:2,{}", unique, flag_suffix(flags));
-        let cur_path = folder_dir.join("cur").join(&filename);
-        let lock = match self.lock_folder(&folder_dir) {
-            Ok(l) => l,
-            Err(e) => {
-                let _ = fs::remove_file(&tmp_path);
-                return Err(e);
-            },
-        };
-        // Every writer of cur/ holds the lock, so nothing can take the name between the test
-        // and the rename.
-        if cur_path.exists() {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(err!(
-                "A message named {:?} is already in the folder.", cur_path;
-                IO, File, Exists));
-        }
-        if let Err(e) = fs::rename(&tmp_path, &cur_path) {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(err!(e,
-                "Renaming {:?} -> {:?}.", tmp_path, cur_path;
-                IO, File, Write));
-        }
-        // The data is on disk; the entry naming it must be too before the UID is given out,
-        // or a power loss leaves a uidlist naming a message that SMTP acknowledged and lost.
-        res!(sync_parent_dir(&cur_path));
-        let view = res!(Self::read_folder(&folder_dir, false, &lock));
-        match view.entries.iter().find(|e| e.key == unique) {
-            Some(e) => Ok(e.meta.uid),
-            None => Err(err!(
-                "The message just filed as {:?} has no UID in {:?}.", cur_path, folder_dir;
-                Bug, Missing)),
-        }
+    fn deliver(
+        &self,
+        user:       &MailUser,
+        folder:     &FolderName,
+        bytes:      &[u8],
+        flags:      MessageFlags,
+        internal:   Option<SystemTime>,
+    )
+        -> Outcome<MessageUid>
+    {
+        self.file_message(user, folder, bytes, flags, internal, message_id(bytes).as_deref())
     }
 
     fn list_folders(&self, user: &MailUser) -> Outcome<Vec<FolderName>> {
@@ -832,6 +935,49 @@ fn read_message(path: &Path, size: u64) -> Outcome<Vec<u8>> {
             IO, File, Read));
     }
     Ok(bytes)
+}
+
+/// The `hematite-msgids` rows, key to Message-ID (empty for a message without one). A row that
+/// cannot be read is left out, so its message's header is read again.
+fn read_msgids(path: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if let Ok(text) = fs::read_to_string(path) {
+        for line in text.lines() {
+            if let Some((k, m)) = line.split_once('\t') {
+                if !k.is_empty() {
+                    out.insert(k.to_string(), m.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The message's start, through its header section's blank line or `HEAD_MAX` bytes, whichever
+/// comes first; `None` for a file gone.
+fn read_head(path: &Path) -> Outcome<Option<Vec<u8>>> {
+    let mut f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(err!(e,
+            "Opening {:?}.", path;
+            IO, File, Read)),
+    };
+    let mut head: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    while head.len() < HEAD_MAX {
+        let n = match f.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => return Err(err!(e,
+                "Reading {:?}.", path;
+                IO, File, Read)),
+        };
+        if n == 0 { break; }
+        let from = head.len().saturating_sub(3);
+        head.extend_from_slice(&buf[..n]);
+        if head[from..].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+    }
+    Ok(Some(head))
 }
 
 fn read_uidlist(path: &Path) -> Outcome<Uidlist> {

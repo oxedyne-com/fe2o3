@@ -210,6 +210,21 @@ pub trait MailStore: Clone + Send + Sync + 'static {
     )
         -> Outcome<MessageUid>;
 
+    /// [`Self::append`] for a delivery, which a sender retries after a temporary failure: a
+    /// message whose Message-ID the folder already holds is not filed again, and the UID of the
+    /// copy there is answered, so a retry after a partial failure duplicates nothing. A message
+    /// without a Message-ID is filed every time. IMAP APPEND files what the client sends, and
+    /// does not come this way.
+    fn deliver(
+        &self,
+        user:       &MailUser,
+        folder:     &FolderName,
+        bytes:      &[u8],
+        flags:      MessageFlags,
+        internal:   Option<SystemTime>,
+    )
+        -> Outcome<MessageUid>;
+
     /// Recursively.
     fn list_folders(&self, user: &MailUser) -> Outcome<Vec<FolderName>>;
 

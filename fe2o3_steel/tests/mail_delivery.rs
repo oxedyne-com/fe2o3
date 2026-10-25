@@ -117,7 +117,8 @@ fn a_failed_local_delivery_is_answered_451_and_the_retry_duplicates_nothing() ->
         HandlerOutcome::Accepted(_) => {},
         other => return Err(err!("The retry was answered {:?}.", other; Test)),
     }
-    assert!(res!(inbox_count(&h, "bob@test.local")) >= 1, "bob holds the message");
+    assert_eq!(res!(inbox_count(&h, "alice@test.local")), 1, "alice holds the message once");
+    assert_eq!(res!(inbox_count(&h, "bob@test.local")), 1, "bob holds the message once");
     let _ = fs::remove_dir_all(&dir);
     Ok(())
 }

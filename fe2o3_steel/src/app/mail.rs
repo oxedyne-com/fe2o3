@@ -190,16 +190,17 @@ impl SmtpHandler for AppMailHandler {
 
 impl AppMailHandler {
 
-    /// Files `bytes` in the user's INBOX.
+    /// Files `bytes` in the user's INBOX once: a copy already there from an earlier attempt,
+    /// by Message-ID, is not written again, so a retry after a deferral duplicates nothing.
     fn deliver_local(&self, user: &MailUser, bytes: &[u8]) -> Outcome<()> {
         let flags = MessageFlags { recent: true, ..Default::default() };
-        res!(self.store.append(user, &FolderName::new("INBOX"), bytes, flags, Some(SystemTime::now())));
+        res!(self.store.deliver(user, &FolderName::new("INBOX"), bytes, flags, Some(SystemTime::now())));
         Ok(())
     }
 
     /// A message that cannot be filed is deferred whole with `451 4.3.0`, never refused with a
     /// `550` the sender would bounce, and never dropped for one recipient while the others are
-    /// answered `250`: the sender retries.
+    /// answered `250`: the sender retries, and the copies already filed are not filed again.
     fn deferred(&self, e: Error<ErrTag>, rcpt: &str) -> HandlerOutcome {
         error!(err!(e,
             "Local delivery to {} failed; the message is deferred.", rcpt;
