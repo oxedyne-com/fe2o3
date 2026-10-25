@@ -233,6 +233,17 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 res!(write_ok(stream, &tag, "NOOP completed").await);
                 Ok(false)
             }
+            "CHECK" => {
+                // RFC 3501 §6.4.1: a checkpoint. Every Maildir write is already durable when
+                // it returns, so there is nothing to flush; the view is reconciled as for NOOP.
+                if session.user.is_none() || session.selected.is_none() {
+                    res!(write_no(stream, &tag, "No mailbox selected").await);
+                    return Ok(false);
+                }
+                res!(self.sync_view(stream, session, true).await);
+                res!(write_ok(stream, &tag, "CHECK completed").await);
+                Ok(false)
+            }
             "IDLE" => {
                 if session.user.is_none() || session.selected.is_none() {
                     res!(write_bad(stream, &tag,

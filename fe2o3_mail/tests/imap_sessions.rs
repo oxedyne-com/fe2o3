@@ -176,6 +176,27 @@ async fn search_keeps_the_view_and_noop_reconciles_it() -> Outcome<()> {
     Ok(())
 }
 
+/// CHECK (RFC 3501 §6.4.1) is a checkpoint: it completes, and like NOOP it announces another
+/// session's expunge and a delivery.
+#[tokio::test(flavor = "multi_thread")]
+async fn check_completes_and_reconciles_the_view() -> Outcome<()> {
+    let (port, root) = res!(setup("check", 3).await);
+    let mut a = res!(Sess::open(port).await);
+    let mut b = res!(Sess::open(port).await);
+    res!(b.cmd("UID STORE 2 +FLAGS (\\Deleted)").await);
+    res!(b.cmd("EXPUNGE").await);
+    let store = res!(MaildirStore::new(root.clone(), "test.local"));
+    let u = res!(res!(OneUser.lookup("")).ok_or_else(|| err!("No test user."; Test, Bug)));
+    res!(store.append(&u, &FolderName::new("INBOX"), b"Subject: m4\r\n\r\nid=m4\r\n", MessageFlags::default(), None));
+
+    let check = res!(a.cmd("CHECK").await);
+    assert!(check.starts_with("* 2 EXPUNGE\r\n"), "CHECK did not announce the expunge:\n{}", check);
+    assert!(check.contains("* 3 EXISTS\r\n"), "CHECK did not announce the delivery:\n{}", check);
+    assert!(check.lines().last().map_or(false, |l| l.starts_with("t3 OK")), "CHECK answered:\n{}", check);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
 /// An idling session is told of another's expunge, without being asked.
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_announces_an_expunge() -> Outcome<()> {
