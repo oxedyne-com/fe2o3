@@ -226,10 +226,12 @@ pub trait MailStore: Clone + Send + Sync + 'static {
         -> Outcome<MessageUid>;
 
     /// [`Self::append`] for a delivery, which a sender retries after a temporary failure: a
-    /// message whose Message-ID the folder already holds is not filed again, and the UID of the
-    /// copy there is answered, so a retry after a partial failure duplicates nothing. A message
-    /// without a Message-ID is filed every time. IMAP APPEND files what the client sends, and
-    /// does not come this way.
+    /// message the folder already holds, the same Message-ID and the same fields and body as its
+    /// sender set them (the fields added in transit aside, as
+    /// [`crate::email::header::sender_parts`] reads them), is not filed again, and the UID of
+    /// the copy there is answered, so a retry after a partial failure duplicates nothing. A
+    /// different message reusing a Message-ID, and a message without one, are filed. IMAP
+    /// APPEND files what the client sends, and does not come this way.
     fn deliver(
         &self,
         user:       &MailUser,

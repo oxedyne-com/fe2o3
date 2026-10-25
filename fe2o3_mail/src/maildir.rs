@@ -47,7 +47,10 @@ use oxedyne_fe2o3_core::{
     },
 };
 use oxedyne_fe2o3_net::{
-    email::header::message_id,
+    email::header::{
+        message_id,
+        sender_parts,
+    },
     mail::store::{
         FlagUpdate,
         FolderName,
@@ -376,7 +379,7 @@ impl MaildirStore {
     }
 
     /// Files a message in the folder: `append`, and `deliver` with the message's Message-ID as
-    /// `once`, which files nothing when the folder already holds that Message-ID.
+    /// `once`, which files nothing when the folder already holds the same message under it.
     fn file_message(
         &self,
         user:       &MailUser,
@@ -424,27 +427,6 @@ impl MaildirStore {
                 return Err(e);
             },
         };
-        // A copy already filed, by an attempt the sender was told failed, is the answer.
-        if let Some(id) = once {
-            let view = match Self::read_folder(&folder_dir, false, &lock) {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Err(e);
-                },
-            };
-            match Self::find_message_id(&folder_dir, &view, id, &lock) {
-                Ok(Some(uid)) => {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Ok(uid);
-                },
-                Ok(None) => {},
-                Err(e) => {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Err(e);
-                },
-            }
-        }
         // Every writer of cur/ holds the lock, so nothing can take the name between the test
         // and the rename.
         if cur_path.exists() {
@@ -462,51 +444,94 @@ impl MaildirStore {
         // The data is on disk; the entry naming it must be too before the UID is given out,
         // or a power loss leaves a uidlist naming a message that SMTP acknowledged and lost.
         res!(sync_parent_dir(&cur_path));
+        // One reading of the folder serves both the UID and the search for an earlier copy, so
+        // a delivery is filed first and taken back when it is a resend. A crash between the two
+        // leaves a duplicate, never a loss, and a resend leaves one UID unused.
         let view = res!(Self::read_folder(&folder_dir, false, &lock));
-        match view.entries.iter().find(|e| e.key == unique) {
-            Some(e) => Ok(e.meta.uid),
-            None => Err(err!(
+        let uid = match view.entries.iter().find(|e| e.key == unique) {
+            Some(e) => e.meta.uid,
+            None    => return Err(err!(
                 "The message just filed as {:?} has no UID in {:?}.", cur_path, folder_dir;
                 Bug, Missing)),
+        };
+        if let Some(id) = once {
+            if let Some(earlier) = Self::find_copy(&folder_dir, &view, &unique, id, bytes, &lock) {
+                match fs::remove_file(&cur_path) {
+                    Ok(())  => return Ok(earlier),
+                    Err(e)  => warn!("Could not take back {:?}, a resend of UID {}, so it stands \
+                        as a duplicate: {}.", cur_path, earlier.0, e),
+                }
+            }
         }
+        Ok(uid)
     }
 
-    /// The UID of the message in `view` whose Message-ID is `id`. The folder's Message-IDs are
-    /// kept in `hematite-msgids`, beside the uidlist and under the same lock, so a delivery reads
-    /// the header of only a message not yet listed there, a copy another hand dropped into new/
-    /// included; a missing or damaged index is rebuilt the same way, and a message gone leaves
-    /// it. The index is only ever a cache of the files, so a failed save is a warning.
-    fn find_message_id(
+    /// The UID of an earlier copy in `view` of the message `bytes`, whose Message-ID is `id`,
+    /// filed as `ours`: a message with the same Message-ID and the same [`sender_parts`], so that
+    /// a sender's retry is one message and a different message reusing a Message-ID is another.
+    ///
+    /// The folder's Message-IDs are kept in `hematite-msgids`, `<key>\t<Message-ID>` rows beside
+    /// the uidlist and under the same lock, so a delivery reads the header of only a message not
+    /// listed there, a copy another hand dropped into new/ included. The index is only a hint: a
+    /// row naming `id` is confirmed by reading that one message whole, and a row found wrong is
+    /// corrected. A message that cannot be read is a Message-ID unknown, given no row, so it is
+    /// tried again next time. The index is rebuilt from `view` in the same pass, so a missing or
+    /// damaged one is made whole and a message gone leaves it, and a failed save is a warning.
+    /// Nothing here fails a delivery: the worst outcome is a duplicate.
+    fn find_copy(
         folder_dir: &Path,
         view:       &FolderView,
+        ours:       &str,
         id:         &str,
+        bytes:      &[u8],
         _lock:      &ExclusiveLock,
     )
-        -> Outcome<Option<MessageUid>>
+        -> Option<MessageUid>
     {
         let path = folder_dir.join(MSGIDS_NAME);
-        let mut index = read_msgids(&path);
+        let old = read_msgids(&path);
+        let wanted = sender_parts(bytes);
+        let mut index: BTreeMap<String, String> = BTreeMap::new();
         let mut changed = false;
         let mut found = None;
         for e in &view.entries {
-            let listed = match index.get(&e.key) {
-                Some(m) => m.as_str() == id,
+            if e.key == ours { continue; }
+            let mut m = match old.get(&e.key) {
+                Some(m) => m.clone(),
                 None    => {
-                    let m = res!(read_head(&e.path)).and_then(|h| message_id(&h)).unwrap_or_default();
-                    let hit = m == id;
-                    index.insert(e.key.clone(), m);
                     changed = true;
-                    hit
+                    match read_head(&e.path) {
+                        Ok(Some(h)) => message_id(&h).unwrap_or_default(),
+                        Ok(None)    => continue, // gone since the reading
+                        Err(err)    => {
+                            warn!("Message {:?} is not indexed by Message-ID: {}.", e.path, err);
+                            continue;
+                        },
+                    }
                 },
             };
-            if listed && found.is_none() {
-                found = Some(e.meta.uid);
+            if found.is_none() && m == id {
+                match read_message(&e.path, e.meta.size) {
+                    Ok(full) => {
+                        let actual = message_id(&full).unwrap_or_default();
+                        if actual != m {
+                            m = actual;
+                            changed = true;
+                        } else if wanted.is_some() && sender_parts(&full) == wanted {
+                            found = Some(e.meta.uid);
+                        }
+                    },
+                    Err(err) => warn!("Message {:?}, indexed with the Message-ID {}, could not \
+                        be read to confirm it: {}.", e.path, id, err),
+                }
             }
+            index.insert(e.key.clone(), m);
         }
-        let before = index.len();
-        index.retain(|k, _| view.entries.iter().any(|e| &e.key == k));
-        if index.len() != before { changed = true; }
-        if changed {
+        if found.is_none() {
+            index.insert(ours.to_string(), id.to_string());
+            changed = true;
+        }
+        if changed || index.len() != old.len() {
             let mut text = String::new();
             for (k, m) in &index {
                 text.push_str(&fmt!("{}\t{}\n", k, m));
@@ -515,7 +540,7 @@ impl MaildirStore {
                 warn!("Could not save the Message-ID index {:?}: {}.", path, e);
             }
         }
-        Ok(found)
+        found
     }
 
     /// The folder read under its lock, which is released before this returns.

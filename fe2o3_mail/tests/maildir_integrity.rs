@@ -480,7 +480,7 @@ fn with_id(id: &str, tag: &str) -> Vec<u8> {
         id, tag, tag).into_bytes()
 }
 
-/// A delivery is filed once per Message-ID: a retry answers the UID already given, a message
+/// A resend is filed once per Message-ID: a retry answers the UID already given, a message
 /// without one is filed each time, a copy dropped into new/ by another hand counts, an expunged
 /// copy no longer does, and IMAP APPEND is never deduplicated.
 #[test]
@@ -493,7 +493,9 @@ fn a_redelivery_by_message_id_is_filed_once() -> Outcome<()> {
     let flags = MessageFlags { recent: true, ..MessageFlags::default() };
 
     let first = res!(store.deliver(&u, &inbox, &with_id("<a@x>", "a1"), flags, None));
-    let again = res!(store.deliver(&u, &inbox, &with_id("<a@x>", "a2"), flags, None));
+    let resend = [b"Received: from mx2 by mx; Mon, 26 Oct 2026 10:00:00 +0000\r\n".as_slice(),
+        &with_id("<a@x>", "a1")].concat();
+    let again = res!(store.deliver(&u, &inbox, &resend, flags, None));
     assert_eq!(first, again, "the retry answers the UID of the copy already filed");
     assert_eq!(res!(uid_map(&store, &u, &inbox)).len(), 1);
 
@@ -503,10 +505,10 @@ fn a_redelivery_by_message_id_is_filed_once() -> Outcome<()> {
 
     // Another MDA's copy, never read by this store.
     res!(fs::write(inbox_dir(&root).join("new").join("1.M1P1.other"), with_id("<b@x>", "b1")), IO, File);
-    res!(store.deliver(&u, &inbox, &with_id("<b@x>", "b2"), flags, None));
+    res!(store.deliver(&u, &inbox, &with_id("<b@x>", "b1"), flags, None));
     let map = res!(uid_map(&store, &u, &inbox));
     assert_eq!(map.len(), 4, "the other hand's copy holds the Message-ID: {:?}", map);
-    assert!(!map.values().any(|t| t == "b2"));
+    assert_eq!(map.values().filter(|t| *t == "b1").count(), 1);
 
     // Expunged, the copy is gone, and a later delivery is filed afresh.
     res!(store.update_flags(&u, &inbox, first, FlagUpdate::Add(MessageFlags {
