@@ -194,6 +194,26 @@ pub trait MailStore: Clone + Send + Sync + 'static {
     )
         -> Outcome<Vec<u8>>;
 
+    /// Hands `f` the stored bytes of each message of `uids`, in the order given. A UID the
+    /// folder no longer holds is skipped. A store that can read many messages under one
+    /// look at the folder overrides this; the default fetches each in turn.
+    fn visit_bytes<F>(
+        &self,
+        user:   &MailUser,
+        folder: &FolderName,
+        uids:   &[MessageUid],
+        mut f:  F,
+    )
+        -> Outcome<()>
+        where F: FnMut(MessageUid, &[u8]) -> Outcome<()>
+    {
+        for uid in uids {
+            let bytes = res!(self.fetch_bytes(user, folder, *uid));
+            res!(f(*uid, &bytes));
+        }
+        Ok(())
+    }
+
     /// The flag set returned may differ from the one given, where the
     /// implementation enforces an invariant such as always-clear `\Recent`.
     fn set_flags(

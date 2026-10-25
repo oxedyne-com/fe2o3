@@ -8,6 +8,7 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+use crate::imap::search;
 use crate::mail::{
     store::{
         FolderName,
@@ -476,8 +477,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                     res!(write_no(stream, tag, "No mailbox selected").await);
                     return Ok(false);
                 }
-                res!(self.do_search(stream, session, args, false).await);
-                res!(write_ok(stream, tag, "SEARCH completed").await);
+                res!(self.do_search(stream, session, tag, args, false).await);
                 Ok(false)
             }
             "EXPUNGE" => {
@@ -563,8 +563,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         res!(write_ok(stream, tag, "UID STORE completed").await);
                     }
                     "SEARCH" => {
-                        res!(self.do_search(stream, session, it.rest(), true).await);
-                        res!(write_ok(stream, tag, "UID SEARCH completed").await);
+                        res!(self.do_search(stream, session, tag, it.rest(), true).await);
                     }
                     _ => {
                         res!(write_bad(stream, tag, "UID subcommand not supported").await);
@@ -1000,55 +999,78 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         Ok(())
     }
 
+    /// Answers SEARCH or UID SEARCH, tagged response included: a key it cannot read is a
+    /// tagged BAD and never the whole mailbox.
     async fn do_search<S: AsyncRead + AsyncWrite + Unpin + Send>(
         &self,
         stream:     &mut S,
         session:    &mut ImapSession,
+        tag:        &str,
         args:       &str,
         by_uid:     bool,
     )
         -> Outcome<()>
     {
-        // Minimal SEARCH: ALL, UID <set>, SEEN/UNSEEN, ANSWERED,
-        // UNANSWERED, FLAGGED, DELETED. Anything else returns the
-        // entire mailbox.
+        // Literals (LITERAL+ is advertised) arrive after the line that announces them.
+        let mut segments: Vec<search::Segment> = Vec::new();
+        let mut line = args.to_string();
+        while let Some((before, n, sync)) = search::trailing_literal(&line) {
+            if n > IMAP_MAX_LITERAL {
+                return write_bad(stream, tag, "Literal too large").await;
+            }
+            segments.push(search::Segment::Text(before));
+            if sync {
+                res!(write_all(stream, b"+ Ready for literal data\r\n").await);
+            }
+            let mut buf = vec![0u8; n];
+            if let Err(e) = stream.read_exact(&mut buf).await {
+                return Err(err!(e, "Reading a SEARCH literal."; IO, Network, Read));
+            }
+            segments.push(search::Segment::Literal(String::from_utf8_lossy(&buf).into_owned()));
+            line = match res!(read_line(stream).await) {
+                Some(l) => l,
+                None    => return Err(err!("The client closed mid-SEARCH."; IO, Network, Read)),
+            };
+        }
+        segments.push(search::Segment::Text(line));
+        let key = match search::parse(&segments) {
+            Ok(k) => k,
+            Err(search::SearchError::Bad(text)) => return write_bad(stream, tag, &text).await,
+            Err(search::SearchError::BadCharset) => return write_no(stream, tag,
+                "[BADCHARSET (UTF-8 US-ASCII)] Charset not supported").await,
+        };
         res!(self.refresh_selected(session, false).await);
-        let trimmed = args.trim();
-        let upper = trimmed.to_uppercase();
-        let mut matched: Vec<&MessageMeta> = Vec::new();
-        if upper == "ALL" || upper.is_empty() {
-            for m in &session.messages { matched.push(m); }
-        } else if upper == "UNSEEN" {
-            for m in &session.messages { if !m.flags.seen { matched.push(m); } }
-        } else if upper == "SEEN" {
-            for m in &session.messages { if m.flags.seen { matched.push(m); } }
-        } else if upper == "FLAGGED" {
-            for m in &session.messages { if m.flags.flagged { matched.push(m); } }
-        } else if upper == "DELETED" {
-            for m in &session.messages { if m.flags.deleted { matched.push(m); } }
-        } else if upper.starts_with("UID ") {
-            let set = &trimmed[4..];
-            let indices = resolve_set(set, &session.messages, true);
-            for &i in &indices {
-                if let Some(m) = session.messages.get(i) { matched.push(m); }
-            }
-        } else {
-            // Fall back to ALL.
-            for m in &session.messages { matched.push(m); }
-        }
-        let mut parts: Vec<String> = Vec::new();
-        for m in &matched {
-            if by_uid {
-                parts.push(fmt!("{}", m.uid.0));
-            } else {
-                if let Some(idx) = session.messages.iter().position(|x| x.uid == m.uid) {
-                    parts.push(fmt!("{}", idx + 1));
+        let msgs = &session.messages;
+        let mut hits: Vec<usize> = Vec::new();
+        if key.needs_content() {
+            let (user, folder) = match (&session.user, &session.selected) {
+                (Some(u), Some(f)) => (u.clone(), f.clone()),
+                _ => return write_no(stream, tag, "No mailbox selected").await,
+            };
+            let uids: Vec<crate::mail::store::MessageUid> = msgs.iter().map(|m| m.uid).collect();
+            res!(self.store.visit_bytes(&user, &folder, &uids, |uid, bytes| {
+                if let Ok(idx) = msgs.binary_search_by_key(&uid.0, |m| m.uid.0) {
+                    if key.matches(idx, msgs, Some(&search::Content::new(bytes))) {
+                        hits.push(idx);
+                    }
                 }
+                Ok(())
+            }));
+            hits.sort();
+        } else {
+            hits = (0..msgs.len()).filter(|i| key.matches(*i, msgs, None)).collect();
+        }
+        let mut line = fmt!("* SEARCH");
+        for i in &hits {
+            match msgs.get(*i) {
+                Some(m) if by_uid   => line.push_str(&fmt!(" {}", m.uid.0)),
+                Some(_)             => line.push_str(&fmt!(" {}", i + 1)),
+                None                => (),
             }
         }
-        let line = fmt!("* SEARCH {}\r\n", parts.join(" "));
+        line.push_str("\r\n");
         res!(write_all(stream, line.as_bytes()).await);
-        Ok(())
+        write_ok(stream, tag, if by_uid { "UID SEARCH completed" } else { "SEARCH completed" }).await
     }
 
     async fn do_append<S: AsyncRead + AsyncWrite + Unpin + Send>(

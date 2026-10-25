@@ -543,6 +543,28 @@ impl MailStore for MaildirStore {
         read_message(&entry.path, entry.meta.size)
     }
 
+    fn visit_bytes<F>(
+        &self,
+        user:   &MailUser,
+        folder: &FolderName,
+        uids:   &[MessageUid],
+        mut f:  F,
+    )
+        -> Outcome<()>
+        where F: FnMut(MessageUid, &[u8]) -> Outcome<()>
+    {
+        let folder_dir = self.folder_path(user, folder);
+        let lock = res!(Self::lock_folder(&folder_dir));
+        let view = res!(Self::read_folder(&folder_dir, false, &lock));
+        for uid in uids {
+            if let Some(e) = view.find(*uid) {
+                let bytes = res!(read_message(&e.path, e.meta.size));
+                res!(f(*uid, &bytes));
+            }
+        }
+        Ok(())
+    }
+
     fn set_flags(
         &self,
         user:       &MailUser,

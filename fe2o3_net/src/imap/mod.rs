@@ -19,7 +19,7 @@
 //!   `BODY[]`, `BODY.PEEK[]`, `BODY[HEADER.FIELDS (...)]`,
 //!   `BODY.PEEK[HEADER.FIELDS (...)]`, `RFC822.HEADER`, `RFC822`.
 //! - `STORE` and `UID STORE` for `+FLAGS`, `-FLAGS`, `FLAGS`.
-//! - `UID SEARCH` (the trivial `ALL` and UID-range queries).
+//! - `SEARCH` and `UID SEARCH` with every RFC 3501 search key; see [`search`].
 //! - `APPEND` (synchronising and non-synchronising literals).
 //! - `EXPUNGE`, `CREATE`, `DELETE`.
 //!
@@ -31,4 +31,5 @@
 //! Anthropic Claude
 
 pub mod client;
+pub mod search;
 pub mod server;
