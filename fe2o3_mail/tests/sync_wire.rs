@@ -49,6 +49,7 @@ fn cursor() -> Outcome<Cursor> {
         highest_modseq: Some(1_234_567_890_123),
         polls:          9,
         backlog:        res!(UidSet::parse("1:5,9,100:120")),
+        floor:          3_999_999_000,
     })
 }
 
@@ -69,6 +70,7 @@ fn test_delta_round_trips_with_sets_and_base64_bodies() -> Outcome<()> {
                 raw:            raw.clone(),
                 whole:          true,
                 link:           Some(LinkKey::MessageId(fmt!("a@b.c"))),
+                arrival:        true,
             },
             NewMessage {
                 uid:            129,
@@ -78,6 +80,7 @@ fn test_delta_round_trips_with_sets_and_base64_bodies() -> Outcome<()> {
                 raw:            b"Subject: big\r\n\r\n".to_vec(),
                 whole:          false,
                 link:           Some(LinkKey::GmMsgId(u64::MAX)),
+                arrival:        false,
             },
             NewMessage { uid: 128, raw: Vec::new(), ..Default::default() },
         ],
@@ -106,7 +109,7 @@ fn test_delta_round_trips_with_sets_and_base64_bodies() -> Outcome<()> {
     assert!(text.contains("\"tier\":\"\""), "{}", text);
     assert!(!text.contains("reset") && !text.contains("highest_modseq"), "{}", text);
     let no_raw = res!(wire::delta_from(&res!(parse(r#"{"mailbox":"INBOX",
-        "cursor":{"uid_validity":1},"new":[{"uid":5,"whole":true}]}"#))));
+        "cursor":{"uid_validity":1,"floor":0},"new":[{"uid":5,"whole":true}]}"#))));
     assert_eq!(no_raw, bare);
     Ok(())
 }
@@ -114,16 +117,17 @@ fn test_delta_round_trips_with_sets_and_base64_bodies() -> Outcome<()> {
 #[test]
 fn test_delta_refuses_what_it_cannot_read() -> Outcome<()> {
     let bad = [
-        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1},"vanished":"0:x"}"#,
-        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1,"backlog":"7:"}}"#,
+        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1,"floor":0},"vanished":"0:x"}"#,
+        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1,"floor":0,"backlog":"7:"}}"#,
         r#"{"mailbox":"INBOX","cursor":{"uid_validity":0}}"#,
+        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1}}"#,
         r#"{"mailbox":"INBOX"}"#,
         r#"{"cursor":{"uid_validity":1}}"#,
         r#"{"mailbox":"INBOX","cursor":{"uid_validity":4294967296}}"#,
-        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1},"new":[{"uid":3,"raw":"not base64!"}]}"#,
-        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1},"new":[{"uid":0}]}"#,
-        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1},"flags":[{"uid":3,"flags":[1]}]}"#,
-        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1},"tier":"psychic"}"#,
+        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1,"floor":0},"new":[{"uid":3,"raw":"not base64!"}]}"#,
+        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1,"floor":0},"new":[{"uid":0}]}"#,
+        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1,"floor":0},"flags":[{"uid":3,"flags":[1]}]}"#,
+        r#"{"mailbox":"INBOX","cursor":{"uid_validity":1,"floor":0},"tier":"psychic"}"#,
     ];
     for b in bad {
         assert!(wire::delta_from(&res!(parse(b))).is_err(), "read: {}", b);

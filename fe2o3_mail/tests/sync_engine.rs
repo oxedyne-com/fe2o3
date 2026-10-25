@@ -589,6 +589,47 @@ async fn test_new_messages_bounded_newest_first_none_lost_00() -> Outcome<()> {
     Ok(())
 }
 
+/// Only mail that came after a folder became known is an arrival: what a capped first sync left
+/// behind is fetched later without being one, and so is a rebuild's backlog; a message delivered
+/// meanwhile is one, and is fetched beside that backlog.
+#[tokio::test]
+async fn test_only_mail_after_the_first_sync_is_an_arrival_00() -> Outcome<()> {
+    for caps in [QRESYNC, CONDSTORE, PLAIN] {
+        let mut s = Server::new(caps);
+        for i in 1..=7 {
+            s.deliver("INBOX", &fmt!("m{}@x", i));
+        }
+        let mut st = Store::default();
+        let b = Budget { max_count: 3, ..Budget::default() };
+        let arrived = |d: &Delta| d.new.iter().filter(|m| m.arrival).map(|m| m.uid).collect::<Vec<_>>();
+        let d = res!(round(&mut s, &mut st, &b, &[]).await);
+        req!(Vec::<u32>::new(), arrived(&d), "{} first", caps);
+        req!(7, d.cursor.floor, "{}", caps);
+        s.deliver("INBOX", "m8@x");
+        let d = res!(round(&mut s, &mut st, &b, &[]).await);
+        req!(vec![8, 4, 3], d.new.iter().map(|m| m.uid).collect::<Vec<_>>(), "{}", caps);
+        req!(vec![8], arrived(&d), "{} backlog beside a delivery", caps);
+        let d = res!(round(&mut s, &mut st, &b, &[]).await);
+        req!(vec![2, 1], d.new.iter().map(|m| m.uid).collect::<Vec<_>>(), "{}", caps);
+        req!(Vec::<u32>::new(), arrived(&d), "{} completion", caps);
+        req!(false, d.more);
+        s.deliver("INBOX", "m9@x");
+        let d = res!(round(&mut s, &mut st, &b, &[]).await);
+        req!(vec![9], arrived(&d), "{} after", caps);
+        // A rebuild brings the folder back under new UIDs, above the old floor: none arrives.
+        s.renumber("INBOX", 777);
+        loop {
+            let d = res!(round(&mut s, &mut st, &b, &[]).await);
+            req!(Vec::<u32>::new(), arrived(&d), "{} rebuild", caps);
+            if !d.more { break; }
+        }
+        s.deliver("INBOX", "m10@x");
+        let d = res!(round(&mut s, &mut st, &b, &[]).await);
+        req!(1, arrived(&d).len(), "{} after the rebuild", caps);
+    }
+    Ok(())
+}
+
 /// Header fetches count against `max_bytes` as bodies do, so a request's bytes are bounded by
 /// the budget and not by `max_count` times the header size; nothing is skipped meanwhile.
 #[tokio::test]

@@ -2,11 +2,11 @@
 //! [`Delta`] and the page that applies it read the same shape (`jdat` feature).
 //!
 //! ```text
-//! Cursor   {uid_validity, highest_uid, highest_modseq?, polls, backlog: "1:5"}
+//! Cursor   {uid_validity, highest_uid, highest_modseq?, polls, backlog: "1:5", floor}
 //! Snapshot {mailbox, cursor?, held?: "1:40,42", window?: "30:42"}
 //! Budget   {max_count?, max_bytes?, bodies?}
 //! Delta    {mailbox, tier: "qresync"|"condstore"|"full"|"", reset?: {old, new},
-//!           new: [{uid, flags, internal_date, size, raw, whole, link_mid?, link_gm?}],
+//!           new: [{uid, flags, internal_date, size, raw, whole, arrival, link_mid?, link_gm?}],
 //!           flags: [{uid, flags}], vanished: "3,7", cursor, more}
 //! Entry    {id, mailbox, uid_validity, uid, message_id?, size?, year?,
 //!           action: "flags"|"move"|"archive"|"trash"|"junk"|"not_junk"|"expunge",
@@ -17,7 +17,9 @@
 //! base64, and may be left out by a reader that keeps the bytes elsewhere (the page hands the
 //! delta to its wasm apply without them). An entry's `id` is read as a number or a decimal
 //! string (a JavaScript number holds only 53 bits), and its reply's `id` is written back in the
-//! same form, so the page matches the two with `===`.
+//! same form, so the page matches the two with `===`. A known folder's cursor must carry its
+//! `floor`, since a missing one would turn everything left in its backlog into arrivals, and
+//! arrivals fire triggers that spend.
 //!
 //! Decoding is strict where a silent default would lose something: a UID set that does not
 //! parse, an unknown action or target, a number out of range or a flag that is not a string is
@@ -159,12 +161,18 @@ pub fn cursor_from(c: &Dat) -> Outcome<Cursor> {
         return Err(err!("A cursor must be an object, not {:?}.", c.kind(); Invalid, Input));
     }
     let modseq = res!(whole(c, "highest_modseq", i64::MAX as u64));
+    let uv = res!(u32_of(c, "uid_validity"));
+    if uv != 0 && field(c, "floor").is_none() {
+        return Err(err!("The cursor of a folder under UIDVALIDITY {} has no 'floor', so what is \
+            an arrival cannot be told.", uv; Missing, Input));
+    }
     Ok(Cursor {
         uid_validity:   res!(u32_of(c, "uid_validity")),
         highest_uid:    res!(u32_of(c, "highest_uid")),
         highest_modseq: if modseq > 0 { Some(modseq) } else { None },
         polls:          res!(u32_of(c, "polls")),
         backlog:        res!(uid_set(c, "backlog")),
+        floor:          res!(u32_of(c, "floor")),
     })
 }
 
@@ -174,6 +182,7 @@ pub fn cursor_dat(c: &Cursor) -> Dat {
         (dat!("highest_uid"),   num_dat(c.highest_uid as u64)),
         (dat!("polls"),         num_dat(c.polls as u64)),
         (dat!("backlog"),       set_dat(&c.backlog)),
+        (dat!("floor"),         num_dat(c.floor as u64)),
     ];
     if let Some(m) = c.highest_modseq {
         p.push((dat!("highest_modseq"), num_dat(m)));
@@ -288,6 +297,7 @@ fn new_from(m: &Dat) -> Outcome<NewMessage> {
         raw,
         whole:          res!(boolean(m, "whole")),
         link,
+        arrival:        res!(boolean(m, "arrival")),
     })
 }
 
@@ -299,6 +309,7 @@ fn new_dat(m: &NewMessage) -> Dat {
         (dat!("size"),          num_dat(m.size as u64)),
         (dat!("raw"),           dat!(base64::encode(&m.raw))),
         (dat!("whole"),         Dat::Bool(m.whole)),
+        (dat!("arrival"),       Dat::Bool(m.arrival)),
     ];
     match &m.link {
         Some(LinkKey::MessageId(s)) => p.push((dat!("link_mid"), dat!(s.clone()))),

@@ -14,6 +14,10 @@
 //!   over the whole held set every `sweep_every`th, so a message read elsewhere long ago does not
 //!   keep a stale state here; `UID SEARCH ALL` against the held set for what vanished.
 //!
+//! Each new message says whether it is an arrival ([`NewMessage::arrival`]): only what came after
+//! the folder became known to the device is, never what a capped first read or a rebuild left in
+//! the backlog, so a trigger that fires on arrivals does not fire on old mail.
+//!
 //! The device advances its [`Cursor`] only once the delta's writes have landed ([`apply`]), so a
 //! crash replays a delta and never skips one, and a replayed apply changes nothing. A UIDVALIDITY
 //! change makes the delta a [`Reset`]: the device sets its one old generation aside, rebuilds,
@@ -235,6 +239,7 @@ pub struct Cursor {
     pub highest_modseq: Option<u64>,    // CONDSTORE and QRESYNC only
     pub polls:          u32,            // counts full-reconcile polls, for the sweep
     pub backlog:        UidSet,         // seen arriving, not yet fetched; newest are fetched first
+    pub floor:          u32,            // the folder's last UID when it became known: none up to here arrived
 }
 
 /// What a device holds of one folder, sent with each sync.
@@ -290,6 +295,7 @@ pub struct NewMessage {
     pub raw:            Vec<u8>,    // the whole message where `whole`, else its header block
     pub whole:          bool,
     pub link:           Option<LinkKey>,
+    pub arrival:        bool,       // came after the folder became known, so a trigger may fire on it
 }
 
 /// A held message's flags as the server now has them. [`apply`] turns them into `+`/`-` changes
@@ -426,6 +432,16 @@ pub async fn sync_folder<S: MailSession>(
     sizes.sort();
     sizes.dedup_by_key(|p| p.0);
     let highest = sizes.last().map(|p| p.0.max(base.highest_uid)).unwrap_or(base.highest_uid);
+    // Arrivals are told from the floor: the folder's last UID when this device first read it,
+    // or rebuilt it under a new UIDVALIDITY. What was already there is fetched, a capped first
+    // read's remainder later from the backlog, without being an arrival; what came after is one,
+    // however long it waits in the backlog. UIDNEXT is read at the select, so a message delivered
+    // between the select and the fetch counts as arriving.
+    let floor = if fresh || d.reset.is_some() {
+        if st.uid_next > 0 { st.uid_next - 1 } else { highest }
+    } else {
+        base.floor
+    };
     // A backlog UID the server no longer returns was expunged before it was fetched.
     let mut backlog = UidSet::from(&sizes.iter().map(|p| p.0).collect::<Vec<_>>()[..]);
 
@@ -488,6 +504,7 @@ pub async fn sync_folder<S: MailSession>(
             size:           m.size,
             raw:            m.body,
             whole:          w,
+            arrival:        m.uid > floor && !held.contains(m.uid),
         });
     }
     // What was asked for and not returned was expunged meanwhile; either way it leaves the backlog.
@@ -500,6 +517,7 @@ pub async fn sync_folder<S: MailSession>(
         highest_modseq: st.highest_modseq,
         polls,
         backlog,
+        floor,
     };
     Ok(d)
 }
