@@ -53,12 +53,12 @@ fn test_config_file_sources_lists_both_forms_after_env_and_reads_none() -> Outco
     assert!(copy.resolve_config(root).is_err(), "the fixture must be unreadable to prove no read");
 
     let got = res!(route.config_file_sources(root));
-    let want: Vec<PathBuf> = vec![
-        root.join("./keys/hdr"),
-        root.join("./keys/stripe/sandbox/sk"),
-        PathBuf::from("/abs/oregami_key"),      // An absolute path replaces the root.
-        root.join("a"),
-        root.join("b"),
+    let want: Vec<(String, PathBuf)> = vec![
+        (fmt!("Authorization"), root.join("./keys/hdr")),
+        (fmt!("sk"),            root.join("./keys/stripe/sandbox/sk")),
+        (fmt!("voice"),         PathBuf::from("/abs/oregami_key")),  // An absolute path replaces the root.
+        (fmt!("two"),           root.join("a")),
+        (fmt!("two"),           root.join("b")),
     ];
     assert_eq!(got, want);
     Ok(())
@@ -81,7 +81,7 @@ fn test_config_file_sources_on_a_webhook_route() -> Outcome<()> {
         ],
     };
     let got = res!(route.config_file_sources(root));
-    assert_eq!(got, vec![root.join("./keys/stripe/sandbox/whsec")]);
+    assert_eq!(got, vec![(fmt!("whsec"), root.join("./keys/stripe/sandbox/whsec"))]);
     Ok(())
 }
 

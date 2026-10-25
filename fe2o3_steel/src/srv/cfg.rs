@@ -370,25 +370,34 @@ impl ApiRoute {
     }
 
     /// Every file a [`ApiRoute::resolve_headers`] and [`ApiRoute::resolve_config`] would read,
-    /// in order of appearance, without reading any of them.
+    /// in order of appearance, each with the header name or config key it is read for, without
+    /// reading any of them.
     ///
     /// Each `{file:}` and `{file?:}` path is taken after `{env:}` resolution and joined to `root`
     /// exactly as the resolve joins it, so an absolute path stays absolute. A caller that must vet
-    /// where secrets come from can then refuse a path before anything is read from it.
-    pub fn config_file_sources(&self, root: &Path) -> Outcome<Vec<PathBuf>> {
+    /// where secrets come from can then refuse a path, naming its key, before anything is read.
+    pub fn config_file_sources(&self, root: &Path) -> Outcome<Vec<(String, PathBuf)>> {
         let mut out = Vec::new();
-        for (_name, value) in self.headers.iter().chain(self.config.iter()) {
-            res!(Self::file_sources_into(value, root, &mut out));
+        for (name, value) in self.headers.iter().chain(self.config.iter()) {
+            res!(Self::file_sources_into(name, value, root, &mut out));
         }
         Ok(out)
     }
 
-    /// Append the `{file:}`/`{file?:}` paths of one value, after `{env:}` resolution, to `out`.
-    fn file_sources_into(value: &str, root: &Path, out: &mut Vec<PathBuf>) -> Outcome<()> {
+    /// Append the `{file:}`/`{file?:}` paths of one value, after `{env:}` resolution, to `out`,
+    /// each beside the key `name` it belongs to.
+    fn file_sources_into(
+        name:   &str,
+        value:  &str,
+        root:   &Path,
+        out:    &mut Vec<(String, PathBuf)>,
+    )
+        -> Outcome<()>
+    {
         let resolved = res!(Self::resolve_env_refs(value));
         let mut pos = 0;
         while let Some((start, end, marker_len)) = res!(Self::first_file_ref(&resolved[pos..], value)) {
-            out.push(root.join(&resolved[pos + start + marker_len..pos + end]));
+            out.push((name.to_string(), root.join(&resolved[pos + start + marker_len..pos + end])));
             pos += end + 1;
         }
         Ok(())
@@ -590,10 +599,10 @@ impl WebhookRoute {
 
     /// Every file [`WebhookRoute::resolve_config`] would read, without reading any. See
     /// [`ApiRoute::config_file_sources`].
-    pub fn config_file_sources(&self, root: &Path) -> Outcome<Vec<PathBuf>> {
+    pub fn config_file_sources(&self, root: &Path) -> Outcome<Vec<(String, PathBuf)>> {
         let mut out = Vec::new();
-        for (_name, value) in &self.config {
-            res!(ApiRoute::file_sources_into(value, root, &mut out));
+        for (name, value) in &self.config {
+            res!(ApiRoute::file_sources_into(name, value, root, &mut out));
         }
         Ok(out)
     }
