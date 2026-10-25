@@ -116,6 +116,87 @@ async fn setup(name: &str, n: usize) -> Outcome<(u16, PathBuf)> {
     Ok((port, root))
 }
 
+/// The FLAGS a `UID FETCH n (FLAGS)` reply gives UID `uid`, if it names it.
+fn flags_of(reply: &str, uid: u32) -> Option<String> {
+    for l in reply.lines() {
+        if l.contains(&fmt!("UID {} ", uid)) || l.contains(&fmt!("UID {})", uid)) {
+            if let Some(i) = l.find("FLAGS (") {
+                let rest = &l[i + 7..];
+                return rest.find(')').map(|j| rest[..j].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Another session expunges UID 1; this one, not yet told, marks its message 2, which is UID 2.
+#[tokio::test(flavor = "multi_thread")]
+async fn sequence_numbers_hold_until_the_expunge_is_announced() -> Outcome<()> {
+    let (port, root) = res!(setup("seq", 3).await);
+    let mut a = res!(Sess::open(port).await);
+    let mut b = res!(Sess::open(port).await);
+    res!(b.cmd("UID STORE 1 +FLAGS (\\Deleted)").await);
+    res!(b.cmd("EXPUNGE").await);
+
+    let store = res!(a.cmd("STORE 2 +FLAGS (\\Deleted)").await);
+    assert!(!store.contains("EXPUNGE"), "an EXPUNGE was sent during STORE:\n{}", store);
+    assert!(store.contains("* 2 FETCH (FLAGS (\\Deleted))"), "STORE 2 answered:\n{}", store);
+
+    let fetch = res!(a.cmd("UID FETCH 1:* (UID FLAGS)").await);
+    assert!(fetch.starts_with("* 1 EXPUNGE\r\n"), "the expunge of UID 1 was not announced first:\n{}", fetch);
+    assert_eq!(flags_of(&fetch, 2).as_deref(), Some("\\Deleted"), "UID 2 after STORE 2:\n{}", fetch);
+    assert_eq!(flags_of(&fetch, 3).as_deref(), Some(""), "UID 3 after STORE 2:\n{}", fetch);
+    assert!(fetch.contains("* 1 FETCH (UID 2 "), "UID 2 is not message 1 after the EXPUNGE:\n{}", fetch);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// A non-UID SEARCH answers in the numbers the client holds, and NOOP then announces the
+/// expunge, highest first, and the delivery.
+#[tokio::test(flavor = "multi_thread")]
+async fn search_keeps_the_view_and_noop_reconciles_it() -> Outcome<()> {
+    let (port, root) = res!(setup("search", 4).await);
+    let mut a = res!(Sess::open(port).await);
+    let mut b = res!(Sess::open(port).await);
+    res!(b.cmd("UID STORE 1,3 +FLAGS (\\Deleted)").await);
+    res!(b.cmd("EXPUNGE").await);
+    res!(a.cmd("STORE 4 +FLAGS (\\Flagged)").await);
+
+    let search = res!(a.cmd("SEARCH FLAGGED").await);
+    assert!(search.contains("* SEARCH 4\r\n"), "SEARCH FLAGGED in the client's numbers:\n{}", search);
+    assert!(!search.contains("EXPUNGE"), "an EXPUNGE was sent during SEARCH:\n{}", search);
+
+    let noop = res!(a.cmd("NOOP").await);
+    let want = "* 3 EXPUNGE\r\n* 1 EXPUNGE\r\n";
+    assert!(noop.starts_with(want), "NOOP did not announce 3 then 1:\n{}", noop);
+    assert!(!noop.contains("EXISTS"), "NOOP sent EXISTS with nothing delivered:\n{}", noop);
+    let search = res!(a.cmd("SEARCH FLAGGED").await);
+    assert!(search.contains("* SEARCH 2\r\n"), "SEARCH FLAGGED after NOOP:\n{}", search);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// An idling session is told of another's expunge, without being asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_announces_an_expunge() -> Outcome<()> {
+    let (port, root) = res!(setup("idle", 2).await);
+    let mut a = res!(Sess::open(port).await);
+    let mut b = res!(Sess::open(port).await);
+    res!(a.r.get_mut().write_all(b"i1 IDLE\r\n").await, IO, Network);
+    let mut l = String::new();
+    res!(a.r.read_line(&mut l).await, IO, Network);
+    assert!(l.starts_with("+"), "IDLE answered {:?}", l);
+    res!(b.cmd("UID STORE 1 +FLAGS (\\Deleted)").await);
+    res!(b.cmd("EXPUNGE").await);
+    l.clear();
+    let got = tokio::time::timeout(Duration::from_secs(15), a.r.read_line(&mut l)).await;
+    assert!(got.is_ok(), "no untagged response within 15 s of the expunge");
+    assert_eq!(l, "* 1 EXPUNGE\r\n");
+    res!(a.r.get_mut().write_all(b"DONE\r\n").await, IO, Network);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
 /// A toggles \Seen on UID 1 while B sets \Flagged once per trial; \Flagged must survive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_concurrent_flag_is_never_lost() -> Outcome<()> {

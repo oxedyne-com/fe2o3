@@ -26,6 +26,10 @@ use crate::mail::{
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     net::SocketAddr,
     sync::Arc,
     time::{
@@ -85,8 +89,11 @@ struct ImapSession {
     user:           Option<MailUser>,       // set on a successful LOGIN
     selected:       Option<FolderName>,
     read_only:      bool,                   // the selection came from EXAMINE
-    // In UID order, refreshed on SELECT, EXAMINE and NOOP, and after STORE and EXPUNGE.
+    // The client's view, in UID order: sequence number n is messages[n - 1]. It changes only
+    // as the client is told, so a message another session expunges stays, as a ghost in
+    // `ghosts`, until its EXPUNGE may be sent (RFC 3501 §7.4.1).
     messages:       Vec<MessageMeta>,
+    ghosts:         BTreeSet<u32>,          // UIDs gone from the folder, not yet announced
 }
 
 impl ImapSession {
@@ -96,6 +103,7 @@ impl ImapSession {
             selected:   None,
             read_only:  false,
             messages:   Vec::new(),
+            ghosts:     BTreeSet::new(),
         }
     }
 }
@@ -204,6 +212,13 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         };
         info!("IMAP {} {} {} {}", peer, tag, cmd, log_args);
 
+        // RFC 3501 §7.4.1: no EXPUNGE while answering FETCH, STORE or SEARCH (the UID forms
+        // may carry one), nor for SELECT, EXAMINE and CLOSE, which drop the view, or LOGOUT.
+        match cmd.as_str() {
+            "FETCH" | "STORE" | "SEARCH" | "SELECT" | "EXAMINE" | "CLOSE" | "LOGOUT" => (),
+            _ => res!(Self::announce_expunged(stream, session).await),
+        }
+
         match cmd.as_str() {
             "CAPABILITY" => {
                 let line = fmt!("* CAPABILITY {}\r\n", capability_list());
@@ -213,8 +228,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             }
             "NOOP" => {
                 if session.user.is_some() && session.selected.is_some() {
-                    res!(self.refresh_selected(session, false).await);
-                    res!(self.write_select_status(stream, session).await);
+                    res!(self.sync_view(stream, session, true).await);
                 }
                 res!(write_ok(stream, &tag, "NOOP completed").await);
                 Ok(false)
@@ -290,7 +304,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 };
                 session.selected = Some(folder);
                 session.read_only = cmd == "EXAMINE";
-                res!(self.refresh_selected(session, true).await);
+                res!(self.load_view(session).await);
                 res!(self.write_select_status(stream, session).await);
                 let suffix = if session.read_only { "[READ-ONLY]" } else { "[READ-WRITE]" };
                 res!(write_ok(stream, &tag, &fmt!("{} {} completed", suffix, cmd)).await);
@@ -306,6 +320,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 session.selected = None;
                 session.read_only = false;
                 session.messages.clear();
+                session.ghosts.clear();
                 res!(write_ok(stream, &tag, "CLOSE completed").await);
                 Ok(false)
             }
@@ -523,6 +538,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         return Ok(false);
                     }
                 };
+                res!(self.sync_view(stream, session, true).await);
                 let removed = res!(self.on_store(move |s| s.expunge(&user, &folder)).await);
                 // For each expunged UID we send an untagged EXPUNGE
                 // with the *sequence number* (1-based index in the
@@ -616,7 +632,8 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
     ///
     /// The client sends `IDLE`, we answer `+ idling`, and from then until it
     /// sends `DONE` the only thing it may send is `DONE`. We meanwhile watch
-    /// the mailbox and push an untagged `EXISTS` when the count moves.
+    /// the mailbox and push an untagged `EXPUNGE` for each message gone and an `EXISTS` when
+    /// one arrives.
     ///
     /// # Why a timeout around the read, and not `select!`
     ///
@@ -636,18 +653,10 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
     )
         -> Outcome<bool>
     {
-        let user = match session.user.clone() {
-            Some(u) => u,
-            None => return Ok(false),
-        };
-        let folder = match session.selected.clone() {
-            Some(f) => f,
-            None => return Ok(false),
-        };
+        if session.user.is_none() || session.selected.is_none() { return Ok(false); }
 
         res!(write_all(stream, b"+ idling\r\n").await);
 
-        let mut last_exists = res!(self.folder_status(&user, &folder).await).exists;
         let mut pending: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 256];
         let mut waited = Duration::from_secs(0);
@@ -696,15 +705,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 Err(_elapsed) => {
                     waited = waited.saturating_add(IDLE_POLL_INTERVAL);
 
-                    let status = res!(self.folder_status(&user, &folder).await);
-                    if status.exists != last_exists {
-                        last_exists = status.exists;
-                        res!(self.refresh_selected(session, false).await);
-                        res!(write_all(stream,
-                            fmt!("* {} EXISTS\r\n", status.exists).as_bytes()).await);
-                        res!(write_all(stream,
-                            fmt!("* {} RECENT\r\n", status.recent).as_bytes()).await);
-                    }
+                    res!(self.sync_view(stream, session, true).await);
 
                     // RFC 2177 tells clients to re-issue IDLE at least every
                     // 29 minutes, and warns servers to expect stale ones. End
@@ -727,24 +728,79 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         self.on_store(move |s| s.folder_status(&user, &folder)).await
     }
 
-    async fn refresh_selected(
+    /// Replaces the view with the folder as it is, for SELECT and EXAMINE, which report it
+    /// whole. SELECT takes \Recent from the folder for this session.
+    async fn load_view(&self, session: &mut ImapSession) -> Outcome<()> {
+        let (user, folder) = match (session.user.clone(), session.selected.clone()) {
+            (Some(u), Some(f))  => (u, f),
+            _                   => return Ok(()),
+        };
+        let read_only = session.read_only;
+        session.messages = res!(self.on_store(move |s| s.list_messages(&user, &folder, read_only)).await);
+        session.ghosts.clear();
+        Ok(())
+    }
+
+    /// Brings the view up to date with the folder: flags are refreshed, a message delivered
+    /// since is added with an untagged EXISTS, and a message gone becomes a ghost, keeping its
+    /// sequence number. With `announce`, where RFC 3501 §7.4.1 allows an EXPUNGE, every
+    /// ghost is then announced and dropped.
+    async fn sync_view<S: AsyncWrite + Unpin>(
         &self,
+        stream:     &mut S,
         session:    &mut ImapSession,
-        clear_rec:  bool,
+        announce:   bool,
     )
         -> Outcome<()>
     {
-        let user = match session.user.clone() {
-            Some(u) => u,
-            None => return Ok(()),
+        let (user, folder) = match (session.user.clone(), session.selected.clone()) {
+            (Some(u), Some(f))  => (u, f),
+            _                   => return Ok(()),
         };
-        let folder = match session.selected.clone() {
-            Some(f) => f,
-            None => return Ok(()),
-        };
-        let read_only = !clear_rec || session.read_only;
-        let messages = res!(self.on_store(move |s| s.list_messages(&user, &folder, read_only)).await);
-        session.messages = messages;
+        let listed = res!(self.on_store(move |s| s.list_messages(&user, &folder, true)).await);
+        let mut now: BTreeMap<u32, MessageMeta> = listed.into_iter().map(|m| (m.uid.0, m)).collect();
+        for m in session.messages.iter_mut() {
+            match now.remove(&m.uid.0) {
+                Some(fresh) => {
+                    // \Recent stays with the session that first saw the message.
+                    let recent = m.flags.recent || fresh.flags.recent;
+                    *m = fresh;
+                    m.flags.recent = recent;
+                },
+                None => { session.ghosts.insert(m.uid.0); },
+            }
+        }
+        if announce {
+            res!(Self::announce_expunged(stream, session).await);
+        }
+        // UIDs only rise, so a message the view lacks below its highest UID was never in it.
+        let top = session.messages.last().map(|m| m.uid.0).unwrap_or(0);
+        let before = session.messages.len();
+        session.messages.extend(now.into_values().filter(|m| m.uid.0 > top));
+        if session.messages.len() != before {
+            let recent = session.messages.iter().filter(|m| m.flags.recent).count();
+            res!(write_all(stream, fmt!("* {} EXISTS\r\n* {} RECENT\r\n",
+                session.messages.len(), recent).as_bytes()).await);
+        }
+        Ok(())
+    }
+
+    /// Sends `* n EXPUNGE` for every ghost, highest sequence number first so that each number
+    /// still means what the client holds, and drops them from the view.
+    async fn announce_expunged<S: AsyncWrite + Unpin>(
+        stream:     &mut S,
+        session:    &mut ImapSession,
+    )
+        -> Outcome<()>
+    {
+        if session.ghosts.is_empty() { return Ok(()); }
+        for idx in (0..session.messages.len()).rev() {
+            if session.ghosts.contains(&session.messages[idx].uid.0) {
+                res!(write_all(stream, fmt!("* {} EXPUNGE\r\n", idx + 1).as_bytes()).await);
+                session.messages.remove(idx);
+            }
+        }
+        session.ghosts.clear();
         Ok(())
     }
 
@@ -767,7 +823,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         };
         let status = res!(self.folder_status(&user, &folder).await);
         let lines = [
-            fmt!("* {} EXISTS\r\n", status.exists),
+            fmt!("* {} EXISTS\r\n", session.messages.len()),
             fmt!("* {} RECENT\r\n", status.recent),
             fmt!("* OK [UIDVALIDITY {}] UIDs valid\r\n", status.uid_validity),
             fmt!("* OK [UIDNEXT {}] Next UID\r\n", status.uid_next),
@@ -803,15 +859,15 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             Some(f) => f.clone(),
             None => return Ok(()),
         };
-        res!(self.refresh_selected(session, false).await);
+        res!(self.sync_view(stream, session, by_uid).await);
 
         let items = parse_fetch_items(items_raw);
         let indices = resolve_set(seq_set, &session.messages, by_uid);
 
         for &idx in &indices {
             let meta = match session.messages.get(idx) {
-                Some(m) => m.clone(),
-                None => continue,
+                Some(m) if !session.ghosts.contains(&m.uid.0) => m.clone(),
+                _ => continue, // expunged elsewhere: nothing to fetch, and its EXPUNGE waits
             };
             let seq_no = idx + 1;
 
@@ -829,7 +885,14 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             }
             let raw: Option<Vec<u8>> = if needs_bytes {
                 let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
-                Some(res!(self.on_store(move |s| s.fetch_bytes(&user, &folder, uid)).await))
+                match res!(self.on_store(move |s| s.fetch_bytes(&user, &folder, uid)).await) {
+                    Some(b) => Some(b),
+                    None    => {
+                        // Expunged since the view was brought up to date.
+                        session.ghosts.insert(meta.uid.0);
+                        continue;
+                    },
+                }
             } else {
                 None
             };
@@ -988,7 +1051,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             Some(f) => f.clone(),
             None => return Ok(()),
         };
-        res!(self.refresh_selected(session, false).await);
+        res!(self.sync_view(stream, session, by_uid).await);
         let indices = resolve_set(seq_set, &session.messages, by_uid);
         let op_upper = op.to_ascii_uppercase();
         let silent = op_upper.ends_with(".SILENT");
@@ -1009,13 +1072,16 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
 
         for &idx in &indices {
             let meta = match session.messages.get(idx) {
-                Some(m) => m.clone(),
-                None => continue,
+                Some(m) if !session.ghosts.contains(&m.uid.0) => m.clone(),
+                _ => continue, // expunged elsewhere: no effect, and its EXPUNGE waits
             };
             let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
             let final_flags = match res!(self.on_store(move |s| s.update_flags(&user, &folder, uid, update)).await) {
                 Some(f) => f,
-                None    => continue, // expunged by another session meanwhile
+                None    => {
+                    session.ghosts.insert(meta.uid.0);
+                    continue;
+                },
             };
             if let Some(m) = session.messages.iter_mut().find(|m| m.uid == meta.uid) {
                 m.flags = final_flags;
@@ -1072,8 +1138,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             Err(search::SearchError::BadCharset) => return write_no(stream, tag,
                 "[BADCHARSET (UTF-8 US-ASCII)] Charset not supported").await,
         };
-        res!(self.refresh_selected(session, false).await);
+        res!(self.sync_view(stream, session, by_uid).await);
         let msgs = &session.messages;
+        let ghosts = &session.ghosts;
         let mut hits: Vec<usize>;
         if key.needs_content() {
             let (user, folder) = match (&session.user, &session.selected) {
@@ -1084,6 +1151,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             let metas = msgs.clone();
             hits = res!(self.on_store(move |s| {
                 let mut hits: Vec<usize> = Vec::new();
+                // A ghost is skipped by the store, so it never matches.
                 let uids: Vec<crate::mail::store::MessageUid> = metas.iter().map(|m| m.uid).collect();
                 res!(s.visit_bytes(&user, &folder, &uids, |uid, bytes| {
                     if let Ok(idx) = metas.binary_search_by_key(&uid.0, |m| m.uid.0) {
@@ -1097,7 +1165,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             }).await);
             hits.sort();
         } else {
-            hits = (0..msgs.len()).filter(|i| key.matches(*i, msgs, None)).collect();
+            hits = (0..msgs.len())
+                .filter(|i| !ghosts.contains(&msgs[*i].uid.0) && key.matches(*i, msgs, None))
+                .collect();
         }
         let mut line = fmt!("* SEARCH");
         for i in &hits {

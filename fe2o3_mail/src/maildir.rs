@@ -537,18 +537,15 @@ impl MailStore for MaildirStore {
         folder: &FolderName,
         uid:    MessageUid,
     )
-        -> Outcome<Vec<u8>>
+        -> Outcome<Option<Vec<u8>>>
     {
         let folder_dir = self.folder_path(user, folder);
         let lock = res!(Self::lock_folder(&folder_dir));
         let view = res!(Self::read_folder(&folder_dir, false, &lock));
-        let entry = match view.find(uid) {
-            Some(e) => e,
-            None => return Err(err!(
-                "No message with UID {} in folder {}.", uid.0, folder.as_str();
-                Missing, Input)),
-        };
-        read_message(&entry.path, entry.meta.size)
+        match view.find(uid) {
+            Some(e) => Ok(Some(res!(read_message(&e.path, e.meta.size)))),
+            None    => Ok(None),
+        }
     }
 
     fn visit_bytes<F>(

@@ -79,8 +79,9 @@ fn uid_map(store: &MaildirStore, u: &MailUser, f: &FolderName) -> Outcome<BTreeM
     let msgs = res!(store.list_messages(u, f, true));
     let mut out = BTreeMap::new();
     for m in &msgs {
-        let bytes = res!(store.fetch_bytes(u, f, m.uid));
-        out.insert(m.uid.0, tag_of(&bytes));
+        if let Some(bytes) = res!(store.fetch_bytes(u, f, m.uid)) {
+            out.insert(m.uid.0, tag_of(&bytes));
+        }
     }
     Ok(out)
 }
@@ -230,7 +231,8 @@ fn append_returns_the_uid_of_its_own_message() -> Outcome<()> {
     for i in 0..3 {
         let tag = fmt!("m{}", i);
         let uid = res!(store.append(&u, &inbox, &body(&tag), MessageFlags::default(), None));
-        let got = res!(store.fetch_bytes(&u, &inbox, uid));
+        let got = res!(res!(store.fetch_bytes(&u, &inbox, uid))
+            .ok_or_else(|| err!("UID {} is missing.", uid.0; Missing)));
         assert_eq!(tag_of(&got), tag, "append returned UID {} which is not its own message", uid.0);
     }
     let _ = fs::remove_dir_all(&root);

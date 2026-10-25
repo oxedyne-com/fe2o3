@@ -230,14 +230,15 @@ pub trait MailStore: Clone + Send + Sync + 'static {
     )
         -> Outcome<Vec<MessageMeta>>;
 
-    /// The stored bytes exactly, since `FETCH BODY[]` must reproduce them.
+    /// The stored bytes exactly, since `FETCH BODY[]` must reproduce them. `None` when the
+    /// message is gone, expunged by another session.
     fn fetch_bytes(
         &self,
         user:   &MailUser,
         folder: &FolderName,
         uid:    MessageUid,
     )
-        -> Outcome<Vec<u8>>;
+        -> Outcome<Option<Vec<u8>>>;
 
     /// Hands `f` the stored bytes of each message of `uids`, in the order given. A UID the
     /// folder no longer holds is skipped. A store that can read many messages under one
@@ -253,8 +254,9 @@ pub trait MailStore: Clone + Send + Sync + 'static {
         where F: FnMut(MessageUid, &[u8]) -> Outcome<()>
     {
         for uid in uids {
-            let bytes = res!(self.fetch_bytes(user, folder, *uid));
-            res!(f(*uid, &bytes));
+            if let Some(bytes) = res!(self.fetch_bytes(user, folder, *uid)) {
+                res!(f(*uid, &bytes));
+            }
         }
         Ok(())
     }
