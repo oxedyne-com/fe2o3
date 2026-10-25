@@ -28,6 +28,12 @@
 //! error, UIDNEXT only moves forward, and a uidlist that is missing or
 //! damaged is answered with a new, larger UIDVALIDITY rather than a
 //! silent renumbering under the old one.
+//!
+//! A deliberate UIDVALIDITY bump is the same path: with every process
+//! that serves the folder stopped, remove its `dovecot-uidlist`. The
+//! next reading issues a larger UIDVALIDITY, leaves its one marker, and
+//! numbers every message afresh from 1 in delivery (file name) order;
+//! `a_uidvalidity_bump_leaves_one_marker_and_numbers_afresh` holds it so.
 
 use oxedyne_fe2o3_core::{
     prelude::*,
