@@ -6,7 +6,10 @@
 //! so these tests hold the store to RFC 3501 §2.3.1.1: a UID names one message
 //! for as long as the UIDVALIDITY lasts, and UIDNEXT never moves backwards.
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+    prelude::*,
+    file::ExclusiveLock,
+};
 use oxedyne_fe2o3_mail::maildir::MaildirStore;
 use oxedyne_fe2o3_net::mail::store::{
     FlagUpdate,
@@ -30,6 +33,10 @@ use std::{
         Mutex,
     },
     thread,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 
@@ -396,6 +403,34 @@ fn expunge_reports_only_what_it_removed() -> Outcome<()> {
     let removed = res!(outcome);
     assert!(removed.is_empty(), "expunge reported {:?}, but no file could be removed", removed);
     assert_eq!(res!(store.list_messages(&u, &inbox, true)).len(), 2);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// A holder that never lets go of a folder must show up as an error, not as every session
+/// and delivery on the folder hanging.
+#[test]
+fn a_held_folder_lock_fails_loudly_after_the_wait() -> Outcome<()> {
+    let root = res!(fresh_root("lock_wait"));
+    let store = res!(MaildirStore::new(root.clone(), "test.local"))
+        .with_lock_wait(Duration::from_millis(300));
+    let u = user();
+    res!(store.ensure_user(&u));
+    let inbox = FolderName::new("INBOX");
+    let held = res!(ExclusiveLock::acquire(&inbox_dir(&root).join("hematite-folder.lock")));
+    let t0 = Instant::now();
+    let outcome = store.folder_status(&u, &inbox);
+    let took = t0.elapsed();
+    drop(held);
+    match outcome {
+        Ok(_)   => panic!("folder_status succeeded while another held the folder's lock"),
+        Err(e)  => {
+            assert!(e.tags().contains(&ErrTag::Timeout), "the error is not a Timeout: {}", e);
+            assert!(took >= Duration::from_millis(300) && took < Duration::from_secs(5),
+                "gave up after {:?}", took);
+        },
+    }
+    res!(store.folder_status(&u, &inbox));
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }

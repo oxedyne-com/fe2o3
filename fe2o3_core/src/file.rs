@@ -28,6 +28,7 @@ use std::{
     },
     time::{
         Duration,
+        Instant,
         SystemTime,
     },
 };
@@ -716,6 +717,39 @@ impl ExclusiveLock {
                 File, IO, Lock));
         }
         Ok(Self { file, path: path.to_path_buf() })
+    }
+
+    /// As [`Self::acquire`], but gives up after `wait` with a `Timeout` error naming the file,
+    /// so a holder that never lets go shows up as a fault rather than as a hang. Waiters poll,
+    /// at most every 50 ms, so they are not served in arrival order.
+    pub fn acquire_within(path: &Path, wait: Duration) -> Outcome<Self> {
+        let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path) {
+            Ok(f) => f,
+            Err(e) => return Err(err!(e,
+                "Could not open the lock file {:?}.", path;
+                File, IO, Lock)),
+        };
+        let deadline = Instant::now() + wait;
+        let mut pause = Duration::from_millis(1);
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { file, path: path.to_path_buf() }),
+                Err(fs::TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(err!(
+                            "Gave up after {:?} waiting for the lock on {:?}, whose holder has \
+                            not let go.", wait, path;
+                            File, Lock, Timeout));
+                    }
+                    std::thread::sleep(pause.min(deadline - now));
+                    pause = (pause * 2).min(Duration::from_millis(50));
+                },
+                Err(fs::TryLockError::Error(e)) => return Err(err!(e,
+                    "Could not take the lock on {:?}.", path;
+                    File, IO, Lock)),
+            }
+        }
     }
 
     pub fn path(&self) -> &Path { &self.path }

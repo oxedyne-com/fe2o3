@@ -82,6 +82,7 @@ use std::{
         },
     },
     time::{
+        Duration,
         SystemTime,
         UNIX_EPOCH,
     },
@@ -93,6 +94,7 @@ const UIDVALIDITY_PREFIX:   &str    = "dovecot-uidvalidity";
 const SUBSCRIPTIONS_NAME:   &str    = "subscriptions";
 const MAILDIRFOLDER_NAME:   &str    = "maildirfolder";      // marks a Maildir++ sub-folder
 const LOCK_NAME:            &str    = "hematite-folder.lock";
+const LOCK_WAIT:            Duration = Duration::from_secs(30);     // then a Timeout error
 const NAME_TRIES:           u64     = 16;                   // fresh message names tried in tmp/
 static NAME_SEQ:            AtomicU64 = AtomicU64::new(0);  // the Maildir `Q<n>` delivery counter
 
@@ -106,6 +108,7 @@ static NAME_SEQ:            AtomicU64 = AtomicU64::new(0);  // the Maildir `Q<n>
 pub struct MaildirStore {
     root:       Arc<PathBuf>,   // holds the `<domain>/<local>/` trees
     hostname:   Arc<String>,    // in every message name, `/` and `:` escaped
+    lock_wait:  Duration,       // longest wait for a folder's lock
 }
 
 /// A message on disk with the UID the folder's uidlist gives it.
@@ -163,7 +166,16 @@ impl MaildirStore {
         Ok(Self {
             root:       Arc::new(root),
             hostname:   Arc::new(hostname),
+            lock_wait:  LOCK_WAIT,
         })
+    }
+
+    /// The longest any call waits for a lock (30 s by default) before it fails with a
+    /// `Timeout` error, so a stuck holder is reported rather than hanging every session and
+    /// delivery on the folder.
+    pub fn with_lock_wait(mut self, wait: Duration) -> Self {
+        self.lock_wait = wait;
+        self
     }
 
     /// Resolve the absolute on-disk path for a user's mailbox tree.
@@ -215,9 +227,9 @@ impl MaildirStore {
 
     /// Waits for and takes the folder's lock, which every reader and writer of its uidlist and
     /// of its `cur/` and `new/` holds, in this process or another.
-    fn lock_folder(folder_dir: &Path) -> Outcome<ExclusiveLock> {
+    fn lock_folder(&self, folder_dir: &Path) -> Outcome<ExclusiveLock> {
         res!(Self::ensure_subdirs(folder_dir));
-        ExclusiveLock::acquire(&folder_dir.join(LOCK_NAME))
+        ExclusiveLock::acquire_within(&folder_dir.join(LOCK_NAME), self.lock_wait)
     }
 
     /// Reads the folder and brings its uidlist up to date: a UID for each file not yet listed,
@@ -356,8 +368,8 @@ impl MaildirStore {
     }
 
     /// The folder read under its lock, which is released before this returns.
-    fn view(folder_dir: &Path, clear_recent: bool) -> Outcome<FolderView> {
-        let lock = res!(Self::lock_folder(folder_dir));
+    fn view(&self, folder_dir: &Path, clear_recent: bool) -> Outcome<FolderView> {
+        let lock = res!(self.lock_folder(folder_dir));
         Self::read_folder(folder_dir, clear_recent, &lock)
     }
 
@@ -402,7 +414,7 @@ impl MailStore for MaildirStore {
                     IO, File, Init));
             }
         }
-        res!(Self::view(&root, false));
+        res!(self.view(&root, false));
         // Pre-create the special-use folders so IMAP clients can
         // discover them via LIST + SPECIAL-USE attributes without
         // having to issue CREATE first. This unblocks Thunderbird's
@@ -455,7 +467,7 @@ impl MailStore for MaildirStore {
 
         let filename = fmt!("{}:2,{}", unique, flag_suffix(flags));
         let cur_path = folder_dir.join("cur").join(&filename);
-        let lock = match Self::lock_folder(&folder_dir) {
+        let lock = match self.lock_folder(&folder_dir) {
             Ok(l) => l,
             Err(e) => {
                 let _ = fs::remove_file(&tmp_path);
@@ -511,7 +523,7 @@ impl MailStore for MaildirStore {
     )
         -> Outcome<FolderStatus>
     {
-        let view = res!(Self::view(&self.folder_path(user, folder), false));
+        let view = res!(self.view(&self.folder_path(user, folder), false));
         let unseen = view.entries.iter().filter(|e| !e.meta.flags.seen).count() as u32;
         Ok(FolderStatus {
             exists:         view.entries.len() as u32,
@@ -530,7 +542,7 @@ impl MailStore for MaildirStore {
     )
         -> Outcome<Vec<MessageMeta>>
     {
-        let view = res!(Self::view(&self.folder_path(user, folder), !read_only));
+        let view = res!(self.view(&self.folder_path(user, folder), !read_only));
         Ok(view.messages())
     }
 
@@ -543,7 +555,7 @@ impl MailStore for MaildirStore {
         -> Outcome<Option<Vec<u8>>>
     {
         let folder_dir = self.folder_path(user, folder);
-        let lock = res!(Self::lock_folder(&folder_dir));
+        let lock = res!(self.lock_folder(&folder_dir));
         let view = res!(Self::read_folder(&folder_dir, false, &lock));
         match view.find(uid) {
             Some(e) => Ok(Some(res!(read_message(&e.path, e.meta.size)))),
@@ -562,7 +574,7 @@ impl MailStore for MaildirStore {
         where F: FnMut(MessageUid, &[u8]) -> Outcome<()>
     {
         let folder_dir = self.folder_path(user, folder);
-        let lock = res!(Self::lock_folder(&folder_dir));
+        let lock = res!(self.lock_folder(&folder_dir));
         let view = res!(Self::read_folder(&folder_dir, false, &lock));
         for uid in uids {
             if let Some(e) = view.find(*uid) {
@@ -583,7 +595,7 @@ impl MailStore for MaildirStore {
         -> Outcome<Option<MessageFlags>>
     {
         let folder_dir = self.folder_path(user, folder);
-        let lock = res!(Self::lock_folder(&folder_dir));
+        let lock = res!(self.lock_folder(&folder_dir));
         let view = res!(Self::read_folder(&folder_dir, false, &lock));
         let entry = match view.find(uid) {
             Some(e) => e,
@@ -610,7 +622,7 @@ impl MailStore for MaildirStore {
         -> Outcome<Vec<MessageUid>>
     {
         let folder_dir = self.folder_path(user, folder);
-        let lock = res!(Self::lock_folder(&folder_dir));
+        let lock = res!(self.lock_folder(&folder_dir));
         let view = res!(Self::read_folder(&folder_dir, false, &lock));
         let mut removed: Vec<MessageUid> = Vec::new();
         for e in &view.entries {
@@ -656,7 +668,7 @@ impl MailStore for MaildirStore {
             }
         }
         // Issues the folder's UIDVALIDITY with its first uidlist.
-        res!(Self::view(&folder_dir, false));
+        res!(self.view(&folder_dir, false));
         Ok(())
     }
 
