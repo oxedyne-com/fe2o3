@@ -42,6 +42,7 @@ pub use redact::{
     fingerprint,
     secret_name,
     secret_name_loose,
+    typed_name,
     Deny,
     NoTest,
     Or,

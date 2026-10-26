@@ -20,7 +20,10 @@ use oxedyne_fe2o3_core::{
 };
 use oxedyne_fe2o3_jdat::{
     prelude::*,
-    cfg::Config,
+    cfg::{
+        self,
+        Config,
+    },
 };
 use oxedyne_fe2o3_net::{
     constant::SESSION_ID_KEY_LABEL,
@@ -402,7 +405,7 @@ impl ApiRoute {
     /// the route is dispatched.
     pub fn resolve_headers(&mut self, root: &Path) -> Outcome<()> {
         for (_name, value) in &mut self.headers {
-            *value = res!(Self::resolve_file_refs(value, root));
+            *value = res!(cfg::resolve(value, root));
         }
         Ok(())
     }
@@ -415,114 +418,39 @@ impl ApiRoute {
     /// startup before the route is dispatched.
     pub fn resolve_config(&mut self, root: &Path) -> Outcome<()> {
         for (_name, value) in &mut self.config {
-            *value = res!(Self::resolve_file_refs(value, root));
+            *value = res!(cfg::resolve(value, root));
         }
         Ok(())
     }
 
-    /// Resolve `{file:path}`, optional `{file?:path}`, and `{env:VAR}` or
-    /// `{env:VAR:default}` placeholders in a config value.
+    /// Every file a [`ApiRoute::resolve_headers`] and [`ApiRoute::resolve_config`] would read,
+    /// in order of appearance, each with the header name or config key it is read for, without
+    /// reading any of them.
     ///
-    /// * `{file:path}` — replaced with the trimmed contents of the file,
-    ///   resolved relative to `root`. Fails if the file cannot be read.
-    /// * `{file?:path}` — the optional form: replaced with the trimmed
-    ///   contents when the file exists, and with the empty string when it
-    ///   is absent. Any read error other than not-found — a present file
-    ///   the process may not read, say — still fails, so an unreadable key
-    ///   is never silently dropped.
-    /// * `{env:VAR}` — replaced with the value of environment variable
-    ///   `VAR`. Fails if the variable is unset.
-    /// * `{env:VAR:default}` — replaced with the env var value, or
-    ///   `default` if the variable is unset or empty.
-    ///
-    /// Env placeholders are resolved first so they may appear inside
-    /// `{file:...}` paths to parameterise file locations.
-    pub fn resolve_file_refs(value: &str, root: &Path) -> Outcome<String> {
-        // Pass 1: resolve all {env:} placeholders so env values can appear
-        // inside {file:} paths.
-        let intermediate = res!(Self::resolve_env_refs(value));
-        // Pass 2: resolve all {file:} placeholders.
-        Self::resolve_file_only(&intermediate, root)
+    /// Each `{file:}` and `{file?:}` path is taken after `{env:}` resolution and joined to `root`
+    /// exactly as the resolve joins it, so an absolute path stays absolute. A caller that must vet
+    /// where secrets come from can then refuse a path, naming its key, before anything is read.
+    pub fn config_file_sources(&self, root: &Path) -> Outcome<Vec<(String, PathBuf)>> {
+        let mut out = Vec::new();
+        for (name, value) in self.headers.iter().chain(self.config.iter()) {
+            res!(Self::file_sources_into(name, value, root, &mut out));
+        }
+        Ok(out)
     }
 
-    /// Resolve only `{env:VAR[:default]}` placeholders.
-    fn resolve_env_refs(value: &str) -> Outcome<String> {
-        let mut result = value.to_string();
-        while let Some(start) = result.find("{env:") {
-            let end = match result[start..].find('}') {
-                Some(i) => start + i,
-                None => return Err(err!(
-                    "Config: unclosed '{{env:' placeholder in value '{}'.", value;
-                    Invalid, Input)),
-            };
-            let inner = result[start + 5..end].to_string();
-            let (var_name, default) = match inner.find(':') {
-                Some(i) => (&inner[..i], Some(&inner[i + 1..])),
-                None    => (inner.as_str(), None),
-            };
-            let replacement = match std::env::var(var_name) {
-                Ok(v) if !v.is_empty() => v,
-                _ => match default {
-                    Some(d) => d.to_string(),
-                    None => return Err(err!(
-                        "Config: environment variable '{}' is not set \
-                        and '{{env:{}}}' has no default.",
-                        var_name, inner;
-                        Invalid, Input, Missing)),
-                },
-            };
-            result.replace_range(start..=end, &replacement);
+    /// Append the files one value would read to `out`, each beside the key `name` it belongs to.
+    fn file_sources_into(
+        name:   &str,
+        value:  &str,
+        root:   &Path,
+        out:    &mut Vec<(String, PathBuf)>,
+    )
+        -> Outcome<()>
+    {
+        for path in res!(cfg::file_refs(value, root)) {
+            out.push((name.to_string(), path));
         }
-        Ok(result)
-    }
-
-    /// Resolve `{file:path}` and optional `{file?:path}` placeholders.
-    ///
-    /// `{file:path}` fails on any read error. `{file?:path}` resolves to
-    /// the empty string when the file is not found, but still fails on any
-    /// other read error — a present-but-unreadable key must not be silently
-    /// swallowed.
-    fn resolve_file_only(value: &str, root: &Path) -> Outcome<String> {
-        let mut result = value.to_string();
-        loop {
-            // Find the earliest of the two markers. The required '{file:' is
-            // not a substring of the optional '{file?:' — the sixth byte is
-            // ':' against '?' — so a plain search for one never matches the
-            // other, and the two positions can never coincide.
-            let required = result.find("{file:");
-            let optional = result.find("{file?:");
-            let (start, marker_len, is_optional) = match (required, optional) {
-                (None,    None)              => break,
-                (Some(r), None)              => (r, 6, false),
-                (None,    Some(o))           => (o, 7, true),
-                (Some(r), Some(o)) if o < r  => (o, 7, true),
-                (Some(r), Some(_))           => (r, 6, false),
-            };
-            let opt_mark = if is_optional { "?" } else { "" };
-            let end = match result[start..].find('}') {
-                Some(i) => start + i,
-                None => return Err(err!(
-                    "Config: unclosed '{{file{}:' placeholder in value '{}'.",
-                    opt_mark, value;
-                    Invalid, Input)),
-            };
-            let rel_path = result[start + marker_len..end].to_string();
-            let abs_path = root.join(&rel_path);
-            let content = match std::fs::read_to_string(&abs_path) {
-                Ok(s) => s.trim().to_string(),
-                // An absent optional file resolves to nothing. Only not-found
-                // is tolerated, so a permissions failure on a present file
-                // still errors below rather than yielding a silent empty key.
-                Err(e) if is_optional
-                    && e.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(e) => return Err(err!(e,
-                    "Config: failed to read '{{file{}:{}}}' at '{:?}'.",
-                    opt_mark, rel_path, abs_path;
-                    IO, File, Read)),
-            };
-            result.replace_range(start..=end, &content);
-        }
-        Ok(result)
+        Ok(())
     }
 }
 
@@ -630,9 +558,19 @@ impl WebhookRoute {
 
     pub fn resolve_config(&mut self, root: &Path) -> Outcome<()> {
         for (_name, value) in &mut self.config {
-            *value = res!(ApiRoute::resolve_file_refs(value, root));
+            *value = res!(cfg::resolve(value, root));
         }
         Ok(())
+    }
+
+    /// Every file [`WebhookRoute::resolve_config`] would read, without reading any. See
+    /// [`ApiRoute::config_file_sources`].
+    pub fn config_file_sources(&self, root: &Path) -> Outcome<Vec<(String, PathBuf)>> {
+        let mut out = Vec::new();
+        for (name, value) in &self.config {
+            res!(ApiRoute::file_sources_into(name, value, root, &mut out));
+        }
+        Ok(out)
     }
 
     pub fn get_config(&self, key: &str) -> Option<&str> {
@@ -2717,8 +2655,8 @@ impl AlertConfig {
     /// can read.
     pub fn resolve_secrets(&mut self, root: &Path) -> Outcome<()> {
         if let Some(sub) = &mut self.submission {
-            sub.password = res!(ApiRoute::resolve_file_refs(&sub.password, root));
-            sub.user = res!(ApiRoute::resolve_file_refs(&sub.user, root));
+            sub.password = res!(cfg::resolve(&sub.password, root));
+            sub.user = res!(cfg::resolve(&sub.user, root));
         }
         Ok(())
     }
@@ -4151,104 +4089,6 @@ mod tests {
         v.ws_routes = vec![ws_up("/ws", "[2001:db8::1]", 9000)];
         assert!(v.validate_egress().is_err(),
             "an entry naming the loopback must not permit another address");
-        Ok(())
-    }
-
-    /// A unique, empty scratch directory under the system temp root.
-    fn scratch_dir(tag: &str) -> Outcome<PathBuf> {
-        let nanos = match std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-        {
-            Ok(d)  => d.as_nanos(),
-            Err(_) => 0,
-        };
-        let dir = std::env::temp_dir().join(fmt!(
-            "fe2o3_steel_file_resolver_{}_{}_{}", tag, std::process::id(), nanos));
-        res!(std::fs::create_dir_all(&dir));
-        Ok(dir)
-    }
-
-    /// `{file:path}` fails when the file is missing; `{file?:path}` yields the
-    /// empty string on that one io kind — not-found — and nothing else. The
-    /// two optional cases below straddle the branch: a missing file must give
-    /// `""` while a read that fails for any *other* reason must still error,
-    /// so the test fails if the not-found guard is dropped (every error
-    /// swallowed) or inverted (not-found not swallowed).
-    #[test]
-    fn optional_file_marker_swallows_only_not_found() -> Outcome<()> {
-        let root = res!(scratch_dir("optmark"));
-        let present = "present.key";
-        // A trailing newline proves the resolver trims, as the required form does.
-        res!(std::fs::write(root.join(present), "s3cret\n"));
-
-        // Required form: present resolves to the trimmed contents, ...
-        assert_eq!(
-            res!(ApiRoute::resolve_file_only(&fmt!("{{file:{}}}", present), &root)),
-            "s3cret",
-            "{{file:PRESENT}} must resolve to the trimmed file contents");
-        // ... and missing hard-errors exactly as before this change.
-        assert!(
-            ApiRoute::resolve_file_only("{file:absent.key}", &root).is_err(),
-            "{{file:MISSING}} must still hard-error");
-
-        // Optional form: present behaves identically to the required form.
-        assert_eq!(
-            res!(ApiRoute::resolve_file_only(&fmt!("{{file?:{}}}", present), &root)),
-            "s3cret",
-            "{{file?:PRESENT}} must resolve to the trimmed file contents");
-        // The load-bearing case: a not-found file resolves to the empty string.
-        assert_eq!(
-            res!(ApiRoute::resolve_file_only("{file?:absent.key}", &root)),
-            "",
-            "{{file?:MISSING}} must resolve to \"\", not error");
-
-        // A read that fails for a reason other than not-found must still
-        // error, so a present-but-unreadable key is never silently dropped.
-        // Traversing through a regular file yields ENOTDIR, an io error whose
-        // kind is not NotFound and therefore must not be swallowed. This holds
-        // for any user, needing no permission games.
-        res!(std::fs::write(root.join("notdir"), "x"));
-        assert!(
-            ApiRoute::resolve_file_only("{file?:notdir/child}", &root).is_err(),
-            "{{file?:...}} must error on a non-not-found io error (ENOTDIR here)");
-
-        // The literal present-but-unreadable case, where the platform allows
-        // it to be constructed: a mode-000 file read by a non-root user fails
-        // with PermissionDenied, which the optional form must not swallow.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let locked = root.join("locked.key");
-            res!(std::fs::write(&locked, "nope\n"));
-            res!(std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)));
-            // Skip the assertion if the test runs as root, where mode-000 is
-            // still readable and the read would succeed.
-            if std::fs::read_to_string(&locked).is_err() {
-                assert!(
-                    ApiRoute::resolve_file_only("{file?:locked.key}", &root).is_err(),
-                    "{{file?:PRESENT_BUT_UNREADABLE}} must error, not yield \"\"");
-            }
-            let _ = std::fs::set_permissions(
-                &locked, std::fs::Permissions::from_mode(0o600));
-        }
-
-        // Both markers may co-occur in one value, and the required finder must
-        // not mis-match the optional marker: here the absent optional collapses
-        // to nothing while the present required resolves around it.
-        assert_eq!(
-            res!(ApiRoute::resolve_file_only(
-                &fmt!("a{{file?:absent.key}}b{{file:{}}}c", present), &root)),
-            "abs3cretc",
-            "the required finder must not mis-read '{{file?:' as '{{file:'");
-
-        // The optional marker also works through the public wired entry point,
-        // which runs the env pass first.
-        assert_eq!(
-            res!(ApiRoute::resolve_file_refs("{file?:absent.key}", &root)),
-            "",
-            "the optional marker must resolve through resolve_file_refs too");
-
-        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 }

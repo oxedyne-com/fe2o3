@@ -271,4 +271,23 @@ section('redact: the walk, the deny-list hook and the string test');
 	check('a byte length counts UTF-8, not characters', byteLen('é') === 2 && byteLen('abc') === 3);
 }
 
+section('redact: SCRUB-ONE, a typed password field is marked whole, with no head');
+{
+	// Mail posts a mailbox's app password as `password` and keeps it sealed as `pass`; a passphrase's
+	// first six characters are its first word. Such a field keeps nothing of its value (D-20261006-24).
+	const APP = 'abcd efgh ijkl mnop', PHRASE = 'correct horse battery staple';
+	const posted = scrubDeep({ address: 'me@x.org', user: 'me', password: APP, pass: APP, smtpPassword: APP,
+		newPassphrase: PHRASE, passAt: 1789300000000, passwordHint: 'the usual', bypass: 'on' });
+	const wire = JSON.stringify(posted);
+	check('ARM mailbox: a password-named field goes whole in the scrubber\'s walk', wire.indexOf('efgh') === -1 && wire.indexOf('horse') === -1, wire);
+	check('ARM mailbox: as a mark with no head', /^\[redacted named #[0-9a-f]+\/19\]$/.test(String(posted.pass)), String(posted.pass));
+	check('ARM mailbox: and the fields beside it still read', posted.address === 'me@x.org' && posted.user === 'me'
+		&& posted.passAt === 1789300000000 && posted.passwordHint === 'the usual' && posted.bypass === 'on');
+	const red = createRedactor().value({ password: PHRASE, pass: APP, smtpPassword: APP, seed_phrase: PHRASE, apiKey: 'sk-or-v1-abcdefghij' });
+	const rw = JSON.stringify(red);
+	check('ARM name walk: the redactor keeps no head of a typed field', rw.indexOf('correc') === -1 && rw.indexOf('abcd') === -1, rw);
+	check('ARM name walk: a key keeps its six', red.apiKey.indexOf('[redacted sk-or-…#') === 0, red.apiKey);
+	check('ARM name walk: and a second walk changes nothing', JSON.stringify(createRedactor().value(red)) === rw);
+}
+
 finish('redact');

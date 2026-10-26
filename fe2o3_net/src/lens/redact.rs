@@ -104,6 +104,24 @@ pub fn secret_name_loose(name: &str) -> bool {
         || l.ends_with("key")
 }
 
+/// Is this the name of a field a person types into? This is Daimond's `SECRET_KEY_TYPED`,
+///
+/// `/(?:pass(?:word|wd|phrase)|mnemonic|seed[_-]?phrase)$|^pass$/i`:
+///
+/// a passphrase, a password, a mailbox's app password (Daimond's mail posts it as `password` and
+/// keeps it sealed as `pass`), a recovery phrase. It is matched at the END of the name, so
+/// `smtpPassword` and `newPassphrase` count while `passAt` and `passwordHint` do not, and `pass`
+/// only whole, so `bypass` and `compass` do not. `Redact` covers such a field whatever else its
+/// name is, and marks its value with no head (SCRUB-ONE, D-20261006-24): the first six characters
+/// a fingerprint keeps to tell two keys apart are the first word of a passphrase.
+pub fn typed_name(name: &str) -> bool {
+    let l = name.to_ascii_lowercase();
+    l == "pass"
+        || ["password", "passwd", "passphrase", "mnemonic", "seedphrase", "seed_phrase", "seed-phrase"]
+            .iter()
+            .any(|w| l.ends_with(w))
+}
+
 /// A short, non-reversible rendering of a secret for a person's eye: its first `head`
 /// characters, a stable hash and its length. With `head` of 6 this is Daimond's `fingerprint`
 /// exactly, which hashes and counts UTF-16 code units as JavaScript does.
@@ -480,8 +498,9 @@ impl<T: StrTest> Redact<T> {
 
     // One field of a map: covered by name or place, or walked.
     fn member(&self, name: &str, v: &Dat, path: &mut Vec<String>, depth: usize) -> (Dat, bool) {
-        if self.secret(name) || self.denied(path) {
-            return self.cover(v);
+        let typed = typed_name(name);
+        if typed || self.secret(name) || self.denied(path) {
+            return self.cover(v, typed);
         }
         let id = self.ids.iter().any(|k| k == name);
         self.value(v, path, depth, id)
@@ -492,15 +511,17 @@ impl<T: StrTest> Redact<T> {
         if id { self.test.hit_id(s) } else { self.test.hit(s) }
     }
 
-    // A value covered by its field: a scalar's fingerprint, or a note of what it was.
-    fn cover(&self, v: &Dat) -> (Dat, bool) {
+    // A value covered by its field: a scalar's fingerprint, or a note of what it was. A typed
+    // field's scalar is marked with no head, `[redacted named #<hash>/<length>]`, as the scrubber
+    // marks a value it cuts from text, whatever head this redactor shows.
+    fn cover(&self, v: &Dat, typed: bool) -> (Dat, bool) {
         let s = match v {
             Dat::Empty              => return (Dat::Str(ABSENT.to_string()), true),
             Dat::Opt(o)             => match &**o {
-                Some(x) => return self.cover(x),
+                Some(x) => return self.cover(x, typed),
                 None    => return (Dat::Str(ABSENT.to_string()), true),
             },
-            Dat::Box(b)             => return self.cover(b),
+            Dat::Box(b)             => return self.cover(b, typed),
             Dat::Str(s)             => s.clone(),
             Dat::Bool(b)            => fmt!("{}", b),
             Dat::U8(n)              => fmt!("{}", n),
@@ -521,6 +542,9 @@ impl<T: StrTest> Redact<T> {
         };
         if marker(&s) {
             return (Dat::Str(s), false);
+        }
+        if typed && !s.is_empty() {
+            return (Dat::Str(scrub::mark("named", &s)), true);
         }
         (Dat::Str(fingerprint(&s, self.head)), true)
     }

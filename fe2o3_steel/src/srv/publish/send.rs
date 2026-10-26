@@ -238,7 +238,7 @@ impl MastodonCreds {
 
 	/// Resolves the token's secret reference. The instance URL is public and taken as written.
 	fn resolve_secrets(&mut self, root: &Path) -> Outcome<()> {
-		self.token = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(&self.token, root));
+		self.token = res!(oxedyne_fe2o3_jdat::cfg::resolve(&self.token, root));
 		Ok(())
 	}
 
@@ -278,7 +278,7 @@ impl BlueskyCreds {
 	/// Resolves the app password's secret reference. The handle and host are public and taken as
 	/// written.
 	fn resolve_secrets(&mut self, root: &Path) -> Outcome<()> {
-		self.app_password = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(&self.app_password, root));
+		self.app_password = res!(oxedyne_fe2o3_jdat::cfg::resolve(&self.app_password, root));
 		Ok(())
 	}
 

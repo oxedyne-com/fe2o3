@@ -101,3 +101,42 @@ add('');
 add('short');
 add('       ');
 add('plain prose with no credential at all, only words and a number 12345 and a path /usr/local/bin');
+
+// SCRUB-ONE (D-20261006-24): what the `named` and `bearer` rules once let through. A passphrase is
+// words, a password may be short, a value may be quoted (with an escaped quote inside, or as a JSON
+// member), and an `Authorization` scheme is case-free on the wire. Taken from Daimond's arms. Each
+// is also a LEAK: `[template, what must not survive]`, which `gen_scrub_oracle.mjs` writes to
+// `tests/data/lens_scrub_leaks.tsv` so that both languages hold the scrubber to the absence itself
+// and not only to the JavaScript's own answer.
+export const LEAKS = [];
+const leak = (t, gone) => { add(t); LEAKS.push([t, gone]); };
+const PHRASE = 'correct horse battery staple';
+leak('passphrase: ' + PHRASE, 'horse');
+leak('[id] unlock with passphrase: ' + PHRASE, 'battery');
+leak('mnemonic = ' + PHRASE + ' again', 'battery');
+leak('PASSPHRASE=' + PHRASE, 'horse');
+leak('Password: hunter2', 'hunter2');
+leak('login password = tr0ub4dor', 'tr0ub4dor');
+leak('passwd=s3cr3t pa55', 's3cr3t');
+leak('PASSWD: s3cr3t pa55', 'pa55');
+leak('newPassword: abc', 'abc');
+leak('seed-phrase:\t' + PHRASE + '  \nnext line', 'staple');
+leak('password: "' + PHRASE + '"', 'horse');
+leak("passphrase='" + PHRASE + "'", 'horse');
+leak('password: "pa\\"ss wo rd"', 'wo rd');
+leak('config password="hunter2" set', 'hunter2');
+leak('{"user":"me","password":"' + PHRASE + '","port":993}', 'horse');
+leak('{"address":"me@x.org","host":"imap.x.org","user":"me","password":"abcd efgh ijkl mnop"}', 'efgh');
+leak("token = 'ab cd' and secret: \"xy\"", 'ab cd');
+leak("secret: \"xy\" after", '"xy"');
+leak('api_key: "' + q(6, 'alnum') + '"', '{{6:' + (seed - 1) + ':alnum}}');
+leak('authorization: bearer ' + q(20, 'b64'), '{{20:' + (seed - 1) + ':b64}}');
+leak('AUTHORIZATION: BEARER ' + q(20, 'b64'), '{{20:' + (seed - 1) + ':b64}}');
+leak('BeArEr ' + q(12, 'b64') + ' mixed', '{{12:' + (seed - 1) + ':b64}}');
+// And what must still read: prose about a password with no value, and a second pass.
+for (const p of ['Forgot your password? Reset it from the sign-in screen.', 'the password was wrong',
+	'Password must be at least 12 characters', 'Enter your passphrase:', 'passphrase:    ', 'Change password',
+	'Set a passphrase, then confirm it', 'the compass bypass passes', 'password:     four spaces',
+	'password: "unterminated value', 'password: [REDACTED by hand]', 'basic auth then token words'])
+	add(p);
+add('passphrase: [redacted named #1a2b3c4d/28] and password="[redacted named #5e6f7a8b/7]"');

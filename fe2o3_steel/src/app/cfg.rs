@@ -8,7 +8,10 @@ use oxedyne_fe2o3_core::{
 };
 use oxedyne_fe2o3_jdat::{
     prelude::*,
-    cfg::Config,
+    cfg::{
+        self,
+        Config,
+    },
 };
 
 use std::{
@@ -31,42 +34,12 @@ pub struct AppConfig {
 }
 
 impl Config for AppConfig {
-    /// Validates and resolves the app_root path. Special values:
-    /// - "current" (or "here", "auto", "."): Use current working directory
-    /// - "env": Read from STEEL_APP_ROOT environment variable
-    /// - "~/path": Expand home directory
-    /// - "./path": Relative to current directory
-    /// - "/path": Absolute path (used as-is)
+    /// Resolves the app root by `cfg::resolve_root`, with `STEEL_APP_ROOT` for `env`, and
+    /// creates it.
     fn check_and_fix(&mut self) -> Outcome<()> {
-        self.app_root = match self.app_root.as_str() {
-            "current" | "here" | "auto" | "." => {
-                res!(std::env::current_dir())
-                    .to_string_lossy()
-                    .to_string()
-            }
-            "env" => {
-                match std::env::var("STEEL_APP_ROOT") {
-                    Ok(path) => path,
-                    Err(_) => return Err(err!(
-                        "STEEL_APP_ROOT environment variable not set when app_root is 'env'.";
-                        Configuration, Missing, Invalid)),
-                }
-            }
-            path if path.starts_with("~/") => {
-                let home = match std::env::var("HOME") {
-                    Ok(home) => home,
-                    Err(_) => return Err(err!(
-                        "HOME environment variable not set for path expansion.";
-                        Configuration, Missing, Invalid)),
-                };
-                fmt!("{}{}", home, &path[1..])
-            }
-            path if path.starts_with("./") => {
-                let cwd = res!(std::env::current_dir());
-                cwd.join(&path[2..]).to_string_lossy().to_string()
-            }
-            path => path.to_string(),
-        };
+        self.app_root = res!(cfg::resolve_root(&self.app_root, "STEEL_APP_ROOT")) // fixed: the documented env var name
+            .to_string_lossy()
+            .to_string();
 
         let app_root_path = Path::new(&self.app_root);
 

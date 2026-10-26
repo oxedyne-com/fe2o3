@@ -41,6 +41,7 @@ pub mod html_inert;
 #[cfg(feature = "hyphenation")]
 pub mod hyphen;
 pub mod lines;
+pub mod lint;
 pub mod mime;
 pub mod doc;
 pub mod pattern;
