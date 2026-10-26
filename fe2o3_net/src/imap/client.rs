@@ -12,7 +12,9 @@
 //! - `LOGIN` with a password, or `AUTHENTICATE XOAUTH2` with a bearer
 //!   token, whichever the account requires.
 //! - `CAPABILITY`, `LIST`, `SELECT`/`EXAMINE`, `UID SEARCH`, `UID FETCH`,
-//!   `UID STORE`, `APPEND`, `LOGOUT`.
+//!   `UID STORE` (as `+FLAGS`/`-FLAGS` deltas only), `UID COPY`, `UID MOVE`,
+//!   `UID EXPUNGE`, `APPEND` (with `APPENDUID`), `LOGOUT`, over a range-compressed
+//!   [`UidSet`].
 //!
 //! A failure says what kind it is in its tags, so a caller explaining it to a
 //! person reads the tags and never the words, which for a dropped connection
@@ -55,14 +57,14 @@
 //!
 //! ```no_run
 //! # use oxedyne_fe2o3_core::prelude::*;
-//! # use oxedyne_fe2o3_net::imap::client::{FetchWhat, ImapClient, ImapConfig, Security};
+//! # use oxedyne_fe2o3_net::imap::client::{FetchWhat, ImapClient, ImapConfig, Security, UidSet};
 //! # async fn f() -> Outcome<()> {
 //! let cfg = ImapConfig::new("imap.example.com", 993, Security::ImplicitTls);
 //! let mut c = res!(ImapClient::connect(&cfg).await);
 //! res!(c.login("alice@example.com", "app-password").await);
 //! let inbox = res!(c.select("INBOX").await);
 //! let uids  = res!(c.uid_search(&fmt!("UID {}:*", inbox.uid_next.saturating_sub(10))).await);
-//! for msg in res!(c.uid_fetch(&uids, FetchWhat::Full).await) {
+//! for msg in res!(c.uid_fetch(&UidSet::from(&uids), FetchWhat::Full).await) {
 //!     println!("{} bytes, flags {:?}", msg.body.len(), msg.flags);
 //! }
 //! res!(c.logout().await);
@@ -73,9 +75,13 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::tls::{
-    self,
-    ClientStream,
+use crate::{
+    email,
+    imap::uid_set,
+    tls::{
+        self,
+        ClientStream,
+    },
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -103,6 +109,9 @@ use tokio::{
     time::timeout,
 };
 use tokio_rustls::rustls::ClientConfig;
+
+
+pub use crate::imap::uid_set::UidSet;
 
 
 // Generous, because a large `UID FETCH` against a slow mailbox is a legitimate
@@ -146,6 +155,10 @@ pub struct ImapConfig {
     // and hope for the same answer twice. This field is how it does the last part.
     pub addr:       Option<SocketAddr>,
     pub retries:    u8,         // fresh connections a client may make for dropped ones
+    // The roots the server's certificate is checked against; `None` is what the operating system
+    // trusts (tls::default_client_config, which honours SSL_CERT_FILE and SSL_CERT_DIR). A
+    // private CA is added with tls::ClientRoots or tls::client_config_trusting.
+    pub tls:        Option<Arc<ClientConfig>>,
 }
 
 impl ImapConfig {
@@ -159,7 +172,13 @@ impl ImapConfig {
             timeout:  IMAP_CLIENT_TIMEOUT,
             addr:     None,
             retries:  IMAP_CLIENT_RETRIES,
+            tls:      None,
         }
+    }
+
+    pub fn with_tls(mut self, tls_cfg: Arc<ClientConfig>) -> Self {
+        self.tls = Some(tls_cfg);
+        self
     }
 
     /// Zero turns the retry of a dropped connection off.
@@ -180,128 +199,18 @@ impl ImapConfig {
 }
 
 
-// ┌───────────────────────────────────────────────────────────────────────────┐
-// │ RESULT TYPES                                                              │
-// └───────────────────────────────────────────────────────────────────────────┘
-
-/// One mailbox as reported by `LIST`.
-#[derive(Clone, Debug)]
-pub struct MailboxInfo {
-    pub name:       String,         // as the server spells it
-    pub delimiter:  Option<char>,   // `None` for a flat namespace
-    pub attrs:      Vec<String>,    // e.g. `\HasChildren`, `\Noselect`, `\Sent`
-}
-
-impl MailboxInfo {
-    /// A mailbox that exists only to hold children cannot itself be selected.
-    pub fn selectable(&self) -> bool {
-        !self.attrs.iter().any(|a| a.eq_ignore_ascii_case("\\Noselect"))
-    }
-
-    /// The RFC 6154 special-use role, where the server declared one. This is how a client
-    /// recognises the Sent folder on a mailbox whose
-    /// names are localised -- Gmail spells it "[Gmail]/Gesendet" for a German
-    /// account, but the attribute is `\Sent` everywhere.
-    pub fn special_use(&self) -> Option<SpecialUse> {
-        for a in &self.attrs {
-            let role = match a.to_uppercase().as_str() {
-                "\\SENT"     => Some(SpecialUse::Sent),
-                "\\DRAFTS"   => Some(SpecialUse::Drafts),
-                "\\TRASH"    => Some(SpecialUse::Trash),
-                "\\JUNK"     => Some(SpecialUse::Junk),
-                "\\ARCHIVE"  => Some(SpecialUse::Archive),
-                "\\ALL"      => Some(SpecialUse::All),
-                "\\FLAGGED"  => Some(SpecialUse::Flagged),
-                _            => None,
-            };
-            if role.is_some() {
-                return role;
-            }
-        }
-        None
-    }
-}
-
-/// The special-use roles of RFC 6154, one per mailbox at most.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpecialUse {
-    Sent,
-    Drafts,
-    Trash,      // deleted messages await expunge
-    Junk,       // spam
-    Archive,    // filed out of the inbox
-    All,        // every message however filed, Gmail's "All Mail"
-    Flagged,    // starred or flagged
-}
-
-/// The state of a mailbox after `SELECT` or `EXAMINE`.
-///
-/// `uid_validity` is the one field a synchronising caller must persist:
-/// if it changes, every UID it has cached is meaningless and the mailbox
-/// must be re-read from scratch.
-#[derive(Clone, Debug, Default)]
-pub struct MailboxStatus {
-    pub name:           String,
-    pub exists:         u32,            // messages present
-    pub recent:         u32,            // messages flagged `\Recent`
-    pub uid_validity:   u32,            // UID namespace generation
-    pub uid_next:       u32,            // the UID the next arrival will be given
-    pub flags:          Vec<String>,    // defined in this mailbox
-    pub read_only:      bool,           // `EXAMINE`, or a server that downgraded the `SELECT`
-}
-
-/// How much of each message to pull down.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FetchWhat {
-    Meta,       // UID, flags, internal date, size; no body at all
-    Headers,    // and the RFC 5322 header block
-    Full,       // and the whole message
-}
-
-impl FetchWhat {
-    /// `BODY.PEEK` rather than `BODY`, so reading a message does not silently mark it `\Seen` --
-    /// a sync should be invisible to whoever is reading the mailbox elsewhere.
-    fn items(&self) -> &'static str {
-        match self {
-            Self::Meta    => "(UID FLAGS INTERNALDATE RFC822.SIZE)",
-            Self::Headers => "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])",
-            Self::Full    => "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[])",
-        }
-    }
-}
-
-/// One message returned by `UID FETCH`.
-#[derive(Clone, Debug, Default)]
-pub struct FetchedMessage {
-    pub seq:            u32,            // sequence number in the current mailbox view
-    pub uid:            u32,            // stable within the mailbox's current `uid_validity`
-    pub flags:          Vec<String>,    // e.g. `\Seen`, `\Answered`
-    // `INTERNALDATE` exactly as the server gave it, e.g. `01-Jan-2026 09:15:00 +0000`. Left as
-    // the server's string, because only the caller knows what calendar it wants it in.
-    pub internal_date:  String,
-    pub size:           u32,            // `RFC822.SIZE`, which may exceed `body.len()`
-    pub body:           Vec<u8>,        // whole message, header block, or empty, per FetchWhat
-}
-
-/// What a `UID STORE` does to the named flags.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FlagOp {
-    Add,        // leaving the others alone
-    Remove,     // leaving the others alone
-    Set,        // replacing the flag set entirely
-}
-
-impl FlagOp {
-    /// `.SILENT` throughout: the client already knows what it asked for, and the untagged FETCH
-    /// the server would otherwise send back is a round trip spent on nothing.
-    fn item(&self) -> &'static str {
-        match self {
-            Self::Add    => "+FLAGS.SILENT",
-            Self::Remove => "-FLAGS.SILENT",
-            Self::Set    => "FLAGS.SILENT",
-        }
-    }
-}
+pub use crate::imap::types::{
+    AppendUid,
+    CopyUid,
+    FetchChanged,
+    FetchWhat,
+    FetchedMessage,
+    FolderStatus,
+    MailboxInfo,
+    MailboxStatus,
+    SelectWith,
+    SpecialUse,
+};
 
 /// The completion status of a tagged command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -348,6 +257,7 @@ pub struct ImapClient {
     cfg:        ImapConfig,
     tls_cfg:    Arc<ClientConfig>,
     auth:       Option<Auth>,   // as last accepted
+    enabled:    Vec<String>,    // RFC 5161 extensions the server said it enabled, upper-cased
     opened:     Option<Opened>, // the mailbox last opened
     retries:    u8,             // fresh connections left
 }
@@ -363,7 +273,9 @@ enum Auth {
 struct Opened {
     name:           String,
     read_only:      bool,           // as asked: `EXAMINE` rather than `SELECT`
+    with:           SelectWith,     // repeated as asked
     uid_validity:   Option<u32>,    // None until an open has answered
+    modseq:         bool,           // the open answered a HIGHESTMODSEQ, so a fetch asks MODSEQ
 }
 
 /// Is this a transient failure -- a dropped connection, a server briefly unavailable -- that a
@@ -374,14 +286,19 @@ pub fn is_interrupted(e: &Error<ErrTag>) -> bool {
 
 impl ImapClient {
 
-    /// Protects the connection as configured and reads the greeting. Does not authenticate.
+    /// Protects the connection as configured and reads the greeting. Does not authenticate. The
+    /// certificate is checked against [`ImapConfig::tls`] where set, and what the operating system
+    /// trusts otherwise.
     pub async fn connect(cfg: &ImapConfig) -> Outcome<Self> {
-        let tls_cfg = Arc::new(res!(tls::default_client_config()));
+        let tls_cfg = match &cfg.tls {
+            Some(t) => t.clone(),
+            None    => Arc::new(res!(tls::default_client_config())),
+        };
         Self::connect_with(cfg, tls_cfg).await
     }
 
-    /// Connect using a caller-supplied rustls config, for a private CA or
-    /// a pinned root.
+    /// Connect using a caller-supplied rustls config, for a private CA or a pinned root. It
+    /// overrides [`ImapConfig::tls`].
     pub async fn connect_with(
         cfg:        &ImapConfig,
         tls_cfg:    Arc<ClientConfig>,
@@ -441,6 +358,7 @@ impl ImapClient {
             cfg:     cfg.clone(),
             tls_cfg: tls_cfg.clone(),
             auth:    None,
+            enabled: Vec::new(),
             opened:  None,
             retries: 0,
         };
@@ -662,23 +580,201 @@ impl ImapClient {
     }
 
     pub async fn select(&mut self, mailbox: &str) -> Outcome<MailboxStatus> {
-        self.select_impl(mailbox, false).await
+        self.select_impl(mailbox, false, &SelectWith::Plain).await
     }
 
     /// Read-only, so nothing the client does can change a flag. The safe choice for a sync that
     /// must not disturb the mailbox.
     pub async fn examine(&mut self, mailbox: &str) -> Outcome<MailboxStatus> {
-        self.select_impl(mailbox, true).await
+        self.select_impl(mailbox, true, &SelectWith::Plain).await
     }
 
-    async fn select_impl(&mut self, mailbox: &str, read_only: bool) -> Outcome<MailboxStatus> {
+    // ── Extensions ───────────────────────────────────────────────
+
+    /// RFC 5161 `ENABLE`, refused before anything is sent to a server without it. The server
+    /// names what it turned on, which may be less than was asked and is returned; what it turned
+    /// on is enabled again on any fresh connection.
+    pub async fn enable(&mut self, exts: &[&str]) -> Outcome<Vec<String>> {
+        if !self.has_cap("ENABLE") {
+            return Err(err!(
+                "IMAP server {} does not offer ENABLE, so it cannot enable {:?}.", self.host, exts;
+                Unimplemented, Mismatch));
+        }
+        if exts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let exts: Vec<String> = exts.iter().map(|e| e.to_uppercase()).collect();
+        match self.enable_once(&exts).await {
+            Err(e) if self.may_retry(&e) => {
+                res!(self.reopen(e).await);
+                self.enable_once(&exts).await
+            },
+            other => other,
+        }
+    }
+
+    async fn enable_once(&mut self, exts: &[String]) -> Outcome<Vec<String>> {
+        let resp = res!(self.command(&fmt!("ENABLE {}", exts.join(" "))).await);
+        let mut got: Vec<String> = Vec::new();
+        for line in &resp.untagged {
+            let up = line.text.to_uppercase();
+            if let Some(rest) = up.strip_prefix("* ENABLED") {
+                got.extend(rest.split_whitespace().map(|s| s.to_string()));
+            }
+        }
+        for g in &got {
+            if !self.enabled.contains(g) {
+                self.enabled.push(g.clone());
+            }
+        }
+        Ok(got)
+    }
+
+    /// Has the server said it enabled this extension? `QRESYNC` brings `CONDSTORE` with it
+    /// (RFC 7162 §3.2.3).
+    pub fn is_enabled(&self, ext: &str) -> bool {
+        let want = ext.to_uppercase();
+        self.enabled.iter().any(|e| *e == want || (want == "CONDSTORE" && e == "QRESYNC"))
+    }
+
+    // ── Mailboxes ────────────────────────────────────────────────
+
+    /// As [`Self::select`], with RFC 7162 parameters, which a reconnect repeats. A QRESYNC open
+    /// enables QRESYNC first where it is not yet on, and either is refused before anything is
+    /// sent to a server that does not offer it.
+    pub async fn select_with(&mut self, mailbox: &str, with: &SelectWith) -> Outcome<MailboxStatus> {
+        self.select_impl(mailbox, false, with).await
+    }
+
+    /// As [`Self::examine`], with RFC 7162 parameters, as [`Self::select_with`].
+    pub async fn examine_with(&mut self, mailbox: &str, with: &SelectWith) -> Outcome<MailboxStatus> {
+        self.select_impl(mailbox, true, with).await
+    }
+
+    /// RFC 3501 `STATUS`, for a mailbox's counts without opening it; `HIGHESTMODSEQ` too where
+    /// CONDSTORE is offered.
+    pub async fn status(&mut self, mailbox: &str) -> Outcome<FolderStatus> {
+        let modseq = self.has_cap("CONDSTORE") || self.has_cap("QRESYNC");
+        let cmd = fmt!("STATUS {} (MESSAGES UIDNEXT UIDVALIDITY UNSEEN{})",
+            quoted(mailbox), if modseq { " HIGHESTMODSEQ" } else { "" });
+        let resp = res!(self.read_command(&cmd).await);
+        for line in &resp.untagged {
+            if let Some(st) = res!(parse_status_line(line)) {
+                return Ok(st);
+            }
+        }
+        Err(err!("IMAP server {} answered STATUS of '{}' with no STATUS line.", self.host, mailbox;
+            IO, Network, Missing))
+    }
+
+    /// Creates `mailbox`, a hierarchy the server needs to hold it included (RFC 3501 6.3.3).
+    pub async fn create(&mut self, mailbox: &str) -> Outcome<()> {
+        res!(self.command(&fmt!("CREATE {}", quoted(mailbox))).await);
+        Ok(())
+    }
+
+    pub async fn subscribe(&mut self, mailbox: &str) -> Outcome<()> {
+        res!(self.read_command(&fmt!("SUBSCRIBE {}", quoted(mailbox))).await);
+        Ok(())
+    }
+
+    pub async fn unsubscribe(&mut self, mailbox: &str) -> Outcome<()> {
+        res!(self.read_command(&fmt!("UNSUBSCRIBE {}", quoted(mailbox))).await);
+        Ok(())
+    }
+
+    /// The subscribed mailboxes under `reference` matching `pattern`, as [`Self::list`].
+    pub async fn lsub(&mut self, reference: &str, pattern: &str) -> Outcome<Vec<MailboxInfo>> {
+        let cmd  = fmt!("LSUB {} {}", quoted(reference), quoted(pattern));
+        let resp = res!(self.read_command(&cmd).await);
+        let mut out = Vec::new();
+        for line in &resp.untagged {
+            if let Some(mb) = res!(parse_list_line(line)) {
+                out.push(mb);
+            }
+        }
+        Ok(out)
+    }
+
+    /// RFC 2971 `ID`: the client's fields go, the server's come back, a `None` value where it
+    /// sent `NIL`. No fields sends `ID NIL`. Refused before anything is sent to a server without
+    /// it.
+    pub async fn id(&mut self, fields: &[(&str, &str)]) -> Outcome<Vec<(String, Option<String>)>> {
+        if !self.has_cap("ID") {
+            return Err(err!("IMAP server {} does not offer ID.", self.host; Unimplemented, Mismatch));
+        }
+        let cmd = if fields.is_empty() {
+            fmt!("ID NIL")
+        } else {
+            let parts: Vec<String> = fields.iter()
+                .map(|(k, v)| fmt!("{} {}", quoted(k), quoted(v)))
+                .collect();
+            fmt!("ID ({})", parts.join(" "))
+        };
+        let resp = res!(self.read_command(&cmd).await);
+        for line in &resp.untagged {
+            if !line.text.to_uppercase().starts_with("* ID ") {
+                continue;
+            }
+            let toks = res!(tokenise(&line.text, &line.literals));
+            let items = match toks.get(2) {
+                Some(Tok::List(items)) => items,
+                _                      => return Ok(Vec::new()), // `* ID NIL`
+            };
+            let mut out = Vec::new();
+            for pair in items.chunks(2) {
+                let key = String::from_utf8_lossy(&pair[0].as_bytes()).into_owned();
+                let val = match pair.get(1) {
+                    Some(Tok::Atom(a)) if a.eq_ignore_ascii_case("NIL") => None,
+                    Some(t) => Some(String::from_utf8_lossy(&t.as_bytes()).into_owned()),
+                    None    => None,
+                };
+                out.push((key, val));
+            }
+            return Ok(out);
+        }
+        Ok(Vec::new())
+    }
+
+    async fn select_impl(
+        &mut self,
+        mailbox:    &str,
+        read_only:  bool,
+        with:       &SelectWith,
+    )
+        -> Outcome<MailboxStatus>
+    {
+        match with {
+            SelectWith::Plain => (),
+            SelectWith::CondStore => if !self.has_cap("CONDSTORE") {
+                return Err(err!(
+                    "IMAP server {} does not offer CONDSTORE, so '{}' cannot be opened with it.",
+                    self.host, mailbox; Unimplemented, Mismatch));
+            },
+            // A QRESYNC parameter before `ENABLE QRESYNC` is a protocol error (RFC 7162 §3.2.5).
+            SelectWith::QResync { .. } => if !self.is_enabled("QRESYNC") {
+                if !self.has_cap("QRESYNC") || !self.has_cap("ENABLE") {
+                    return Err(err!(
+                        "IMAP server {} does not offer QRESYNC, so '{}' cannot be opened with it.",
+                        self.host, mailbox; Unimplemented, Mismatch));
+                }
+                res!(self.enable(&["QRESYNC"]).await);
+                if !self.is_enabled("QRESYNC") {
+                    return Err(err!(
+                        "IMAP server {} offers QRESYNC but did not enable it.", self.host;
+                        Unimplemented, Mismatch));
+                }
+            },
+        }
         // A new open starts a new numbering, so no earlier UIDVALIDITY binds it.
         self.opened = Some(Opened {
             name:           mailbox.to_string(),
             read_only,
+            with:           with.clone(),
             uid_validity:   None,
+            modseq:         false,
         });
-        let st = match self.select_once(mailbox, read_only).await {
+        let st = match self.select_once(mailbox, read_only, with).await {
             Ok(st) => st,
             Err(e) if self.may_retry(&e) => {
                 match res!(self.reopen(e).await) {
@@ -696,13 +792,29 @@ impl ImapClient {
         };
         if let Some(o) = self.opened.as_mut() {
             o.uid_validity = Some(st.uid_validity);
+            o.modseq       = st.highest_modseq.is_some();
         }
         Ok(st)
     }
 
-    async fn select_once(&mut self, mailbox: &str, read_only: bool) -> Outcome<MailboxStatus> {
-        let verb = if read_only { "EXAMINE" } else { "SELECT" };
-        let cmd  = fmt!("{} {}", verb, quoted(mailbox));
+    async fn select_once(
+        &mut self,
+        mailbox:    &str,
+        read_only:  bool,
+        with:       &SelectWith,
+    )
+        -> Outcome<MailboxStatus>
+    {
+        let verb  = if read_only { "EXAMINE" } else { "SELECT" };
+        let param = match with {
+            SelectWith::Plain     => String::new(),
+            SelectWith::CondStore => fmt!(" (CONDSTORE)"),
+            SelectWith::QResync { uid_validity, modseq, known } => match known {
+                Some(k) if !k.is_empty() => fmt!(" (QRESYNC ({} {} {}))", uid_validity, modseq, k),
+                _                        => fmt!(" (QRESYNC ({} {}))", uid_validity, modseq),
+            },
+        };
+        let cmd  = fmt!("{} {}{}", verb, quoted(mailbox), param);
         let resp = res!(self.command(&cmd).await);
 
         let mut st = MailboxStatus {
@@ -710,8 +822,17 @@ impl ImapClient {
             read_only,
             ..Default::default()
         };
+        // QRESYNC's part of the reply: what vanished, and what changed. Only there does every
+        // FETCH carry its UID, so only there is one read.
+        let qresync = matches!(with, SelectWith::QResync { .. });
         for line in &resp.untagged {
-            res!(absorb_select_line(&mut st, &line.text));
+            if let Some(v) = res!(parse_vanished(&line.text)) {
+                st.vanished = st.vanished.union(&v);
+            } else if let Some(msg) = if qresync { res!(parse_fetch_line(line)) } else { None } {
+                st.changed.push(msg);
+            } else {
+                res!(absorb_select_line(&mut st, &line.text));
+            }
         }
         // A server may downgrade a SELECT to read-only, and says so in the
         // completion line's response code.
@@ -741,11 +862,11 @@ impl ImapClient {
         Ok(uids)
     }
 
-    /// An empty `uids` is a no-op rather than a command, because `UID FETCH ` with no set is a
+    /// An empty set is a no-op rather than a command, because `UID FETCH ` with no set is a
     /// syntax error and a caller passing an empty search result is not doing anything wrong.
     pub async fn uid_fetch(
         &mut self,
-        uids:   &[u32],
+        uids:   &UidSet,
         what:   FetchWhat,
     )
         -> Outcome<Vec<FetchedMessage>>
@@ -754,7 +875,7 @@ impl ImapClient {
             return Ok(Vec::new());
         }
         // `BODY.PEEK`, so a repeat changes nothing and is safe after a drop.
-        let cmd  = fmt!("UID FETCH {} {}", uid_set(uids), what.items());
+        let cmd  = fmt!("UID FETCH {} ({})", uids, self.fetch_items(what, false));
         let resp = res!(self.read_command(&cmd).await);
         let mut out: Vec<FetchedMessage> = Vec::new();
         for line in &resp.untagged {
@@ -765,39 +886,159 @@ impl ImapClient {
         Ok(out)
     }
 
+    /// What changed since mod-sequence `since` among `uids` (RFC 7162 `CHANGEDSINCE`), and, with
+    /// QRESYNC enabled, which of them have vanished. Refused before anything is sent to a server
+    /// without CONDSTORE.
+    pub async fn uid_fetch_changed(
+        &mut self,
+        uids:   &UidSet,
+        what:   FetchWhat,
+        since:  u64,
+    )
+        -> Outcome<FetchChanged>
+    {
+        if !self.has_cap("CONDSTORE") && !self.has_cap("QRESYNC") {
+            return Err(err!(
+                "IMAP server {} does not offer CONDSTORE, so it cannot fetch what changed.",
+                self.host; Unimplemented, Mismatch));
+        }
+        if uids.is_empty() {
+            return Ok(FetchChanged::default());
+        }
+        let vanished = if self.is_enabled("QRESYNC") { " VANISHED" } else { "" };
+        let cmd = fmt!("UID FETCH {} ({}) (CHANGEDSINCE {}{})",
+            uids, self.fetch_items(what, true), since, vanished);
+        let resp = res!(self.read_command(&cmd).await);
+        let mut out = FetchChanged::default();
+        for line in &resp.untagged {
+            if let Some(v) = res!(parse_vanished(&line.text)) {
+                out.vanished = out.vanished.union(&v);
+            } else if let Some(msg) = res!(parse_fetch_line(line)) {
+                out.messages.push(msg);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The fetch items for `what`: `MODSEQ` where asked or where the open mailbox keeps
+    /// mod-sequences, and Gmail's where the server offers them, but nothing beyond what
+    /// `MessageId` names.
+    fn fetch_items(&self, what: FetchWhat, modseq: bool) -> String {
+        let mut items = what.items().to_string();
+        if what != FetchWhat::MessageId {
+            if modseq || self.opened.as_ref().map(|o| o.modseq).unwrap_or(false) {
+                items.push_str(" MODSEQ");
+            }
+            if self.has_cap("X-GM-EXT-1") {
+                items.push_str(" X-GM-MSGID X-GM-LABELS");
+            }
+        }
+        items
+    }
+
+    /// The messages whose `Message-ID` is `mid`, with or without its angle brackets. The server's
+    /// `SEARCH` is only a candidate list, because a server may match a substring, another field
+    /// or nothing in particular: each candidate's `Message-ID` field is fetched, a few bytes, and
+    /// only those it names exactly are kept, with their UIDs and sizes. An empty result is no
+    /// match, never an error.
+    pub async fn uid_search_message_id(&mut self, mid: &str) -> Outcome<Vec<FetchedMessage>> {
+        let bare = bare_message_id(mid);
+        if bare.is_empty() || bare.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+            return Err(err!(
+                "The Message-ID {:?} cannot be searched for: empty, or with a control character, \
+                quote or backslash.", mid; Invalid, Input));
+        }
+        let uids = res!(self.uid_search(&fmt!("HEADER Message-ID {}", quoted(bare))).await);
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let found = res!(self.uid_fetch(&UidSet::from(&uids), FetchWhat::MessageId).await);
+        Ok(found.into_iter().filter(|m| header_message_id(&m.body).as_deref() == Some(bare)).collect())
+    }
+
     /// `None` where the server does not return it: expunged between the search and the fetch,
     /// which is a race the caller cannot prevent and should not treat as an error.
     pub async fn uid_fetch_one(&mut self, uid: u32) -> Outcome<Option<FetchedMessage>> {
-        let mut msgs = res!(self.uid_fetch(&[uid], FetchWhat::Full).await);
+        let mut msgs = res!(self.uid_fetch(&UidSet::from([uid]), FetchWhat::Full).await);
         Ok(if msgs.is_empty() { None } else { Some(msgs.remove(0)) })
     }
 
+    /// Adds `add` and removes `remove`, leaving every other flag as it is: a `+FLAGS` and a
+    /// `-FLAGS`, each sent only when it names a flag. There is deliberately no absolute set,
+    /// which would overwrite a flag another client has changed since this one looked. A UID no
+    /// longer in the mailbox is passed over by the server, which is not an error.
     pub async fn uid_store_flags(
         &mut self,
-        uids:   &[u32],
-        op:     FlagOp,
-        flags:  &[&str],
+        uids:   &UidSet,
+        add:    &[&str],
+        remove: &[&str],
     )
         -> Outcome<()>
     {
         if uids.is_empty() {
             return Ok(());
         }
-        let cmd = fmt!("UID STORE {} {} ({})",
-            uid_set(uids), op.item(), flags.join(" "));
-        res!(self.command(&cmd).await);
+        // `.SILENT` throughout: the client already knows what it asked for, and the untagged
+        // FETCH the server would otherwise send back is a round trip spent on nothing.
+        for (item, flags) in [("+FLAGS.SILENT", add), ("-FLAGS.SILENT", remove)] {
+            if flags.is_empty() {
+                continue;
+            }
+            let cmd = fmt!("UID STORE {} {} ({})", uids, item, flags.join(" "));
+            res!(self.command(&cmd).await);
+        }
+        Ok(())
+    }
+
+    /// `None` from a server without `UIDPLUS`, which says nothing of where the copies went.
+    pub async fn uid_copy(&mut self, uids: &UidSet, to: &str) -> Outcome<Option<CopyUid>> {
+        if uids.is_empty() {
+            return Ok(None);
+        }
+        let resp = res!(self.command(&fmt!("UID COPY {} {}", uids, quoted(to))).await);
+        copy_uid_of(&resp, uids)
+    }
+
+    /// RFC 6851 `MOVE`, refused before anything is sent to a server that does not offer it: the
+    /// fallback (`UID COPY`, `+FLAGS \Deleted`, `UID EXPUNGE`) is the caller's to choose.
+    pub async fn uid_move(&mut self, uids: &UidSet, to: &str) -> Outcome<Option<CopyUid>> {
+        if !self.has_cap("MOVE") {
+            return Err(err!(
+                "IMAP server {} does not offer MOVE.", self.host;
+                Unimplemented, Mismatch));
+        }
+        if uids.is_empty() {
+            return Ok(None);
+        }
+        let resp = res!(self.command(&fmt!("UID MOVE {} {}", uids, quoted(to))).await);
+        copy_uid_of(&resp, uids)
+    }
+
+    /// Removes exactly these UIDs where they are `\Deleted`. Refused before anything is sent to a
+    /// server without `UIDPLUS`, because the only other expunge removes every `\Deleted` message
+    /// in the mailbox, including ones another client marked and meant to keep a while.
+    pub async fn uid_expunge(&mut self, uids: &UidSet) -> Outcome<()> {
+        if !self.has_cap("UIDPLUS") {
+            return Err(err!(
+                "IMAP server {} does not offer UIDPLUS, so it cannot expunge by UID.", self.host;
+                Unimplemented, Mismatch));
+        }
+        if uids.is_empty() {
+            return Ok(());
+        }
+        res!(self.command(&fmt!("UID EXPUNGE {}", uids)).await);
         Ok(())
     }
 
     /// `body` is a raw RFC 5322 message: this is how a sent message is filed in `Sent` after
-    /// SMTP has delivered it.
+    /// SMTP has delivered it. The new UID where the server has `UIDPLUS`, and `None` otherwise.
     pub async fn append(
         &mut self,
         mailbox:    &str,
         flags:      &[&str],
         body:       &[u8],
     )
-        -> Outcome<()>
+        -> Outcome<Option<AppendUid>>
     {
         let tag  = self.next_tag();
         let flag_part = if flags.is_empty() {
@@ -821,8 +1062,17 @@ impl ImapClient {
         res!(self.write_all(b"\r\n").await);
 
         let resp = res!(self.read_until_tag(&tag, "APPEND").await);
-        let _ = resp;
-        Ok(())
+        let code = match response_code(&resp.text, "APPENDUID") {
+            Some(c) => c,
+            None    => return Ok(None),
+        };
+        let mut it = code.split_whitespace();
+        match (it.next().map(|v| v.parse::<u32>()), it.next().map(|u| u.parse::<u32>())) {
+            (Some(Ok(uid_validity)), Some(Ok(uid))) => Ok(Some(AppendUid { uid_validity, uid })),
+            _ => Err(err!(
+                "IMAP server {} sent a malformed APPENDUID: {}", self.host, resp.text;
+                IO, Network, Decode)),
+        }
     }
 
     pub async fn logout(&mut self) -> Outcome<()> {
@@ -877,9 +1127,15 @@ impl ImapClient {
                 res!(fresh.xoauth2_once(user, token.expose_secret()).await),
             None => (),
         }
+        // What was enabled is enabled again before the mailbox is re-opened, which a QRESYNC
+        // open needs.
+        if !self.enabled.is_empty() {
+            let exts = self.enabled.clone();
+            res!(fresh.enable_once(&exts).await);
+        }
         let mut status = None;
         if let Some(o) = &self.opened {
-            let st = res!(fresh.select_once(&o.name, o.read_only).await);
+            let st = res!(fresh.select_once(&o.name, o.read_only, &o.with).await);
             if let Some(v) = o.uid_validity {
                 if st.uid_validity != v {
                     return Err(err!(
@@ -895,6 +1151,7 @@ impl ImapClient {
         self.stream = fresh.stream.take();
         self.tag    = fresh.tag;
         self.caps   = std::mem::take(&mut fresh.caps);
+        self.enabled = std::mem::take(&mut fresh.enabled);
         Ok(status)
     }
 
@@ -1339,6 +1596,10 @@ fn absorb_select_line(st: &mut MailboxStatus, text: &str) -> Outcome<()> {
     if let Some(v) = bracket_value(&up, "UIDNEXT") {
         st.uid_next = v;
     }
+    // `* OK [HIGHESTMODSEQ 715194045007]`; `[NOMODSEQ]` leaves it `None`.
+    if let Some(v) = bracket_u64(&up, "HIGHESTMODSEQ") {
+        st.highest_modseq = Some(v);
+    }
     // `* FLAGS (\Answered \Flagged ...)`
     if up.starts_with("* FLAGS") {
         if let (Some(a), Some(b)) = (text.find('('), text.rfind(')')) {
@@ -1363,6 +1624,81 @@ fn bracket_value(up: &str, name: &str) -> Option<u32> {
     let start = i + pat.len();
     let end = ok!(up[start..].find(']'));
     up[start..start + end].trim().parse::<u32>().ok()
+}
+
+/// As [`bracket_value`], for a 63-bit mod-sequence.
+fn bracket_u64(up: &str, name: &str) -> Option<u64> {
+    let pat = fmt!("[{} ", name);
+    let i = ok!(up.find(&pat));
+    let start = i + pat.len();
+    let end = ok!(up[start..].find(']'));
+    up[start..start + end].trim().parse::<u64>().ok()
+}
+
+/// The UIDs of a `* VANISHED (EARLIER) 41,43:116` line (RFC 7162 §3.2.10), with or without
+/// `(EARLIER)`; `None` for any other line.
+fn parse_vanished(text: &str) -> Outcome<Option<UidSet>> {
+    let rest = match text.get(..11) {
+        Some(head) if head.eq_ignore_ascii_case("* VANISHED ") => text[11..].trim(),
+        _ => return Ok(None),
+    };
+    let rest = match rest.get(..9) {
+        Some(head) if head.eq_ignore_ascii_case("(EARLIER)") => rest[9..].trim(),
+        _ => rest,
+    };
+    Ok(Some(res!(UidSet::parse(rest))))
+}
+
+/// Reads `* STATUS "INBOX" (MESSAGES 231 UIDNEXT 44292)`; `None` for any other line.
+fn parse_status_line(line: &RawLine) -> Outcome<Option<FolderStatus>> {
+    if !line.text.to_uppercase().starts_with("* STATUS ") {
+        return Ok(None);
+    }
+    let toks = res!(tokenise(&line.text, &line.literals));
+    let items = match toks.get(3) {
+        Some(Tok::List(items)) => items,
+        _ => return Err(err!("IMAP STATUS reply has no data list: {}", line.text;
+            Invalid, Input, Decode)),
+    };
+    let mut st = FolderStatus::default();
+    for pair in items.chunks(2) {
+        let (key, val) = match (pair[0].as_str(), pair.get(1).and_then(|t| t.as_str())) {
+            (Some(k), Some(v)) => (k.to_uppercase(), v),
+            _                  => continue,
+        };
+        let n = res!(val.parse::<u64>().map_err(|e| err!(e,
+            "IMAP STATUS item {} is not a number: {}", key, line.text; Invalid, Input, Decode)));
+        if key == "HIGHESTMODSEQ" {
+            st.highest_modseq = Some(n);
+            continue;
+        }
+        let small = res!(u32::try_from(n).map_err(|e| err!(e,
+            "IMAP STATUS item {} is out of range: {}", key, line.text; Invalid, Input, Decode)));
+        match key.as_str() {
+            "MESSAGES"      => st.messages = small,
+            "UIDNEXT"       => st.uid_next = small,
+            "UIDVALIDITY"   => st.uid_validity = small,
+            "UNSEEN"        => st.unseen = small,
+            _               => (),
+        }
+    }
+    Ok(Some(st))
+}
+
+/// A Message-ID without its angle brackets or surrounding space.
+fn bare_message_id(mid: &str) -> &str {
+    let t = mid.trim();
+    t.strip_prefix('<').and_then(|t| t.strip_suffix('>')).unwrap_or(t).trim()
+}
+
+/// The `Message-ID` a header block names, without its angle brackets; `None` where it names
+/// none, or cannot be read as RFC 5322 reads it, which is no confirmation.
+fn header_message_id(block: &[u8]) -> Option<String> {
+    let (head, _) = email::header::split_headers_body(block);
+    let fields = ok!(email::header::header_fields(head).ok());
+    fields.into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("Message-ID"))
+        .map(|(_, v)| bare_message_id(&v).to_string())
 }
 
 /// Reads `* 12 FETCH (UID 345 FLAGS (\Seen) ... BODY[] {4523}...)`; `None` for an untagged line
@@ -1428,6 +1764,23 @@ fn parse_fetch_line(line: &RawLine) -> Outcome<Option<FetchedMessage>> {
                     msg.internal_date = s.to_string();
                 }
             }
+            // `MODSEQ (20060115194045000)`, a list of one.
+            "MODSEQ" => {
+                if let Tok::List(v) = val {
+                    msg.modseq = v.first().and_then(|t| t.as_str()).and_then(|s| s.parse::<u64>().ok());
+                }
+            }
+            "X-GM-MSGID" => {
+                msg.gm_msgid = val.as_str().and_then(|s| s.parse::<u64>().ok());
+            }
+            // Atoms, strings or literals, a label being any mailbox name.
+            "X-GM-LABELS" => {
+                if let Tok::List(ls) = val {
+                    msg.gm_labels = ls.iter()
+                        .map(|t| String::from_utf8_lossy(&t.as_bytes()).into_owned())
+                        .collect();
+                }
+            }
             _ => {
                 // Every body-ish item -- `BODY[]`, `BODY[HEADER]`,
                 // `RFC822`, `RFC822.HEADER` -- carries the bytes we want,
@@ -1452,33 +1805,51 @@ fn parse_fetch_line(line: &RawLine) -> Outcome<Option<FetchedMessage>> {
     Ok(Some(msg))
 }
 
-/// Render a UID list as a compact IMAP sequence set, collapsing runs into
-/// ranges: `[1,2,3,7,9,10]` becomes `1:3,7,9:10`. A mailbox synced after a
-/// week away yields a set of thousands of consecutive UIDs, and a server
-/// is entitled to reject a command line that long.
-fn uid_set(uids: &[u32]) -> String {
-    let mut sorted: Vec<u32> = uids.to_vec();
-    sorted.sort_unstable();
-    sorted.dedup();
-
-    let mut out   = String::new();
-    let mut i     = 0usize;
-    while i < sorted.len() {
-        let start = sorted[i];
-        let mut end = start;
-        while i + 1 < sorted.len() && sorted[i + 1] == end + 1 {
-            i += 1;
-            end = sorted[i];
+/// The text of the `[NAME ...]` response code in `text`, after the name; `Some("")` for a bare
+/// `[NAME]`.
+fn response_code(text: &str, name: &str) -> Option<String> {
+    let up  = text.to_uppercase();
+    let pat = fmt!("[{}", name);
+    let mut from = 0usize;
+    while let Some(i) = up[from..].find(&pat) {
+        let start = from + i + pat.len();
+        match up[start..].chars().next() {
+            Some(' ') | Some(']') => {
+                let end = ok!(text[start..].find(']'));
+                return Some(text[start..start + end].trim().to_string());
+            },
+            _ => from = start,
         }
-        if !out.is_empty() { out.push(','); }
-        if start == end {
-            out.push_str(&fmt!("{}", start));
-        } else {
-            out.push_str(&fmt!("{}:{}", start, end));
-        }
-        i += 1;
     }
-    out
+    None
+}
+
+/// The `COPYUID` of a `COPY` or `MOVE` of `sent`, on the completion line or, for a `MOVE`, an
+/// untagged `OK`. Its source UIDs are a subset of `sent` (RFC 4315), so a list longer than `sent`
+/// is not believed and is never expanded.
+fn copy_uid_of(resp: &Response, sent: &UidSet) -> Outcome<Option<CopyUid>> {
+    let max = usize::try_from(sent.len()).unwrap_or(usize::MAX);
+    let code = resp.untagged.iter().map(|l| l.text.as_str())
+        .chain(std::iter::once(resp.text.as_str()))
+        .find_map(|t| response_code(t, "COPYUID"));
+    let code = match code {
+        Some(c) => c,
+        None    => return Ok(None),
+    };
+    let parts: Vec<&str> = code.split_whitespace().collect();
+    if parts.len() != 3 {
+        return Err(err!("A malformed COPYUID: [COPYUID {}]", code; Invalid, Input, Decode));
+    }
+    let uid_validity = res!(parts[0].parse::<u32>().map_err(|e| err!(e,
+        "A malformed COPYUID: [COPYUID {}]", code; Invalid, Input, Decode)));
+    let src = res!(uid_set::uid_list(parts[1], max));
+    let dst = res!(uid_set::uid_list(parts[2], max));
+    if src.len() != dst.len() {
+        return Err(err!(
+            "A COPYUID naming {} source and {} destination UIDs: [COPYUID {}]",
+            src.len(), dst.len(), code; Invalid, Input, Decode));
+    }
+    Ok(Some(CopyUid { uid_validity, pairs: src.into_iter().zip(dst).collect() }))
 }
 
 /// An IMAP quoted-string, with the two characters that need escaping escaped.
@@ -1857,7 +2228,7 @@ mod tests {
         let (addr, _) = res!(scripted(GREET, script).await);
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.select("INBOX").await);
-        let msgs = res!(c.uid_fetch(&[9], FetchWhat::Full).await);
+        let msgs = res!(c.uid_fetch(&UidSet::from([9]), FetchWhat::Full).await);
         req!(1, msgs.len(), "the FETCH reply was lost");
         req!(body.as_bytes().to_vec(), msgs[0].body,
             "the literal came back changed: {:?}", String::from_utf8_lossy(&msgs[0].body));
@@ -1880,7 +2251,7 @@ mod tests {
         ).await);
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.select("INBOX").await);
-        let msg = match c.uid_fetch(&[9], FetchWhat::Full).await {
+        let msg = match c.uid_fetch(&UidSet::from([9]), FetchWhat::Full).await {
             Err(e) => fmt!("{}", e),
             Ok(_)  => return Err(err!(
                 "A 64 MiB literal was accepted from a server that never sent it.";
@@ -1970,7 +2341,7 @@ mod tests {
         ).await);
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.select("INBOX").await);
-        res!(c.uid_fetch(&[1, 2, 3, 7, 9, 10], FetchWhat::Meta).await);
+        res!(c.uid_fetch(&UidSet::from([1, 2, 3, 7, 9, 10]), FetchWhat::Meta).await);
         let lines = res!(lines_of(&seen));
         req!(true, lines.iter().any(|l| l.contains("UID FETCH 1:3,7,9:10")),
             "the UID set was not collapsed on the wire: {:?}", lines);
@@ -1986,8 +2357,8 @@ mod tests {
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.select("INBOX").await);
         let before = res!(lines_of(&seen)).len();
-        req!(true, res!(c.uid_fetch(&[], FetchWhat::Full).await).is_empty());
-        res!(c.uid_store_flags(&[], FlagOp::Add, &["\\Seen"]).await);
+        req!(true, res!(c.uid_fetch(&UidSet::new(), FetchWhat::Full).await).is_empty());
+        res!(c.uid_store_flags(&UidSet::new(), &["\\Seen"], &[]).await);
         req!(before, res!(lines_of(&seen)).len(),
             "a command was sent for an empty UID set");
         Ok(())
@@ -2061,7 +2432,7 @@ mod tests {
         ).await);
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.select("INBOX").await);
-        res!(c.uid_store_flags(&[4, 5], FlagOp::Add, &["\\Seen"]).await);
+        res!(c.uid_store_flags(&UidSet::from([4, 5]), &["\\Seen"], &[]).await);
         let lines = res!(lines_of(&seen));
         req!(true, lines.iter().any(|l| l.contains("UID STORE 4:5 +FLAGS.SILENT (\\Seen)")),
             "the STORE was not what was expected: {:?}", lines);
@@ -2110,20 +2481,12 @@ mod tests {
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         let msg = match c.append("Sent", &[], body).await {
             Err(e) => fmt!("{}", e),
-            Ok(())  => return Err(err!("A refused APPEND was a success."; Test, Invalid)),
+            Ok(_)   => return Err(err!("A refused APPEND was a success."; Test, Invalid)),
         };
         req!(true, msg.contains("OVERQUOTA"), "the server's words were dropped: {}", msg);
         req!(false, res!(lines_of(&seen)).iter().any(|l| l.starts_with("<literal ")),
             "the body was sent to a mailbox that had refused it");
         Ok(())
-    }
-
-    #[test]
-    fn test_uid_set_collapses_runs() {
-        assert_eq!(uid_set(&[1, 2, 3, 7, 9, 10]), "1:3,7,9:10");
-        assert_eq!(uid_set(&[5]),                 "5");
-        assert_eq!(uid_set(&[3, 1, 2]),           "1:3");
-        assert_eq!(uid_set(&[]),                  "");
     }
 
     #[test]
@@ -2399,7 +2762,7 @@ mod tests {
         let mut c = res!(ImapClient::connect(&cfg(addr)).await);
         res!(c.login(USER, PASS).await);
         res!(c.select("INBOX").await);
-        match c.uid_store_flags(&[3], FlagOp::Add, &["\\Seen"]).await {
+        match c.uid_store_flags(&UidSet::from([3]), &["\\Seen"], &[]).await {
             Ok(())  => return Err(err!("A dropped STORE was reported done."; Test, Invalid)),
             Err(e)  => req!(true, e.tags().contains(&ErrTag::Interrupted),
                 "the dropped STORE was not tagged Interrupted: {:?}", e.tags()),
@@ -2460,6 +2823,52 @@ mod tests {
         Ok(())
     }
 
+    /// An implicit-TLS server vouched for by a private CA, which greets each of `n` connections.
+    async fn private_tls_server(n: usize) -> Outcome<(SocketAddr, String)> {
+        use tokio_rustls::{rustls::ServerConfig, TlsAcceptor};
+        let mint = res!(tls::Mint::new(&[tls::NameRule::Exact(fmt!("imap.world.test"))], 1));
+        let ca   = mint.ca_pem();
+        let scfg = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(mint));
+        let acceptor = TlsAcceptor::from(Arc::new(scfg));
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the test server."; Test, IO)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading its address."; Test, IO)));
+        tokio::spawn(async move {
+            for _ in 0..n {
+                if let Ok((sock, _)) = listener.accept().await {
+                    if let Ok(mut s) = acceptor.accept(sock).await {
+                        let _ = s.write_all(GREET.as_bytes()).await;
+                        let _ = s.flush().await;
+                    }
+                }
+            }
+        });
+        Ok((addr, ca))
+    }
+
+    /// The caller's roots reach the handshake through the config: the private CA is refused by
+    /// the default roots and trusted once the config carries it.
+    #[tokio::test]
+    async fn test_a_config_carrying_a_private_root_connects_00() -> Outcome<()> {
+        let (addr, ca) = res!(private_tls_server(2).await);
+        let base = ImapConfig::new(fmt!("imap.world.test"), addr.port(), Security::ImplicitTls)
+            .with_addr(addr)
+            .with_retries(0)
+            .with_timeout(Duration::from_secs(10));
+        match ImapClient::connect(&base).await {
+            Ok(_)  => return Err(err!("A private CA was trusted unasked."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Security),
+                "the refusal was not tagged Security: {:?}", e.tags()),
+        }
+        let tls_cfg = Arc::new(res!(tls::client_config_trusting(&tls::TrustConfig::default(), ca.as_bytes())));
+        let c = res!(ImapClient::connect(&base.with_tls(tls_cfg)).await);
+        req!(true, c.has_cap("SPECIAL-USE"), "the greeting was not read over TLS");
+        Ok(())
+    }
+
     /// A server that accepts and hangs up before the TLS handshake finishes has dropped the
     /// connection. That is not a certificate fault, and must not be tagged as one.
     #[tokio::test]
@@ -2478,6 +2887,462 @@ mod tests {
             },
         }
         req!(2, res!(connections_of(&seen)), "the dropped handshake was not tried once more");
+        Ok(())
+    }
+
+    // ── Deltas, copies, moves and expunges (F1) ─────────────────────
+
+    /// A greeting from a server with the extensions a modern Dovecot offers.
+    const GREET_PLUS: &str = "* OK [CAPABILITY IMAP4rev1 SPECIAL-USE UIDPLUS MOVE ENABLE \
+                              CONDSTORE QRESYNC ID] ready\r\n";
+    const SELECT_OK: &str  = "%T% OK [READ-WRITE] SELECT completed\r\n";
+
+    /// Flags go as deltas, one `+FLAGS` and one `-FLAGS`, never an absolute list, which would
+    /// overwrite a flag set elsewhere since the client last looked.
+    #[tokio::test]
+    async fn test_a_flag_change_goes_as_deltas_only_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec![
+            SELECT_OK, "%T% OK STORE done\r\n", "%T% OK STORE done\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        res!(c.uid_store_flags(&UidSet::from([3, 4]), &["\\Seen"], &["\\Flagged", "$Junk"]).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.ends_with("UID STORE 3:4 +FLAGS.SILENT (\\Seen)")),
+            "no +FLAGS: {:?}", lines);
+        req!(true, lines.iter().any(|l| l.ends_with("UID STORE 3:4 -FLAGS.SILENT (\\Flagged $Junk)")),
+            "no -FLAGS: {:?}", lines);
+        req!(false, lines.iter().any(|l| l.contains(" FLAGS.SILENT")),
+            "an absolute FLAGS was sent: {:?}", lines);
+        Ok(())
+    }
+
+    /// RFC 4315's example: `COPYUID` pairs each source UID with its new one, by position.
+    #[tokio::test]
+    async fn test_uid_copy_reads_copyuid_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            SELECT_OK, "%T% OK [COPYUID 38505 304,319:320 3956:3958] Done\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let got = res!(c.uid_copy(&res!(UidSet::parse("304,319:320")), "Archive/2026").await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.ends_with("UID COPY 304,319:320 \"Archive/2026\"")),
+            "the COPY was not what was expected: {:?}", lines);
+        let got = res!(got.ok_or_else(|| err!("No COPYUID was read."; Test, Missing)));
+        req!(38505, got.uid_validity);
+        req!(vec![(304, 3956), (319, 3957), (320, 3958)], got.pairs);
+        Ok(())
+    }
+
+    /// Without `UIDPLUS` there is no `COPYUID`, which is no answer rather than an error.
+    #[tokio::test]
+    async fn test_a_copy_without_uidplus_has_no_copyuid_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(GREET, vec![SELECT_OK, "%T% OK COPY done\r\n"]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        req!(true, res!(c.uid_copy(&UidSet::from([5]), "Trash").await).is_none());
+        Ok(())
+    }
+
+    /// RFC 6851's example: a `MOVE` carries `COPYUID` on an untagged `OK`, before the expunges.
+    #[tokio::test]
+    async fn test_uid_move_reads_copyuid_from_the_untagged_ok_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            SELECT_OK,
+            "* OK [COPYUID 432432 42:43 11:12]\r\n* 22 EXPUNGE\r\n* 22 EXPUNGE\r\n\
+             %T% OK Move completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let got = res!(c.uid_move(&UidSet::from([42, 43]), "Junk").await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.ends_with("UID MOVE 42:43 \"Junk\"")),
+            "the MOVE was not what was expected: {:?}", lines);
+        let got = res!(got.ok_or_else(|| err!("No COPYUID was read."; Test, Missing)));
+        req!(vec![(42, 11), (43, 12)], got.pairs);
+        Ok(())
+    }
+
+    /// A server without `MOVE` is not sent one: the fallback is the caller's to choose.
+    #[tokio::test]
+    async fn test_a_move_is_not_sent_to_a_server_without_it_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec![SELECT_OK]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let before = res!(lines_of(&seen)).len();
+        match c.uid_move(&UidSet::from([1]), "Trash").await {
+            Ok(_)  => return Err(err!("A MOVE went to a server without it."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Unimplemented), "{:?}", e.tags()),
+        }
+        req!(before, res!(lines_of(&seen)).len(), "a command was sent");
+        Ok(())
+    }
+
+    /// `UID EXPUNGE` removes only the UIDs named. Without `UIDPLUS` it is refused, never replaced
+    /// by a plain `EXPUNGE`, which would remove every `\Deleted` message in the mailbox.
+    #[tokio::test]
+    async fn test_uid_expunge_names_its_uids_or_is_refused_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            SELECT_OK, "* 3 EXPUNGE\r\n* 3 EXPUNGE\r\n* 3 EXPUNGE\r\n%T% OK Expunge completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        res!(c.uid_expunge(&res!(UidSet::parse("3000:3002"))).await);
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l.ends_with("UID EXPUNGE 3000:3002")));
+
+        let (addr, seen) = res!(scripted(GREET, vec![SELECT_OK]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        match c.uid_expunge(&UidSet::from([7])).await {
+            Ok(())  => return Err(err!("An expunge went to a server without UIDPLUS."; Test, Invalid)),
+            Err(e)  => req!(true, e.tags().contains(&ErrTag::Unimplemented), "{:?}", e.tags()),
+        }
+        req!(false, res!(lines_of(&seen)).iter().any(|l| l.contains("EXPUNGE")),
+            "an EXPUNGE was sent");
+        Ok(())
+    }
+
+    /// RFC 4315's example: `APPENDUID` names the new message.
+    #[tokio::test]
+    async fn test_append_returns_appenduid_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(GREET_PLUS, vec![
+            "+ Ready for literal data\r\n", "%T% OK [APPENDUID 38505 3955] APPEND completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let got = res!(c.append("Sent", &["\\Seen"], b"Subject: x\r\n\r\ny\r\n").await);
+        req!(Some(AppendUid { uid_validity: 38505, uid: 3955 }), got);
+        Ok(())
+    }
+
+
+    // ── ENABLE, CONDSTORE and QRESYNC (F1 part 2) ───────────────────
+
+    const ENABLED_QRESYNC: &str = "* ENABLED QRESYNC\r\n%T% OK Enabled\r\n";
+
+    /// RFC 5161's example: the server names what it turned on, which may be less than was asked.
+    #[tokio::test]
+    async fn test_enable_reads_what_was_enabled_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            "* ENABLED X-GOOD-IDEA\r\n%T% OK foo\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let got = res!(c.enable(&["CONDSTORE", "X-GOOD-IDEA"]).await);
+        req!(vec![fmt!("X-GOOD-IDEA")], got);
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l.ends_with("ENABLE CONDSTORE X-GOOD-IDEA")));
+        req!(true, c.is_enabled("x-good-idea"));
+        req!(false, c.is_enabled("CONDSTORE"), "an extension the server did not enable is held on");
+        Ok(())
+    }
+
+    /// No `ENABLE` capability, no `ENABLE` command.
+    #[tokio::test]
+    async fn test_enable_is_not_sent_without_the_capability_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec![]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        match c.enable(&["QRESYNC"]).await {
+            Ok(v)  => return Err(err!("ENABLE went to a server without it: {:?}", v; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Unimplemented), "{:?}", e.tags()),
+        }
+        req!(0, res!(lines_of(&seen)).len(), "a command was sent");
+        Ok(())
+    }
+
+    /// RFC 7162 §3.2.5.1's example: a QRESYNC `SELECT` returns the mailbox's HIGHESTMODSEQ, the
+    /// known UIDs that vanished, and the messages whose flags changed. QRESYNC is enabled first,
+    /// because a server must refuse the parameter otherwise.
+    #[tokio::test]
+    async fn test_a_qresync_select_reads_vanished_and_changed_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            ENABLED_QRESYNC,
+            "* 314 EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 67890007] UIDVALIDITY\r\n\
+             * OK [UIDNEXT 567] Predicted next UID\r\n\
+             * FLAGS (\\Answered \\Flagged \\Draft \\Deleted \\Seen)\r\n\
+             * OK [PERMANENTFLAGS (\\Answered \\Flagged \\Draft \\Deleted \\Seen \\*)] Permanent flags\r\n\
+             * OK [HIGHESTMODSEQ 20060128194045007] Highest mailbox mod-sequence\r\n\
+             * VANISHED (EARLIER) 41,43:116,118,120:211,214:540\r\n\
+             * 49 FETCH (UID 117 FLAGS (\\Seen \\Answered) MODSEQ (20060115194045000))\r\n\
+             * 50 FETCH (UID 119 FLAGS (\\Draft $MDNSent) MODSEQ (20060115194045308))\r\n\
+             * 51 FETCH (UID 541 FLAGS (\\Seen $Forwarded) MODSEQ (20060115194045001))\r\n\
+             %T% OK [READ-WRITE] mailbox selected\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let with = SelectWith::QResync {
+            uid_validity:   67890007,
+            modseq:         20050715194045000,
+            known:          Some(res!(UidSet::parse("41,43:211,214:541"))),
+        };
+        let st = res!(c.select_with("INBOX", &with).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines[0].ends_with("ENABLE QRESYNC"), "QRESYNC was not enabled first: {:?}", lines);
+        req!(true, lines[1].ends_with(
+            "SELECT \"INBOX\" (QRESYNC (67890007 20050715194045000 41,43:211,214:541))"),
+            "the SELECT was not what was expected: {:?}", lines);
+        req!(Some(20060128194045007u64), st.highest_modseq);
+        req!(res!(UidSet::parse("41,43:116,118,120:211,214:540")), st.vanished);
+        req!(vec![117u32, 119, 541], st.changed.iter().map(|m| m.uid).collect::<Vec<_>>());
+        req!(Some(20060115194045000u64), st.changed[0].modseq);
+        req!(vec![fmt!("\\Draft"), fmt!("$MDNSent")], st.changed[1].flags.clone());
+        req!(314, st.exists);
+        Ok(())
+    }
+
+    /// A server without QRESYNC is not sent a QRESYNC select, nor an `ENABLE` for one.
+    #[tokio::test]
+    async fn test_a_qresync_select_is_refused_where_not_offered_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec![]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let with = SelectWith::QResync { uid_validity: 1, modseq: 2, known: None };
+        match c.select_with("INBOX", &with).await {
+            Ok(_)  => return Err(err!("A QRESYNC select went to a server without it."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Unimplemented), "{:?}", e.tags()),
+        }
+        match c.select_with("INBOX", &SelectWith::CondStore).await {
+            Ok(_)  => return Err(err!("A CONDSTORE select went to a server without it."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Unimplemented), "{:?}", e.tags()),
+        }
+        req!(0, res!(lines_of(&seen)).len(), "a command was sent");
+        Ok(())
+    }
+
+    /// RFC 7162 §3.1.2's example: `(CONDSTORE)` on the select, and `HIGHESTMODSEQ` in the reply.
+    /// Once the mailbox has mod-sequences, a fetch asks for `MODSEQ`; a `NOMODSEQ` one does not.
+    #[tokio::test]
+    async fn test_a_condstore_select_reads_highestmodseq_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            "* 172 EXISTS\r\n* OK [UIDVALIDITY 3857529045] UIDVALIDITY\r\n\
+             * OK [HIGHESTMODSEQ 715194045007]\r\n%T% OK [READ-WRITE] SELECT completed\r\n",
+            "* 1 FETCH (UID 4 MODSEQ (65402) FLAGS (\\Seen))\r\n%T% OK done\r\n",
+            "* 1 EXISTS\r\n* OK [UIDVALIDITY 9] x\r\n* OK [NOMODSEQ] Sorry\r\n%T% OK [READ-ONLY] done\r\n",
+            "* 1 FETCH (UID 4 FLAGS (\\Seen))\r\n%T% OK done\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let st = res!(c.select_with("INBOX", &SelectWith::CondStore).await);
+        req!(Some(715194045007u64), st.highest_modseq);
+        let got = res!(c.uid_fetch(&UidSet::from([4]), FetchWhat::Flags).await);
+        req!(Some(65402u64), got[0].modseq);
+        let st = res!(c.examine_with("Shared", &SelectWith::CondStore).await);
+        req!(None::<u64>, st.highest_modseq, "NOMODSEQ read as a mod-sequence");
+        res!(c.uid_fetch(&UidSet::from([4]), FetchWhat::Flags).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines[0].ends_with("SELECT \"INBOX\" (CONDSTORE)"), "{:?}", lines);
+        req!(true, lines[1].ends_with("UID FETCH 4 (UID FLAGS MODSEQ)"), "{:?}", lines);
+        req!(true, lines[2].ends_with("EXAMINE \"Shared\" (CONDSTORE)"), "{:?}", lines);
+        req!(true, lines[3].ends_with("UID FETCH 4 (UID FLAGS)"), "{:?}", lines);
+        Ok(())
+    }
+
+    /// RFC 7162 §3.2.6's example: with QRESYNC on, `CHANGEDSINCE` asks for `VANISHED` too, and
+    /// the `VANISHED (EARLIER)` reply names the UIDs expunged among those asked about.
+    #[tokio::test]
+    async fn test_changedsince_reads_vanished_earlier_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            ENABLED_QRESYNC,
+            "* 10 EXISTS\r\n* OK [UIDVALIDITY 5] x\r\n* OK [HIGHESTMODSEQ 90000] x\r\n%T% OK done\r\n",
+            "* VANISHED (EARLIER) 300:310,405,411\r\n\
+             * 1 FETCH (UID 404 MODSEQ (65402) FLAGS (\\Seen))\r\n\
+             * 2 FETCH (UID 406 MODSEQ (75403) FLAGS (\\Deleted))\r\n\
+             * 4 FETCH (UID 408 MODSEQ (29738) FLAGS ($NoJunk $AutoJunk $MDNSent))\r\n\
+             %T% OK Conditional UID FETCH completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.enable(&["QRESYNC"]).await);
+        res!(c.select("INBOX").await);
+        let got = res!(c.uid_fetch_changed(&UidSet::from_range(300, 500), FetchWhat::Flags, 12345).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines[2].ends_with("UID FETCH 300:500 (UID FLAGS MODSEQ) (CHANGEDSINCE 12345 VANISHED)"),
+            "{:?}", lines);
+        req!(res!(UidSet::parse("300:310,405,411")), got.vanished);
+        req!(vec![404u32, 406, 408], got.messages.iter().map(|m| m.uid).collect::<Vec<_>>());
+        req!(Some(29738u64), got.messages[2].modseq);
+        Ok(())
+    }
+
+    /// RFC 7162 §3.1.4.1: CONDSTORE without QRESYNC asks no `VANISHED`, which such a server would
+    /// refuse; a server with neither is sent no `CHANGEDSINCE`.
+    #[tokio::test]
+    async fn test_changedsince_without_qresync_asks_no_vanished_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted("* OK [CAPABILITY IMAP4rev1 CONDSTORE] ready\r\n", vec![
+            SELECT_OK,
+            "* 1 FETCH (UID 4 MODSEQ (65402) FLAGS (\\Seen))\r\n\
+             * 2 FETCH (UID 6 MODSEQ (75403) FLAGS (\\Deleted))\r\n%T% OK done\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let got = res!(c.uid_fetch_changed(&UidSet::from_open(1), FetchWhat::Flags, 12345).await);
+        req!(true, res!(lines_of(&seen)).iter()
+            .any(|l| l.ends_with("UID FETCH 1:* (UID FLAGS MODSEQ) (CHANGEDSINCE 12345)")));
+        req!(2, got.messages.len());
+        req!(true, got.vanished.is_empty());
+
+        let (addr, seen) = res!(scripted(GREET, vec![SELECT_OK]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        match c.uid_fetch_changed(&UidSet::from_open(1), FetchWhat::Flags, 1).await {
+            Ok(_)  => return Err(err!("CHANGEDSINCE went to a server without CONDSTORE."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Unimplemented), "{:?}", e.tags()),
+        }
+        req!(1, res!(lines_of(&seen)).len(), "a command was sent");
+        Ok(())
+    }
+
+    /// A drop under a read on a QRESYNC mailbox: the fresh connection logs in, enables QRESYNC
+    /// again, and repeats the select with its parameters before asking again.
+    #[tokio::test]
+    async fn test_a_reconnect_enables_again_and_repeats_the_select_00() -> Outcome<()> {
+        const SEL: &str = "* 2 EXISTS\r\n* OK [UIDVALIDITY 7] x\r\n* OK [HIGHESTMODSEQ 99] x\r\n\
+                           %T% OK [READ-ONLY] EXAMINE completed\r\n";
+        let (addr, seen) = res!(scripted_seq(vec![
+            (GREET_PLUS, vec![LOGIN_OK, ENABLED_QRESYNC, SEL]),
+            (GREET_PLUS, vec![LOGIN_OK, ENABLED_QRESYNC, SEL, SEARCH_3_4]),
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.login(USER, PASS).await);
+        let with = SelectWith::QResync { uid_validity: 7, modseq: 50, known: None };
+        res!(c.examine_with("INBOX", &with).await);
+        req!(vec![3u32, 4], res!(c.uid_search("ALL").await));
+        let lines = res!(lines_of(&seen));
+        req!(2, lines.iter().filter(|l| l.ends_with("ENABLE QRESYNC")).count(), "{:?}", lines);
+        req!(2, lines.iter().filter(|l| l.ends_with("EXAMINE \"INBOX\" (QRESYNC (7 50))")).count(),
+            "{:?}", lines);
+        req!(true, c.is_enabled("QRESYNC"));
+        Ok(())
+    }
+
+    // ── STATUS, ID, SUBSCRIBE and LSUB (F1 part 2) ──────────────────
+
+    /// RFC 7162 §3.1.3's example: `HIGHESTMODSEQ` is asked for only where CONDSTORE is offered.
+    #[tokio::test]
+    async fn test_status_reads_highestmodseq_where_offered_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            "* STATUS blurdybloop (MESSAGES 231 UIDNEXT 7500 UIDVALIDITY 3 UNSEEN 4 \
+             HIGHESTMODSEQ 7011231777)\r\n%T% OK STATUS completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let st = res!(c.status("blurdybloop").await);
+        req!(true, res!(lines_of(&seen))[0].ends_with(
+            "STATUS \"blurdybloop\" (MESSAGES UIDNEXT UIDVALIDITY UNSEEN HIGHESTMODSEQ)"));
+        req!(231, st.messages);
+        req!(7500, st.uid_next);
+        req!(3, st.uid_validity);
+        req!(4, st.unseen);
+        req!(Some(7011231777u64), st.highest_modseq);
+
+        let (addr, seen) = res!(scripted(GREET, vec![
+            "* STATUS {5}\r\nINBOX (MESSAGES 2 UIDNEXT 9 UIDVALIDITY 1 UNSEEN 0)\r\n%T% OK done\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let st = res!(c.status("INBOX").await);
+        req!(false, res!(lines_of(&seen))[0].contains("HIGHESTMODSEQ"));
+        req!(2, st.messages);
+        req!(None::<u64>, st.highest_modseq);
+        Ok(())
+    }
+
+    /// RFC 2971's example: `ID` sends the client's fields and reads the server's.
+    #[tokio::test]
+    async fn test_id_exchanges_fields_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET_PLUS, vec![
+            "* ID (\"name\" \"Cyrus\" \"version\" \"1.5\" \"os\" \"sunos\" \"os-version\" \"5.5\" \
+             \"support-url\" \"mailto:cyrus-bugs+@andrew.cmu.edu\" \"vendor\" NIL)\r\n\
+             %T% OK ID completed\r\n",
+            "* ID NIL\r\n%T% OK ID completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let got = res!(c.id(&[("name", "Daimond"), ("version", "0.5")]).await);
+        req!(6, got.len());
+        req!((fmt!("name"), Some(fmt!("Cyrus"))), got[0].clone());
+        req!((fmt!("vendor"), None::<String>), got[5].clone());
+        req!(0, res!(c.id(&[]).await).len());
+        let lines = res!(lines_of(&seen));
+        req!(true, lines[0].ends_with("ID (\"name\" \"Daimond\" \"version\" \"0.5\")"), "{:?}", lines);
+        req!(true, lines[1].ends_with("ID NIL"), "{:?}", lines);
+
+        let (addr, seen) = res!(scripted(GREET, vec![]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        match c.id(&[]).await {
+            Ok(_)  => return Err(err!("ID went to a server without it."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Unimplemented), "{:?}", e.tags()),
+        }
+        req!(0, res!(lines_of(&seen)).len());
+        Ok(())
+    }
+
+    /// `SUBSCRIBE`, `UNSUBSCRIBE` and `LSUB` on the wire.
+    #[tokio::test]
+    async fn test_subscribe_and_lsub_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec![
+            "%T% OK SUBSCRIBE completed\r\n",
+            "%T% OK UNSUBSCRIBE completed\r\n",
+            "* LSUB () \".\" #news.comp.mail.misc\r\n* LSUB (\\Sent) \".\" \"Sent Items\"\r\n\
+             %T% OK LSUB completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.subscribe("Sent Items").await);
+        res!(c.unsubscribe("Old").await);
+        let got = res!(c.lsub("", "*").await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines[0].ends_with("SUBSCRIBE \"Sent Items\""), "{:?}", lines);
+        req!(true, lines[1].ends_with("UNSUBSCRIBE \"Old\""), "{:?}", lines);
+        req!(true, lines[2].ends_with("LSUB \"\" \"*\""), "{:?}", lines);
+        req!(vec![fmt!("#news.comp.mail.misc"), fmt!("Sent Items")],
+            got.iter().map(|m| m.name.clone()).collect::<Vec<_>>());
+        req!(Some(SpecialUse::Sent), got[1].special_use());
+        Ok(())
+    }
+
+    // ── The confirming fetch and Gmail's items (F1 part 2) ──────────
+
+    /// A loose server's `SEARCH` names three UIDs; the header `FETCH` confirms one, and only it is
+    /// kept, with its size, for a caller re-resolving by Message-ID and size.
+    #[tokio::test]
+    async fn test_a_message_id_search_keeps_only_confirmed_matches_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec![
+            SELECT_OK,
+            "* SEARCH 4 7 9\r\n%T% OK SEARCH completed\r\n",
+            "* 1 FETCH (UID 4 RFC822.SIZE 900 BODY[HEADER.FIELDS (MESSAGE-ID)] {32}\r\n\
+             Message-ID: <xabc@example.org>\r\n)\r\n\
+             * 2 FETCH (UID 7 RFC822.SIZE 1200 BODY[HEADER.FIELDS (MESSAGE-ID)] {35}\r\n\
+             Message-Id:\r\n <abc@example.org>\r\n\r\n)\r\n\
+             * 3 FETCH (UID 9 RFC822.SIZE 50 BODY[HEADER.FIELDS (MESSAGE-ID)] {2}\r\n\r\n)\r\n\
+             %T% OK FETCH completed\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let got = res!(c.uid_search_message_id("<abc@example.org>").await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines[1].ends_with("UID SEARCH HEADER Message-ID \"abc@example.org\""), "{:?}", lines);
+        req!(true, lines[2].ends_with(
+            "UID FETCH 4,7,9 (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"), "{:?}", lines);
+        req!(vec![(7u32, 1200u32)], got.iter().map(|m| (m.uid, m.size)).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    /// Gmail's `X-GM-MSGID` and `X-GM-LABELS` are asked for only where `X-GM-EXT-1` is offered,
+    /// and read back.
+    #[tokio::test]
+    async fn test_gmail_items_only_where_offered_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted("* OK [CAPABILITY IMAP4rev1 X-GM-EXT-1] Gimap ready\r\n", vec![
+            SELECT_OK,
+            "* 1 FETCH (X-GM-MSGID 1278455344230334865 X-GM-LABELS (\\Inbox \\Sent Important \
+             \"Muy Importante\") UID 3 FLAGS (\\Seen))\r\n%T% OK Success\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let got = res!(c.uid_fetch(&UidSet::from([3]), FetchWhat::Flags).await);
+        req!(true, res!(lines_of(&seen))[1].ends_with("UID FETCH 3 (UID FLAGS X-GM-MSGID X-GM-LABELS)"));
+        req!(Some(1278455344230334865u64), got[0].gm_msgid);
+        req!(vec![fmt!("\\Inbox"), fmt!("\\Sent"), fmt!("Important"), fmt!("Muy Importante")],
+            got[0].gm_labels.clone());
+
+        let (addr, seen) = res!(scripted(GREET, vec![
+            SELECT_OK, "* 1 FETCH (UID 3 FLAGS (\\Seen))\r\n%T% OK done\r\n",
+        ]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let got = res!(c.uid_fetch(&UidSet::from([3]), FetchWhat::Flags).await);
+        req!(false, res!(lines_of(&seen))[1].contains("X-GM-"));
+        req!(None::<u64>, got[0].gm_msgid);
         Ok(())
     }
 

@@ -76,6 +76,8 @@ fn server_tls() -> Outcome<ServerConfig> {
 
 /// A client with an empty root store, which trusts no certificate a server could show it.
 fn client_tls_trusting_nothing() -> ClientConfig {
+    // Built before `server_tls` installs the provider, so it must not rely on test order.
+    ensure_crypto_provider();
     ClientConfig::builder()
         .with_root_certificates(RootCertStore::empty())
         .with_no_client_auth()

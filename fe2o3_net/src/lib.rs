@@ -113,7 +113,6 @@ pub mod guard;
 pub mod hmac;
 pub mod http;
 pub mod id;
-#[cfg(feature = "async")]
 pub mod imap;
 pub mod lens;
 #[cfg(feature = "async")]

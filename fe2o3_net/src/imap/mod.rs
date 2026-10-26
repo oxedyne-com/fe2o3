@@ -30,6 +30,12 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+// Everything that talks on a socket is tokio-driven; the UID set is plain data a browser can hold.
+#[cfg(feature = "async")]
 pub mod client;
+#[cfg(feature = "async")]
 pub mod search;
+#[cfg(feature = "async")]
 pub mod server;
+pub mod types;
+pub mod uid_set;

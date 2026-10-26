@@ -16,7 +16,7 @@ use oxedyne_fe2o3_net::{
     imap::{
         client::{
             FetchWhat,
-            FlagOp,
+            UidSet,
             ImapClient,
             ImapConfig,
             Security,
@@ -156,7 +156,7 @@ async fn imap_client_reads_what_the_imap_server_serves() -> Outcome<()> {
     assert_eq!(uids.len(), 3, "UID SEARCH ALL found {} of 3", uids.len());
 
     // ── The whole point: the bytes come back byte-identical ──────
-    let msgs = res!(c.uid_fetch(&uids, FetchWhat::Full).await);
+    let msgs = res!(c.uid_fetch(&UidSet::from(&uids), FetchWhat::Full).await);
     assert_eq!(msgs.len(), 3, "UID FETCH returned {} of 3", msgs.len());
     for (i, msg) in msgs.iter().enumerate() {
         assert_eq!(msg.body, bodies[i],
@@ -170,7 +170,7 @@ async fn imap_client_reads_what_the_imap_server_serves() -> Outcome<()> {
 
     // Headers-only: the body stops at the blank line, and the size still
     // describes the whole message.
-    let heads = res!(c.uid_fetch(&uids[..1], FetchWhat::Headers).await);
+    let heads = res!(c.uid_fetch(&UidSet::from(&uids[..1]), FetchWhat::Headers).await);
     assert_eq!(heads.len(), 1);
     let head = String::from_utf8_lossy(&heads[0].body).into_owned();
     assert!(head.contains("Subject: message 1"), "header block missing subject: {:?}", head);
@@ -178,8 +178,8 @@ async fn imap_client_reads_what_the_imap_server_serves() -> Outcome<()> {
     assert_eq!(heads[0].size as usize, bodies[0].len());
 
     // ── Flags round-trip ─────────────────────────────────────────
-    res!(c.uid_store_flags(&uids[..1], FlagOp::Add, &["\\Seen"]).await);
-    let after = res!(c.uid_fetch(&uids[..1], FetchWhat::Meta).await);
+    res!(c.uid_store_flags(&UidSet::from(&uids[..1]), &["\\Seen"], &[]).await);
+    let after = res!(c.uid_fetch(&UidSet::from(&uids[..1]), FetchWhat::Meta).await);
     assert!(after[0].flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")),
         "\\Seen did not stick: {:?}", after[0].flags);
 
@@ -228,6 +228,86 @@ async fn imap_client_reports_a_bad_password() -> Outcome<()> {
     let outcome = c.login(USER, "wrong").await;
     assert!(outcome.is_err(), "a wrong password authenticated");
 
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+fn message_with_id(id: &str, refs: Option<&str>) -> Vec<u8> {
+    let mut m = fmt!("From: bob@example.org\r\nTo: alice@test.local\r\nMessage-ID: {}\r\n", id);
+    if let Some(r) = refs {
+        m.push_str(&fmt!("References: {}\r\n", r));
+    }
+    m.push_str("Subject: ids\r\n\r\nNothing to see.\r\n");
+    m.into_bytes()
+}
+
+/// The confirming fetch against fe2o3's own server: `SEARCH HEADER` is a substring match, so a
+/// search for `abc@test.local` also finds `<xabc@test.local>`, and only the header `FETCH` tells
+/// them apart. `STATUS`, `SUBSCRIBE` and `LSUB` ride along.
+#[tokio::test]
+async fn imap_client_confirms_a_message_id_match() -> Outcome<()> {
+    let root = std::env::temp_dir().join(fmt!("fe2o3_imap_mid_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    res!(fs::create_dir_all(&root), IO, File);
+
+    let store = res!(MaildirStore::new(PathBuf::from(&root), "test.local"));
+    let users = OneUser { delivery_key: fmt!("test.local/alice") };
+    let user  = match res!(users.lookup(USER)) {
+        Some(u) => u,
+        None    => return Err(err!("The test user did not resolve."; Test, Bug)),
+    };
+    res!(store.ensure_user(&user));
+    let inbox = FolderName::new("INBOX");
+    let bodies = vec![
+        message_with_id("<xabc@test.local>", None),
+        message_with_id("<abc@test.local>", None),
+        message_with_id("<other@test.local>", Some("<abc@test.local>")),
+    ];
+    for body in &bodies {
+        res!(store.append(&user, &inbox, body, MessageFlags::default(), None));
+    }
+    res!(store.create_folder(&user, &FolderName::new("Archive")));
+
+    let listener = res!(TcpListener::bind("127.0.0.1:0").await, IO, Network);
+    let addr = res!(listener.local_addr(), IO, Network);
+    let server = ImapServer {
+        store:    store.clone(),
+        users:    users.clone(),
+        hostname: std::sync::Arc::new(fmt!("test.local")),
+    };
+    tokio::spawn(async move {
+        while let Ok((sock, peer)) = listener.accept().await {
+            let srv = server.clone();
+            tokio::spawn(async move { let _ = srv.run(sock, peer).await; });
+        }
+    });
+
+    let cfg = ImapConfig::new(fmt!("127.0.0.1"), addr.port(), Security::Plain)
+        .with_timeout(Duration::from_secs(10));
+    let mut c = res!(ImapClient::connect(&cfg).await);
+    res!(c.login(USER, PASS).await);
+
+    let st = res!(c.status("INBOX").await);
+    assert_eq!(st.messages, 3, "STATUS MESSAGES");
+    assert_eq!(st.unseen, 3, "STATUS UNSEEN");
+    assert!(st.uid_validity > 0 && st.uid_next > 3, "STATUS UIDs: {:?}", st);
+    assert_eq!(st.highest_modseq, None, "a mod-sequence from a server without CONDSTORE");
+
+    res!(c.subscribe("Archive").await);
+    let subs = res!(c.lsub("", "*").await);
+    assert!(subs.iter().any(|m| m.name == "Archive"), "LSUB lacks Archive: {:?}", subs);
+
+    res!(c.examine("INBOX").await);
+    let loose = res!(c.uid_search("HEADER Message-ID \"abc@test.local\"").await);
+    assert_eq!(loose.len(), 2, "the search is not the substring match this test relies on: {:?}", loose);
+    let got = res!(c.uid_search_message_id("<abc@test.local>").await);
+    assert_eq!(got.len(), 1, "matches kept: {:?}", got);
+    assert_eq!(got[0].size as usize, bodies[1].len(), "the confirmed match's size");
+    let msgs = res!(c.uid_fetch(&UidSet::from([got[0].uid]), FetchWhat::Full).await);
+    assert_eq!(msgs[0].body, bodies[1], "the confirmed UID is not the message");
+    assert!(res!(c.uid_search_message_id("<none@test.local>").await).is_empty());
+
+    res!(c.logout().await);
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }
