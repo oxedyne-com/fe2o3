@@ -57,22 +57,6 @@ impl Dat {
     }
 }
 
-// The daticle under any notes.
-fn bare(dat: &Dat) -> &Dat {
-    match dat {
-        Dat::ABox(_, inner, _)  => bare(inner),
-        _                       => dat,
-    }
-}
-
-// Does this entry hold nothing but a comment? A note on nothing is an `ABox` round an empty
-// daticle, as key or as value, and a bare empty key and value is a stray comma instead.
-fn is_note(key: &Dat, val: &Dat) -> bool {
-    (matches!(key, Dat::ABox(..)) || matches!(val, Dat::ABox(..)))
-        && matches!(bare(key), Dat::Empty)
-        && matches!(bare(val), Dat::Empty)
-}
-
 // The position of what is being written, outermost first: `[2]` the third item of a list, `{3}`
 // the fourth member of a map. It holds no key.
 fn at(path: &[String]) -> String {
@@ -89,7 +73,7 @@ fn place(path: &[String]) -> String {
 
 // The name of the `n`th member, counting from 0.
 fn key_text(key: &Dat, path: &[String], n: usize) -> Outcome<String> {
-    match bare(key) {
+    match key.bare() {
         Dat::Str(s) => Ok(s.clone()),
         Dat::Empty  => Err(err!(
             "A member has no name, in {}{}.", place(path),
@@ -142,7 +126,7 @@ fn write_members<'a, I: Iterator<Item = (&'a Dat, &'a Dat)>>(
     out.push('{');
     let mut n = 0;
     for (k, v) in members {
-        if is_note(k, v) {
+        if Dat::is_note_entry(k, v) {
             continue;
         }
         let key = res!(key_text(k, path, n));
@@ -153,7 +137,7 @@ fn write_members<'a, I: Iterator<Item = (&'a Dat, &'a Dat)>>(
         out.push_str(&escape_json_string(&key));
         out.push_str("\":");
         path.push(fmt!("{{{}}}", n));
-        if matches!(bare(v), Dat::Empty) {
+        if matches!(v.bare(), Dat::Empty) {
             return Err(err!(
                 "The member at {} has no value.", at(path); Invalid, Input, Decode, Missing));
         }
@@ -184,10 +168,10 @@ fn write_json(dat: &Dat, js_safe: bool, path: &mut Vec<String>, out: &mut String
             out.push('[');
             let mut n = 0;
             for item in items {
-                if matches!(item, Dat::ABox(..)) && matches!(bare(item), Dat::Empty) {
+                if item.is_lone_note() {
                     continue; // A comment standing alone.
                 }
-                if matches!(bare(item), Dat::Empty) {
+                if matches!(item.bare(), Dat::Empty) {
                     return Err(err!(
                         "A list item is missing after item {} in {}.", n, place(path);
                         Invalid, Input, Decode, Missing));
