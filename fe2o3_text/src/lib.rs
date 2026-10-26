@@ -37,6 +37,7 @@ pub mod csl;
 pub mod glob;
 pub mod highlight;
 pub mod html;
+pub mod html_inert;
 #[cfg(feature = "hyphenation")]
 pub mod hyphen;
 pub mod lines;

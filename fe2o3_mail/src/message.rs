@@ -21,8 +21,10 @@
 //! which keeps the ASCII every charset shares.
 
 use oxedyne_fe2o3_core::prelude::*;
+pub use oxedyne_fe2o3_text::html_inert::Remote;
 use oxedyne_fe2o3_text::{
     base64,
+    html_inert::inert_html,
     mime::{
         decode_words,
         entity,
@@ -111,12 +113,18 @@ pub struct ViewPart {
 }
 
 impl MessageView {
-    /// Read a whole message from its RFC 5322 bytes; infallible, as [`ParsedMessage::parse`].
-    ///
-    /// The HTML is the message's own markup, untouched but for a plain part shown beside it (a
-    /// list footer after an HTML body), which is escaped into a `<pre>`. It is for a frame with
-    /// no scripts and no access to the page, never for the page's own document.
+    /// Read a whole message from its RFC 5322 bytes with pictures off, as a reader first sees
+    /// it; infallible, as [`ParsedMessage::parse`].
     pub fn parse(raw: &[u8]) -> Self {
+        Self::read(raw, Remote::Blocked)
+    }
+
+    /// Read a whole message, its HTML made inert by [`inert_html`]: with [`Remote::Blocked`]
+    /// it names no remote resource, so opening it tells the sender nothing, and "Load
+    /// pictures" reads it again with [`Remote::Allowed`]. A plain part shown beside the HTML (a
+    /// list footer) is escaped into a `<pre>`. It is for a frame with no scripts and no access
+    /// to the page, never for the page's own document.
+    pub fn read(raw: &[u8], remote: Remote) -> Self {
         let hs  = headers(raw);
         let top = entity(raw);
         let rich = top.rich_parts();
@@ -129,6 +137,7 @@ impl MessageView {
         } else {
             String::new()
         };
+        let html = inert_html(&html, remote);
         let mut parts = Vec::new();
         view_parts_into(&top, &rich, &mut parts);
         let lower = html.to_ascii_lowercase();

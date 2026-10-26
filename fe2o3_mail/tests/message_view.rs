@@ -10,6 +10,7 @@ use oxedyne_fe2o3_mail::message::{
     DraftMessage,
     MessageView,
     ParsedMessage,
+    Remote,
 };
 
 
@@ -102,4 +103,18 @@ fn a_draft_with_attachments_round_trips_through_the_reader() {
     assert_eq!(v.parts[1].name, "Grüße.txt");
     assert_eq!(v.parts[1].media_type, "application/octet-stream");
     assert_eq!(v.parts[1].bytes, b"hallo");
+}
+
+#[test]
+fn a_tracking_pixel_is_gone_until_pictures_are_allowed() {
+    let raw = b"From: Shop <shop@x.example>\r\nSubject: Sale\r\nContent-Type: text/html\r\n\r\n\
+        <p>Sale</p><img src=\"https://track.example/p.gif\" srcset=\"https://track.example/p2.gif 2x\">\
+        <picture><source srcset=\"https://track.example/p.webp\"></picture>\r\n";
+    let off = MessageView::parse(raw);
+    assert_eq!(off, MessageView::read(raw, Remote::Blocked));
+    assert!(!off.html.contains("track.example"), "{:?}", off.html);
+    assert!(off.html.starts_with("<p>Sale</p><img>"), "{:?}", off.html);
+    let on = MessageView::read(raw, Remote::Allowed);
+    assert!(on.html.contains(r#"<img src="https://track.example/p.gif" srcset="https://track.example/p2.gif 2x">"#), "{:?}", on.html);
+    assert_eq!(on.text, off.text);
 }
