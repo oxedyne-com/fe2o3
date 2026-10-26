@@ -101,6 +101,31 @@ pub enum Engine {
 	Serper,	// another engine's results, resold as JSON
 }
 
+/// The host each engine is dialled on. A deployment moves one (a regional host, a relay) by
+/// setting its key.
+#[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
+pub struct SearchHosts {
+	#[optional]
+	pub brave:	String,
+	#[optional]
+	pub exa:	String,
+	#[optional]
+	pub tavily:	String,
+	#[optional]
+	pub serper:	String,
+}
+
+impl Default for SearchHosts {
+	fn default() -> Self {
+		Self {
+			brave:	fmt!("api.search.brave.com"),
+			exa:	fmt!("api.exa.ai"),
+			tavily:	fmt!("api.tavily.com"),
+			serper:	fmt!("google.serper.dev"),
+		}
+	}
+}
+
 impl Engine {
 
 	// In a fixed order, so a caller listing them need not keep its own copy in step.
@@ -131,12 +156,12 @@ impl Engine {
 	}
 
 	/// The host to dial and to validate the TLS certificate against.
-	pub fn host(&self) -> &'static str {
+	pub fn host<'a>(&self, hosts: &'a SearchHosts) -> &'a str {
 		match self {
-			Self::Brave	=> "api.search.brave.com",
-			Self::Exa	=> "api.exa.ai",
-			Self::Tavily	=> "api.tavily.com",
-			Self::Serper	=> "google.serper.dev",
+			Self::Brave	=> &hosts.brave,
+			Self::Exa	=> &hosts.exa,
+			Self::Tavily	=> &hosts.tavily,
+			Self::Serper	=> &hosts.serper,
 		}
 	}
 
@@ -157,7 +182,7 @@ impl Engine {
 	///
 	/// **Not a request that is sent.** The caller owns the transport, the address check and the TLS;
 	/// see the module documentation for why that division is deliberate.
-	pub fn request(&self, key: &str, q: &SearchQuery) -> Outcome<SearchCall> {
+	pub fn request(&self, hosts: &SearchHosts, key: &str, q: &SearchQuery) -> Outcome<SearchCall> {
 		if q.query.trim().is_empty() {
 			return Err(err!(
 				"An empty query was passed to the {} engine.", self.id();
@@ -184,14 +209,14 @@ impl Engine {
 					Kind::News	=> "news",
 					_		=> "web",
 				};
-				let path = fmt!("/res/v1/{}/search?q={}&count={}",
+				let path = fmt!("/res/v1/{}/search?q={}&count={}", // fixed: Brave's API path
 					seg, pct::encode_component(q.query), n);
 				Ok(SearchCall {
-					host:		self.host().to_string(),
+					host:		self.host(hosts).to_string(),
 					port:		443,
 					path,
 					method:		HttpMethod::GET,
-					headers:	self.headers(key),
+					headers:	self.headers(hosts, key),
 					body:		Vec::new(),
 				})
 			},
@@ -208,7 +233,7 @@ impl Engine {
 					Kind::Academic	=> { b.insert(dat!("category"), dat!("publication")); },
 					Kind::Web	=> {},
 				}
-				self.post(key, "/search", res!(Dat::Map(b).json()))
+				self.post(hosts, key, "/search", res!(Dat::Map(b).json())) // fixed: the vendor's API path
 			},
 			Self::Tavily => {
 				let mut b = DaticleMap::new();
@@ -218,11 +243,12 @@ impl Engine {
 					Kind::News	=> dat!("news"),
 					_		=> dat!("general"),
 				});
-				self.post(key, "/search", res!(Dat::Map(b).json()))
+				self.post(hosts, key, "/search", res!(Dat::Map(b).json())) // fixed: the vendor's API path
 			},
 			Self::Serper => {
 				// Here the kind is the path rather than a parameter.
 				let path = match q.kind {
+					// fixed: Serper's API paths
 					Kind::Web	=> "/search",
 					Kind::News	=> "/news",
 					Kind::Academic	=> "/scholar",
@@ -230,7 +256,7 @@ impl Engine {
 				let mut b = DaticleMap::new();
 				b.insert(dat!("q"), dat!(q.query.to_string()));
 				b.insert(dat!("num"), dat!(n as u64));
-				self.post(key, path, res!(Dat::Map(b).json()))
+				self.post(hosts, key, path, res!(Dat::Map(b).json()))
 			},
 		}
 	}
@@ -314,9 +340,9 @@ impl Engine {
 	///
 	/// `Accept-Encoding: identity` because the caller owns the socket and need not own a
 	/// decompressor as well; a body it cannot inflate is a body it cannot parse.
-	fn headers(&self, key: &str) -> Vec<(String, String)> {
+	fn headers(&self, hosts: &SearchHosts, key: &str) -> Vec<(String, String)> {
 		let mut h = vec![
-			("Host".to_string(),			self.host().to_string()),
+			("Host".to_string(),			self.host(hosts).to_string()),
 			("Accept".to_string(),			"application/json".to_string()),
 			("Accept-Encoding".to_string(),		"identity".to_string()),
 		];
@@ -333,11 +359,11 @@ impl Engine {
 	}
 
 	/// A JSON `POST` to this engine, which is the shape of three of the four.
-	fn post(&self, key: &str, path: &str, body: String) -> Outcome<SearchCall> {
-		let mut headers = self.headers(key);
+	fn post(&self, hosts: &SearchHosts, key: &str, path: &str, body: String) -> Outcome<SearchCall> {
+		let mut headers = self.headers(hosts, key);
 		headers.push(("Content-Type".to_string(), "application/json".to_string()));
 		Ok(SearchCall {
-			host:	self.host().to_string(),
+			host:	self.host(hosts).to_string(),
 			port:	443,
 			path:	path.to_string(),
 			method:	HttpMethod::POST,
@@ -683,7 +709,7 @@ mod tests {
 			let id = e.id();
 			assert!(!id.is_empty(), "{:?} has no id", e);
 			assert_eq!(Engine::from_id(id), Some(e), "'{}' did not round-trip", id);
-			assert!(e.host().contains('.'), "'{}' has no host", id);
+			assert!(e.host(&SearchHosts::default()).contains('.'), "'{}' has no host", id);
 		}
 		// Every id is distinct, which a match arm copied and half-edited would break.
 		for a in Engine::ALL {
@@ -722,10 +748,10 @@ mod tests {
 			(Engine::Serper,	"X-API-KEY",		"test-key-value"),
 		];
 		for (e, name, value) in expect {
-			let c = res!(e.request(key, &q("iron oxide", Kind::Web, 5)));
+			let c = res!(e.request(&SearchHosts::default(), key, &q("iron oxide", Kind::Web, 5)));
 			assert_eq!(hdr(&c, name).as_deref(), Some(*value),
 				"{} did not carry its key in {}", e.id(), name);
-			assert_eq!(hdr(&c, "Host").as_deref(), Some(e.host()),
+			assert_eq!(hdr(&c, "Host").as_deref(), Some(e.host(&SearchHosts::default())),
 				"{} did not name its host", e.id());
 			assert!(!c.path.contains(key),
 				"{} put the key in the path: {}", e.id(), c.path);
@@ -744,9 +770,9 @@ mod tests {
 		}
 		// A call with no key at all is refused here rather than sent to be refused there.
 		for e in Engine::ALL {
-			assert!(e.request("", &q("iron oxide", Kind::Web, 5)).is_err(),
+			assert!(e.request(&SearchHosts::default(), "", &q("iron oxide", Kind::Web, 5)).is_err(),
 				"{} accepted an empty key", e.id());
-			assert!(e.request("k", &q("   ", Kind::Web, 5)).is_err(),
+			assert!(e.request(&SearchHosts::default(), "k", &q("   ", Kind::Web, 5)).is_err(),
 				"{} accepted an empty query", e.id());
 		}
 		Ok(())
@@ -759,7 +785,7 @@ mod tests {
 		// Every character a naive concatenation would break out of, in both directions.
 		let awkward = "rust & \"iron\" +oxide/water";
 
-		let c = res!(Engine::Brave.request("k", &q(awkward, Kind::Web, 5)));
+		let c = res!(Engine::Brave.request(&SearchHosts::default(), "k", &q(awkward, Kind::Web, 5)));
 		assert_eq!(c.method, HttpMethod::GET, "brave is a GET");
 		assert!(c.body.is_empty(), "a GET carries no body");
 		assert!(c.path.starts_with("/res/v1/web/search?q="), "wrong path: {}", c.path);
@@ -777,7 +803,7 @@ mod tests {
 		assert_eq!(res!(pct::decode_str(raw)), awkward, "the query did not survive escaping");
 
 		for e in [Engine::Exa, Engine::Tavily, Engine::Serper] {
-			let c = res!(e.request("k", &q(awkward, Kind::Web, 5)));
+			let c = res!(e.request(&SearchHosts::default(), "k", &q(awkward, Kind::Web, 5)));
 			assert_eq!(c.method, HttpMethod::POST, "{} is a POST", e.id());
 			assert_eq!(hdr(&c, "Content-Type").as_deref(), Some("application/json"),
 				"{} did not declare JSON", e.id());
@@ -835,17 +861,17 @@ mod tests {
 					continue;
 				}
 				let ceiling = e.max_results(kind);
-				let big = res!(e.request("k", &q("iron", kind, 5_000)));
+				let big = res!(e.request(&SearchHosts::default(), "k", &q("iron", kind, 5_000)));
 				let n = res!(asked(e, &big));
 				assert_eq!(n, ceiling,
 					"{} '{}' asked for {} against a ceiling of {}",
 					e.id(), kind.id(), n, ceiling);
 
-				let none = res!(e.request("k", &q("iron", kind, 0)));
+				let none = res!(e.request(&SearchHosts::default(), "k", &q("iron", kind, 0)));
 				assert!(res!(asked(e, &none)) >= 1,
 					"{} '{}' asked for no results at all", e.id(), kind.id());
 
-				let some = res!(e.request("k", &q("iron", kind, 3)));
+				let some = res!(e.request(&SearchHosts::default(), "k", &q("iron", kind, 3)));
 				assert_eq!(res!(asked(e, &some)), 3,
 					"{} '{}' did not pass a modest limit through", e.id(), kind.id());
 			}
@@ -868,7 +894,7 @@ mod tests {
 
 		// What is not supported is refused, and the refusal names both the engine and the kind.
 		for e in Engine::ALL {
-			let r = e.request("k", &q("iron oxide", Kind::Academic, 5));
+			let r = e.request(&SearchHosts::default(), "k", &q("iron oxide", Kind::Academic, 5));
 			assert_eq!(r.is_err(), !e.supports(Kind::Academic),
 				"{} disagreed with its own supports()", e.id());
 			if let Err(err) = r {
@@ -878,12 +904,12 @@ mod tests {
 			}
 		}
 		// The kind that is supported reaches the wire as that vendor spells it.
-		let exa = res!(Engine::Exa.request("k", &q("iron", Kind::Academic, 5)));
+		let exa = res!(Engine::Exa.request(&SearchHosts::default(), "k", &q("iron", Kind::Academic, 5)));
 		let txt = String::from_utf8_lossy(&exa.body).to_string();
 		assert!(txt.contains("publication"), "exa did not ask for publications: {}", txt);
-		let ser = res!(Engine::Serper.request("k", &q("iron", Kind::Academic, 5)));
+		let ser = res!(Engine::Serper.request(&SearchHosts::default(), "k", &q("iron", Kind::Academic, 5)));
 		assert_eq!(ser.path, "/scholar", "serper did not use its scholar endpoint");
-		let ser_news = res!(Engine::Serper.request("k", &q("iron", Kind::News, 5)));
+		let ser_news = res!(Engine::Serper.request(&SearchHosts::default(), "k", &q("iron", Kind::News, 5)));
 		assert_eq!(ser_news.path, "/news", "serper did not use its news endpoint");
 		Ok(())
 	}
@@ -1075,8 +1101,8 @@ mod tests {
 	#[test]
 	fn test_a_call_is_only_its_parts_10() -> Outcome<()> {
 		for e in Engine::ALL {
-			let c = res!(e.request("k", &q("iron oxide", Kind::Web, 5)));
-			assert_eq!(c.host, e.host(), "{} named the wrong host", e.id());
+			let c = res!(e.request(&SearchHosts::default(), "k", &q("iron oxide", Kind::Web, 5)));
+			assert_eq!(c.host, e.host(&SearchHosts::default()), "{} named the wrong host", e.id());
 			assert_eq!(c.port, 443, "{} is not on 443", e.id());
 			assert!(c.path.starts_with('/'), "{} has no leading slash: {}", e.id(), c.path);
 			assert_eq!(hdr(&c, "Accept").as_deref(), Some("application/json"),

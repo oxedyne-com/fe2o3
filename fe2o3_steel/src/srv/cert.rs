@@ -334,19 +334,16 @@ pub struct Certificate;
 
 impl Certificate {
 
-    pub fn filepath(
+    /// The absolute directory `{root}/{dir_root}/{subdir}`, which holds a certificate pair.
+    pub fn dirpath(
         root:       &NormPathBuf,
         dir_root:   &String,
         subdir:     &str,
-        name:       &str,
-        ext:        &str,
     )
         -> PathBuf
     {
         let mut relpath = PathBuf::from(dir_root);
         relpath.push(subdir);
-        relpath.push(name);
-        relpath.set_extension(ext);
         let relpath = relpath.normalise().remove_relative();
         root.clone().join(relpath).absolute().into_inner()
     }
@@ -404,12 +401,8 @@ impl Certificate {
 
         if dev_mode {
             // In dev mode, all vhosts share the single self-signed dev cert.
-            let cert_path = Self::filepath(
-                root, &cfg.tls_dir_rel, tls_subdir, "fullchain", "pem",
-            );
-            let key_path = Self::filepath(
-                root, &cfg.tls_dir_rel, tls_subdir, "privkey", "pem",
-            );
+            let (cert_path, key_path) = cfg.tls_pair(
+                &Self::dirpath(root, &cfg.tls_dir_rel, tls_subdir));
             info!("Loading dev certificate from {:?}", cert_path);
             let certified = res!(Self::read_cert_and_key(&cert_path, &key_path));
             let all_hostnames: Vec<String> = vhosts
@@ -419,15 +412,11 @@ impl Certificate {
             resolver.insert_vhost_cert(&all_hostnames, Arc::new(certified));
         } else {
             // Production without ACME: one cert per vhost under
-            // {tls_dir_rel}/prod/{primary_hostname}/{fullchain,privkey}.pem
+            // {tls_dir_rel}/prod/{primary_hostname}/{tls_cert_file,tls_key_file}
             for vh in vhosts {
                 let primary = vh.primary_hostname();
-                let cert_path = Self::filepath(
-                    root, &cfg.tls_dir_rel, tls_subdir, &fmt!("{}/fullchain", primary), "pem",
-                );
-                let key_path = Self::filepath(
-                    root, &cfg.tls_dir_rel, tls_subdir, &fmt!("{}/privkey", primary), "pem",
-                );
+                let (cert_path, key_path) = cfg.tls_pair(
+                    &Self::dirpath(root, &cfg.tls_dir_rel, &fmt!("{}/{}", tls_subdir, primary)));
                 info!("Loading cert for vhost '{}' from {:?}", primary, cert_path);
                 let certified = res!(Self::read_cert_and_key(&cert_path, &key_path));
                 resolver.insert_vhost_cert(&vh.hostnames, Arc::new(certified));
@@ -630,9 +619,8 @@ impl Certificate {
 
         let cert = res!(rcgen::Certificate::from_params(params));
 
-        let cert_path = Self::filepath(
-            root, &cfg.tls_dir_rel, constant::TLS_DIR_DEV, "fullchain", "pem",
-        );
+        let (cert_path, key_path) = cfg.tls_pair(
+            &Self::dirpath(root, &cfg.tls_dir_rel, constant::TLS_DIR_DEV));
         let dir_path = match cert_path.parent() {
             Some(p) => p,
             None => return Err(err!(
@@ -645,11 +633,11 @@ impl Certificate {
         // The private key: 0600 whatever the umask, via the secret path
         // rather than `write_to_file`, which the public chain below keeps.
         res!(core_file::save_secret(
-            &Self::filepath(root, &cfg.tls_dir_rel, constant::TLS_DIR_DEV, "privkey", "pem"),
+            &key_path,
             cert.serialize_private_key_pem().as_bytes(),
         ));
         res!(Self::write_to_file(
-            Self::filepath(root, &cfg.tls_dir_rel, constant::TLS_DIR_DEV, "fullchain", "pem"),
+            &cert_path,
             res!(cert.serialize_pem()).as_bytes(),
         ));
         Ok(())

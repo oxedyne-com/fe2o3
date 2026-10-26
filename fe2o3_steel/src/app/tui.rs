@@ -36,7 +36,10 @@ use oxedyne_fe2o3_crypto::keystore::{
 };
 use oxedyne_fe2o3_jdat::{
     prelude::*,
-    cfg::Config,
+    cfg::{
+        self,
+        Config,
+    },
     file::{
         JdatFile,
         JdatMapFile,
@@ -139,7 +142,10 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
     // │ root directory,       │
     // │ among other things.   │
     // └───────────────────────┘
-    let cfg_path = Path::new("./").join(constant::CONFIG_NAME);
+    let (cfg_path, invocation_cmds) = res!(cfg::config_arg(
+        std::env::args().skip(1).collect(), constant::CONFIG_NAME));
+    // The wallet sits beside the config, so a second instance's `--config` brings its own.
+    let cfg_dir = cfg_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
 
     if !cfg_path.is_file() {
         app_status.first = true;
@@ -225,7 +231,6 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
     // │ the migration routine, bypassing the unlock step entirely. All other │
     // │ subcommands require a successful unlock first.                        │
     // └───────────────────────────────────────────────────────────────────────┘
-    let invocation_cmds: Vec<String> = std::env::args().skip(1).collect();
     let is_wallet_migrate = {
         let mut saw_wallet = false;
         let mut saw_migrate = false;
@@ -236,7 +241,7 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
         saw_wallet && saw_migrate
     };
     if is_wallet_migrate {
-        res!(migrate_legacy_wallet_inline(&cfg));
+        res!(migrate_legacy_wallet_inline(&cfg_dir));
         return Ok(());
     }
 
@@ -271,7 +276,7 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
     // │ provides no real defence against the threat model it was built for -- │
     // │ disk theft.                                                           │
     // └───────────────────────────────────────────────────────────────────────┘
-    let wallet_path = Path::new("./").join(constant::WALLET_NAME);
+    let wallet_path = cfg_dir.join(constant::WALLET_NAME);
     let (wallet, db_default_enc_key, unlocked_admin_name, unlocked_admin_scopes) =
     if wallet_path.is_file() {
         // Tighten a wallet that predates `save_secret` before loading it.
@@ -467,7 +472,7 @@ pub fn command_line_outcome(evals: Vec<Evaluation>, app_name: &str) -> Outcome<(
 }
 
 
-fn migrate_legacy_wallet_inline(_cfg: &AppConfig) -> Outcome<()> {
+fn migrate_legacy_wallet_inline(cfg_dir: &Path) -> Outcome<()> {
     use std::io::Write;
     use oxedyne_fe2o3_core::mem::Extract;
     use oxedyne_fe2o3_hash::kdf::KeyDerivationScheme;
@@ -477,7 +482,7 @@ fn migrate_legacy_wallet_inline(_cfg: &AppConfig) -> Outcome<()> {
         DEFAULT_WALLET_KDF_NAME,
     };
 
-    let wallet_path = Path::new("./").join(constant::WALLET_NAME);
+    let wallet_path = cfg_dir.join(constant::WALLET_NAME);
     if !wallet_path.is_file() {
         println!("No wallet file to migrate at {:?}.", wallet_path);
         return Ok(());
@@ -595,7 +600,7 @@ fn migrate_legacy_wallet_inline(_cfg: &AppConfig) -> Outcome<()> {
     // A plain `fs::copy` would carry the source's mode, so the backup holds
     // the same passphrase verifier and key-derivation material at a wider
     // mode than the original.
-    let backup_path = Path::new("./").join(fmt!("{}.pre-admins", constant::WALLET_NAME));
+    let backup_path = cfg_dir.join(fmt!("{}.pre-admins", constant::WALLET_NAME));
     let old_wallet_bytes = match std::fs::read(&wallet_path) {
         Ok(b) => b,
         Err(e) => return Err(err!(e,

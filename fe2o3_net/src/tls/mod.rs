@@ -16,8 +16,10 @@
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::{
+    collections::BTreeMap,
     pin::Pin,
     sync::Arc,
     task::{
@@ -421,18 +423,39 @@ pub fn ensure_crypto_provider() {
         .install_default();
 }
 
+/// Where the host keeps its CA bundle. The list varies by distribution and container, so it is
+/// config; the first path that exists is read.
+#[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
+pub struct TrustConfig {
+    #[optional]
+    pub ca_bundle_paths: Vec<String>,
+}
+
+impl Default for TrustConfig {
+    fn default() -> Self {
+        Self {
+            ca_bundle_paths: vec![
+                fmt!("/etc/ssl/certs/ca-certificates.crt"),	// Debian/Ubuntu
+                fmt!("/etc/pki/tls/certs/ca-bundle.crt"),		// Fedora/RHEL
+                fmt!("/etc/ssl/cert.pem"),					// Alpine/macOS
+            ],
+        }
+    }
+}
+
 /// The host's CA bundle, and nothing else: the "trust what the operating system
 /// trusts" default every public-internet client wants. A caller needing its own
 /// root store builds the `ClientConfig` itself.
 pub fn default_client_config() -> Outcome<ClientConfig> {
+    client_config(&TrustConfig::default())
+}
+
+/// As [`default_client_config`], with the CA bundle searched for along `trust.ca_bundle_paths`.
+pub fn client_config(trust: &TrustConfig) -> Outcome<ClientConfig> {
     ensure_crypto_provider();
-    let ca_paths = [
-        "/etc/ssl/certs/ca-certificates.crt",	// Debian/Ubuntu
-        "/etc/pki/tls/certs/ca-bundle.crt",		// Fedora/RHEL
-        "/etc/ssl/cert.pem",					// Alpine/macOS
-    ];
+    let ca_paths = &trust.ca_bundle_paths;
     let ca_file = match ca_paths.iter().find(|p| std::path::Path::new(p).exists()) {
-        Some(p) => *p,
+        Some(p) => p,
         None => return Err(err!(
             "No system CA bundle found. Tried: {:?}", ca_paths;
             Init, Missing, File)),

@@ -8,7 +8,7 @@ pub const DB_DIR:                           &'static str = "o3db";
 pub const DEFAULT_LOG_LEVEL:                &'static str = "info";
 pub const LOG_FILE_EXTENSION:               &'static str = "log";
 
-pub const CONFIG_NAME:                      &'static str = "config.jdat";
+pub const CONFIG_NAME:                      &'static str = "config.jdat"; // fixed: the bootstrap name, overridden by --config
 pub const WALLET_NAME:                      &'static str = "wallet.jdat";
 // Retain enough passhashes to be satisfied that the user is not reusing recent passphrases.
 pub const NUM_PREV_PASSHASHES_TO_RETAIN:    usize = 10;

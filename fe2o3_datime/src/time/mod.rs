@@ -14,7 +14,10 @@ pub mod ntp_advanced;
 pub mod leap_second;
 
 pub use self::{
-    zone::CalClockZone,
+    zone::{
+        CalClockZone,
+        ZoneinfoConfig,
+    },
     calclock::CalClock,
     duration::CalClockDuration,
     interval::CalClockInterval,
@@ -41,6 +44,7 @@ pub use self::{
     },
     ntp::{
         NtpClient,
+        NtpConfig,
         NtpTimeResult,
         NtpPool,
     },

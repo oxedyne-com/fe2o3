@@ -20,7 +20,9 @@
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
 use std::{
+    collections::BTreeMap,
     net::{UdpSocket, ToSocketAddrs},
     time::{Duration, SystemTime, UNIX_EPOCH},
     thread,
@@ -151,7 +153,7 @@ impl NtpClient {
             .ok_or_else(|| err!("No addresses found for NTP server '{}'", server_addr; Invalid, Network)));
 
         // Create UDP socket
-        let socket = res!(UdpSocket::bind("0.0.0.0:0")
+        let socket = res!(UdpSocket::bind("0.0.0.0:0") // fixed: any interface, an OS-chosen ephemeral port
             .map_err(|e| err!("Failed to create UDP socket: {}", e; Invalid, Network)));
 
         res!(socket.set_read_timeout(Some(self.timeout))
@@ -280,27 +282,45 @@ impl NtpClient {
     }
 }
 
+/// The servers a pool query asks. The public pools are third parties a deployment may replace
+/// with its own, so they are config.
+#[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
+pub struct NtpConfig {
+    #[optional]
+    pub servers:            Vec<String>,    // asked by `NtpPool::query_time`
+    #[optional]
+    pub reliable_servers:   Vec<String>,    // asked by `NtpPool::query_reliable`
+}
+
+impl Default for NtpConfig {
+    fn default() -> Self {
+        Self {
+            servers: vec![
+                fmt!("pool.ntp.org"),
+                fmt!("time.nist.gov"),
+                fmt!("time.google.com"),
+                fmt!("time.cloudflare.com"),
+            ],
+            reliable_servers: vec![
+                fmt!("time.google.com"),
+                fmt!("time.cloudflare.com"),
+                fmt!("pool.ntp.org"),
+            ],
+        }
+    }
+}
+
 pub struct NtpPool;
 
 impl NtpPool {
-    pub const PUBLIC: &'static [&'static str] = &[
-        "pool.ntp.org",
-        "time.nist.gov",
-        "time.google.com",
-        "time.cloudflare.com",
-    ];
-
-    pub fn query_time() -> Outcome<NtpTimeResult> {
-        NtpClient::query_multiple_servers(Self::PUBLIC, 4)
+    pub fn query_time(cfg: &NtpConfig) -> Outcome<NtpTimeResult> {
+        let servers: Vec<&str> = cfg.servers.iter().map(String::as_str).collect();
+        NtpClient::query_multiple_servers(&servers, servers.len())
     }
 
-    pub fn query_reliable() -> Outcome<NtpTimeResult> {
-        let reliable_servers = &[
-            "time.google.com",
-            "time.cloudflare.com", 
-            "pool.ntp.org",
-        ];
-        NtpClient::query_multiple_servers(reliable_servers, 3)
+    pub fn query_reliable(cfg: &NtpConfig) -> Outcome<NtpTimeResult> {
+        let servers: Vec<&str> = cfg.reliable_servers.iter().map(String::as_str).collect();
+        NtpClient::query_multiple_servers(&servers, servers.len())
     }
 }
 
@@ -383,7 +403,7 @@ mod tests {
     #[ignore] // Network test - only run manually
     #[test]
     fn test_ntp_pool_query() -> Outcome<()> {
-        let result = res!(NtpPool::query_reliable());
+        let result = res!(NtpPool::query_reliable(&NtpConfig::default()));
         
         println!("Pool result - Offset: {} ms, Delay: {} ms, Stratum: {}", 
                  result.offset_millis, result.delay_millis, result.stratum);

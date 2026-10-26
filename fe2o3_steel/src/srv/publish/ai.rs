@@ -26,6 +26,7 @@ use oxedyne_fe2o3_jdat::{
 use oxedyne_fe2o3_net::llm::{
 	self,
 	LlmConfig,
+	LlmHosts,
 	Provider,
 };
 
@@ -79,6 +80,7 @@ pub struct AiSettings {
 	// The addresses emailed when a comment is held for a human. Empty means nobody is told, and the
 	// comment simply waits in the console queue.
 	pub alert_emails:	Vec<String>,
+	pub hosts:	LlmHosts,		// where each named provider is dialled; a missing key keeps the published host
 }
 
 impl AiSettings {
@@ -92,6 +94,7 @@ impl AiSettings {
 		m.insert(dat!("comment_prompt"),dat!(self.comment_prompt.clone()));
 		m.insert(dat!("alert_emails"),
 			Dat::List(self.alert_emails.iter().map(|e| dat!(e.clone())).collect()));
+		m.insert(dat!("hosts"),		LlmHosts::to_datmap(self.hosts.clone()));
 		Dat::Map(m)
 	}
 
@@ -114,6 +117,10 @@ impl AiSettings {
 						_		=> None,
 					}).collect(),
 					_			=> Vec::new(),
+				},
+				hosts:		match m.get(&dat!("hosts")) {
+					Some(Dat::Map(h))	=> LlmHosts::from_datmap(h.clone()).unwrap_or_default(),
+					_			=> LlmHosts::default(),
 				},
 			},
 			_		=> Self::default(),
@@ -147,6 +154,7 @@ impl AiSettings {
 			provider:	res!(Provider::of(self.provider.trim())),
 			model:		self.model.trim().to_string(),
 			api_key:	self.api_key.clone(),
+			hosts:		self.hosts.clone(),
 		})
 	}
 }
@@ -279,6 +287,7 @@ mod tests {
 			fix_prompt:	fmt!("Fix it."),
 			comment_prompt:	String::new(),
 			alert_emails:	vec![fmt!("me@example.com"), fmt!("also@example.com")],
+			hosts:		LlmHosts { mistral: fmt!("eu.proxy.example"), ..LlmHosts::default() },
 		};
 		let back = AiSettings::from_dat(&s.to_dat());
 		assert_eq!(back.provider, "mistral");
@@ -286,6 +295,8 @@ mod tests {
 		assert_eq!(back.api_key, "sk-secret");
 		assert_eq!(back.fix_prompt, "Fix it.");
 		assert_eq!(back.alert_emails, vec![fmt!("me@example.com"), fmt!("also@example.com")]);
+		assert_eq!(back.hosts.mistral, "eu.proxy.example");
+		assert_eq!(back.hosts.fireworks, LlmHosts::default().fireworks);
 		Ok(())
 	}
 
