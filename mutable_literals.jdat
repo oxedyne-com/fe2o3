@@ -395,6 +395,12 @@
 		{
 			"class": "named",
 			"count": (u64|1),
+			"file": "fe2o3_crypto/src/mac.rs",
+			"text": "HKDF_SHA256_MAX",
+		},
+		{
+			"class": "named",
+			"count": (u64|1),
 			"file": "fe2o3_data/src/hll/sketch.rs",
 			"text": "P_MAX",
 		},
@@ -971,6 +977,12 @@
 		{
 			"class": "named",
 			"count": (u64|1),
+			"file": "fe2o3_graphics/src/lzw.rs",
+			"text": "MAX_BITS",
+		},
+		{
+			"class": "named",
+			"count": (u64|1),
 			"file": "fe2o3_graphics/src/matroska.rs",
 			"text": "DEPTH_LIMIT",
 		},
@@ -1061,6 +1073,12 @@
 		{
 			"class": "named",
 			"count": (u64|1),
+			"file": "fe2o3_graphics/src/tiff.rs",
+			"text": "MAX_PAGES",
+		},
+		{
+			"class": "named",
+			"count": (u64|1),
 			"file": "fe2o3_hash/src/kdf.rs",
 			"text": "PASSWORD_MAX_LANES",
 		},
@@ -1117,6 +1135,12 @@
 			"count": (u64|1),
 			"file": "fe2o3_jdat/src/bdat/limits.rs",
 			"text": "DEFAULT_MAX_TEXT_DEPTH",
+		},
+		{
+			"class": "host",
+			"count": (u64|1),
+			"file": "fe2o3_jdat/src/pipe.rs",
+			"text": "pipe.io",
 		},
 		{
 			"class": "named",
@@ -3589,6 +3613,36 @@
 			"count": (u64|1),
 			"file": "fe2o3_sys/src/signal.rs",
 			"text": "/proc/{}/stat",
+		},
+		{
+			"class": "path",
+			"count": (u64|1),
+			"file": "fe2o3_sys/src/supervise.rs",
+			"text": "/bin/sh",
+		},
+		{
+			"class": "path",
+			"count": (u64|1),
+			"file": "fe2o3_sys/src/supervise.rs",
+			"text": "/proc/self/cgroup",
+		},
+		{
+			"class": "path",
+			"count": (u64|1),
+			"file": "fe2o3_sys/src/supervise.rs",
+			"text": "/sys/fs/cgroup",
+		},
+		{
+			"class": "timing",
+			"count": (u64|1),
+			"file": "fe2o3_sys/src/supervise.rs",
+			"text": "Duration::from_millis(10)",
+		},
+		{
+			"class": "timing",
+			"count": (u64|1),
+			"file": "fe2o3_sys/src/supervise.rs",
+			"text": "Duration::from_secs(5)",
 		},
 		{
 			"class": "path",
