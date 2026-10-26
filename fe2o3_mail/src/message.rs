@@ -365,11 +365,6 @@ impl DraftMessage {
             return Err(err!(
                 "A draft has no sender address, so it cannot be built."; Invalid, Input, Missing));
         }
-        if self.to.iter().all(|a| a.trim().is_empty()) {
-            return Err(err!(
-                "A draft has no recipient in its To list, so it cannot be built.";
-                Invalid, Input, Missing));
-        }
         if self.date.trim().is_empty() {
             return Err(err!(
                 "A draft was built with no Date header; the caller must supply one.";
@@ -385,7 +380,10 @@ impl DraftMessage {
         h.push(fmt!("Message-ID: {}", self.message_id.trim()));
         h.push(fmt!("Date: {}", self.date.trim()));
         h.push(fmt!("From: {}", encode_addr(&self.from_name, &self.from)));
-        h.push(fmt!("To: {}", join_addrs(&self.to)));
+        // A draft may be saved before it has a recipient; a send checks its own envelope.
+        if !self.to.iter().all(|a| a.trim().is_empty()) {
+            h.push(fmt!("To: {}", join_addrs(&self.to)));
+        }
         if !self.cc.iter().all(|a| a.trim().is_empty()) {
             h.push(fmt!("Cc: {}", join_addrs(&self.cc)));
         }
@@ -697,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn a_draft_with_no_recipient_is_refused() {
+    fn a_draft_with_no_recipient_yet_builds_without_a_to() {
         let d = DraftMessage {
             from:       fmt!("me@x.example"),
             to:         Vec::new(),
@@ -705,7 +703,10 @@ mod tests {
             message_id: fmt!("<new@x.example>"),
             ..Default::default()
         };
-        assert!(d.build().is_err());
+        let raw = d.build().expect("a draft with no recipient yet builds");
+        assert!(headers(&raw).iter().all(|(n, _)| n != "to"));
+        let no_date = DraftMessage { date: String::new(), ..d };
+        assert!(no_date.build().is_err());
     }
 
     #[test]
