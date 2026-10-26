@@ -84,31 +84,75 @@ impl MessageFlags {
         out
     }
 
-    /// Is `flag` set? Named with or without its leading backslash; anything
+    /// Which system flag `flag` names, with or without its leading backslash and in any
+    /// case (RFC 3501 §2.3.2), as an index into [`Self::SYSTEM`].
+    fn system_index(flag: &str) -> Option<usize> {
+        let name = flag.strip_prefix('\\').unwrap_or(flag);
+        Self::SYSTEM.iter().position(|s| s.eq_ignore_ascii_case(name))
+    }
+
+    const SYSTEM: [&'static str; 6] = ["Seen", "Answered", "Flagged", "Deleted", "Draft", "Recent"];
+
+    fn field_mut(&mut self, i: usize) -> Option<&mut bool> {
+        match i {
+            0 => Some(&mut self.seen),
+            1 => Some(&mut self.answered),
+            2 => Some(&mut self.flagged),
+            3 => Some(&mut self.deleted),
+            4 => Some(&mut self.draft),
+            5 => Some(&mut self.recent),
+            _ => None,
+        }
+    }
+
+    /// Is `flag` set? Named with or without its leading backslash, in any case; anything
     /// outside the known set reads as clear.
     pub fn has(&self, flag: &str) -> bool {
-        match flag {
-            "\\Seen"     | "Seen"     => self.seen,
-            "\\Answered" | "Answered" => self.answered,
-            "\\Flagged"  | "Flagged"  => self.flagged,
-            "\\Deleted"  | "Deleted"  => self.deleted,
-            "\\Draft"    | "Draft"    => self.draft,
-            "\\Recent"   | "Recent"   => self.recent,
-            _ => false,
+        match Self::system_index(flag) {
+            Some(0) => self.seen,
+            Some(1) => self.answered,
+            Some(2) => self.flagged,
+            Some(3) => self.deleted,
+            Some(4) => self.draft,
+            Some(5) => self.recent,
+            _       => false,
         }
     }
 
     /// A name outside the known set is silently ignored, since a client may
     /// `STORE` a custom keyword the MVP does not carry.
     pub fn set(&mut self, flag: &str, on: bool) {
-        match flag {
-            "\\Seen"     | "Seen"     => self.seen     = on,
-            "\\Answered" | "Answered" => self.answered = on,
-            "\\Flagged"  | "Flagged"  => self.flagged  = on,
-            "\\Deleted"  | "Deleted"  => self.deleted  = on,
-            "\\Draft"    | "Draft"    => self.draft    = on,
-            "\\Recent"   | "Recent"   => self.recent   = on,
-            _ => (),
+        if let Some(b) = Self::system_index(flag).and_then(|i| self.field_mut(i)) {
+            *b = on;
+        }
+    }
+}
+
+/// A flag change as the client asked for it (RFC 3501 §6.4.6 `+FLAGS`, `-FLAGS`, `FLAGS`),
+/// applied to the stored flags at the moment of writing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FlagUpdate {
+    Add(MessageFlags),
+    Remove(MessageFlags),
+    Replace(MessageFlags),
+}
+
+impl FlagUpdate {
+    /// The flags after this change to `cur`. `\Recent` belongs to the session and no STORE
+    /// alters it.
+    pub fn apply(&self, cur: MessageFlags) -> MessageFlags {
+        let (m, op): (&MessageFlags, fn(bool, bool) -> bool) = match self {
+            Self::Add(m)        => (m, |c, x| c || x),
+            Self::Remove(m)     => (m, |c, x| c && !x),
+            Self::Replace(m)    => (m, |_, x| x),
+        };
+        MessageFlags {
+            seen:       op(cur.seen,        m.seen),
+            answered:   op(cur.answered,    m.answered),
+            flagged:    op(cur.flagged,     m.flagged),
+            deleted:    op(cur.deleted,     m.deleted),
+            draft:      op(cur.draft,       m.draft),
+            recent:     cur.recent,
         }
     }
 }
@@ -181,6 +225,23 @@ pub trait MailStore: Clone + Send + Sync + 'static {
     )
         -> Outcome<MessageUid>;
 
+    /// [`Self::append`] for a delivery, which a sender retries after a temporary failure: a
+    /// message the folder already holds, the same Message-ID and the same fields and body as its
+    /// sender set them (the fields added in transit aside, as
+    /// [`crate::email::header::sender_parts`] reads them), is not filed again, and the UID of
+    /// the copy there is answered, so a retry after a partial failure duplicates nothing. A
+    /// different message reusing a Message-ID, and a message without one, are filed. IMAP
+    /// APPEND files what the client sends, and does not come this way.
+    fn deliver(
+        &self,
+        user:       &MailUser,
+        folder:     &FolderName,
+        bytes:      &[u8],
+        flags:      MessageFlags,
+        internal:   Option<SystemTime>,
+    )
+        -> Outcome<MessageUid>;
+
     /// Recursively.
     fn list_folders(&self, user: &MailUser) -> Outcome<Vec<FolderName>>;
 
@@ -201,14 +262,15 @@ pub trait MailStore: Clone + Send + Sync + 'static {
     )
         -> Outcome<Vec<MessageMeta>>;
 
-    /// The stored bytes exactly, since `FETCH BODY[]` must reproduce them.
+    /// The stored bytes exactly, since `FETCH BODY[]` must reproduce them. `None` when the
+    /// message is gone, expunged by another session.
     fn fetch_bytes(
         &self,
         user:   &MailUser,
         folder: &FolderName,
         uid:    MessageUid,
     )
-        -> Outcome<Vec<u8>>;
+        -> Outcome<Option<Vec<u8>>>;
 
     /// Hands `f` the stored bytes of each message of `uids`, in the order given. A UID the
     /// folder no longer holds is skipped. A store that can read many messages under one
@@ -224,32 +286,80 @@ pub trait MailStore: Clone + Send + Sync + 'static {
         where F: FnMut(MessageUid, &[u8]) -> Outcome<()>
     {
         for uid in uids {
-            let bytes = res!(self.fetch_bytes(user, folder, *uid));
-            res!(f(*uid, &bytes));
+            if let Some(bytes) = res!(self.fetch_bytes(user, folder, *uid)) {
+                res!(f(*uid, &bytes));
+            }
         }
         Ok(())
     }
 
-    /// The flag set returned may differ from the one given, where the
-    /// implementation enforces an invariant such as always-clear `\Recent`.
-    fn set_flags(
+    /// Applies `op` to the message's flags as they stand when the store holds the folder,
+    /// not as a session last read them, so a flag another session set meanwhile survives.
+    /// `None` when the message is gone, expunged by another session.
+    fn update_flags(
         &self,
         user:       &MailUser,
         folder:     &FolderName,
         uid:        MessageUid,
-        flags:      MessageFlags,
+        op:         FlagUpdate,
     )
-        -> Outcome<MessageFlags>;
+        -> Outcome<Option<MessageFlags>>;
 
-    /// Removes every message flagged `\Deleted`, and returns their UIDs in
-    /// removal order, since IMAP wants one untagged `EXPUNGE` per UID in that
-    /// same order.
+    /// [`Self::update_flags`] for each of `uids`, the answers in the same order. A store that
+    /// can should do it under one hold of the folder; a caller bounds `uids`, since no one else
+    /// reaches the folder meanwhile.
+    fn update_flags_many(
+        &self,
+        user:       &MailUser,
+        folder:     &FolderName,
+        uids:       &[MessageUid],
+        op:         FlagUpdate,
+    )
+        -> Outcome<Vec<Option<MessageFlags>>>
+    {
+        let mut out = Vec::with_capacity(uids.len());
+        for uid in uids {
+            out.push(res!(self.update_flags(user, folder, *uid, op)));
+        }
+        Ok(out)
+    }
+
+    /// Removes every message flagged `\Deleted`, or with `only` those of them it names
+    /// (RFC 4315 `UID EXPUNGE`), and returns their UIDs in removal order, since IMAP wants
+    /// one untagged `EXPUNGE` per UID in that same order.
     fn expunge(
         &self,
         user:   &MailUser,
         folder: &FolderName,
+        only:   Option<&[MessageUid]>,
     )
         -> Outcome<Vec<MessageUid>>;
+
+    /// Files a copy of each message of `uids` in `from` into `to`, flags and INTERNALDATE
+    /// kept, and returns `(source UID, new UID)` for each, in source UID order: the pairs
+    /// RFC 4315's `COPYUID` names. A UID `from` no longer holds is skipped. `to` must exist.
+    /// All or nothing (RFC 3501 §6.4.7): on an error `to` holds none of the copies, and any
+    /// UID one took is retired, which is safe as UIDNEXT only rises.
+    fn copy(
+        &self,
+        user:   &MailUser,
+        from:   &FolderName,
+        uids:   &[MessageUid],
+        to:     &FolderName,
+    )
+        -> Outcome<Vec<(MessageUid, MessageUid)>>;
+
+    /// As [`Self::copy`], but each message leaves `from` (RFC 6851 `MOVE`). A message is in
+    /// exactly one of the two folders at every moment, a crash included, and takes in `to`
+    /// a UID above any that folder has issued.
+    fn move_to(
+        &self,
+        user:   &MailUser,
+        from:   &FolderName,
+        uids:   &[MessageUid],
+        to:     &FolderName,
+    )
+        -> Outcome<Vec<(MessageUid, MessageUid)>>;
 
     /// Idempotent.
     fn create_folder(

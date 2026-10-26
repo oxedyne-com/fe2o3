@@ -535,8 +535,7 @@ pub fn link_key(m: &FetchedMessage, gmail: bool) -> Option<LinkKey> {
 
 /// The `Message-ID` a header block (or whole message) names, without its angle brackets.
 pub fn header_message_id(raw: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(raw);
-    message::headers(&text).into_iter()
+    message::headers(raw).into_iter()
         .find(|(n, _)| n == "message-id")
         .map(|(_, v)| bare_message_id(&v).to_string())
         .filter(|v| !v.is_empty())
