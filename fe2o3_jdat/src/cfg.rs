@@ -63,12 +63,13 @@ impl<T: Config> JdatMapFile for T {}
 /// * `{file?:path}` is the same, or the empty string when the file does not exist. Any other
 ///   read failure is still refused, so a present but unreadable key is never silently dropped.
 ///
-/// The environment is expanded first, so a variable may name a file. A file's contents are
-/// inserted verbatim and never scanned for references themselves.
+/// The environment is expanded first, so a variable may name a file. A variable's value and a
+/// file's contents are both inserted verbatim and never scanned for references themselves: a
+/// `{file:` or `}` inside a variable's value is text, so it neither starts nor ends a reference.
 pub fn resolve(value: &str, root: &Path)
     -> Outcome<String>
 {
-    let named = res!(resolve_env(value));
+    let named = res!(expand_env(value));
     resolve_files(&named, value, root)
 }
 
@@ -76,19 +77,42 @@ pub fn resolve(value: &str, root: &Path)
 pub fn resolve_env(whole: &str)
     -> Outcome<String>
 {
-    let mut out = fmt!("{}", whole);
-    while let Some(start) = out.find("{env:") {
-        let end = match out[start..].find('}') {
+    Ok(res!(expand_env(whole)).text)
+}
+
+/// A value with its environment expanded, and the byte ranges in it each variable's value
+/// fills, so the file scan can tell the value's own text from what the environment put there.
+struct EnvExpanded {
+    text:   String,
+    filled: Vec<std::ops::Range<usize>>,
+}
+
+impl EnvExpanded {
+    /// Did the environment put the byte at `i` there?
+    fn filled_at(&self, i: usize) -> bool {
+        self.filled.iter().any(|r| r.contains(&i))
+    }
+}
+
+// One pass, forward: each value is inserted verbatim and the scan resumes after it, never
+// through it. A rescan from the start hung on a variable naming itself (QA gwmain P3-3).
+fn expand_env(whole: &str)
+    -> Outcome<EnvExpanded>
+{
+    let mut out = EnvExpanded { text: String::with_capacity(whole.len()), filled: Vec::new() };
+    let mut rest = whole;
+    while let Some(start) = rest.find("{env:") {
+        let end = match rest[start..].find('}') {
             Some(i) => start + i,
             None => return Err(err!(
                 "The configuration value {:?} opens an {{env: reference and does not \
                 close it.", whole;
             Invalid, Input)),
         };
-        let inner = fmt!("{}", &out[start + 5..end]);
+        let inner = &rest[start + 5..end];
         let (name, fallback) = match inner.find(':') {
             Some(i) => (&inner[..i], Some(&inner[i + 1..])),
-            None    => (inner.as_str(), None),
+            None    => (inner, None),
         };
         let got = match std::env::var(name) {
             Ok(v) if !v.is_empty() => v,
@@ -100,8 +124,13 @@ pub fn resolve_env(whole: &str)
                 Invalid, Input, Missing)),
             },
         };
-        out.replace_range(start..=end, &got);
+        out.text.push_str(&rest[..start]);
+        let at = out.text.len();
+        out.text.push_str(&got);
+        out.filled.push(at..out.text.len());
+        rest = &rest[end + 1..];
     }
+    out.text.push_str(rest);
     Ok(out)
 }
 
@@ -111,12 +140,12 @@ pub fn resolve_env(whole: &str)
 pub fn file_refs(value: &str, root: &Path)
     -> Outcome<Vec<PathBuf>>
 {
-    let named = res!(resolve_env(value));
+    let named = res!(expand_env(value));
     let mut out = Vec::new();
     let mut pos = 0;
-    while let Some(fref) = res!(first_file_ref(&named[pos..], value)) {
-        out.push(root.join(&named[pos + fref.start + fref.marker..pos + fref.end]));
-        pos += fref.end + 1;
+    while let Some(fref) = res!(first_file_ref(&named, pos, value)) {
+        out.push(root.join(&named.text[fref.start + fref.marker..fref.end]));
+        pos = fref.end + 1;
     }
     Ok(out)
 }
@@ -259,20 +288,36 @@ impl FileRef {
     fn optional(&self) -> bool { self.marker == 7 }
 }
 
-/// The earliest file reference in `s`. `whole` is the original value, named in an error.
-fn first_file_ref(s: &str, whole: &str)
+/// The earliest file reference in `named` at or after byte `from`, its positions absolute. Only
+/// the value's own text opens or closes one, never what the environment filled in. `whole` is
+/// the original value, named in an error.
+fn first_file_ref(named: &EnvExpanded, from: usize, whole: &str)
     -> Outcome<Option<FileRef>>
 {
-    // '{file:' is not a substring of '{file?:', so neither search can match the other.
-    let (start, marker) = match (s.find("{file:"), s.find("{file?:")) {
-        (None,    None)             => return Ok(None),
-        (Some(r), None)             => (r, 6),
-        (None,    Some(o))          => (o, 7),
-        (Some(r), Some(o)) if o < r => (o, 7),
-        (Some(r), Some(_))          => (r, 6),
+    let s = &named.text;
+    // '{file:' is not a substring of '{file?:', so neither marker can match the other.
+    let opener = |at: usize| -> Option<usize> {
+        if named.filled_at(at) {
+            None
+        } else if s[at..].starts_with("{file:") {
+            Some(6)
+        } else if s[at..].starts_with("{file?:") {
+            Some(7)
+        } else {
+            None
+        }
     };
-    match s[start..].find('}') {
-        Some(i) => Ok(Some(FileRef { start, end: start + i, marker })),
+    let (start, marker) = match s[from..].match_indices('{')
+        .find_map(|(i, _)| opener(from + i).map(|m| (from + i, m)))
+    {
+        Some(found) => found,
+        None        => return Ok(None),
+    };
+    let close = s[start + marker..].match_indices('}')
+        .map(|(i, _)| start + marker + i)
+        .find(|&i| !named.filled_at(i));
+    match close {
+        Some(end) => Ok(Some(FileRef { start, end, marker })),
         None    => Err(err!(
             "The configuration value {:?} opens a {{file{}: reference and does not close it.",
             whole, if marker == 7 { "?" } else { "" };
@@ -280,19 +325,20 @@ fn first_file_ref(s: &str, whole: &str)
     }
 }
 
-fn resolve_files(value: &str, whole: &str, root: &Path)
+fn resolve_files(named: &EnvExpanded, whole: &str, root: &Path)
     -> Outcome<String>
 {
     // A file's contents are inserted verbatim and the scan continues after them, never through
     // them: a secret holding `{file:...}` would otherwise loop, read a file no path check saw, or
     // put part of itself in an error.
-    let mut out = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(fref) = res!(first_file_ref(rest, whole)) {
-        let rel = &rest[fref.start + fref.marker..fref.end];
+    let text = &named.text;
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0;
+    while let Some(fref) = res!(first_file_ref(named, pos, whole)) {
+        let rel = &text[fref.start + fref.marker..fref.end];
         let path = root.join(rel);
         let mark = if fref.optional() { "?" } else { "" };
-        out.push_str(&rest[..fref.start]);
+        out.push_str(&text[pos..fref.start]);
         match std::fs::read_to_string(&path) {
             Ok(t) => out.push_str(t.trim()),
             // Only not-found is tolerated, so a present file that cannot be read still fails.
@@ -303,9 +349,9 @@ fn resolve_files(value: &str, whole: &str, root: &Path)
                 mark, rel, path;
             IO, File, Read)),
         }
-        rest = &rest[fref.end + 1..];
+        pos = fref.end + 1;
     }
-    out.push_str(rest);
+    out.push_str(&text[pos..]);
     Ok(out)
 }
 

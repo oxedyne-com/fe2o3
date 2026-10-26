@@ -153,3 +153,41 @@ fn a_file_is_inserted_verbatim_and_never_rescanned() -> Outcome<()> {
     let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
+
+// QA gwmain P3-3: an environment value is inserted verbatim, as a file's contents are, and the
+// scan goes on after it. A value naming its own variable used to hang start-up, and a value
+// holding `{file:...}` was then read as a key file that no path check saw.
+#[test]
+fn an_env_value_is_inserted_verbatim_and_never_rescanned() -> Outcome<()> {
+    let root = res!(scratch("env_verbatim"));
+    res!(std::fs::write(root.join("probe.key"), "read"));
+    std::env::set_var("FE2O3_CFG_RESOLVE_SELF", "{env:FE2O3_CFG_RESOLVE_SELF}");
+    std::env::set_var("FE2O3_CFG_RESOLVE_HOLDS_FILE", "x{file:probe.key}y");
+    std::env::set_var("FE2O3_CFG_RESOLVE_HOLDS_ENV", "{env:FE2O3_CFG_RESOLVE_SET2}");
+    std::env::set_var("FE2O3_CFG_RESOLVE_SET2", "inner");
+    std::env::set_var("FE2O3_CFG_RESOLVE_BRACE", "pro}be.key");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let r = root.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send((
+            cfg::resolve_env("a{env:FE2O3_CFG_RESOLVE_SELF}b").map_err(|e| fmt!("{}", e)),
+            cfg::resolve("<{env:FE2O3_CFG_RESOLVE_SELF}>", &r).map_err(|e| fmt!("{}", e)),
+        ));
+    });
+    let (env_only, whole) = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(v)  => v,
+        Err(_) => panic!("a self-referring environment value hangs the resolver"),
+    };
+    assert_eq!(env_only, Ok(fmt!("a{{env:FE2O3_CFG_RESOLVE_SELF}}b")));
+    assert_eq!(whole, Ok(fmt!("<{{env:FE2O3_CFG_RESOLVE_SELF}}>")));
+    assert_eq!(res!(cfg::resolve_env("{env:FE2O3_CFG_RESOLVE_HOLDS_ENV}")), "{env:FE2O3_CFG_RESOLVE_SET2}");
+    // A {file:} inside an environment value is text, not a reference: nothing is read.
+    assert_eq!(res!(cfg::resolve("{env:FE2O3_CFG_RESOLVE_HOLDS_FILE}", &root)), "x{file:probe.key}y");
+    assert!(res!(cfg::file_refs("{env:FE2O3_CFG_RESOLVE_HOLDS_FILE}", &root)).is_empty());
+    // A brace in a variable naming a file does not end the reference early.
+    res!(std::fs::write(root.join("pro}be.key"), "braced"));
+    assert_eq!(res!(cfg::resolve("{file:{env:FE2O3_CFG_RESOLVE_BRACE}}", &root)), "braced");
+    assert_eq!(res!(cfg::file_refs("{file:{env:FE2O3_CFG_RESOLVE_BRACE}}", &root)), vec![root.join("pro}be.key")]);
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
