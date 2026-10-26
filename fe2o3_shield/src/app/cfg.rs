@@ -7,7 +7,10 @@ use oxedyne_fe2o3_core::{
 };
 use oxedyne_fe2o3_jdat::{
     prelude::*,
-    cfg::Config,
+    cfg::{
+        self,
+        Config,
+    },
 };
 
 use std::{
@@ -29,7 +32,12 @@ pub struct AppConfig {
 }
 
 impl Config for AppConfig {
+    /// Resolves the app root by `cfg::resolve_root`, with `SHIELD_APP_ROOT` for `env`, and
+    /// creates it.
     fn check_and_fix(&mut self) -> Outcome<()> {
+        self.app_root = res!(cfg::resolve_root(&self.app_root, "SHIELD_APP_ROOT")) // fixed: the documented env var name
+            .to_string_lossy()
+            .to_string();
         let app_root_path = Path::new(&self.app_root);
         res!(std::fs::create_dir_all(app_root_path));
         Ok(())
