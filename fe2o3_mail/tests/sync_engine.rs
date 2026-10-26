@@ -190,6 +190,10 @@ impl MailSession for Server {
 
     async fn create(&mut self, mb: &str) -> Outcome<()> {
         self.log.push(fmt!("CREATE {}", mb));
+        // As a server answers NO [ALREADYEXISTS].
+        if self.folders.contains_key(mb) {
+            return Err(err!("NO [ALREADYEXISTS] {}", mb; Invalid, Input));
+        }
         self.folder(mb, "", 900);
         Ok(())
     }
@@ -940,6 +944,53 @@ async fn test_copy_store_uid_expunge_without_move_00() -> Outcome<()> {
     Ok(())
 }
 
+
+/// A move to the folder the message is in does nothing, and says so: never `Done` (QA mailA, 26
+/// Oct 2026: Delete pressed in Trash answered Done and the page forgot a message the server kept).
+#[tokio::test]
+async fn test_move_to_its_own_folder_is_already_not_done_00() -> Outcome<()> {
+    let mut s = account(PLAIN);
+    let u = s.deliver("Trash", "t@x");
+    let (caps, r) = res!(roles(&mut s).await);
+    let mut e = entry(u, "t@x", Action::Trash);
+    e.mailbox = "Trash".into();
+    e.uid_validity = 300;
+    req!(ActOutcome::Already("Trash".into()), res!(act(&mut s, &caps, &r, Provider::Steel, &e).await));
+    req!(true, s.has("Trash", "t@x"));
+    req!(false, s.log.iter().any(|l| l.contains("MOVE") || l.contains("COPY") || l.contains("STORE")), "{:?}", s.log);
+    Ok(())
+}
+
+/// Without MOVE, a retry after a cut between the COPY and the EXPUNGE finds the copy already in
+/// the target (confirmed by FETCH) and does not copy again.
+#[tokio::test]
+async fn test_retried_copy_without_move_leaves_one_copy_00() -> Outcome<()> {
+    let mut s = account("IMAP4rev1 UIDPLUS SPECIAL-USE");
+    let u = s.deliver("INBOX", "a@x");
+    // The first try's COPY landed; its STORE and EXPUNGE did not.
+    s.deliver("Junk", "a@x");
+    let (caps, r) = res!(roles(&mut s).await);
+    req!(ActOutcome::Done, res!(act(&mut s, &caps, &r, Provider::Steel, &entry(u, "a@x", Action::Junk)).await));
+    let r = raw("a@x", 2025);
+    req!(1, s.folders["Junk"].msgs.iter().filter(|m| m.raw == r).count(), "{:?}", s.log);
+    req!(0, s.folders["INBOX"].msgs.len());
+    Ok(())
+}
+
+/// Two archives of one new year in one batch: the roles were listed at its start, so the second
+/// meets the folder the first created, and archives into it.
+#[tokio::test]
+async fn test_two_archives_of_a_new_year_in_one_batch_00() -> Outcome<()> {
+    let mut s = account(PLAIN);
+    let a = s.deliver("INBOX", "a@x");
+    let b = s.deliver("INBOX", "b@x");
+    let (caps, r) = res!(roles(&mut s).await);
+    req!(ActOutcome::Done, res!(act(&mut s, &caps, &r, Provider::Steel, &entry(a, "a@x", Action::Archive)).await));
+    req!(ActOutcome::Done, res!(act(&mut s, &caps, &r, Provider::Steel, &entry(b, "b@x", Action::Archive)).await));
+    req!(true, s.has("Archive/2025", "a@x") && s.has("Archive/2025", "b@x"), "{:?}", s.log);
+    req!(0, s.folders["INBOX"].msgs.len());
+    Ok(())
+}
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ ARCHIVE AND FILING RULES, ROLES, LINKS, NAMES                             │

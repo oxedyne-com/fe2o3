@@ -241,6 +241,7 @@ fn test_replies_round_trip_every_outcome() -> Outcome<()> {
         Ok(ActOutcome::Done),
         Ok(ActOutcome::Gone),
         Ok(ActOutcome::Superseded(fmt!("Archive/2024"))),
+        Ok(ActOutcome::Already(fmt!("Trash"))),
         Ok(ActOutcome::Lost),
         Ok(ActOutcome::Stuck(fmt!("two copies match"))),
         Err(fmt!("The mail server could not be reached.")),

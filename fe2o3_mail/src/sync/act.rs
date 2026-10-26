@@ -10,7 +10,12 @@
 //! - On a UIDVALIDITY that is no longer the entry's, the message is re-found by `Message-ID` and
 //!   size, and only a unique match is acted on; otherwise the entry is `Stuck`.
 //! - Without `MOVE`, a move is `UID COPY`, `+FLAGS \Deleted` and `UID EXPUNGE`; without `UIDPLUS`
-//!   the action refuses, because a plain `EXPUNGE` would remove other `\Deleted` messages too.
+//!   the action refuses, because a plain `EXPUNGE` would remove other `\Deleted` messages too. A
+//!   target that already holds the message's confirmed `Message-ID` is not copied to again, so a
+//!   retry after a cut between the copy and the expunge leaves one copy, not two.
+//! - A move to the folder the message is already in does nothing and answers
+//!   [`ActOutcome::Already`], never `Done` (26 Oct 2026, QA mailA: a `Done` for Delete pressed in
+//!   Trash let the page forget a message the server kept).
 
 use crate::sync::{
     bare_message_id,
@@ -76,6 +81,7 @@ impl Default for Action {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ActOutcome {
     Done,
+    Already(String),        // the message is in this folder already: nothing was done
     Gone,                   // the UID is no longer in the folder: a flag change has nothing to do
     Superseded(String),     // another device filed it first, here
     Lost,                   // found in no folder at all, to be shown, never dropped
@@ -157,6 +163,12 @@ pub async fn act<S: MailSession>(
         },
     };
 
+    if let Some(to) = &dest {
+        if *to == e.mailbox {
+            return Ok(ActOutcome::Already(to.clone()));
+        }
+    }
+
     let st = res!(s.select(&e.mailbox, &SelectWith::Plain).await);
     let uid = if st.uid_validity == e.uid_validity {
         Some(e.uid)
@@ -200,14 +212,14 @@ pub async fn act<S: MailSession>(
             Ok(ActOutcome::Done)
         }
         (_, Some(to), true, Some(u)) => {
-            if to == e.mailbox {
-                return Ok(ActOutcome::Done);
-            }
             let one = UidSet::from([u]);
             if caps.mov {
                 res!(s.uid_move(&one, &to).await);
             } else if caps.uidplus {
-                res!(s.uid_copy(&one, &to).await);
+                // A retry after a cut between the copy and the expunge finds the copy made.
+                if !res!(held_in(s, roles, &to, &e.message_id, &e.mailbox).await) {
+                    res!(s.uid_copy(&one, &to).await);
+                }
                 res!(s.uid_store_flags(&one, &["\\Deleted"], &[]).await);
                 res!(s.uid_expunge(&one).await);
             } else {
@@ -246,6 +258,19 @@ async fn locate<S: MailSession>(s: &mut S, roles: &Roles, e: &Entry, to: &str)
         }
     }
     Ok(ActOutcome::Lost)
+}
+
+/// Does `to` hold a confirmed copy of `mid`? Leaves `back` selected again.
+async fn held_in<S: MailSession>(s: &mut S, roles: &Roles, to: &str, mid: &str, back: &str)
+    -> Outcome<bool>
+{
+    if mid.is_empty() || !roles.exists(to) {
+        return Ok(false);
+    }
+    res!(s.select(to, &SelectWith::Plain).await);
+    let found = !res!(find_message_id(s, mid).await).is_empty();
+    res!(s.select(back, &SelectWith::Plain).await);
+    Ok(found)
 }
 
 /// The mailbox an action moves to, created where the provider's rule needs one that is absent;
@@ -290,7 +315,14 @@ async fn destination<S: MailSession>(
     if let Ok(name) = &to {
         if !roles.exists(name) {
             if let Action::Archive = action {
-                res!(s.create(name).await);
+                // The roles were listed at the batch's start, so an earlier entry of this batch,
+                // or another device, may have made it since: a refusal is checked, not trusted.
+                if let Err(x) = s.create(name).await {
+                    let made = res!(s.list().await).iter().any(|m| m.name == *name);
+                    if !made {
+                        return Err(x);
+                    }
+                }
             }
         }
     }

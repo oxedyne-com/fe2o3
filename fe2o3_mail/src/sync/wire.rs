@@ -11,7 +11,8 @@
 //! Entry    {id, mailbox, uid_validity, uid, message_id?, size?, year?,
 //!           action: "flags"|"move"|"archive"|"trash"|"junk"|"not_junk"|"expunge",
 //!           add?: [..], remove?: [..], to?: "inbox"|"role:<role>"|"path:<name>"}
-//! ActReply {id, outcome: "done"|"gone"|"superseded"|"lost"|"stuck"|"error", detail?}
+//! ActReply {id, outcome: "done"|"already"|"gone"|"superseded"|"lost"|"stuck"|"error",
+//!     detail?}
 //! ```
 //! A UID set travels as its IMAP wire form, so 10^5 held UIDs cost bytes. `raw` is standard
 //! base64, and may be left out by a reader that keeps the bytes elsewhere (the page hands the
@@ -579,6 +580,7 @@ pub struct ActReply {
 pub fn reply_dat(r: &ActReply) -> Dat {
     let (word, detail) = match &r.outcome {
         Ok(ActOutcome::Done)            => ("done",       None),
+        Ok(ActOutcome::Already(at))     => ("already",    Some(at)),
         Ok(ActOutcome::Gone)            => ("gone",       None),
         Ok(ActOutcome::Superseded(at))  => ("superseded", Some(at)),
         Ok(ActOutcome::Lost)            => ("lost",       None),
@@ -603,6 +605,7 @@ pub fn reply_from(d: &Dat) -> Outcome<ActReply> {
     let detail = res!(text(d, "detail"));
     let outcome = match res!(text(d, "outcome")).as_str() {
         "done"          => Ok(ActOutcome::Done),
+        "already"       => Ok(ActOutcome::Already(detail)),
         "gone"          => Ok(ActOutcome::Gone),
         "superseded"    => Ok(ActOutcome::Superseded(detail)),
         "lost"          => Ok(ActOutcome::Lost),
