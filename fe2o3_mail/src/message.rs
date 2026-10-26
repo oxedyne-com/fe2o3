@@ -79,6 +79,108 @@ impl ParsedMessage {
     }
 }
 
+/// A message as a viewer shows it: the fields a reader sees, the text a reply quotes, the HTML
+/// a sandboxed frame renders, and every attachment and embedded part with its bytes.
+///
+/// One reader for the person and the agent: [`MessageView::text`] is [`readable_text`], the
+/// text a model is handed, so what he reads and what the agent reads cannot drift apart.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessageView {
+    pub from:        String,        // decoded for display
+    pub to:          String,
+    pub cc:          String,
+    pub reply_to:    String,
+    pub subject:     String,
+    pub date:        String,        // verbatim
+    pub message_id:  String,
+    pub in_reply_to: String,
+    pub references:  String,
+    pub text:        String,        // readable_text: of an alternative the plain version
+    pub html:        String,        // what a frame renders, empty when the message has no HTML
+    pub parts:       Vec<ViewPart>, // attachments and embedded parts, in order
+}
+
+/// One attachment or embedded part of a [`MessageView`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViewPart {
+    pub name:       String,     // attachment_name: the file name, or an attached message's Subject
+    pub media_type: String,     // lower case, e.g. `image/png`
+    pub content_id: String,     // without angle brackets, empty when none
+    pub inline:     bool,       // the HTML names it by `cid:`, so it is shown there, not listed
+    pub bytes:      Vec<u8>,    // out of its transfer encoding
+}
+
+impl MessageView {
+    /// Read a whole message from its RFC 5322 bytes; infallible, as [`ParsedMessage::parse`].
+    ///
+    /// The HTML is the message's own markup, untouched but for a plain part shown beside it (a
+    /// list footer after an HTML body), which is escaped into a `<pre>`. It is for a frame with
+    /// no scripts and no access to the page, never for the page's own document.
+    pub fn parse(raw: &[u8]) -> Self {
+        let hs  = headers(raw);
+        let top = entity(raw);
+        let rich = top.rich_parts();
+        let html = if rich.iter().any(|p| p.media_type() == "text/html") {
+            rich.iter().map(|p| match p.media_type().as_str() {
+                "text/html" => p.text(),
+                _           => fmt!("<pre style=\"white-space:pre-wrap;font:inherit\">{}</pre>",
+                                    escape_html(&p.text())),
+            }).collect::<Vec<String>>().join("\n")
+        } else {
+            String::new()
+        };
+        let mut parts = Vec::new();
+        view_parts_into(&top, &rich, &mut parts);
+        let lower = html.to_ascii_lowercase();
+        for vp in parts.iter_mut() {
+            vp.inline = !vp.content_id.is_empty()
+                && lower.contains(&fmt!("cid:{}", vp.content_id.to_ascii_lowercase()));
+        }
+        Self {
+            from:        decode_words(&hget(&hs, "from")),
+            to:          decode_words(&hget(&hs, "to")),
+            cc:          decode_words(&hget(&hs, "cc")),
+            reply_to:    decode_words(&hget(&hs, "reply-to")),
+            subject:     decode_words(&hget(&hs, "subject")),
+            date:        hget(&hs, "date"),
+            message_id:  hget(&hs, "message-id"),
+            in_reply_to: hget(&hs, "in-reply-to"),
+            references:  hget(&hs, "references"),
+            text:        readable_text(raw),
+            html,
+            parts,
+        }
+    }
+}
+
+/// Every attachment, every embedded non-text part not shown as the body (a `cid:` logo), and
+/// each attached message, which is one part and never looked inside.
+fn view_parts_into(p: &Part<'_>, shown: &[&Part<'_>], out: &mut Vec<ViewPart>) {
+    match &p.structure {
+        Structure::Multipart(kids) => for k in kids { view_parts_into(k, shown, out); },
+        _ => {
+            let is_shown = shown.iter().any(|s| std::ptr::eq(*s, p));
+            let media = p.media_type();
+            // A named text part shown inline is listed too, as the agent's reader lists it, so
+            // it can be saved as the file it is.
+            if p.is_attachment() || (!is_shown && !(p.is_text() || media.starts_with("multipart/"))) {
+                out.push(ViewPart {
+                    name:       p.attachment_name(),
+                    media_type: media,
+                    content_id: p.content_id().unwrap_or_default(),
+                    inline:     false,
+                    bytes:      p.bytes(),
+                });
+            }
+        }
+    }
+}
+
+/// Text made safe to place inside HTML markup.
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
 
 // ── Reading ─────────────────────────────────────────────────────────────
 
@@ -237,11 +339,24 @@ pub struct DraftMessage {
     pub references:  String,        // the References header, or empty to derive from in_reply_to
     pub date:        String,        // the Date header, spelled as RFC 5322 wants it
     pub message_id:  String,        // this message's own Message-ID, angle brackets and all
+    pub attachments: Vec<DraftAttachment>,
+}
+
+/// A file attached to a [`DraftMessage`].
+#[derive(Clone, Debug, Default)]
+pub struct DraftAttachment {
+    pub name:       String,     // the file name the recipient sees
+    pub media_type: String,     // empty for application/octet-stream
+    pub bytes:      Vec<u8>,
 }
 
 impl DraftMessage {
-    /// Build the RFC 5322 document this draft describes: a single `text/plain` part, its body
-    /// quoted-printable, with the headers that make a reply thread.
+    /// Build the RFC 5322 document this draft describes, with the headers that make a reply
+    /// thread: a single `text/plain` part, its body quoted-printable, or with attachments a
+    /// `multipart/mixed` of that part and each file in base64.
+    ///
+    /// The boundary is drawn from the Message-ID, so the same draft builds the same bytes, and
+    /// it begins `=_`, which neither base64 nor quoted-printable can write.
     ///
     /// This does NOT send.  It hands back bytes; what becomes of them is the caller's, and in
     /// Daimond the caller writes them to a drafts folder for a person to read and send.
@@ -286,12 +401,62 @@ impl DraftMessage {
         }
         h.push(fmt!("MIME-Version: 1.0"));
         h.push(fmt!("User-Agent: Daimond"));
-        h.push(fmt!("Content-Type: text/plain; charset=utf-8"));
-        h.push(fmt!("Content-Transfer-Encoding: quoted-printable"));
+        let text_head = "Content-Type: text/plain; charset=utf-8\r\n\
+                         Content-Transfer-Encoding: quoted-printable";
+        if self.attachments.is_empty() {
+            let doc = fmt!("{}\r\n{}\r\n\r\n{}\r\n", h.join("\r\n"), text_head, encode_qp(&self.body));
+            return Ok(doc.into_bytes());
+        }
 
-        let doc = fmt!("{}\r\n\r\n{}\r\n", h.join("\r\n"), encode_qp(&self.body));
+        let bnd = fmt!("=_daimond_{:016x}", fnv1a(self.message_id.trim().as_bytes()));
+        h.push(fmt!("Content-Type: multipart/mixed; boundary=\"{}\"", bnd));
+        let mut doc = fmt!("{}\r\n\r\nThis is a message in MIME format.\r\n--{}\r\n{}\r\n\r\n{}\r\n",
+            h.join("\r\n"), bnd, text_head, encode_qp(&self.body));
+        for att in &self.attachments {
+            let media = if att.media_type.trim().is_empty() {
+                "application/octet-stream"
+            } else {
+                att.media_type.trim()
+            };
+            doc.push_str(&fmt!("--{}\r\nContent-Type: {}\r\nContent-Transfer-Encoding: base64\r\n\
+                Content-Disposition: attachment; {}\r\n\r\n{}\r\n",
+                bnd, media, filename_param(&att.name), base64_lines(&att.bytes)));
+        }
+        doc.push_str(&fmt!("--{}--\r\n", bnd));
         Ok(doc.into_bytes())
     }
+}
+
+/// FNV-1a, 64 bits: a boundary that follows from the Message-ID, not from a random source.
+fn fnv1a(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, x| (h ^ *x as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// Base64 in lines of 76, as RFC 2045 §6.8 requires of a body.
+fn base64_lines(b: &[u8]) -> String {
+    let enc = base64::encode(b);
+    enc.as_bytes().chunks(76)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect::<Vec<String>>()
+        .join("\r\n")
+}
+
+/// The `filename` parameter for a name: quoted when ASCII, else RFC 2231's `filename*` in
+/// UTF-8, percent-encoded, which every reader decodes and an encoded-word inside quotes is not.
+fn filename_param(name: &str) -> String {
+    let name = if name.trim().is_empty() { "attachment" } else { name.trim() };
+    if is_ascii(name) {
+        return fmt!("filename=\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""));
+    }
+    let mut pct = String::new();
+    for b in name.as_bytes() {
+        if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(b) {
+            pct.push(*b as char);
+        } else {
+            pct.push_str(&fmt!("%{:02X}", b));
+        }
+    }
+    fmt!("filename*=utf-8''{}", pct)
 }
 
 /// Join a list of addresses for a `To` or `Cc` header, each encoded and comma-separated.
@@ -519,6 +684,7 @@ mod tests {
             references:  String::new(),
             date:        fmt!("Mon, 1 Sep 2026 12:00:00 +0000"),
             message_id:  fmt!("<new@x.example>"),
+            attachments: Vec::new(),
         };
         let bytes = d.build().expect("the draft builds");
         let m = ParsedMessage::parse(&bytes);

@@ -262,6 +262,21 @@ impl<'a> Part<'a> {
         decode_body(self.body, &self.encoding, param(&self.ctype, "charset").as_deref())
     }
 
+    /// The body out of its transfer encoding, as the bytes it carries: an attachment's file.
+    pub fn bytes(&self) -> Vec<u8> {
+        decode_transfer(self.body, &self.encoding)
+    }
+
+    /// The Content-ID (RFC 2392) a `cid:` URL names this part by, without its angle brackets.
+    pub fn content_id(&self) -> Option<String> {
+        self.header("content-id")
+            .map(|id| {
+                let t = id.trim();
+                t.strip_prefix('<').and_then(|t| t.strip_suffix('>')).unwrap_or(t).trim().to_string()
+            })
+            .filter(|id| !id.is_empty())
+    }
+
     /// The `text/plain` and `text/html` leaves a reader is shown as this entity's body, in
     /// order, by RFC 2046: of a `multipart/alternative` the plain version among its own parts,
     /// else the last that shows anything; of a `multipart/related` its root (RFC 2387); of any
@@ -269,11 +284,20 @@ impl<'a> Part<'a> {
     /// message, is never shown, nor is a leaf with no text.
     pub fn display_parts(&self) -> Vec<&Part<'a>> {
         let mut out = Vec::new();
-        self.display_into(&mut out);
+        self.display_into(&mut out, false);
         out
     }
 
-    fn display_into<'s>(&'s self, out: &mut Vec<&'s Part<'a>>) {
+    /// The leaves a viewer that renders HTML shows, as [`Part::display_parts`] except that of
+    /// a `multipart/alternative` it takes the last version that shows anything, the richest
+    /// by RFC 2046 §5.1.4.
+    pub fn rich_parts(&self) -> Vec<&Part<'a>> {
+        let mut out = Vec::new();
+        self.display_into(&mut out, true);
+        out
+    }
+
+    fn display_into<'s>(&'s self, out: &mut Vec<&'s Part<'a>>, rich: bool) {
         match &self.structure {
             Structure::Leaf => {
                 let media = self.media_type();
@@ -292,12 +316,19 @@ impl<'a> Part<'a> {
             Structure::Message(_) => (),
             Structure::Multipart(kids) => match self.media_type().as_str() {
                 "multipart/alternative" => {
-                    let plain = kids.iter()
-                        .filter(|k| matches!(k.structure, Structure::Leaf) && k.media_type() == "text/plain")
-                        .map(|k| k.display_parts())
-                        .find(|v| !v.is_empty());
+                    let parts = |k: &'s Part<'a>| {
+                        let mut v = Vec::new();
+                        k.display_into(&mut v, rich);
+                        v
+                    };
+                    let plain = if rich { None } else {
+                        kids.iter()
+                            .filter(|k| matches!(k.structure, Structure::Leaf) && k.media_type() == "text/plain")
+                            .map(parts)
+                            .find(|v| !v.is_empty())
+                    };
                     let chosen = plain.or_else(|| kids.iter().rev()
-                        .map(|k| k.display_parts())
+                        .map(parts)
                         .find(|v| !v.is_empty()));
                     if let Some(v) = chosen { out.extend(v); }
                 }
@@ -306,9 +337,9 @@ impl<'a> Part<'a> {
                     let root = start.and_then(|s| kids.iter().find(|k|
                             k.header("content-id").map(|id| id.trim() == s.trim()).unwrap_or(false)))
                         .or_else(|| kids.first());
-                    if let Some(r) = root { r.display_into(out); }
+                    if let Some(r) = root { r.display_into(out, rich); }
                 }
-                _ => for k in kids { k.display_into(out); },
+                _ => for k in kids { k.display_into(out, rich); },
             },
         }
     }
@@ -591,12 +622,17 @@ fn percent_decode(s: &str) -> Vec<u8> {
 
 /// A body out of its Content-Transfer-Encoding and its charset, as UTF-8.
 pub fn decode_body(body: &[u8], encoding: &str, charset: Option<&str>) -> String {
-    let bytes = match encoding.trim().to_ascii_lowercase().as_str() {
+    to_utf8(&decode_transfer(body, encoding), charset)
+}
+
+/// A body out of its Content-Transfer-Encoding: base64 and quoted-printable decoded, any other
+/// (7bit, 8bit, binary, or none) as it is.
+pub fn decode_transfer(body: &[u8], encoding: &str) -> Vec<u8> {
+    match encoding.trim().to_ascii_lowercase().as_str() {
         "base64"            => decode_base64_lenient(body),
         "quoted-printable"  => decode_qp(body),
         _                   => body.to_vec(),
-    };
-    to_utf8(&bytes, charset)
+    }
 }
 
 /// Bytes in `charset` as UTF-8. ISO-8859-1, ISO-8859-15 and Windows-1252 are transcoded,
