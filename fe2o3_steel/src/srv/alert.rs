@@ -1095,7 +1095,7 @@ async fn text_one(
     -> Outcome<Receipt>
 {
     let m = SmsMessage { to, from: &sms.from, body: text };
-    let call = res!(sms.provider.request(cred, &m));
+    let call = res!(sms.provider.request(&sms.hosts, cred, &m));
     let headers: Vec<(&str, &str)> = call.headers.iter()
         .map(|(n, v)| (n.as_str(), v.as_str()))
         .collect();
@@ -1777,7 +1777,7 @@ mod tests {
         // Through a stub gateway call, never dialled: the request carries that text.
         let cred = Credential { user: "u", secret: "s" };
         let m = SmsMessage { to: "+61400000000", from: "", body: &text };
-        match SmsProvider::ClickSend.request(&cred, &m) {
+        match SmsProvider::ClickSend.request(&oxedyne_fe2o3_net::sms::SmsHosts::default(), &cred, &m) {
             Ok(call) => assert!(String::from_utf8_lossy(&call.body).contains("dropped_1m 215"),
                 "the gateway request lost the alert"),
             Err(e) => panic!("request: {}", e),

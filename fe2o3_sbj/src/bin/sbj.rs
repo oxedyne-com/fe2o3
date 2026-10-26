@@ -55,9 +55,6 @@ use std::{
 	},
 };
 
-/// The key file a compiler signs with when the author names none.
-const DEFAULT_KEY: &'static str = "key.jdat";
-
 /// The stack the work is done on.
 ///
 /// The JDAT text decoder is recursive, and a document may legally nest to the depth limit of
@@ -112,7 +109,7 @@ struct Args {
 	/// The file to write, if the subcommand writes one.
 	output:	Option<PathBuf>,
 	/// The key file to sign with.
-	keyfile:	PathBuf,
+	keyfile:	Option<PathBuf>,
 	/// The entry of the key file to sign with, where the file holds several pairs.
 	entry:	Option<String>,
 	/// The authoring time, in Unix milliseconds. The clock, when the author names none.
@@ -180,16 +177,17 @@ fn usage() {
 sbj -- the authoring toolchain for SBJ, the oxeweb document format.
 
 Usage:
-  sbj compile <doc.jdat> -o <doc.sbj> [options]   Validate, canonicalise, hash, sign, write.
-  sbj import  <doc.md|.html> [-o <doc.sbj>]        Map Markdown or HTML to a document, then compile it.
-  sbj verify  <doc.sbj>                           Check the envelope without decoding the tree.
-  sbj inspect <doc.sbj>                           Read the document whole and say what is in it.
-  sbj dump    <doc.sbj> [-o <doc.jdat>]           Write the document back out as text.
+  sbj compile <doc.jdat> -o <doc.sbj> -k <key>         Validate, canonicalise, hash, sign, write.
+  sbj import  <doc.md|.html> -k <key> [-o <doc.sbj>]   Map Markdown or HTML to a document, then compile it.
+  sbj verify  <doc.sbj>                                Check the envelope without decoding the tree.
+  sbj inspect <doc.sbj>                                Read the document whole and say what is in it.
+  sbj dump    <doc.sbj> [-o <doc.jdat>]                Write the document back out as text.
 
 Options:
   -o, --out <path>        Where to write. Compile requires it; import writes beside its source;
                           dump writes to stdout without it.
-  -k, --key <path>        The key file to sign with, generated and saved if absent [{key}].
+  -k, --key <path>        The key file to sign with, generated and saved if absent. Compile and
+                          import require it.
       --key-entry <name>  The entry of the key file to sign with, where it holds several pairs.
   -t, --time <ms>         The authoring time, in Unix milliseconds [the clock].
       --index             Append the optional offset index of SPEC.md 1.4.
@@ -215,7 +213,7 @@ A document is written in JDAT text form, where a node is its kind label and its 
           }})),
       ]),
   }}))
-", key = DEFAULT_KEY, lang = import::DEFAULT_LANG);
+", lang = import::DEFAULT_LANG);
 }
 
 /// Reads the arguments, refusing one that is not an argument and one that is missing its value.
@@ -225,7 +223,7 @@ fn parse(words: &[String]) -> Outcome<Args> {
 
 	let mut input:	Option<PathBuf> = None;
 	let mut output:	Option<PathBuf> = None;
-	let mut keyfile:	PathBuf = PathBuf::from(DEFAULT_KEY);
+	let mut keyfile:	Option<PathBuf> = None;
 	let mut entry:	Option<String> = None;
 	let mut time:	Option<u64> = None;
 	let mut index:	bool = false;
@@ -241,7 +239,7 @@ fn parse(words: &[String]) -> Outcome<Args> {
 				output = Some(PathBuf::from(res!(value(words, &mut i, word))));
 			},
 			"-k" | "--key" => {
-				keyfile = PathBuf::from(res!(value(words, &mut i, word)));
+				keyfile = Some(PathBuf::from(res!(value(words, &mut i, word))));
 			},
 			"--key-entry" => {
 				entry = Some(res!(value(words, &mut i, word)));
@@ -291,6 +289,15 @@ fn parse(words: &[String]) -> Outcome<Args> {
 		return Err(err!(
 			"sbj compile needs somewhere to write the document: `sbj compile {} -o <doc.sbj>`.",
 			input.display();
+		Invalid, Input, Missing));
+	}
+
+	// A signing key is an identity, so it is named on every signing run, never assumed from the
+	// working directory.
+	if (cmd == Cmd::Compile || cmd == Cmd::Import) && keyfile.is_none() {
+		return Err(err!(
+			"sbj {} signs the document, so it needs the key file to sign with: `-k <key.jdat>`.",
+			words[0];
 		Invalid, Input, Missing));
 	}
 
@@ -483,7 +490,9 @@ fn sign_and_write(
 )
 	-> Outcome<()>
 {
-	let (pair, made) = res!(signing_key(&args.keyfile, args.entry.as_deref()));
+	let keyfile = res!(args.keyfile.as_ref().ok_or_else(|| err!(
+		"sbj {} needs the key file to sign with.", verb; Missing, Input)));
+	let (pair, made) = res!(signing_key(keyfile, args.entry.as_deref()));
 	let signer = res!(pair.signer());
 	let time = match args.time {
 		Some(time) => time,
@@ -503,7 +512,7 @@ fn sign_and_write(
 	res!(write_bytes(out, &buf));
 
 	if made {
-		println!("Generated a signing key and saved it to {}.", args.keyfile.display());
+		println!("Generated a signing key and saved it to {}.", keyfile.display());
 	}
 	println!("{} {}", verb, args.input.display());
 	res!(report_envelope(read.env()));

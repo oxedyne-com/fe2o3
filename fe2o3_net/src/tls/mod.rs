@@ -16,8 +16,10 @@
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     path::{
         Path,
@@ -426,12 +428,25 @@ pub fn ensure_crypto_provider() {
         .install_default();
 }
 
-/// The system bundle locations, tried in order.
-pub const SYSTEM_CA_BUNDLES: [&str; 3] = [
-    "/etc/ssl/certs/ca-certificates.crt",   // Debian/Ubuntu
-    "/etc/pki/tls/certs/ca-bundle.crt",     // Fedora/RHEL
-    "/etc/ssl/cert.pem",                    // Alpine/macOS
-];
+/// Where the host keeps its CA bundle. The list varies by distribution and container, so it is
+/// config; the first path that exists is read.
+#[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
+pub struct TrustConfig {
+    #[optional]
+    pub ca_bundle_paths: Vec<String>,
+}
+
+impl Default for TrustConfig {
+    fn default() -> Self {
+        Self {
+            ca_bundle_paths: vec![
+                fmt!("/etc/ssl/certs/ca-certificates.crt"),	// Debian/Ubuntu
+                fmt!("/etc/pki/tls/certs/ca-bundle.crt"),		// Fedora/RHEL
+                fmt!("/etc/ssl/cert.pem"),					// Alpine/macOS
+            ],
+        }
+    }
+}
 
 /// The roots a client trusts, gathered before the `ClientConfig` is built, so a caller can add a
 /// private CA to what the operating system trusts rather than build the store itself.
@@ -447,26 +462,33 @@ impl ClientRoots {
     }
 
     /// What the operating system trusts, read as OpenSSL reads it: see [`Self::openssl`] for
-    /// `SSL_CERT_FILE` and `SSL_CERT_DIR`.
-    pub fn system() -> Outcome<Self> {
-        Self::openssl(std::env::var_os("SSL_CERT_FILE"), std::env::var_os("SSL_CERT_DIR"))
+    /// `SSL_CERT_FILE` and `SSL_CERT_DIR`, the bundle searched for along `trust.ca_bundle_paths`.
+    pub fn system(trust: &TrustConfig) -> Outcome<Self> {
+        Self::openssl(trust, std::env::var_os("SSL_CERT_FILE"), std::env::var_os("SSL_CERT_DIR"))
     }
 
     /// The roots OpenSSL would trust given these two environment values. `file` replaces the
-    /// system bundle, and a file it names that cannot be read is an error, not an empty trust.
-    /// `dir` is a colon-separated list of directories whose every file is read for certificates,
+    /// system bundle (the first of `trust.ca_bundle_paths` that exists), and a file it names
+    /// that cannot be read is an error, not an empty trust. `dir` is a colon-separated list of directories whose every file is read for certificates,
     /// a file holding none and a directory that does not exist passed over, as OpenSSL passes
     /// over a hashed name it does not find. An empty value is an unset one. No usable root at
     /// all is an error.
-    pub fn openssl(file: Option<OsString>, dir: Option<OsString>) -> Outcome<Self> {
+    pub fn openssl(
+        trust:  &TrustConfig,
+        file:   Option<OsString>,
+        dir:    Option<OsString>,
+    )
+        -> Outcome<Self>
+    {
         let mut roots = Self::empty();
         match file.filter(|f| !f.is_empty()) {
             Some(f) => { res!(roots.add_pem_file(PathBuf::from(f))); },
             None    => {
-                let bundle = match SYSTEM_CA_BUNDLES.iter().find(|p| Path::new(p).exists()) {
-                    Some(p) => *p,
+                let paths = &trust.ca_bundle_paths;
+                let bundle = match paths.iter().find(|p| Path::new(p).exists()) {
+                    Some(p) => p,
                     None    => return Err(err!(
-                        "No system CA bundle found. Tried: {:?}", SYSTEM_CA_BUNDLES;
+                        "No system CA bundle found. Tried: {:?}", paths;
                         Init, Missing, File)),
                 };
                 res!(roots.add_pem_file(bundle));
@@ -547,16 +569,21 @@ impl ClientRoots {
     }
 }
 
-/// What the operating system trusts, as [`ClientRoots::system`] reads it, and nothing else: the
-/// default every public-internet client wants.
+/// What the operating system trusts, as [`ClientRoots::system`] reads it with the default
+/// [`TrustConfig`], and nothing else: the default every public-internet client wants.
 pub fn default_client_config() -> Outcome<ClientConfig> {
-    Ok(res!(ClientRoots::system()).client_config())
+    client_config(&TrustConfig::default())
+}
+
+/// As [`default_client_config`], with the CA bundle searched for along `trust.ca_bundle_paths`.
+pub fn client_config(trust: &TrustConfig) -> Outcome<ClientConfig> {
+    Ok(res!(ClientRoots::system(trust)).client_config())
 }
 
 /// What the operating system trusts plus every certificate in `pem`, for a server vouched for by
 /// a private CA.
-pub fn client_config_trusting(pem: &[u8]) -> Outcome<ClientConfig> {
-    let mut roots = res!(ClientRoots::system());
+pub fn client_config_trusting(trust: &TrustConfig, pem: &[u8]) -> Outcome<ClientConfig> {
+    let mut roots = res!(ClientRoots::system(trust));
     res!(roots.add_pem(pem));
     Ok(roots.client_config())
 }
@@ -989,7 +1016,7 @@ mod upgrade_tests {
             Err(e) => req!(true, e.tags().contains(&ErrTag::Security),
                 "the refusal was not tagged Security: {:?}", e.tags()),
         }
-        let mut roots = res!(ClientRoots::system());
+        let mut roots = res!(ClientRoots::system(&TrustConfig::default()));
         let before = roots.len();
         req!(1, res!(roots.add_pem(ca.as_bytes())), "the CA was not added");
         req!(before + 1, roots.len());
@@ -1014,16 +1041,17 @@ mod upgrade_tests {
         res!(std::fs::write(dir.join("README"), "no certificate here")
             .map_err(|e| err!(e, "Writing a stray file."; Test, IO)));
 
-        let only_file = res!(ClientRoots::openssl(Some(file.clone().into()), None));
+        let only_file = res!(ClientRoots::openssl(&TrustConfig::default(), Some(file.clone().into()), None));
         req!(1, only_file.len(), "SSL_CERT_FILE did not replace the bundle");
         let both = res!(ClientRoots::openssl(
+            &TrustConfig::default(),
             Some(file.clone().into()),
             Some(fmt!("{}:{}", root.join("absent").display(), dir.display()).into()),
         ));
         req!(2, both.len(), "SSL_CERT_DIR was not added to SSL_CERT_FILE");
         res!(handshake(addr, both.client_config()).await);
 
-        let missing = ClientRoots::openssl(Some(root.join("absent.pem").into()), None);
+        let missing = ClientRoots::openssl(&TrustConfig::default(), Some(root.join("absent.pem").into()), None);
         req!(true, missing.is_err(), "a missing SSL_CERT_FILE was passed over in silence");
         let _ = std::fs::remove_dir_all(&root);
         Ok(())

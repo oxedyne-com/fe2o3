@@ -55,8 +55,6 @@ use local_ip_address::local_ip;
 
 #[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
 pub struct ServerConfig {
-    // Schemes
-    pub schemes_db_path:                String,
     // Chunking
     pub wire_chunk_threshold:           u64, // applies only to values
     pub wire_chunk_bytes:               u64,
@@ -93,8 +91,6 @@ impl Config for ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            // Schemes
-            schemes_db_path:                fmt!("../oxedyne_fe2o3_namex/namex.jdat"),
             // Chunking
             wire_chunk_threshold:           1_500,
             wire_chunk_bytes:               1_000,

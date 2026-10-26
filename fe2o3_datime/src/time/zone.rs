@@ -6,14 +6,64 @@ use crate::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::{
-	collections::HashMap,
+	collections::{
+		BTreeMap,
+		HashMap,
+	},
 	fmt::{self, Display},
 	fs,
 	path::Path,
 	sync::OnceLock,
 };
+
+/// Where the host keeps its zoneinfo tree, searched in order. The list varies by system and
+/// container, so it is config; [`ZoneinfoConfig::install`] sets it once for the process, before
+/// the first zone is read, and the `Default` is used where nothing is installed.
+#[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
+pub struct ZoneinfoConfig {
+	#[optional]
+	pub dirs: Vec<String>,
+}
+
+impl Default for ZoneinfoConfig {
+	fn default() -> Self {
+		let mut dirs = Vec::new();
+		if cfg!(unix) {
+			dirs.push(fmt!("/usr/share/zoneinfo"));
+			dirs.push(fmt!("/usr/lib/zoneinfo"));
+			dirs.push(fmt!("/etc/zoneinfo"));
+			if cfg!(target_os = "macos") {
+				dirs.push(fmt!("/var/db/timezone/zoneinfo"));
+			}
+		}
+		if cfg!(target_os = "android") {
+			dirs.push(fmt!("/system/usr/share/zoneinfo"));
+			dirs.push(fmt!("/system/usr/share/zoneinfo/tzdata"));	// the concatenated database
+		}
+		Self { dirs }
+	}
+}
+
+static ZONEINFO: OnceLock<ZoneinfoConfig> = OnceLock::new();
+
+impl ZoneinfoConfig {
+	/// Sets the process's zoneinfo search list. An error once a list is in use.
+	pub fn install(self) -> Outcome<()> {
+		match ZONEINFO.set(self) {
+			Ok(())	=> Ok(()),
+			Err(_)	=> Err(err!(
+				"The zoneinfo search list is already set for this process.";
+				Configuration, Exists)),
+		}
+	}
+
+	pub fn current() -> &'static Self {
+		ZONEINFO.get_or_init(Self::default)
+	}
+}
 
 /// A zone is UTC, a fixed offset, or a set of DST rules. The rules for the
 /// major zones are embedded rather than taken from a timezone crate, with the
@@ -512,7 +562,7 @@ impl CalClockZone {
 		// setting is the whole purpose of local(), so no consent machinery
 		// applies here -- that gate belongs to the manager that scans zone
 		// data wholesale.
-		let localtime = Path::new("/etc/localtime");
+		let localtime = Path::new("/etc/localtime"); // fixed: the host zone file, localtime(5); TZ overrides it
 		if localtime.exists() {
 			let id = fs::read_link(localtime).ok()
 				.and_then(|target| Self::zone_name_from_path(&target))
@@ -524,7 +574,7 @@ impl CalClockZone {
 
 		// /etc/timezone: the Debian name file, no longer shipped everywhere
 		// (Ubuntu 25.10 dropped it) but still authoritative where it exists.
-		if let Ok(name) = fs::read_to_string("/etc/timezone") {
+		if let Ok(name) = fs::read_to_string("/etc/timezone") { // fixed: the Debian host zone name file; TZ overrides it
 			let name = name.trim();
 			if !name.is_empty() {
 				if let Ok(zone) = Self::from_zoneinfo_name(name) {
@@ -569,7 +619,7 @@ impl CalClockZone {
 				"'{}' is not a plain zone name.", name;
 			Invalid, Input));
 		}
-		for base in ["/usr/share/zoneinfo", "/usr/lib/zoneinfo", "/etc/zoneinfo"] {
+		for base in &ZoneinfoConfig::current().dirs {
 			let path = Path::new(base).join(name);
 			if path.is_file() {
 				return Self::from_tzif_file(name, &path);

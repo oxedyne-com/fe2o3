@@ -64,7 +64,7 @@ pub const CURRENT_FORMAT_VERSION:       u8 = 2;
 pub const MAX_ZONES:                    u16 = 100;
 pub const LIVE_FILE_CLAIM_LIMIT:        usize = 1024;
 pub const DEFAULT_MAX_ZONE_DIR_BYTES:   u64 = 104_857_600; // 100 MiB
-pub const CONFIG_FILENAME:              &'static str = "config.jdat";
+pub const CONFIG_FILENAME:              &'static str = "config.jdat"; // fixed: the bootstrap name found in the db root before any config is read
 pub const STORE_LOCK_FILENAME:          &'static str = "ozone.lock"; // held by the one process on a store
 pub const FAULT_FILENAME:               &'static str = "ozone.fault"; // the cuts a failed sync leaves for the next open
 pub const REFUSAL_FILENAME:             &'static str = "ozone.refused"; // every open is refused while it stands
@@ -177,7 +177,6 @@ pub const PING_TIMEOUT:                         Duration = Duration::from_secs(5
 pub const CONFIGWATCHER_REFRESH_FILE_AFTER_N_CHECKS: usize = 100;
 
 // ServerBot.
-pub const SERVER_ADDRESS:                   &'static str = "127.0.0.1";
 pub const UDP_BUFFER_SIZE:                  usize = 1_400;
 // Mostly completely arbitrary...
 pub const POW_CREATE_TIMEOUT:               Duration = Duration::from_secs(30);

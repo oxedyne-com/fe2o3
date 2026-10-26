@@ -2863,7 +2863,7 @@ mod tests {
             Err(e) => req!(true, e.tags().contains(&ErrTag::Security),
                 "the refusal was not tagged Security: {:?}", e.tags()),
         }
-        let tls_cfg = Arc::new(res!(tls::client_config_trusting(ca.as_bytes())));
+        let tls_cfg = Arc::new(res!(tls::client_config_trusting(&tls::TrustConfig::default(), ca.as_bytes())));
         let c = res!(ImapClient::connect(&base.with_tls(tls_cfg)).await);
         req!(true, c.has_cap("SPECIAL-USE"), "the greeting was not read over TLS");
         Ok(())

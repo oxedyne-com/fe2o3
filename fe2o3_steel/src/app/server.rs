@@ -55,6 +55,10 @@ use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
 };
+use oxedyne_fe2o3_net::tls::{
+    self,
+    TrustConfig,
+};
 use oxedyne_fe2o3_o3db_sync::O3db;
 
 use oxedyne_fe2o3_core::{
@@ -291,8 +295,7 @@ impl AppShellContext {
         if dev_mode {
             // Dev mode uses a single shared self-signed cert.
             let tls_dir = res!(server_cfg.get_tls_dir(&root_path, true));
-            let cert_path = tls_dir.join("fullchain.pem");
-            let key_path = tls_dir.join("privkey.pem");
+            let (cert_path, key_path) = server_cfg.tls_pair(&tls_dir);
             debug!("dev tls_dir = {:?}", tls_dir);
             if !cert_path.exists() || !key_path.exists() {
                 info!("Development certificates not found -- generating self-signed cert.");
@@ -310,8 +313,7 @@ impl AppShellContext {
             for vh in &vhosts_cfg {
                 let primary = vh.primary_hostname();
                 let vh_dir = tls_dir.join(primary);
-                let cert_path = vh_dir.join("fullchain.pem");
-                let key_path = vh_dir.join("privkey.pem");
+                let (cert_path, key_path) = server_cfg.tls_pair(&vh_dir);
                 if !cert_path.exists() || !key_path.exists() {
                     return Ok(Evaluation::Error(fmt!(
                         "Missing certificate for vhost '{}'. ACME is disabled, so \
@@ -413,7 +415,7 @@ impl AppShellContext {
 
         // Build a TLS client config for outbound API proxy requests.
         // Reads the system CA bundle so Steel can talk to any upstream.
-        let tls_client = match build_outbound_tls_client() {
+        let tls_client = match build_outbound_tls_client(&server_cfg.trust()) {
             Ok(cfg) => Some(cfg),
             Err(e) => {
                 warn!("{}", e);
@@ -508,7 +510,7 @@ impl AppShellContext {
         // else about a host, with the first vhost kept only as a fallback for a
         // system that does not carry one.
         let alert_host = {
-            let machine = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            let machine = std::fs::read_to_string("/proc/sys/kernel/hostname") // fixed: kernel interface, proc(5)
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default();
             if !machine.is_empty() {
@@ -896,64 +898,11 @@ impl AppShellContext {
 
 }
 
-pub fn build_outbound_tls_client()
+/// The outbound client: the host's CA bundle, found along `trust`, and HTTP/1.1 offered by ALPN.
+pub fn build_outbound_tls_client(trust: &TrustConfig)
     -> Outcome<Arc<tokio_rustls::rustls::ClientConfig>>
 {
-    use tokio_rustls::rustls::{
-        ClientConfig,
-        RootCertStore,
-        pki_types::CertificateDer,
-    };
-
-    // Common system CA bundle paths.
-    let ca_paths = [
-        "/etc/ssl/certs/ca-certificates.crt",   // Debian/Ubuntu
-        "/etc/pki/tls/certs/ca-bundle.crt",     // Fedora/RHEL
-        "/etc/ssl/cert.pem",                    // Alpine/macOS
-    ];
-    let ca_file = match ca_paths.iter().find(|p| Path::new(p).exists()) {
-        Some(p) => *p,
-        None => return Err(err!(
-            "No system CA bundle found. Tried: {:?}", ca_paths;
-            Init, Missing, File)),
-    };
-
-    info!("Loading system CA certificates from '{}'...", ca_file);
-    let pem_data = match std::fs::read(ca_file) {
-        Ok(d) => d,
-        Err(e) => return Err(err!(e,
-            "Failed to read CA bundle '{}'.", ca_file;
-            IO, File, Read)),
-    };
-
-    let mut store = RootCertStore::empty();
-    let mut count = 0u32;
-    // Parse PEM-encoded certificates.
-    let mut cursor = &pem_data[..];
-    loop {
-        match rustls_pemfile::read_one(&mut cursor) {
-            Ok(Some(rustls_pemfile::Item::X509Certificate(cert))) => {
-                let der = CertificateDer::from(cert);
-                match store.add(der) {
-                    Ok(()) => count += 1,
-                    Err(_) => (), // Skip malformed certs silently.
-                }
-            }
-            Ok(Some(_)) => continue, // Skip non-certificate items.
-            Ok(None) => break,       // End of file.
-            Err(_) => break,         // Parse error; stop.
-        }
-    }
-    if count == 0 {
-        return Err(err!(
-            "CA bundle '{}' contained no usable certificates.", ca_file;
-            Init, Invalid, File));
-    }
-    info!("Loaded {} CA certificate(s) for outbound HTTPS.", count);
-
-    let mut config = ClientConfig::builder()
-        .with_root_certificates(store)
-        .with_no_client_auth();
+    let mut config = res!(tls::client_config(trust));
     // Advertise HTTP/1.1 via ALPN so CDN-fronted servers (e.g.
     // Fireworks.ai behind Cloudflare) don't close the connection
     // after the TLS handshake when no protocol is negotiated.

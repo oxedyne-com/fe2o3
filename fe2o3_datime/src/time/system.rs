@@ -1,7 +1,7 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::time::{CalClockZone, tzif::{TZifParser, TZifData}};
+use crate::time::{CalClockZone, ZoneinfoConfig, tzif::{TZifParser, TZifData}};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -54,45 +54,25 @@ impl SystemTimezoneConfig {
         }
     }
 
+    /// The process's zoneinfo list ([`ZoneinfoConfig`]), after any the environment names.
     pub fn default_search_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
-
-        // Unix-like systems
-        if cfg!(unix) {
-            paths.push(PathBuf::from("/usr/share/zoneinfo"));
-            paths.push(PathBuf::from("/usr/lib/zoneinfo"));
-            paths.push(PathBuf::from("/etc/zoneinfo"));
-            
-            // macOS
-            if cfg!(target_os = "macos") {
-                paths.push(PathBuf::from("/var/db/timezone/zoneinfo"));
-            }
-        }
-
-        // Windows
         if cfg!(windows) {
             if let Ok(windir) = env::var("WINDIR") {
                 paths.push(PathBuf::from(windir).join("System32").join("tzdata"));
             }
         }
-
-        // Android
         if cfg!(target_os = "android") {
-            // Check environment variables for Android paths
             if let Ok(android_root) = env::var("ANDROID_ROOT") {
                 paths.push(PathBuf::from(android_root).join("usr").join("share").join("zoneinfo"));
-            } else {
-                paths.push(PathBuf::from("/system/usr/share/zoneinfo"));
             }
-
             if let Ok(android_data) = env::var("ANDROID_DATA") {
                 paths.push(PathBuf::from(android_data).join("misc").join("zoneinfo"));
             }
-
-            // Try the concatenated timezone database location
-            paths.push(PathBuf::from("/system/usr/share/zoneinfo/tzdata"));
         }
-
+        for dir in &ZoneinfoConfig::current().dirs {
+            paths.push(PathBuf::from(dir));
+        }
         paths
     }
 

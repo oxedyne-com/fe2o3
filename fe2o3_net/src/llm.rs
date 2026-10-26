@@ -97,21 +97,43 @@ impl Provider {
 	}
 
 	/// Dialled, and the name the TLS certificate is validated against.
-	pub fn host(&self) -> &str {
+	pub fn host<'a>(&'a self, hosts: &'a LlmHosts) -> &'a str {
 		match self {
-			Self::OpenRouter		=> "openrouter.ai",
-			Self::Fireworks			=> "api.fireworks.ai",
-			Self::Mistral			=> "api.mistral.ai",
+			Self::OpenRouter		=> &hosts.openrouter,
+			Self::Fireworks			=> &hosts.fireworks,
+			Self::Mistral			=> &hosts.mistral,
 			Self::Custom { host, .. }	=> host,
 		}
 	}
 
 	pub fn path(&self) -> &str {
 		match self {
-			Self::OpenRouter		=> "/api/v1/chat/completions",
-			Self::Fireworks			=> "/inference/v1/chat/completions",
-			Self::Mistral			=> "/v1/chat/completions",
+			Self::OpenRouter		=> "/api/v1/chat/completions",		// fixed: OpenRouter's API path
+			Self::Fireworks			=> "/inference/v1/chat/completions",	// fixed: Fireworks' API path
+			Self::Mistral			=> "/v1/chat/completions",		// fixed: Mistral's API path
 			Self::Custom { path, .. }	=> path,
+		}
+	}
+}
+
+/// The host each named provider is dialled on. A deployment moves one (a proxy, a regional
+/// endpoint) by setting its key; [`Provider::Custom`] covers a provider not named here.
+#[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
+pub struct LlmHosts {
+	#[optional]
+	pub openrouter:	String,
+	#[optional]
+	pub fireworks:	String,
+	#[optional]
+	pub mistral:	String,
+}
+
+impl Default for LlmHosts {
+	fn default() -> Self {
+		Self {
+			openrouter:	fmt!("openrouter.ai"),
+			fireworks:	fmt!("api.fireworks.ai"),
+			mistral:	fmt!("api.mistral.ai"),
 		}
 	}
 }
@@ -123,6 +145,7 @@ pub struct LlmConfig {
 	pub provider:	Provider,
 	pub model:	String,		// the provider's own naming, e.g. `mistralai/mistral-large-latest`
 	pub api_key:	String,		// bearer key, never logged
+	pub hosts:	LlmHosts,
 }
 
 fn json_decoder() -> DecoderConfig<
@@ -280,13 +303,13 @@ pub async fn complete(
 	let body = res!(chat_body(&cfg.model, system, user));
 	let auth = fmt!("Bearer {}", cfg.api_key);
 	let headers: &[(&str, &str)] = &[
-		("Host",		cfg.provider.host()),
+		("Host",		cfg.provider.host(&cfg.hosts)),
 		("Authorization",	&auth),
 		("Content-Type",	"application/json"),
 		("Accept",		"application/json"),
 	];
 	let resp = res!(https_request(
-		cfg.provider.host(),
+		cfg.provider.host(&cfg.hosts),
 		443,
 		HttpMethod::POST,
 		cfg.provider.path(),
@@ -324,13 +347,13 @@ pub async fn complete_vision(
 	let body = res!(chat_body_vision(&cfg.model, system, user, image_mime, image_b64));
 	let auth = fmt!("Bearer {}", cfg.api_key);
 	let headers: &[(&str, &str)] = &[
-		("Host",		cfg.provider.host()),
+		("Host",		cfg.provider.host(&cfg.hosts)),
 		("Authorization",	&auth),
 		("Content-Type",	"application/json"),
 		("Accept",		"application/json"),
 	];
 	let resp = res!(https_request(
-		cfg.provider.host(),
+		cfg.provider.host(&cfg.hosts),
 		443,
 		HttpMethod::POST,
 		cfg.provider.path(),
@@ -363,10 +386,21 @@ mod tests {
 		for word in ["openrouter", "fireworks", "mistral"] {
 			let p = res!(Provider::of(word));
 			assert_eq!(p.as_str(), Some(word), "'{}' did not round-trip", word);
-			assert!(p.host().contains('.'), "'{}' has no host", word);
+			assert!(p.host(&LlmHosts::default()).contains('.'), "'{}' has no host", word);
 			assert!(p.path().starts_with('/'), "'{}' has no path", word);
 		}
 		assert!(Provider::of("claude").is_err(), "an unknown provider was accepted");
+		Ok(())
+	}
+
+	/// A host set in config replaces the published one, and a config without the key keeps it.
+	#[test]
+	fn test_a_configured_host_overrides_the_default_05() -> Outcome<()> {
+		let mut m = DaticleMap::new();
+		m.insert(dat!("mistral"), dat!("eu.proxy.example"));
+		let hosts = res!(LlmHosts::from_datmap(m));
+		req!(Provider::Mistral.host(&hosts), "eu.proxy.example");
+		req!(Provider::Fireworks.host(&hosts), LlmHosts::default().fireworks.as_str());
 		Ok(())
 	}
 

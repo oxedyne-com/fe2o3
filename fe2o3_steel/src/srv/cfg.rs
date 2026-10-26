@@ -28,7 +28,11 @@ use oxedyne_fe2o3_jdat::{
 use oxedyne_fe2o3_net::{
     constant::SESSION_ID_KEY_LABEL,
     dns::Fqdn,
-    sms::Provider as SmsProvider,
+    sms::{
+        Provider as SmsProvider,
+        SmsHosts,
+    },
+    tls::TrustConfig,
     http::{
         encoding,
         fields::{
@@ -2209,6 +2213,7 @@ pub struct SmsAlertConfig {
     pub from:       String,
     pub user_env:   String,             // env var holding the gateway account identifier
     pub secret_env: String,             // env var holding the gateway secret
+    pub hosts:      SmsHosts,           // where each gateway is dialled, from `hosts`
 }
 
 impl Default for SmsAlertConfig {
@@ -2220,6 +2225,7 @@ impl Default for SmsAlertConfig {
             from:       String::new(),
             user_env:   fmt!("STEEL_SMS_USER"),
             secret_env: fmt!("STEEL_SMS_SECRET"),
+            hosts:      SmsHosts::default(),
         }
     }
 }
@@ -2339,6 +2345,9 @@ impl SmsAlertConfig {
         }
         if let Some(Dat::Str(s)) = m.get(&dat!("from")) {
             out.from = s.clone();
+        }
+        if let Some(Dat::Map(h)) = m.get(&dat!("hosts")) {
+            out.hosts = res!(SmsHosts::from_datmap(h.clone()));
         }
         if let Some(Dat::Str(s)) = m.get(&dat!("user_env")) {
             out.user_env = s.clone();
@@ -2673,9 +2682,16 @@ impl AlertConfig {
 pub struct ServerConfig {
     // --- TLS fallback (only used when acme.enabled = false) -----------------
     // Directory holding per-vhost certificates when ACME is disabled, relative to the app root.
-    // Each vhost's certs live in `{tls_dir_rel}/{dev|prod}/{primary_hostname}/fullchain.pem` and
-    // `privkey.pem`.
+    // Each vhost's certs live in `{tls_dir_rel}/{dev|prod}/{primary_hostname}/{tls_cert_file}` and
+    // `{tls_key_file}`.
     pub tls_dir_rel:                    String,
+    #[optional]
+    pub tls_cert_file:                  String,         // leaf name of the certificate chain
+    #[optional]
+    pub tls_key_file:                   String,         // leaf name of the private key
+    // Where the host's CA bundle may be, for outbound TLS; the first that exists is read.
+    #[optional]
+    pub ca_bundle_paths:                Vec<String>,
 
     // --- Server bind and policy (shared) ------------------------------------
     pub log_level:                      String,         // used by the server once running
@@ -2979,6 +2995,9 @@ impl Default for ServerConfig {
 
         Self {
             tls_dir_rel:                    fmt!("./tls"),
+            tls_cert_file:                  fmt!("fullchain.pem"),
+            tls_key_file:                   fmt!("privkey.pem"),
+            ca_bundle_paths:                TrustConfig::default().ca_bundle_paths,
             log_level:                      fmt!("debug"),
             log_file_max_bytes:             0,      // 1 MiB
             log_files_max:                  0,      // every archive kept
@@ -3393,6 +3412,15 @@ impl ServerConfig {
 
     pub fn log_level(&self) -> Outcome<LogLevel> {
         LogLevel::from_str(&self.log_level)
+    }
+
+    /// The certificate chain and private key files in a TLS directory.
+    pub fn tls_pair(&self, dir: &Path) -> (PathBuf, PathBuf) {
+        (dir.join(&self.tls_cert_file), dir.join(&self.tls_key_file))
+    }
+
+    pub fn trust(&self) -> TrustConfig {
+        TrustConfig { ca_bundle_paths: self.ca_bundle_paths.clone() }
     }
 
     /// Resolve the TLS directory for a given mode (dev or prod) to an absolute

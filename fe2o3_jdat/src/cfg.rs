@@ -119,6 +119,42 @@ pub fn file_refs(value: &str, root: &Path)
     Ok(out)
 }
 
+/// The config file an app was asked to load, and the arguments left once that request is taken out.
+/// `--config <path>` or `--config=<path>` names it; otherwise it is `default_name` in the working
+/// directory.
+pub fn config_arg(args: Vec<String>, default_name: &str)
+    -> Outcome<(PathBuf, Vec<String>)>
+{
+    let mut path = None;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let given = if arg == "--config" {
+            Some(res!(iter.next().ok_or_else(|| err!(
+                "--config needs a path after it."; Missing, Input))))
+        } else if let Some(p) = arg.strip_prefix("--config=") {
+            Some(p.to_string())
+        } else {
+            rest.push(arg);
+            None
+        };
+        if let Some(p) = given {
+            if p.is_empty() {
+                return Err(err!("--config was given an empty path."; Invalid, Input));
+            }
+            if path.is_some() {
+                return Err(err!("--config was given twice."; Invalid, Input));
+            }
+            path = Some(PathBuf::from(p));
+        }
+    }
+    let path = match path {
+        Some(p) => p,
+        None    => Path::new("./").join(default_name),
+    };
+    Ok((path, rest))
+}
+
 /// Turn an app-root spec from a configuration into a path.
 ///
 /// * `current`, `here`, `auto` or `.` is the working directory.

@@ -151,6 +151,28 @@ pub enum Provider {
 	Plivo,		// JSON body, account identifier in the path
 }
 
+/// The host each gateway is dialled on. A deployment moves one (a regional host, a relay) by
+/// setting its key.
+#[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
+pub struct SmsHosts {
+	#[optional]
+	pub clicksend:	String,
+	#[optional]
+	pub twilio:	String,
+	#[optional]
+	pub plivo:	String,
+}
+
+impl Default for SmsHosts {
+	fn default() -> Self {
+		Self {
+			clicksend:	fmt!("rest.clicksend.com"),
+			twilio:		fmt!("api.twilio.com"),
+			plivo:		fmt!("api.plivo.com"),
+		}
+	}
+}
+
 impl Provider {
 	// A list rather than a `match`, so a variant added and not listed here is unreachable
 	// through `Self::from_id` -- the safe direction for a set whose members each carry a
@@ -172,11 +194,11 @@ impl Provider {
 	}
 
 	/// Dialled, and the name the certificate is validated against.
-	pub fn host(&self) -> &'static str {
+	pub fn host<'a>(&self, hosts: &'a SmsHosts) -> &'a str {
 		match self {
-			Self::ClickSend	=> "rest.clicksend.com",
-			Self::Twilio	=> "api.twilio.com",
-			Self::Plivo	=> "api.plivo.com",
+			Self::ClickSend	=> &hosts.clicksend,
+			Self::Twilio	=> &hosts.twilio,
+			Self::Plivo	=> &hosts.plivo,
 		}
 	}
 
@@ -190,7 +212,7 @@ impl Provider {
 
 	/// Host, path, method, headers and body for one message. **Not a request that is sent**:
 	/// the caller owns the transport, the address check and the TLS.
-	pub fn request(&self, cred: &Credential, m: &Message) -> Outcome<SmsCall> {
+	pub fn request(&self, hosts: &SmsHosts, cred: &Credential, m: &Message) -> Outcome<SmsCall> {
 		// Checked here rather than left to the vendor, because a malformed number comes back as
 		// a 400 with a vendor-specific code at the far end of a socket, and this is an alerting
 		// path: the failure that matters is the one discovered while the operator is asleep.
@@ -228,9 +250,9 @@ impl Provider {
 				let mut b = DaticleMap::new();
 				b.insert(dat!("messages"), Dat::List(vec![Dat::Map(one)]));
 				Ok(SmsCall {
-					host:		self.host().to_string(),
+					host:		self.host(hosts).to_string(),
 					port:		443,
-					path:		fmt!("/v3/sms/send"),
+					path:		fmt!("/v3/sms/send"),	// fixed: ClickSend's API path
 					method:		HttpMethod::POST,
 					headers:	headers("application/json"),
 					body:		res!(Dat::Map(b).json()).into_bytes(),
@@ -241,7 +263,7 @@ impl Provider {
 				// escaped even though it is an opaque identifier of known shape, because a path
 				// built by concatenation is a path that will one day be built from something
 				// else.
-				let path = fmt!("/2010-04-01/Accounts/{}/Messages.json",
+				let path = fmt!("/2010-04-01/Accounts/{}/Messages.json", // fixed: Twilio's API path
 					pct::encode_component(cred.user));
 				let mut form = fmt!("To={}&Body={}",
 					pct::encode_component(m.to), pct::encode_component(m.body));
@@ -249,7 +271,7 @@ impl Provider {
 					form.push_str(&fmt!("&From={}", pct::encode_component(m.from)));
 				}
 				Ok(SmsCall {
-					host:		self.host().to_string(),
+					host:		self.host(hosts).to_string(),
 					port:		443,
 					path,
 					method:		HttpMethod::POST,
@@ -258,7 +280,7 @@ impl Provider {
 				})
 			},
 			Self::Plivo => {
-				let path = fmt!("/v1/Account/{}/Message/", pct::encode_component(cred.user));
+				let path = fmt!("/v1/Account/{}/Message/", pct::encode_component(cred.user)); // fixed: Plivo's API path
 				let mut b = DaticleMap::new();
 				b.insert(dat!("dst"), dat!(m.to.to_string()));
 				b.insert(dat!("text"), dat!(m.body.to_string()));
@@ -266,7 +288,7 @@ impl Provider {
 					b.insert(dat!("src"), dat!(m.from.to_string()));
 				}
 				Ok(SmsCall {
-					host:		self.host().to_string(),
+					host:		self.host(hosts).to_string(),
 					port:		443,
 					path,
 					method:		HttpMethod::POST,
@@ -574,7 +596,7 @@ mod tests {
 		let c = cred();
 		let m = msg();
 		for p in Provider::ALL {
-			let call = match p.request(&c, &m) {
+			let call = match p.request(&SmsHosts::default(), &c, &m) {
 				Ok(call) => call,
 				Err(e) => panic!("{} would not build a request: {}", p.id(), e),
 			};
@@ -603,7 +625,7 @@ mod tests {
 		let c = cred();
 		let m = msg();
 		for p in Provider::ALL {
-			let call = res_unwrap(p.request(&c, &m), p);
+			let call = res_unwrap(p.request(&SmsHosts::default(), &c, &m), p);
 			let body = String::from_utf8_lossy(&call.body).to_string();
 			// The number is percent-escaped in a form body and plain in a JSON one, so the
 			// digits are what is looked for rather than the whole string.
@@ -620,7 +642,7 @@ mod tests {
 		for bad in ["0400 000 000", "61400000000", "+61-400-000-000", "+123", ""] {
 			let m = Message { to: bad, from: "", body: "x" };
 			for p in Provider::ALL {
-				assert!(p.request(&c, &m).is_err(),
+				assert!(p.request(&SmsHosts::default(), &c, &m).is_err(),
 					"{} accepted {:?} as a number", p.id(), bad);
 			}
 		}
@@ -633,9 +655,9 @@ mod tests {
 		let c = cred();
 		let long = "x".repeat(MAX_BODY_LEN + 1);
 		for p in Provider::ALL {
-			assert!(p.request(&c, &Message { to: "+61400000000", from: "", body: "" }).is_err(),
+			assert!(p.request(&SmsHosts::default(), &c, &Message { to: "+61400000000", from: "", body: "" }).is_err(),
 				"{} accepted an empty body", p.id());
-			assert!(p.request(&c, &Message { to: "+61400000000", from: "", body: &long }).is_err(),
+			assert!(p.request(&SmsHosts::default(), &c, &Message { to: "+61400000000", from: "", body: &long }).is_err(),
 				"{} accepted a body past the cap", p.id());
 		}
 	}

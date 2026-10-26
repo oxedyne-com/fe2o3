@@ -23,7 +23,10 @@ use oxedyne_fe2o3_crypto::keystore::{
 };
 use oxedyne_fe2o3_jdat::{
     prelude::*,
-    cfg::Config,
+    cfg::{
+        self,
+        Config,
+    },
     file::{
         JdatFile,
         JdatMapFile,
@@ -100,7 +103,10 @@ pub fn run() -> Outcome<()> {
     // │ root directory,       │
     // │ among other things.   │
     // └───────────────────────┘
-    let cfg_path = Path::new("./").join(constant::CONFIG_NAME);
+    let (cfg_path, invocation_cmds) = res!(cfg::config_arg(
+        std::env::args().skip(1).collect(), constant::CONFIG_NAME));
+    // The wallet sits beside the config, so a second instance's `--config` brings its own.
+    let cfg_dir = cfg_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
 
     if !cfg_path.is_file() {
         app_status.first = true;
@@ -161,7 +167,7 @@ pub fn run() -> Outcome<()> {
     // │ from stdin (echo off) with an optional `SHIELD_ADMIN_PASS` env var   │
     // │ override for non-interactive test flows.                              │
     // └───────────────────────────────────────────────────────────────────────┘
-    let wallet_path = Path::new("./").join(constant::WALLET_NAME);
+    let wallet_path = cfg_dir.join(constant::WALLET_NAME);
     let (wallet, db_default_enc_key) = if wallet_path.is_file() {
         let wallet = res!(Wallet::load(
             wallet_path,
@@ -257,7 +263,6 @@ pub fn run() -> Outcome<()> {
     let app_root = Path::new(&cfg.app_root);
     let db_root = app_root.join(constant::DB_DIR);
 
-    let invocation_cmds: Vec<String> = std::env::args().skip(1).collect();
 
     let syntax = res!(app_syntax::new_shell(
         &cfg.app_human_name,
