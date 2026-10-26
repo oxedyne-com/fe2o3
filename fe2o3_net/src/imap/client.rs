@@ -126,9 +126,6 @@ pub const MAX_LITERAL_BYTES: usize = 64 * 1024 * 1024;
 // network's state, not chance, and the caller is told.
 pub const IMAP_CLIENT_RETRIES: u8 = 1;
 
-// A `COPYUID` naming more pairs than this is not believed.
-pub const MAX_COPYUID_PAIRS: usize = 1_000_000;
-
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ CONFIGURATION                                                             │
@@ -999,7 +996,7 @@ impl ImapClient {
             return Ok(None);
         }
         let resp = res!(self.command(&fmt!("UID COPY {} {}", uids, quoted(to))).await);
-        copy_uid_of(&resp)
+        copy_uid_of(&resp, uids)
     }
 
     /// RFC 6851 `MOVE`, refused before anything is sent to a server that does not offer it: the
@@ -1014,7 +1011,7 @@ impl ImapClient {
             return Ok(None);
         }
         let resp = res!(self.command(&fmt!("UID MOVE {} {}", uids, quoted(to))).await);
-        copy_uid_of(&resp)
+        copy_uid_of(&resp, uids)
     }
 
     /// Removes exactly these UIDs where they are `\Deleted`. Refused before anything is sent to a
@@ -1827,8 +1824,11 @@ fn response_code(text: &str, name: &str) -> Option<String> {
     None
 }
 
-/// The `COPYUID` of a `COPY` or `MOVE`, on the completion line or, for a `MOVE`, an untagged `OK`.
-fn copy_uid_of(resp: &Response) -> Outcome<Option<CopyUid>> {
+/// The `COPYUID` of a `COPY` or `MOVE` of `sent`, on the completion line or, for a `MOVE`, an
+/// untagged `OK`. Its source UIDs are a subset of `sent` (RFC 4315), so a list longer than `sent`
+/// is not believed and is never expanded.
+fn copy_uid_of(resp: &Response, sent: &UidSet) -> Outcome<Option<CopyUid>> {
+    let max = usize::try_from(sent.len()).unwrap_or(usize::MAX);
     let code = resp.untagged.iter().map(|l| l.text.as_str())
         .chain(std::iter::once(resp.text.as_str()))
         .find_map(|t| response_code(t, "COPYUID"));
@@ -1842,8 +1842,8 @@ fn copy_uid_of(resp: &Response) -> Outcome<Option<CopyUid>> {
     }
     let uid_validity = res!(parts[0].parse::<u32>().map_err(|e| err!(e,
         "A malformed COPYUID: [COPYUID {}]", code; Invalid, Input, Decode)));
-    let src = res!(uid_set::uid_list(parts[1], MAX_COPYUID_PAIRS));
-    let dst = res!(uid_set::uid_list(parts[2], MAX_COPYUID_PAIRS));
+    let src = res!(uid_set::uid_list(parts[1], max));
+    let dst = res!(uid_set::uid_list(parts[2], max));
     if src.len() != dst.len() {
         return Err(err!(
             "A COPYUID naming {} source and {} destination UIDs: [COPYUID {}]",

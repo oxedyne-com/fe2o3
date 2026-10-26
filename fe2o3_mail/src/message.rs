@@ -21,6 +21,7 @@
 //! which keeps the ASCII every charset shares.
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_net::http::pct;
 pub use oxedyne_fe2o3_text::html_inert::Remote;
 use oxedyne_fe2o3_text::{
     base64,
@@ -140,10 +141,10 @@ impl MessageView {
         let html = inert_html(&html, remote);
         let mut parts = Vec::new();
         view_parts_into(&top, &rich, &mut parts);
-        let lower = html.to_ascii_lowercase();
+        let refs = cid_refs(&html);
         for vp in parts.iter_mut() {
             vp.inline = !vp.content_id.is_empty()
-                && lower.contains(&fmt!("cid:{}", vp.content_id.to_ascii_lowercase()));
+                && refs.contains(&vp.content_id.to_lowercase());
         }
         Self {
             from:        decode_words(&hget(&hs, "from")),
@@ -160,6 +161,30 @@ impl MessageView {
             parts,
         }
     }
+}
+
+/// Every Content-ID the HTML refers to by a `cid:` URL, percent-decoded (RFC 2392 writes `<a@b>`
+/// as `cid:a%40b`) and lower-cased, as the page's embed matches them. A reference ends where a
+/// quoted attribute or a CSS `url(` would end it; one that does not decode is kept as written.
+fn cid_refs(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find("cid:") {
+        let start = from + at + 4; // fixed: the length of "cid:"
+        let len = html[start..]
+            .find(|c: char| c == '"' || c == '\'' || c == ')' || c == '&' || c == '<' || c == '>'
+                || c.is_whitespace())
+            .unwrap_or(html.len() - start);
+        let raw = &html[start..start + len];
+        let id = match pct::decode_str(raw) {
+            Ok(d)   => d,
+            Err(_)  => raw.to_string(),
+        };
+        out.push(id.to_lowercase());
+        from = start + len;
+    }
+    out
 }
 
 /// Every attachment, every embedded non-text part not shown as the body (a `cid:` logo), and

@@ -118,3 +118,17 @@ fn a_tracking_pixel_is_gone_until_pictures_are_allowed() {
     assert!(on.html.contains(r#"<img src="https://track.example/p.gif" srcset="https://track.example/p2.gif 2x">"#), "{:?}", on.html);
     assert_eq!(on.text, off.text);
 }
+
+#[test]
+fn a_percent_encoded_cid_reference_names_its_part() {
+    // RFC 2392 percent-encodes a Content-ID in a URL, so `<a@b>` is referred to as `cid:a%40b`;
+    // a prefix of a longer reference names nothing.
+    let raw = b"Content-Type: multipart/related; boundary=\"R\"\r\n\r\n\
+        --R\r\nContent-Type: text/html\r\n\r\n<img src=\"cid:A%40B\"><img src=\"cid:x@y.long\">\r\n\
+        --R\r\nContent-Type: image/png\r\nContent-ID: <a@b>\r\n\r\nxx\r\n\
+        --R\r\nContent-Type: image/png\r\nContent-ID: <x@y>\r\n\r\nyy\r\n--R--\r\n";
+    let v = MessageView::parse(raw);
+    assert_eq!(v.parts.len(), 2, "{:?}", v.parts);
+    assert_eq!((v.parts[0].content_id.as_str(), v.parts[0].inline), ("a@b", true));
+    assert_eq!((v.parts[1].content_id.as_str(), v.parts[1].inline), ("x@y", false));
+}

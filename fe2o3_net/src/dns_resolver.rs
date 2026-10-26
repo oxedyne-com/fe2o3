@@ -94,7 +94,7 @@ pub fn lookup_a(host: &str) -> Outcome<Vec<Ipv4Addr>> {
     Resolver::system().lookup_a(host)
 }
 
-pub const HOSTS_FILE:       &str        = "/etc/hosts";
+pub const HOSTS_FILE:       &str        = "/etc/hosts"; // fixed: the system hosts file, which Resolver::system reads by definition.
 pub const DNS_TIMEOUT:      Duration    = Duration::from_secs(5);
 
 /// Where names are looked up: a hosts file, then a nameserver.
@@ -139,7 +139,7 @@ impl Resolver {
             return Ok(vec![ip]);
         }
         let name = host.trim_end_matches('.').to_ascii_lowercase();
-        if name == "localhost" || name.ends_with(".localhost") {
+        if name == "localhost" || name.ends_with(".localhost") { // fixed: loopback names, RFC 6761.
             return Ok(vec![Ipv4Addr::LOCALHOST]);
         }
         if let Ok(text) = std::fs::read_to_string(&self.hosts) {

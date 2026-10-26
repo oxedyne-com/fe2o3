@@ -35,13 +35,13 @@ const DROPPED_RAW: [&str; 5] = ["iframe", "noembed", "noframes", "script", "titl
 
 /// Attributes whose value is a URL the browser fetches without being asked. Any other attribute
 /// ending in `href` counts too, except a link's.
-const URL_ATTRS: [&str; 14] = [
+const URL_ATTRS: [&str; 14] = [ // fixed: HTML attribute names.
     "archive", "background", "classid", "code", "codebase", "data", "dynsrc", "href", "icon",
     "lowsrc", "manifest", "poster", "profile", "src",
 ];
 
 /// Attributes holding a list of URLs, never left with pictures off.
-const URL_LISTS: [&str; 2] = ["imagesrcset", "srcset"];
+const URL_LISTS: [&str; 2] = ["imagesrcset", "srcset"]; // fixed: HTML attribute names.
 
 /// The named character references whose expansion holds an ASCII character: the only ones that
 /// could spell `url(` or `cid:` in a value, so the only ones this reader must decode.

@@ -1269,10 +1269,10 @@
 			"text": "0.0.0.0:0",
 		},
 		{
-			"class": "timing",
+			"class": "named",
 			"count": (u64|1),
 			"file": "fe2o3_net/src/dns_resolver.rs",
-			"text": "Duration::from_secs(5)",
+			"text": "DNS_TIMEOUT",
 		},
 		{
 			"class": "named",
