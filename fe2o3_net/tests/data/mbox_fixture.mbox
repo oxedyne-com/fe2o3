@@ -1,0 +1,20 @@
+From alice@example.org Mon Jan  1 10:00:00 2024
+From: Alice <alice@example.org>
+To: Bob <bob@example.com>
+Subject: First fixture message
+Received: from mx.example.org
+ by mx.example.com with ESMTP
+Message-ID: <first.0001@example.org>
+
+Hello Bob,
+
+>From the fixture, an escaped envelope line.
+Alice
+
+From carol@example.net Tue Jan  2 11:30:00 2024
+From: Carol <carol@example.net>
+To: Bob <bob@example.com>
+Subject: Second fixture message
+Date: Tue, 2 Jan 2024 11:30:00 +0000
+
+Second body line one.

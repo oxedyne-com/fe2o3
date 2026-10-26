@@ -1,7 +1,6 @@
-// `file` (the mbox reader) is tokio-driven throughout; `msg` holds the tokio-free
-// `EmailMessage`/`EmailHeader` types (with only its one async `read` gated), which
-// `smtp::cmd` needs whether or not the async half of the crate is compiled.
-#[cfg(feature = "async")]
+// `file` (the mbox reader) and `msg` (the `EmailMessage`/`EmailHeader` types and
+// the line-driven `EmailParser`) are tokio-free, so `smtp::cmd` and mbox reading work
+// whether or not the async half is compiled; only `EmailMessage::read` is gated.
 pub mod file;
 pub mod header;
 pub mod msg;

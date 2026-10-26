@@ -50,72 +50,95 @@ impl fmt::Display for EmailMessage {
     }
 }
 
+/// Builds an `EmailMessage` one line at a time, so that each transport (an SMTP
+/// DATA stream, an mbox file) frames lines its own way and shares the parsing.
+#[derive(Clone, Debug)]
+pub struct EmailParser {
+    email:          EmailMessage,
+    in_headers:     bool,
+    header_line:    String, // Header being unfolded, not yet parsed.
+}
+
+impl Default for EmailParser {
+    fn default() -> Self {
+        Self {
+            email:          EmailMessage::default(),
+            in_headers:     true,
+            header_line:    String::new(),
+        }
+    }
+}
+
+impl EmailParser {
+
+    /// Takes one line with its terminator already removed.
+    pub fn push_line(&mut self, line: &str) -> Outcome<()> {
+        if self.in_headers {
+            let line = line.trim_end();
+            if line.is_empty() {
+                // The blank line ends the headers, so the last one is complete.
+                res!(self.flush_header());
+                self.in_headers = false;
+            } else if line.starts_with(char::is_whitespace) {
+                // Continuation of a folded header.
+                self.header_line.push(' ');
+                self.header_line.push_str(line.trim_start());
+            } else {
+                res!(self.flush_header());
+                self.header_line = line.to_string();
+            }
+        } else {
+            self.email.body.push_str(line.trim_end());
+            self.email.body.push('\n');
+        }
+        Ok(())
+    }
+
+    fn flush_header(&mut self) -> Outcome<()> {
+        if self.header_line.is_empty() {
+            return Ok(());
+        }
+        let header_line = std::mem::take(&mut self.header_line);
+        match res!(EmailHeader::from_str(&header_line)) {
+            EmailHeader::From(value)    => self.email.from = value,
+            EmailHeader::To(value)      => self.email.to.push(value),
+            EmailHeader::Subject(value) => self.email.subject = value,
+            header                      => self.email.headers.push(header),
+        }
+        Ok(())
+    }
+
+    /// Ends the message, keeping a header still pending when it has no body.
+    pub fn finish(mut self) -> Outcome<EmailMessage> {
+        res!(self.flush_header());
+        Ok(self.email)
+    }
+}
+
 #[cfg(feature = "async")]
 impl EmailMessage {
 
+    /// Reads an SMTP DATA section up to its terminating "." line.
     pub async fn read<R: AsyncRead + AsyncBufRead + Unpin>(
         stream: &mut R,
     )
         -> Outcome<EmailMessage>
     {
-        let mut email = Self::default();
-        let mut in_headers = true;
-        let mut header_line = String::new();
-    
+        let mut parser = EmailParser::default();
         let mut safety = ErrorWhen::new(constant::READ_LOOP_SAFETY_LIMIT);
         loop {
             res!(safety.inc());
             let mut line = Vec::new();
             let result = SmtpMessage::read_line(stream, &mut line).await;
             let byts_read = res!(result);
-    
-            if byts_read == 1 {
-                if line[0] == b'.' {
-                    break;
-                }
+            if byts_read == 1 && line[0] == b'.' {
+                break;
             }
-            if byts_read == 2 {
-                if line[0] == b'\r' && line[1] == b'\n' {
-                    in_headers = false;
-                    continue;
-                }
-            }
-    
             let line = String::from_utf8_lossy(&line);
             debug!("### line={}", line);
-            let line = line.trim_end();
-    
-            if line.is_empty() && in_headers {
-                in_headers = false;
-                continue;
-            }
-    
-            if in_headers {
-                if line.starts_with(char::is_whitespace) { 
-                    // Accumulate header lines.
-                    header_line.push(' ');
-                    header_line.push_str(line.trim_start());
-                } else {
-                    if !header_line.is_empty() {
-                        match res!(EmailHeader::from_str(&header_line)) {
-                            EmailHeader::From(value) => email.from = value,
-                            EmailHeader::To(value) => email.to.push(value),
-                            EmailHeader::Subject(value) => email.subject = value,
-                            header => {
-                                email.headers.push(header);
-                            }
-                        }
-                    }
-                    header_line = line.to_string();
-                }
-            } else {
-                // Accumulate body lines.
-                email.body.push_str(line);
-                email.body.push('\n');
-            }
+            res!(parser.push_line(&line));
         }
-    
-        Ok(email)
+        parser.finish()
     }
 
 }

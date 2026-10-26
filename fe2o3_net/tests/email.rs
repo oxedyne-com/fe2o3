@@ -68,6 +68,7 @@ Sender\r
             headers:    vec![
                 EmailHeader::Received(fmt!("from servera.example.org (servera.example.org [192.168.0.1]) by serverb.example.com (ExampleMTA) with ESMTP id 12345678 for <recipient@example.com>; Fri, 11 Jun 2023 09:30:00 -0500 (EST)")),
                 EmailHeader::Date(fmt!("Fri, 11 Jun 2023 09:30:00 -0500")),
+                EmailHeader::MessageId(fmt!("<12345.67890@servera.example.org>")),
             ],
         };
         for line in Stringer::new(fmt!("{:?}", email)).to_lines("  ") {
@@ -79,30 +80,38 @@ Sender\r
 
     res!(test_it(filter, &["Mbox reader 000", "all", "email", "mbox"], || {
 
-        let rt = res!(tokio::runtime::Runtime::new());
-
-        let home = res!(std::env::var("HOME"));
-        let path = Path::new(&home).join("tmp/Inbox");
-        let result = rt.block_on(async {
-            MboxEmailIterator::new(path).await
-        });
-
-        let mut mbox_iter = res!(result);
-        match mbox_iter.next() {
-            Some(Ok(email)) => {
-                test!("{:?}", email);
-            }
-            Some(Err(e)) => {
-                return Err(err!(e,
-                    "While reading first email from mbox file.";
-                Test, IO, File, Read)); 
-            }
-            None => {
-                return Err(err!(
-                    "Expected to read an email from the mbox file.";
-                Test, Missing, Data)); 
-            }
+        // A committed, synthetic mbox: two messages, a folded header, a blank
+        // body line and an mboxrd-escaped ">From " body line.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests").join("data").join("mbox_fixture.mbox");
+        let mbox_iter = res!(MboxEmailIterator::new(path));
+        let mut emails = Vec::new();
+        for email in mbox_iter {
+            emails.push(res!(email));
         }
+
+        let expected = vec![
+            EmailMessage {
+                from:       fmt!("Alice <alice@example.org>"),
+                to:         vec![fmt!("Bob <bob@example.com>")],
+                subject:    fmt!("First fixture message"),
+                body:       fmt!("Hello Bob,\n\nFrom the fixture, an escaped envelope line.\nAlice\n"),
+                headers:    vec![
+                    EmailHeader::Received(fmt!("from mx.example.org by mx.example.com with ESMTP")),
+                    EmailHeader::MessageId(fmt!("<first.0001@example.org>")),
+                ],
+            },
+            EmailMessage {
+                from:       fmt!("Carol <carol@example.net>"),
+                to:         vec![fmt!("Bob <bob@example.com>")],
+                subject:    fmt!("Second fixture message"),
+                body:       fmt!("Second body line one.\n"),
+                headers:    vec![
+                    EmailHeader::Date(fmt!("Tue, 2 Jan 2024 11:30:00 +0000")),
+                ],
+            },
+        ];
+        req!(expected, emails, "(L: expected, R: actual)");
         Ok(())
     }));
 
