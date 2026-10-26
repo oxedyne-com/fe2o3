@@ -766,9 +766,9 @@ fn read_doc_front_matter(template: &str, root_src: &str, raw: &RawStyle, title: 
 
 	// The AI scheme address the mark links to, `<scheme>/<slug>/<medium>`, read from the shared template's
 	// `ai-scheme-url` and `ai-medium` lets (the template's `link(ai-scheme-url + "/" + slug + "/" +
-	// ai-medium, ..)`). A tree without the template falls back to the scheme's permanent home and doc medium.
-	let ai_scheme_url	= first_quoted_after(template, "ai-scheme-url").unwrap_or_else(|| "https://need2know.ai".to_string());
-	let ai_medium		= first_quoted_after(template, "ai-medium").unwrap_or_else(|| "doc".to_string());
+	// ai-medium, ..)`). A tree whose template states neither draws the mark unlinked, as Typst would.
+	let ai_scheme_url	= first_quoted_after(template, "ai-scheme-url");
+	let ai_medium		= first_quoted_after(template, "ai-medium");
 
 	// The revision rows the template's meta/colophon page draws: each row's version, date, notes, and the
 	// AI declaration whose slug picks the mark image, its caption (a `declaration-words` field rescopes the
@@ -779,8 +779,11 @@ fn read_doc_front_matter(template: &str, root_src: &str, raw: &RawStyle, title: 
 			Some(slug)	=> match ai_declaration_mark(&slug) {
 				Some((path, words))	=> {
 					let words = string_field(row, "declaration-words").unwrap_or(words);
-					let url = fmt!("{}/{}/{}", ai_scheme_url, slug, ai_medium);
-					(Some(path), Some(words), Some(url))
+					let url = match (&ai_scheme_url, &ai_medium) {
+						(Some(u), Some(m))	=> Some(fmt!("{}/{}/{}", u, slug, m)),
+						_					=> None,
+					};
+					(Some(path), Some(words), url)
 				},
 				None				=> (None, None, None),
 			},

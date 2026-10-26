@@ -4640,6 +4640,7 @@ mod tests {
 			fix_prompt:	String::new(),
 			comment_prompt:	fmt!("Say APPROVE or SPAM."),
 			alert_emails:	vec![fmt!("me@example.com")],
+			hosts:		oxedyne_fe2o3_net::llm::LlmHosts::default(),
 		};
 		let s = ai_form(&set, "csrf0");
 		// The stored provider is the selected option.
@@ -5486,6 +5487,7 @@ mod ui_dump {
 			fix_prompt:	String::new(),
 			comment_prompt:	String::new(),
 			alert_emails:	vec![fmt!("jason@example.com")],
+			hosts:		oxedyne_fe2o3_net::llm::LlmHosts::default(),
 		};
 		let mut ai_body = String::from("<h1>AI</h1>\n");
 		ai_body.push_str(&ai_form(&ai_set, csrf));
