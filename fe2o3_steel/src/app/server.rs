@@ -124,7 +124,7 @@ impl AppShellContext {
         // the box is sealed. A token stored verbatim would make the path the
         // secret, which is exactly the leak the file-homing rule exists to stop.
         if !server_cfg.health_token.is_empty() {
-            server_cfg.health_token = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(
+            server_cfg.health_token = res!(oxedyne_fe2o3_jdat::cfg::resolve(
                 &server_cfg.health_token, root_path.as_ref()));
         }
         // A stamp with an unusable name or a relative path is a refusal to start, not a
@@ -580,7 +580,7 @@ impl AppShellContext {
                 for p in &mut wcfg.peers {
                     if let Some(tok) = &p.token {
                         if !tok.is_empty() {
-                            p.token = Some(res!(crate::srv::cfg::ApiRoute::resolve_file_refs(
+                            p.token = Some(res!(oxedyne_fe2o3_jdat::cfg::resolve(
                                 tok, root_path.as_ref())));
                         }
                     }
