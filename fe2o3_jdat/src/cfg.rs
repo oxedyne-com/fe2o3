@@ -5,7 +5,8 @@
 //! [`resolve_dat`] are the indirection every Oxedyne configuration file has: a
 //! value that must not sit in the file itself is written `{file:secret}` or
 //! `{env:VAR}` and is fetched when the file is read. [`resolve_root`] is the
-//! app-root rule every app shares.
+//! app-root rule every app shares, and [`path_at`] places one location value
+//! under the root it chose.
 
 use crate::{
     prelude::*,
@@ -14,6 +15,7 @@ use crate::{
 
 use oxedyne_fe2o3_core::{
     prelude::*,
+    path::NormalPath,
 };
 
 use std::path::{
@@ -172,15 +174,77 @@ pub fn resolve_root(spec: &str, env_var: &str)
                 "The app root is 'env' and the environment variable {:?} is not set.", env_var;
             Configuration, Missing, Invalid)),
         },
-        path if path.starts_with("~/") => match std::env::var("HOME") {
-            Ok(home) => PathBuf::from(fmt!("{}{}", home, &path[1..])),
-            Err(_) => return Err(err!(
-                "The app root {:?} starts with '~/' and HOME is not set.", path;
-            Configuration, Missing, Invalid)),
+        path if path.starts_with("~/") => {
+            let home = std::env::var_os("HOME").map(PathBuf::from); // fixed: the POSIX home variable
+            res!(home_for(path, home.as_deref())).join(&path[2..])
         },
         path if path.starts_with("./") => res!(std::env::current_dir()).join(&path[2..]),
         path => PathBuf::from(path),
     })
+}
+
+/// The home a `~/` value is placed under, as `resolve_root` and `path_at` share it.
+/// `resolve_root` gives `HOME`; a caller of `path_at` may give the passwd home instead.
+fn home_for<'a>(value: &str, home: Option<&'a Path>)
+    -> Outcome<&'a Path>
+{
+    match home {
+        Some(home) => Ok(home),
+        None       => Err(err!(
+            "The path {} starts with '~/' and there is no home directory to put it under.",
+            value;
+        Configuration, Missing, Invalid)),
+    }
+}
+
+/// Place one location value from a configuration under `root`, a root already chosen (by
+/// [`resolve_root`], say).
+///
+/// * An absolute value is used as written, normalised.
+/// * `~/path` is under `home`, absolute, and may not escape it.
+/// * Anything else is `root.join(value)`, normalised, and may not escape `root`.
+///
+/// An empty value, a NUL byte, an unresolved `{env:` or `{file:` reference, and a relative
+/// `root` are refused.
+pub fn path_at(value: &str, root: &Path, home: Option<&Path>)
+    -> Outcome<PathBuf>
+{
+    if value.is_empty() {
+        return Err(err!("A configured path is empty."; Configuration, Missing, Path));
+    }
+    if value.contains('\0') {
+        return Err(err!(
+            "The configured path {:?} holds a NUL byte.", value.replace('\0', "\\0");
+        Configuration, Invalid, Path));
+    }
+    for marker in ["{env:", "{file:", "{file?:"] {
+        if value.contains(marker) {
+            return Err(err!(
+                "The configured path {} holds an unresolved {}...}} reference; resolve the \
+                configuration before placing its paths.", value, marker;
+            Configuration, Invalid, Path));
+        }
+    }
+    if Path::new(value).is_absolute() {
+        // NormalPath turns /a/b into ./a/b, so the result is re-rooted.
+        return Ok(Path::new(value).normalise().absolute().as_pathbuf());
+    }
+    let (base, rel) = match value.strip_prefix("~/") {
+        Some(rel) => (res!(home_for(value, home)), rel),
+        None      => (root, value),
+    };
+    if !base.is_absolute() {
+        return Err(err!(
+            "The configured path {} is placed under {:?}, which is not absolute.", value, base;
+        Configuration, Invalid, Path));
+    }
+    let tail = Path::new(rel).normalise();
+    if tail.escapes() {
+        return Err(err!(
+            "The configured path {} escapes {:?}, the directory it must stay under.", value, base;
+        Configuration, Invalid, Path));
+    }
+    Ok(base.normalise().join(tail).normalise().absolute().as_pathbuf())
 }
 
 /// Where a `{file:` or `{file?:` reference sits in a string.
