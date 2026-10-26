@@ -123,6 +123,7 @@ pub mod file;
 pub mod id;
 pub mod int;
 pub mod kind;
+pub mod lint;
 pub mod map;
 pub mod note;
 #[cfg(feature = "pipe")]

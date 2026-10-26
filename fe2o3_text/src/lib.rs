@@ -41,6 +41,7 @@ pub mod html;
 pub mod hyphen;
 pub mod lines;
 pub mod lineset;
+pub mod lint;
 pub mod mime;
 pub mod doc;
 pub mod pattern;

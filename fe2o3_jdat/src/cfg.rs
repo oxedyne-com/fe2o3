@@ -4,7 +4,8 @@
 //! [`Config`] is the trait a configuration type implements. [`resolve`] and
 //! [`resolve_dat`] are the indirection every Oxedyne configuration file has: a
 //! value that must not sit in the file itself is written `{file:secret}` or
-//! `{env:VAR}` and is fetched when the file is read.
+//! `{env:VAR}` and is fetched when the file is read. [`resolve_root`] is the
+//! app-root rule every app shares.
 
 use crate::{
     prelude::*,
@@ -15,7 +16,10 @@ use oxedyne_fe2o3_core::{
     prelude::*,
 };
 
-use std::path::Path;
+use std::path::{
+    Path,
+    PathBuf,
+};
 
 
 pub trait Config:
@@ -48,15 +52,26 @@ pub trait Config:
 impl<T: Config> JdatMapFile for T {}
 
 
+/// Expand every reference in a configuration value.
+///
+/// * `{env:VAR}` is the variable's value, refused when it is unset or empty.
+/// * `{env:VAR:default}` is the value, or `default` when unset or empty.
+/// * `{file:path}` is the file's trimmed contents, read from `root.join(path)`, so an absolute
+///   path replaces the root.
+/// * `{file?:path}` is the same, or the empty string when the file does not exist. Any other
+///   read failure is still refused, so a present but unreadable key is never silently dropped.
+///
+/// The environment is expanded first, so a variable may name a file. A file's contents are
+/// inserted verbatim and never scanned for references themselves.
 pub fn resolve(value: &str, root: &Path)
     -> Outcome<String>
 {
-    // The environment first, so an environment value may name a file.
     let named = res!(resolve_env(value));
     resolve_files(&named, value, root)
 }
 
-fn resolve_env(whole: &str)
+/// Expand only the `{env:VAR[:default]}` references, reading no file.
+pub fn resolve_env(whole: &str)
     -> Outcome<String>
 {
     let mut out = fmt!("{}", whole);
@@ -88,29 +103,109 @@ fn resolve_env(whole: &str)
     Ok(out)
 }
 
+/// Every file [`resolve`] would read for `value`, in order, after the environment is expanded
+/// and each path joined to `root` as `resolve` joins it, without reading any. A caller that vets
+/// where secrets come from can refuse a path before anything is read.
+pub fn file_refs(value: &str, root: &Path)
+    -> Outcome<Vec<PathBuf>>
+{
+    let named = res!(resolve_env(value));
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(fref) = res!(first_file_ref(&named[pos..], value)) {
+        out.push(root.join(&named[pos + fref.start + fref.marker..pos + fref.end]));
+        pos += fref.end + 1;
+    }
+    Ok(out)
+}
+
+/// Turn an app-root spec from a configuration into a path.
+///
+/// * `current`, `here`, `auto` or `.` is the working directory.
+/// * `env` is the value of the variable `env_var`, refused when unset.
+/// * `~/path` is under `HOME`; `./path` is under the working directory.
+/// * Anything else is taken as written.
+pub fn resolve_root(spec: &str, env_var: &str)
+    -> Outcome<PathBuf>
+{
+    Ok(match spec {
+        "current" | "here" | "auto" | "." => res!(std::env::current_dir()),
+        "env" => match std::env::var(env_var) {
+            Ok(path) => PathBuf::from(path),
+            Err(_) => return Err(err!(
+                "The app root is 'env' and the environment variable {:?} is not set.", env_var;
+            Configuration, Missing, Invalid)),
+        },
+        path if path.starts_with("~/") => match std::env::var("HOME") {
+            Ok(home) => PathBuf::from(fmt!("{}{}", home, &path[1..])),
+            Err(_) => return Err(err!(
+                "The app root {:?} starts with '~/' and HOME is not set.", path;
+            Configuration, Missing, Invalid)),
+        },
+        path if path.starts_with("./") => res!(std::env::current_dir()).join(&path[2..]),
+        path => PathBuf::from(path),
+    })
+}
+
+/// Where a `{file:` or `{file?:` reference sits in a string.
+struct FileRef {
+    start:  usize,  // the opening brace
+    end:    usize,  // the closing brace
+    marker: usize,  // 6 for `{file:`, 7 for `{file?:`
+}
+
+impl FileRef {
+    /// Is this the `{file?:` form?
+    fn optional(&self) -> bool { self.marker == 7 }
+}
+
+/// The earliest file reference in `s`. `whole` is the original value, named in an error.
+fn first_file_ref(s: &str, whole: &str)
+    -> Outcome<Option<FileRef>>
+{
+    // '{file:' is not a substring of '{file?:', so neither search can match the other.
+    let (start, marker) = match (s.find("{file:"), s.find("{file?:")) {
+        (None,    None)             => return Ok(None),
+        (Some(r), None)             => (r, 6),
+        (None,    Some(o))          => (o, 7),
+        (Some(r), Some(o)) if o < r => (o, 7),
+        (Some(r), Some(_))          => (r, 6),
+    };
+    match s[start..].find('}') {
+        Some(i) => Ok(Some(FileRef { start, end: start + i, marker })),
+        None    => Err(err!(
+            "The configuration value {:?} opens a {{file{}: reference and does not close it.",
+            whole, if marker == 7 { "?" } else { "" };
+        Invalid, Input)),
+    }
+}
+
 fn resolve_files(value: &str, whole: &str, root: &Path)
     -> Outcome<String>
 {
-    let mut out = fmt!("{}", value);
-    while let Some(start) = out.find("{file:") {
-        let end = match out[start..].find('}') {
-            Some(i) => start + i,
-            None => return Err(err!(
-                "The configuration value {:?} opens a {{file: reference and does not \
-                close it.", whole;
-            Invalid, Input)),
-        };
-        let rel = fmt!("{}", &out[start + 6..end]);
-        let path = root.join(&rel);
-        let held = match std::fs::read_to_string(&path) {
-            Ok(t) => fmt!("{}", t.trim()),
+    // A file's contents are inserted verbatim and the scan continues after them, never through
+    // them: a secret holding `{file:...}` would otherwise loop, read a file no path check saw, or
+    // put part of itself in an error.
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(fref) = res!(first_file_ref(rest, whole)) {
+        let rel = &rest[fref.start + fref.marker..fref.end];
+        let path = root.join(rel);
+        let mark = if fref.optional() { "?" } else { "" };
+        out.push_str(&rest[..fref.start]);
+        match std::fs::read_to_string(&path) {
+            Ok(t) => out.push_str(t.trim()),
+            // Only not-found is tolerated, so a present file that cannot be read still fails.
+            Err(e) if fref.optional()
+                && e.kind() == std::io::ErrorKind::NotFound => (),
             Err(e) => return Err(err!(e,
-                "The configuration reads {{file:{}}}, and {:?} could not be read.",
-                rel, path;
+                "The configuration reads {{file{}:{}}}, and {:?} could not be read.",
+                mark, rel, path;
             IO, File, Read)),
-        };
-        out.replace_range(start..=end, &held);
+        }
+        rest = &rest[fref.end + 1..];
     }
+    out.push_str(rest);
     Ok(out)
 }
 
