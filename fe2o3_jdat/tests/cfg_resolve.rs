@@ -137,3 +137,19 @@ fn the_app_root_rule_resolves_every_spec() -> Outcome<()> {
     assert_eq!(res!(cfg::resolve_root("rel/x", "V")), PathBuf::from("rel/x"));
     Ok(())
 }
+
+#[test]
+fn a_file_is_inserted_verbatim_and_never_rescanned() -> Outcome<()> {
+    let root = res!(scratch("verbatim"));
+    let held = "a{file:/etc/passwd}b{env:FE2O3_CFG_RESOLVE_INNER}c{file?:x}{file:unclosed";
+    res!(std::fs::write(root.join("held.key"), fmt!("{}\n", held)));
+    res!(std::fs::write(root.join("self.key"), "{file:self.key}"));
+    std::env::set_var("FE2O3_CFG_RESOLVE_INNER", "expanded");
+    assert_eq!(res!(cfg::resolve("{file:held.key}", &root)), held);
+    assert_eq!(res!(cfg::resolve("[{file?:held.key}]", &root)), fmt!("[{}]", held));
+    // A file naming itself would loop if its contents were scanned again.
+    assert_eq!(res!(cfg::resolve("{file:self.key}-{file:self.key}", &root)),
+        "{file:self.key}-{file:self.key}");
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}

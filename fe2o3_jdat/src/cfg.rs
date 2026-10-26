@@ -61,7 +61,8 @@ impl<T: Config> JdatMapFile for T {}
 /// * `{file?:path}` is the same, or the empty string when the file does not exist. Any other
 ///   read failure is still refused, so a present but unreadable key is never silently dropped.
 ///
-/// The environment is expanded first, so a variable may name a file.
+/// The environment is expanded first, so a variable may name a file. A file's contents are
+/// inserted verbatim and never scanned for references themselves.
 pub fn resolve(value: &str, root: &Path)
     -> Outcome<String>
 {
@@ -182,23 +183,29 @@ fn first_file_ref(s: &str, whole: &str)
 fn resolve_files(value: &str, whole: &str, root: &Path)
     -> Outcome<String>
 {
-    let mut out = fmt!("{}", value);
-    while let Some(fref) = res!(first_file_ref(&out, whole)) {
-        let rel = fmt!("{}", &out[fref.start + fref.marker..fref.end]);
-        let path = root.join(&rel);
+    // A file's contents are inserted verbatim and the scan continues after them, never through
+    // them: a secret holding `{file:...}` would otherwise loop, read a file no path check saw, or
+    // put part of itself in an error.
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(fref) = res!(first_file_ref(rest, whole)) {
+        let rel = &rest[fref.start + fref.marker..fref.end];
+        let path = root.join(rel);
         let mark = if fref.optional() { "?" } else { "" };
-        let held = match std::fs::read_to_string(&path) {
-            Ok(t) => fmt!("{}", t.trim()),
+        out.push_str(&rest[..fref.start]);
+        match std::fs::read_to_string(&path) {
+            Ok(t) => out.push_str(t.trim()),
             // Only not-found is tolerated, so a present file that cannot be read still fails.
             Err(e) if fref.optional()
-                && e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                && e.kind() == std::io::ErrorKind::NotFound => (),
             Err(e) => return Err(err!(e,
                 "The configuration reads {{file{}:{}}}, and {:?} could not be read.",
                 mark, rel, path;
             IO, File, Read)),
-        };
-        out.replace_range(fref.start..=fref.end, &held);
+        }
+        rest = &rest[fref.end + 1..];
     }
+    out.push_str(rest);
     Ok(out)
 }
 
