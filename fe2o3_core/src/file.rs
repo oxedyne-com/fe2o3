@@ -7,6 +7,10 @@ use crate::{
 };
 
 use std::{
+    collections::{
+        BTreeMap,
+        VecDeque,
+    },
     ffi::{
         OsStr,
         OsString,
@@ -22,12 +26,20 @@ use std::{
         Path,
         PathBuf,
     },
-    sync::atomic::{
-        AtomicU64,
-        Ordering,
+    sync::{
+        Condvar,
+        Mutex,
+        MutexGuard,
+        atomic::{
+            AtomicU64,
+            Ordering,
+        },
+        mpsc,
     },
+    thread,
     time::{
         Duration,
+        Instant,
         SystemTime,
     },
 };
@@ -671,29 +683,130 @@ fn sweep_tmps(path: &Path, name: &OsStr, sweep_age: Duration, legacy: bool) {
     }
 }
 
+// Threads of this process waiting for or holding each lock file, in arrival order.
+static LOCK_QUEUES:     Mutex<BTreeMap<PathBuf, VecDeque<u64>>> = Mutex::new(BTreeMap::new());
+static LOCK_QUEUE_MOVED: Condvar     = Condvar::new();
+static LOCK_TICKET:     AtomicU64   = AtomicU64::new(0);
+
+fn lock_queues() -> MutexGuard<'static, BTreeMap<PathBuf, VecDeque<u64>>> {
+    // The queues hold no invariant a panicking holder can break part-way, so a poisoned
+    // mutex is used as it stands.
+    match LOCK_QUEUES.lock() {
+        Ok(g)   => g,
+        Err(e)  => e.into_inner(),
+    }
+}
+
+/// A thread's place in this process's queue for one lock file. It is at the front while the
+/// thread holds the file lock or is the one thread of the process waiting for it, and it
+/// leaves the queue on drop, which wakes the next.
+#[derive(Debug)]
+struct LockTurn {
+    key:    PathBuf,
+    ticket: u64,
+}
+
+impl LockTurn {
+
+    /// Joins the queue for `key` and waits to reach its front, until `deadline` if one is
+    /// given. `None` when the deadline passes first.
+    fn wait(key: &Path, deadline: Option<Instant>) -> Option<Self> {
+        let ticket = LOCK_TICKET.fetch_add(1, Ordering::Relaxed);
+        let mut g = lock_queues();
+        g.entry(key.to_path_buf()).or_default().push_back(ticket);
+        let turn = Self { key: key.to_path_buf(), ticket };
+        loop {
+            if g.get(key).and_then(|q| q.front()) == Some(&ticket) {
+                return Some(turn);
+            }
+            g = match deadline {
+                None => match LOCK_QUEUE_MOVED.wait(g) {
+                    Ok(g)   => g,
+                    Err(e)  => e.into_inner(),
+                },
+                Some(d) => {
+                    let now = Instant::now();
+                    if now >= d {
+                        drop(g);
+                        return None; // The turn's drop leaves the queue.
+                    }
+                    match LOCK_QUEUE_MOVED.wait_timeout(g, d - now) {
+                        Ok((g, _))  => g,
+                        Err(e)      => e.into_inner().0,
+                    }
+                },
+            };
+        }
+    }
+
+    /// The front of the queue for `key` if no thread of this process is in it.
+    fn try_take(key: &Path) -> Option<Self> {
+        let ticket = LOCK_TICKET.fetch_add(1, Ordering::Relaxed);
+        let mut g = lock_queues();
+        let q = g.entry(key.to_path_buf()).or_default();
+        if !q.is_empty() {
+            return None;
+        }
+        q.push_back(ticket);
+        Some(Self { key: key.to_path_buf(), ticket })
+    }
+}
+
+impl Drop for LockTurn {
+    fn drop(&mut self) {
+        let mut g = lock_queues();
+        if let Some(q) = g.get_mut(&self.key) {
+            q.retain(|t| *t != self.ticket);
+            if q.is_empty() {
+                g.remove(&self.key);
+            }
+        }
+        drop(g);
+        LOCK_QUEUE_MOVED.notify_all();
+    }
+}
+
 /// An exclusive advisory lock on a file, held by the kernel for as long as this value lives.  The
 /// lock belongs to the open file, so it is released on drop and when the process dies, a SIGKILL
 /// included: the file left behind is never a stale lock.  On unix it is `flock`, so a second open
 /// of the same file in this process is refused as well.
+///
+/// Waiters are served fairly. The threads of one process queue for a lock file in arrival
+/// order, so only the one at the front waits on the kernel lock, and it waits blocked in
+/// `flock`, woken as the holder lets go, rather than polling and being passed over.
 #[derive(Debug)]
 pub struct ExclusiveLock {
     file:   File,
     path:   PathBuf,
+    _turn:  LockTurn,   // dropped after the file, so the next thread finds it unlocked
 }
 
 impl ExclusiveLock {
 
-    /// Takes the lock on `path` without waiting, creating the file if need be.  `None` when
-    /// another open file holds it.
-    pub fn try_acquire(path: &Path) -> Outcome<Option<Self>> {
+    fn open(path: &Path) -> Outcome<(File, PathBuf)> {
         let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path) {
             Ok(f) => f,
             Err(e) => return Err(err!(e,
                 "Could not open the lock file {:?}.", path;
                 File, IO, Lock)),
         };
+        // One queue per file however the path is spelt.
+        let key = res!(fs::canonicalize(path).map_err(|e| err!(e,
+            "Could not resolve the lock file {:?}.", path;
+            File, IO, Lock)));
+        Ok((file, key))
+    }
+
+    /// Takes the lock on `path` without waiting, creating the file if need be.  `None` when
+    /// another open file holds it, or another thread of this process holds or awaits it.
+    pub fn try_acquire(path: &Path) -> Outcome<Option<Self>> {
+        let (file, key) = res!(Self::open(path));
+        let turn = match LockTurn::try_take(&key) {
+            Some(t) => t,
+            None    => return Ok(None),
+        };
         match file.try_lock() {
-            Ok(())                                  => Ok(Some(Self { file, path: path.to_path_buf() })),
+            Ok(())                                  => Ok(Some(Self { file, path: path.to_path_buf(), _turn: turn })),
             Err(fs::TryLockError::WouldBlock)       => Ok(None),
             Err(fs::TryLockError::Error(e))         => Err(err!(e,
                 "Could not take the lock on {:?}.", path;
@@ -702,20 +815,71 @@ impl ExclusiveLock {
     }
 
     /// Takes the lock on `path`, waiting for whoever holds it, creating the file if need be.
-    /// Threads of one process exclude each other too, since each opens its own file.
     pub fn acquire(path: &Path) -> Outcome<Self> {
-        let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path) {
-            Ok(f) => f,
-            Err(e) => return Err(err!(e,
-                "Could not open the lock file {:?}.", path;
-                File, IO, Lock)),
+        let (file, key) = res!(Self::open(path));
+        let turn = match LockTurn::wait(&key, None) {
+            Some(t) => t,
+            None    => return Err(err!(
+                "The queue for the lock on {:?} ended an unbounded wait.", path;
+                Bug, Lock)),
         };
         if let Err(e) = file.lock() {
             return Err(err!(e,
                 "Could not take the lock on {:?}.", path;
                 File, IO, Lock));
         }
-        Ok(Self { file, path: path.to_path_buf() })
+        Ok(Self { file, path: path.to_path_buf(), _turn: turn })
+    }
+
+    /// As [`Self::acquire`], but gives up after `wait` with a `Timeout` error naming the file,
+    /// so a holder that never lets go shows up as a fault rather than as a hang. The kernel
+    /// wait runs blocked on a helper thread; one that wins the lock after the caller has
+    /// given up drops it at once. While a holder stays stuck, each waiter that gives up leaves
+    /// such a thread blocked until the holder lets go or its process ends.
+    pub fn acquire_within(path: &Path, wait: Duration) -> Outcome<Self> {
+        let deadline = Instant::now() + wait;
+        let (file, key) = res!(Self::open(path));
+        let turn = match LockTurn::wait(&key, Some(deadline)) {
+            Some(t) => t,
+            None    => return Err(Self::timed_out(path, wait)),
+        };
+        let file = match file.try_lock() {
+            Ok(())                              => file,
+            Err(fs::TryLockError::Error(e))     => return Err(err!(e,
+                "Could not take the lock on {:?}.", path;
+                File, IO, Lock)),
+            Err(fs::TryLockError::WouldBlock)   => {
+                let (tx, rx) = mpsc::channel();
+                // If the receiver is gone the send fails and drops the file, releasing the lock.
+                let spawned = thread::Builder::new()
+                    .name(fmt!("flock-wait"))
+                    .spawn(move || { let _ = tx.send(file.lock().map(|()| file)); });
+                if let Err(e) = spawned {
+                    return Err(err!(e,
+                        "Could not start the thread to wait for the lock on {:?}.", path;
+                        File, Lock, Thread));
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                match rx.recv_timeout(left) {
+                    Ok(Ok(f))   => f,
+                    Ok(Err(e))  => return Err(err!(e,
+                        "Could not take the lock on {:?}.", path;
+                        File, IO, Lock)),
+                    Err(mpsc::RecvTimeoutError::Timeout)        => return Err(Self::timed_out(path, wait)),
+                    Err(mpsc::RecvTimeoutError::Disconnected)   => return Err(err!(
+                        "The thread waiting for the lock on {:?} ended without an answer.", path;
+                        File, Lock, Thread)),
+                }
+            },
+        };
+        Ok(Self { file, path: path.to_path_buf(), _turn: turn })
+    }
+
+    fn timed_out(path: &Path, wait: Duration) -> Error<ErrTag> {
+        err!(
+            "Gave up after {:?} waiting for the lock on {:?}, whose holder has not let go.",
+            wait, path;
+            File, Lock, Timeout)
     }
 
     pub fn path(&self) -> &Path { &self.path }
@@ -967,6 +1131,67 @@ mod tests {
     // Combined with the PID this gives each test a scratch path that cannot
     // collide, even when the suite runs across threads.
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Three threads take the lock again the moment they let it go; a fourth, arriving while
+    /// they do, must have its turn within its wait rather than be passed over for all of it.
+    #[test]
+    fn test_exclusive_lock_acquire_within_serves_a_waiter_in_turn() -> Outcome<()> {
+        let path = scratch_path("lock_fair");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut hammers = Vec::new();
+        for _ in 0..3 {
+            let (p, stop) = (path.clone(), stop.clone());
+            hammers.push(thread::spawn(move || -> Outcome<()> {
+                while !stop.load(Ordering::Relaxed) {
+                    let l = res!(ExclusiveLock::acquire_within(&p, Duration::from_secs(10)));
+                    thread::sleep(Duration::from_millis(5));
+                    drop(l);
+                }
+                Ok(())
+            }));
+        }
+        thread::sleep(Duration::from_millis(50));
+        let mut got = Vec::new();
+        for _ in 0..10 {
+            got.push(ExclusiveLock::acquire_within(&path, Duration::from_millis(500)).map(drop).is_ok());
+        }
+        stop.store(true, Ordering::Relaxed);
+        for h in hammers {
+            match h.join() {
+                Ok(r)   => res!(r),
+                Err(_)  => return Err(err!("A thread taking the lock panicked."; Test, Bug)),
+            }
+        }
+        let _ = fs::remove_file(&path);
+        let missed = got.iter().filter(|ok| !**ok).count();
+        if missed > 0 {
+            return Err(err!("A waiter on {:?} was passed over for its whole 500 ms wait {} times \
+                in 10.", path, missed; Test, Lock));
+        }
+        Ok(())
+    }
+
+    /// A holder outside this process's queue, as another process is, makes the wait run on a
+    /// helper thread: it times out while held, and the lock the helper wins after the caller
+    /// has gone is let go at once.
+    #[test]
+    fn test_exclusive_lock_acquire_within_drops_a_lock_won_too_late() -> Outcome<()> {
+        let path = scratch_path("lock_late");
+        let other = res!(OpenOptions::new().read(true).write(true).create(true).open(&path), IO, File);
+        res!(other.lock(), IO, File);
+        match ExclusiveLock::acquire_within(&path, Duration::from_millis(200)) {
+            Err(e) if e.tags().contains(&ErrTag::Timeout)   => (),
+            Err(e)                                          => return Err(e),
+            Ok(_) => return Err(err!("{:?} was taken while another open file held it.", path; Test, Lock)),
+        }
+        res!(other.unlock(), IO, File);
+        thread::sleep(Duration::from_millis(100));
+        if res!(ExclusiveLock::try_acquire(&path)).is_none() {
+            return Err(err!("The helper kept the lock on {:?} it won after the timeout.", path; Test, Lock));
+        }
+        let _ = fs::remove_file(&path);
+        Ok(())
+    }
 
     fn scratch_path(label: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);

@@ -11,6 +11,7 @@
 use crate::imap::search;
 use crate::mail::{
     store::{
+        FlagUpdate,
         blocking,
         FolderName,
         FolderStatus,
@@ -18,6 +19,7 @@ use crate::mail::{
         MailUser,
         MessageFlags,
         MessageMeta,
+        MessageUid,
     },
     user::UserStore,
 };
@@ -25,6 +27,12 @@ use crate::mail::{
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
+    collections::{
+        BTreeMap,
+        BTreeSet,
+        HashMap,
+        HashSet,
+    },
     net::SocketAddr,
     sync::Arc,
     time::{
@@ -61,6 +69,9 @@ pub const IDLE_MAX_LINE: usize = 1024;                  // bytes
 // literal cap mirrors the SMTP message size limit.
 pub const IMAP_MAX_LINE: usize = 8 * 1024;              // bytes per command line
 pub const IMAP_MAX_LITERAL: usize = 20_480_000;         // bytes per `APPEND`
+// Messages a STORE changes under one hold of the folder lock.
+pub const STORE_CHUNK: usize = 500;
+pub const FETCH_CHUNK_BYTES: u64 = 32 * 1024 * 1024; // the most message bytes a FETCH chunk holds at once
 
 
 /// One IMAP listener configuration.
@@ -84,8 +95,11 @@ struct ImapSession {
     user:           Option<MailUser>,       // set on a successful LOGIN
     selected:       Option<FolderName>,
     read_only:      bool,                   // the selection came from EXAMINE
-    // In UID order, refreshed on SELECT, EXAMINE and NOOP, and after STORE and EXPUNGE.
+    // The client's view, in UID order: sequence number n is messages[n - 1]. It changes only
+    // as the client is told, so a message another session expunges stays, as a ghost in
+    // `ghosts`, until its EXPUNGE may be sent (RFC 3501 §7.4.1).
     messages:       Vec<MessageMeta>,
+    ghosts:         BTreeSet<u32>,          // UIDs gone from the folder, not yet announced
 }
 
 impl ImapSession {
@@ -95,6 +109,7 @@ impl ImapSession {
             selected:   None,
             read_only:  false,
             messages:   Vec::new(),
+            ghosts:     BTreeSet::new(),
         }
     }
 }
@@ -162,14 +177,36 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                     continue;
                 }
             };
+            let tag = parsed.tag.clone();
             match self.dispatch(&mut stream, &mut session, parsed, peer).await {
                 Ok(true) => break,
                 Ok(false) => continue,
-                Err(e) => {
+                // The connection itself failed, so there is no one to answer.
+                Err(e) if e.tags().contains(&ErrTag::Network) => {
                     error!(err!(e,
-                        "IMAP dispatch failure for {:?}.", peer;
+                        "IMAP connection failure for {:?}.", peer;
                         IO));
                     break;
+                }
+                // The store failed, a lock wait run out included: the command is answered and
+                // the session kept (RFC 5530), where closing it would cost the client an alert
+                // and a reconnect, and would repeat for as long as the folder stays busy.
+                Err(e) => {
+                    let busy = e.tags().contains(&ErrTag::Timeout);
+                    error!(err!(e,
+                        "IMAP command {} for {:?} failed; answered NO [UNAVAILABLE].", tag, peer;
+                        IO));
+                    let reason = if busy {
+                        "[UNAVAILABLE] The mailbox is busy, try again"
+                    } else {
+                        "[UNAVAILABLE] The mail store failed, try again"
+                    };
+                    if let Err(e) = write_no(&mut stream, &tag, reason).await {
+                        error!(err!(e,
+                            "IMAP connection failure for {:?}.", peer;
+                            IO));
+                        break;
+                    }
                 }
             }
         }
@@ -203,6 +240,13 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         };
         info!("IMAP {} {} {} {}", peer, tag, cmd, log_args);
 
+        // RFC 3501 §7.4.1: no EXPUNGE while answering FETCH, STORE or SEARCH (the UID forms
+        // may carry one), nor for SELECT, EXAMINE and CLOSE, which drop the view, or LOGOUT.
+        match cmd.as_str() {
+            "FETCH" | "STORE" | "SEARCH" | "SELECT" | "EXAMINE" | "CLOSE" | "LOGOUT" => (),
+            _ => res!(Self::announce_expunged(stream, session).await),
+        }
+
         match cmd.as_str() {
             "CAPABILITY" => {
                 let line = fmt!("* CAPABILITY {}\r\n", capability_list());
@@ -212,10 +256,20 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             }
             "NOOP" => {
                 if session.user.is_some() && session.selected.is_some() {
-                    res!(self.refresh_selected(session, false).await);
-                    res!(self.write_select_status(stream, session).await);
+                    res!(self.sync_view(stream, session, true).await);
                 }
                 res!(write_ok(stream, &tag, "NOOP completed").await);
+                Ok(false)
+            }
+            "CHECK" => {
+                // RFC 3501 §6.4.1: a checkpoint. Every Maildir write is already durable when
+                // it returns, so there is nothing to flush; the view is reconciled as for NOOP.
+                if session.user.is_none() || session.selected.is_none() {
+                    res!(write_no(stream, &tag, "No mailbox selected").await);
+                    return Ok(false);
+                }
+                res!(self.sync_view(stream, session, true).await);
+                res!(write_ok(stream, &tag, "CHECK completed").await);
                 Ok(false)
             }
             "IDLE" => {
@@ -289,7 +343,14 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 };
                 session.selected = Some(folder);
                 session.read_only = cmd == "EXAMINE";
-                res!(self.refresh_selected(session, true).await);
+                if let Err(e) = self.load_view(session).await {
+                    // RFC 3501 §6.3.1: a failed SELECT leaves no mailbox selected.
+                    session.selected = None;
+                    session.read_only = false;
+                    session.messages.clear();
+                    session.ghosts.clear();
+                    return Err(e);
+                }
                 res!(self.write_select_status(stream, session).await);
                 let suffix = if session.read_only { "[READ-ONLY]" } else { "[READ-WRITE]" };
                 res!(write_ok(stream, &tag, &fmt!("{} {} completed", suffix, cmd)).await);
@@ -299,12 +360,13 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 // RFC 3501 §6.4.2: if not read-only, expunge first.
                 if let (Some(user), Some(folder)) = (session.user.clone(), session.selected.clone()) {
                     if !session.read_only {
-                        let _ = self.on_store(move |s| s.expunge(&user, &folder)).await;
+                        let _ = self.on_store(move |s| s.expunge(&user, &folder, None)).await;
                     }
                 }
                 session.selected = None;
                 session.read_only = false;
                 session.messages.clear();
+                session.ghosts.clear();
                 res!(write_ok(stream, &tag, "CLOSE completed").await);
                 Ok(false)
             }
@@ -353,7 +415,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         return Ok(false);
                     }
                 };
-                let _ = self.on_store(move |s| s.subscribe(&user, &folder)).await;
+                res!(self.on_store(move |s| s.subscribe(&user, &folder)).await);
                 res!(write_ok(stream, &tag, "SUBSCRIBE completed").await);
                 Ok(false)
             }
@@ -379,10 +441,10 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                         return Ok(false);
                     }
                 };
-                let _ = self.on_store(move |s| {
-                    let _ = s.create_folder(&user, &folder);
+                res!(self.on_store(move |s| {
+                    res!(s.create_folder(&user, &folder));
                     s.subscribe(&user, &folder)
-                }).await;
+                }).await);
                 res!(write_ok(stream, &tag, "CREATE completed").await);
                 Ok(false)
             }
@@ -429,7 +491,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 res!(write_ok(stream, &tag, "STATUS completed").await);
                 Ok(false)
             }
-            "FETCH" | "UID" | "STORE" | "SEARCH" | "EXPUNGE" | "APPEND" => {
+            "FETCH" | "UID" | "STORE" | "SEARCH" | "EXPUNGE" | "APPEND" | "COPY" | "MOVE" => {
                 // Group the remaining commands together so the
                 // borrow checker keeps `session` mutably available.
                 self.dispatch_data_command(stream, session, &tag, &cmd, &args).await
@@ -508,32 +570,11 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 Ok(false)
             }
             "EXPUNGE" => {
-                let user = match &session.user {
-                    Some(u) => u.clone(),
-                    None => {
-                        res!(write_no(stream, tag, "Authenticate first").await);
-                        return Ok(false);
-                    }
-                };
-                let folder = match &session.selected {
-                    Some(f) => f.clone(),
-                    None => {
-                        res!(write_no(stream, tag, "No mailbox selected").await);
-                        return Ok(false);
-                    }
-                };
-                let removed = res!(self.on_store(move |s| s.expunge(&user, &folder)).await);
-                // For each expunged UID we send an untagged EXPUNGE
-                // with the *sequence number* (1-based index in the
-                // pre-expunge list). We use the cached message list.
-                for uid in &removed {
-                    if let Some(idx) = session.messages.iter().position(|m| m.uid == *uid) {
-                        let line = fmt!("* {} EXPUNGE\r\n", idx + 1);
-                        res!(write_all(stream, line.as_bytes()).await);
-                        session.messages.remove(idx);
-                    }
-                }
-                res!(write_ok(stream, tag, "EXPUNGE completed").await);
+                res!(self.do_expunge(stream, session, tag, None).await);
+                Ok(false)
+            }
+            "COPY" | "MOVE" => {
+                res!(self.do_copy(stream, session, tag, args, false, cmd == "MOVE").await);
                 Ok(false)
             }
             "APPEND" => {
@@ -548,7 +589,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 Ok(false)
             }
             "UID" => {
-                // UID FETCH / UID STORE / UID SEARCH / UID COPY.
+                // UID FETCH, STORE, SEARCH, COPY, MOVE and EXPUNGE.
                 let mut it = ArgIter::new(args);
                 let sub = match it.next_atom() {
                     Some(s) => s.to_uppercase(),
@@ -592,6 +633,19 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                     "SEARCH" => {
                         res!(self.do_search(stream, session, tag, it.rest(), true).await);
                     }
+                    "COPY" | "MOVE" => {
+                        res!(self.do_copy(stream, session, tag, it.rest(), true, sub == "MOVE").await);
+                    }
+                    "EXPUNGE" => {
+                        let set = match it.next_atom() {
+                            Some(s) => s,
+                            None => {
+                                res!(write_bad(stream, tag, "UID EXPUNGE requires a UID set").await);
+                                return Ok(false);
+                            }
+                        };
+                        res!(self.do_expunge(stream, session, tag, Some(&set)).await);
+                    }
                     _ => {
                         res!(write_bad(stream, tag, "UID subcommand not supported").await);
                     }
@@ -615,7 +669,8 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
     ///
     /// The client sends `IDLE`, we answer `+ idling`, and from then until it
     /// sends `DONE` the only thing it may send is `DONE`. We meanwhile watch
-    /// the mailbox and push an untagged `EXISTS` when the count moves.
+    /// the mailbox and push an untagged `EXPUNGE` for each message gone and an `EXISTS` when
+    /// one arrives.
     ///
     /// # Why a timeout around the read, and not `select!`
     ///
@@ -635,18 +690,10 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
     )
         -> Outcome<bool>
     {
-        let user = match session.user.clone() {
-            Some(u) => u,
-            None => return Ok(false),
-        };
-        let folder = match session.selected.clone() {
-            Some(f) => f,
-            None => return Ok(false),
-        };
+        if session.user.is_none() || session.selected.is_none() { return Ok(false); }
 
         res!(write_all(stream, b"+ idling\r\n").await);
 
-        let mut last_exists = res!(self.folder_status(&user, &folder).await).exists;
         let mut pending: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 256];
         let mut waited = Duration::from_secs(0);
@@ -695,15 +742,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                 Err(_elapsed) => {
                     waited = waited.saturating_add(IDLE_POLL_INTERVAL);
 
-                    let status = res!(self.folder_status(&user, &folder).await);
-                    if status.exists != last_exists {
-                        last_exists = status.exists;
-                        res!(self.refresh_selected(session, false).await);
-                        res!(write_all(stream,
-                            fmt!("* {} EXISTS\r\n", status.exists).as_bytes()).await);
-                        res!(write_all(stream,
-                            fmt!("* {} RECENT\r\n", status.recent).as_bytes()).await);
-                    }
+                    res!(self.sync_view(stream, session, true).await);
 
                     // RFC 2177 tells clients to re-issue IDLE at least every
                     // 29 minutes, and warns servers to expect stale ones. End
@@ -726,24 +765,79 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         self.on_store(move |s| s.folder_status(&user, &folder)).await
     }
 
-    async fn refresh_selected(
+    /// Replaces the view with the folder as it is, for SELECT and EXAMINE, which report it
+    /// whole. SELECT takes \Recent from the folder for this session.
+    async fn load_view(&self, session: &mut ImapSession) -> Outcome<()> {
+        let (user, folder) = match (session.user.clone(), session.selected.clone()) {
+            (Some(u), Some(f))  => (u, f),
+            _                   => return Ok(()),
+        };
+        let read_only = session.read_only;
+        session.messages = res!(self.on_store(move |s| s.list_messages(&user, &folder, read_only)).await);
+        session.ghosts.clear();
+        Ok(())
+    }
+
+    /// Brings the view up to date with the folder: flags are refreshed, a message delivered
+    /// since is added with an untagged EXISTS, and a message gone becomes a ghost, keeping its
+    /// sequence number. With `announce`, where RFC 3501 §7.4.1 allows an EXPUNGE, every
+    /// ghost is then announced and dropped.
+    async fn sync_view<S: AsyncWrite + Unpin>(
         &self,
+        stream:     &mut S,
         session:    &mut ImapSession,
-        clear_rec:  bool,
+        announce:   bool,
     )
         -> Outcome<()>
     {
-        let user = match session.user.clone() {
-            Some(u) => u,
-            None => return Ok(()),
+        let (user, folder) = match (session.user.clone(), session.selected.clone()) {
+            (Some(u), Some(f))  => (u, f),
+            _                   => return Ok(()),
         };
-        let folder = match session.selected.clone() {
-            Some(f) => f,
-            None => return Ok(()),
-        };
-        let read_only = !clear_rec || session.read_only;
-        let messages = res!(self.on_store(move |s| s.list_messages(&user, &folder, read_only)).await);
-        session.messages = messages;
+        let listed = res!(self.on_store(move |s| s.list_messages(&user, &folder, true)).await);
+        let mut now: BTreeMap<u32, MessageMeta> = listed.into_iter().map(|m| (m.uid.0, m)).collect();
+        for m in session.messages.iter_mut() {
+            match now.remove(&m.uid.0) {
+                Some(fresh) => {
+                    // \Recent stays with the session that first saw the message.
+                    let recent = m.flags.recent || fresh.flags.recent;
+                    *m = fresh;
+                    m.flags.recent = recent;
+                },
+                None => { session.ghosts.insert(m.uid.0); },
+            }
+        }
+        if announce {
+            res!(Self::announce_expunged(stream, session).await);
+        }
+        // UIDs only rise, so a message the view lacks below its highest UID was never in it.
+        let top = session.messages.last().map(|m| m.uid.0).unwrap_or(0);
+        let before = session.messages.len();
+        session.messages.extend(now.into_values().filter(|m| m.uid.0 > top));
+        if session.messages.len() != before {
+            let recent = session.messages.iter().filter(|m| m.flags.recent).count();
+            res!(write_all(stream, fmt!("* {} EXISTS\r\n* {} RECENT\r\n",
+                session.messages.len(), recent).as_bytes()).await);
+        }
+        Ok(())
+    }
+
+    /// Sends `* n EXPUNGE` for every ghost, highest sequence number first so that each number
+    /// still means what the client holds, and drops them from the view.
+    async fn announce_expunged<S: AsyncWrite + Unpin>(
+        stream:     &mut S,
+        session:    &mut ImapSession,
+    )
+        -> Outcome<()>
+    {
+        if session.ghosts.is_empty() { return Ok(()); }
+        for idx in (0..session.messages.len()).rev() {
+            if session.ghosts.contains(&session.messages[idx].uid.0) {
+                res!(write_all(stream, fmt!("* {} EXPUNGE\r\n", idx + 1).as_bytes()).await);
+                session.messages.remove(idx);
+            }
+        }
+        session.ghosts.clear();
         Ok(())
     }
 
@@ -766,7 +860,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         };
         let status = res!(self.folder_status(&user, &folder).await);
         let lines = [
-            fmt!("* {} EXISTS\r\n", status.exists),
+            fmt!("* {} EXISTS\r\n", session.messages.len()),
             fmt!("* {} RECENT\r\n", status.recent),
             fmt!("* OK [UIDVALIDITY {}] UIDs valid\r\n", status.uid_validity),
             fmt!("* OK [UIDNEXT {}] Next UID\r\n", status.uid_next),
@@ -802,167 +896,220 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             Some(f) => f.clone(),
             None => return Ok(()),
         };
-        res!(self.refresh_selected(session, false).await);
+        res!(self.sync_view(stream, session, by_uid).await);
 
         let items = parse_fetch_items(items_raw);
         let indices = resolve_set(seq_set, &session.messages, by_uid);
+        let needs_bytes = items.iter().any(|it| matches!(it,
+            FetchItem::Body { .. } | FetchItem::Rfc822 | FetchItem::Rfc822Header |
+            FetchItem::Rfc822Text | FetchItem::Envelope));
+        // RFC 3501 §6.4.5: BODY[] without PEEK, RFC822 and RFC822.TEXT set \Seen.
+        let marks_seen = !session.read_only && items.iter().any(|it| matches!(it,
+            FetchItem::Body { peek: false, .. } | FetchItem::Rfc822 | FetchItem::Rfc822Text));
 
-        for &idx in &indices {
-            let meta = match session.messages.get(idx) {
-                Some(m) => m.clone(),
-                None => continue,
-            };
-            let seq_no = idx + 1;
+        // The live messages of the set, a chunk at a time, so that each chunk is one hold of the
+        // folder for its \Seen and one for its bodies, not one hold and one read of the whole
+        // folder per message, and a delivery gets in between. A chunk's bodies are held at once,
+        // so it is bounded in bytes as well as in messages.
+        let live: Vec<usize> = indices.iter().copied().filter(|&idx| {
+            matches!(session.messages.get(idx), Some(m) if !session.ghosts.contains(&m.uid.0))
+        }).collect(); // a message expunged elsewhere has nothing to fetch, and its EXPUNGE waits
+        let mut chunks: Vec<&[usize]> = Vec::new();
+        let (mut from, mut held) = (0usize, 0u64);
+        for (i, &idx) in live.iter().enumerate() {
+            let size = if needs_bytes { session.messages.get(idx).map_or(0, |m| m.size) } else { 0 };
+            if i > from && (i - from >= STORE_CHUNK || held + size > FETCH_CHUNK_BYTES) {
+                chunks.push(&live[from..i]);
+                from = i;
+                held = 0;
+            }
+            held += size;
+        }
+        if from < live.len() { chunks.push(&live[from..]); }
 
-            // Read raw bytes once if any item needs them.
-            let mut needs_bytes = false;
-            for it in &items {
-                match it {
-                    FetchItem::Body { .. }      |
-                    FetchItem::Rfc822           |
-                    FetchItem::Rfc822Header     |
-                    FetchItem::Rfc822Text       |
-                    FetchItem::Envelope         => needs_bytes = true,
-                    _ => (),
+        for chunk in chunks {
+            // Implicit \Seen, added under the folder lock to the flags as they stand, not as last
+            // read, before the responses that show it.
+            let mut seen_now: HashSet<u32> = HashSet::new();
+            if marks_seen {
+                let uids: Vec<MessageUid> = chunk.iter()
+                    .filter_map(|&idx| session.messages.get(idx))
+                    .filter(|m| !m.flags.seen)
+                    .map(|m| m.uid)
+                    .collect();
+                if !uids.is_empty() {
+                    let (user, folder, ask) = (user.clone(), folder.clone(), uids.clone());
+                    let seen = FlagUpdate::Add(MessageFlags { seen: true, ..MessageFlags::default() });
+                    let now = res!(self.on_store(move |s| s.update_flags_many(&user, &folder, &ask, seen)).await);
+                    for (uid, flags) in uids.iter().zip(now) {
+                        match flags {
+                            Some(f) => {
+                                if let Some(m) = session.messages.iter_mut().find(|m| m.uid == *uid) {
+                                    m.flags = keep_recent(f, m.flags);
+                                }
+                                seen_now.insert(uid.0);
+                            },
+                            None => { session.ghosts.insert(uid.0); }, // expunged meanwhile
+                        }
+                    }
                 }
             }
-            let raw: Option<Vec<u8>> = if needs_bytes {
-                let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
-                Some(res!(self.on_store(move |s| s.fetch_bytes(&user, &folder, uid)).await))
-            } else {
-                None
-            };
+            let mut bodies: HashMap<u32, Vec<u8>> = HashMap::new();
+            if needs_bytes {
+                let uids: Vec<MessageUid> = chunk.iter()
+                    .filter_map(|&idx| session.messages.get(idx))
+                    .filter(|m| !session.ghosts.contains(&m.uid.0))
+                    .map(|m| m.uid)
+                    .collect();
+                let (user, folder) = (user.clone(), folder.clone());
+                bodies = res!(self.on_store(move |s| {
+                    let mut out = HashMap::new();
+                    res!(s.visit_bytes(&user, &folder, &uids, |uid, b| {
+                        out.insert(uid.0, b.to_vec());
+                        Ok(())
+                    }));
+                    Ok(out)
+                }).await);
+            }
 
-            let mut implicit_seen = false;
-
-            // Encode each item as a sequence of segments. Text segments
-            // may be joined with a separating space; literal segments
-            // contain raw byte payloads that must be written
-            // unmodified. We collect segments first and decide whether
-            // to also append a synthetic FLAGS segment after evaluating
-            // implicit \Seen.
-            let mut segments: Vec<FetchSegment> = Vec::new();
-            for it in &items {
-                match it {
-                    FetchItem::Uid => {
-                        segments.push(FetchSegment::Text(fmt!("UID {}", meta.uid.0)));
+            for &idx in chunk {
+                let meta = match session.messages.get(idx) {
+                    Some(m) if !session.ghosts.contains(&m.uid.0) => m.clone(),
+                    _ => continue,
+                };
+                let seq_no = idx + 1;
+                let raw: Option<Vec<u8>> = if needs_bytes {
+                    match bodies.remove(&meta.uid.0) {
+                        Some(b) => Some(b),
+                        None    => {
+                            // Expunged since the view was brought up to date.
+                            session.ghosts.insert(meta.uid.0);
+                            continue;
+                        },
                     }
-                    FetchItem::Flags => {
+                } else {
+                    None
+                };
+
+                // Encode each item as a sequence of segments. Text segments
+                // may be joined with a separating space; literal segments
+                // contain raw byte payloads that must be written
+                // unmodified. We collect segments first and decide whether
+                // to also append a synthetic FLAGS segment after evaluating
+                // implicit \Seen.
+                let mut segments: Vec<FetchSegment> = Vec::new();
+                for it in &items {
+                    match it {
+                        FetchItem::Uid => {
+                            segments.push(FetchSegment::Text(fmt!("UID {}", meta.uid.0)));
+                        }
+                        FetchItem::Flags => {
+                            segments.push(FetchSegment::Text(fmt!(
+                                "FLAGS ({})", meta.flags.to_imap_list())));
+                        }
+                        FetchItem::Rfc822Size => {
+                            segments.push(FetchSegment::Text(fmt!(
+                                "RFC822.SIZE {}", meta.size)));
+                        }
+                        FetchItem::InternalDate => {
+                            segments.push(FetchSegment::Text(fmt!(
+                                "INTERNALDATE \"{}\"",
+                                format_internal_date(meta.internal),
+                            )));
+                        }
+                        FetchItem::Envelope => {
+                            if let Some(ref bytes) = raw {
+                                segments.push(FetchSegment::Text(fmt!(
+                                    "ENVELOPE {}", build_envelope(bytes))));
+                            }
+                        }
+                        FetchItem::Body { section, .. } => {
+                            let bytes = match raw {
+                                Some(ref b) => extract_section(b, section),
+                                None => Vec::new(),
+                            };
+                            let label = section_label(section);
+                            segments.push(FetchSegment::Literal {
+                                prefix: fmt!("BODY[{}] ", label),
+                                payload: bytes,
+                            });
+                        }
+                        FetchItem::Rfc822 => {
+                            let bytes = match raw {
+                                Some(ref b) => b.clone(),
+                                None => Vec::new(),
+                            };
+                            segments.push(FetchSegment::Literal {
+                                prefix: "RFC822 ".to_string(),
+                                payload: bytes,
+                            });
+                        }
+                        FetchItem::Rfc822Header => {
+                            let bytes = match raw {
+                                Some(ref b) => extract_section(b, &Section::Header),
+                                None => Vec::new(),
+                            };
+                            segments.push(FetchSegment::Literal {
+                                prefix: "RFC822.HEADER ".to_string(),
+                                payload: bytes,
+                            });
+                        }
+                        FetchItem::Rfc822Text => {
+                            let bytes = match raw {
+                                Some(ref b) => extract_section(b, &Section::Text),
+                                None => Vec::new(),
+                            };
+                            segments.push(FetchSegment::Literal {
+                                prefix: "RFC822.TEXT ".to_string(),
+                                payload: bytes,
+                            });
+                        }
+                    }
+                }
+
+                // RFC 3501 §6.4.8: every FETCH response triggered by a
+                // UID command must include the UID, even when the client
+                // did not request it. Inject one if it's missing.
+                if by_uid {
+                    let already_uid = segments.iter().any(|s| {
+                        matches!(s, FetchSegment::Text(t) if t.starts_with("UID "))
+                    });
+                    if !already_uid {
+                        segments.insert(0, FetchSegment::Text(fmt!("UID {}", meta.uid.0)));
+                    }
+                }
+
+                // The \Seen just set is shown, if the client did not ask for FLAGS.
+                if seen_now.contains(&meta.uid.0) {
+                    let already = segments.iter().any(|s| {
+                        matches!(s, FetchSegment::Text(t) if t.starts_with("FLAGS"))
+                    });
+                    if !already {
                         segments.push(FetchSegment::Text(fmt!(
                             "FLAGS ({})", meta.flags.to_imap_list())));
                     }
-                    FetchItem::Rfc822Size => {
-                        segments.push(FetchSegment::Text(fmt!(
-                            "RFC822.SIZE {}", meta.size)));
+                }
+
+                // Emit `* SEQ FETCH ( ... )\r\n` with a SP between segments.
+                let opener = fmt!("* {} FETCH (", seq_no);
+                res!(write_all(stream, opener.as_bytes()).await);
+                for (i, seg) in segments.iter().enumerate() {
+                    if i > 0 {
+                        res!(write_all(stream, b" ").await);
                     }
-                    FetchItem::InternalDate => {
-                        segments.push(FetchSegment::Text(fmt!(
-                            "INTERNALDATE \"{}\"",
-                            format_internal_date(meta.internal),
-                        )));
-                    }
-                    FetchItem::Envelope => {
-                        if let Some(ref bytes) = raw {
-                            segments.push(FetchSegment::Text(fmt!(
-                                "ENVELOPE {}", build_envelope(bytes))));
+                    match seg {
+                        FetchSegment::Text(t) => {
+                            res!(write_all(stream, t.as_bytes()).await);
+                        }
+                        FetchSegment::Literal { prefix, payload } => {
+                            let head = fmt!("{}{{{}}}\r\n", prefix, payload.len());
+                            res!(write_all(stream, head.as_bytes()).await);
+                            res!(write_all(stream, payload).await);
                         }
                     }
-                    FetchItem::Body { peek, section } => {
-                        if !peek { implicit_seen = true; }
-                        let bytes = match raw {
-                            Some(ref b) => extract_section(b, section),
-                            None => Vec::new(),
-                        };
-                        let label = section_label(section);
-                        segments.push(FetchSegment::Literal {
-                            prefix: fmt!("BODY[{}] ", label),
-                            payload: bytes,
-                        });
-                    }
-                    FetchItem::Rfc822 => {
-                        implicit_seen = true;
-                        let bytes = match raw {
-                            Some(ref b) => b.clone(),
-                            None => Vec::new(),
-                        };
-                        segments.push(FetchSegment::Literal {
-                            prefix: "RFC822 ".to_string(),
-                            payload: bytes,
-                        });
-                    }
-                    FetchItem::Rfc822Header => {
-                        let bytes = match raw {
-                            Some(ref b) => extract_section(b, &Section::Header),
-                            None => Vec::new(),
-                        };
-                        segments.push(FetchSegment::Literal {
-                            prefix: "RFC822.HEADER ".to_string(),
-                            payload: bytes,
-                        });
-                    }
-                    FetchItem::Rfc822Text => {
-                        implicit_seen = true;
-                        let bytes = match raw {
-                            Some(ref b) => extract_section(b, &Section::Text),
-                            None => Vec::new(),
-                        };
-                        segments.push(FetchSegment::Literal {
-                            prefix: "RFC822.TEXT ".to_string(),
-                            payload: bytes,
-                        });
-                    }
                 }
+                res!(write_all(stream, b")\r\n").await);
             }
-
-            // RFC 3501 §6.4.8: every FETCH response triggered by a
-            // UID command must include the UID, even when the client
-            // did not request it. Inject one if it's missing.
-            if by_uid {
-                let already_uid = segments.iter().any(|s| {
-                    matches!(s, FetchSegment::Text(t) if t.starts_with("UID "))
-                });
-                if !already_uid {
-                    segments.insert(0, FetchSegment::Text(fmt!("UID {}", meta.uid.0)));
-                }
-            }
-
-            // Implicit \Seen.
-            if implicit_seen && !session.read_only && !meta.flags.seen {
-                let mut new_flags = meta.flags;
-                new_flags.seen = true;
-                let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
-                let _ = self.on_store(move |s| s.set_flags(&user, &folder, uid, new_flags)).await;
-                if let Some(m) = session.messages.iter_mut().find(|m| m.uid == meta.uid) {
-                    m.flags.seen = true;
-                }
-                let already = segments.iter().any(|s| {
-                    matches!(s, FetchSegment::Text(t) if t.starts_with("FLAGS"))
-                });
-                if !already {
-                    segments.push(FetchSegment::Text(fmt!(
-                        "FLAGS ({})", new_flags.to_imap_list())));
-                }
-            }
-
-            // Emit `* SEQ FETCH ( ... )\r\n` with a SP between segments.
-            let opener = fmt!("* {} FETCH (", seq_no);
-            res!(write_all(stream, opener.as_bytes()).await);
-            for (i, seg) in segments.iter().enumerate() {
-                if i > 0 {
-                    res!(write_all(stream, b" ").await);
-                }
-                match seg {
-                    FetchSegment::Text(t) => {
-                        res!(write_all(stream, t.as_bytes()).await);
-                    }
-                    FetchSegment::Literal { prefix, payload } => {
-                        let head = fmt!("{}{{{}}}\r\n", prefix, payload.len());
-                        res!(write_all(stream, head.as_bytes()).await);
-                        res!(write_all(stream, payload).await);
-                    }
-                }
-            }
-            res!(write_all(stream, b")\r\n").await);
         }
         Ok(())
     }
@@ -986,49 +1133,60 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             Some(f) => f.clone(),
             None => return Ok(()),
         };
-        res!(self.refresh_selected(session, false).await);
+        res!(self.sync_view(stream, session, by_uid).await);
         let indices = resolve_set(seq_set, &session.messages, by_uid);
-        let silent = op.to_uppercase().ends_with(".SILENT");
-        let base = op.trim_end_matches(".SILENT").trim_end_matches(".silent");
-        let new_flag_names: Vec<&str> = flags_raw
-            .split_whitespace()
-            .collect();
+        let op_upper = op.to_ascii_uppercase();
+        let silent = op_upper.ends_with(".SILENT");
+        let base = op_upper.trim_end_matches(".SILENT");
+        let mut mask = MessageFlags::default();
+        for f in flags_raw.split_whitespace() { mask.set(f, true); }
+        // The client's own operation goes to the store, which applies it to the flags as they
+        // stand under the folder lock; a set computed here from a read would undo a flag
+        // another session changed in between.
+        let update = match base {
+            "+FLAGS"    => FlagUpdate::Add(mask),
+            "-FLAGS"    => FlagUpdate::Remove(mask),
+            "FLAGS"     => FlagUpdate::Replace(mask),
+            _ => return Err(err!(
+                "STORE op '{}' not understood.", op;
+                Invalid, Input)),
+        };
 
-        for &idx in &indices {
-            let meta = match session.messages.get(idx) {
-                Some(m) => m.clone(),
-                None => continue,
-            };
-            let mut flags = meta.flags;
-            match base {
-                "+FLAGS" | "+flags" => {
-                    for f in &new_flag_names { flags.set(f, true); }
-                }
-                "-FLAGS" | "-flags" => {
-                    for f in &new_flag_names { flags.set(f, false); }
-                }
-                "FLAGS"  | "flags"  => {
-                    flags = MessageFlags::default();
-                    for f in &new_flag_names { flags.set(f, true); }
-                }
-                _ => {
-                    return Err(err!(
-                        "STORE op '{}' not understood.", op;
-                        Invalid, Input));
-                }
+        // The live messages of the set, taken a chunk at a time, so a bulk STORE holds the
+        // folder for one read and a chunk's renames, and a delivery gets in between.
+        let live: Vec<(usize, MessageUid)> = indices.iter().filter_map(|&idx| {
+            match session.messages.get(idx) {
+                Some(m) if !session.ghosts.contains(&m.uid.0) => Some((idx, m.uid)),
+                _ => None, // expunged elsewhere: no effect, and its EXPUNGE waits
             }
-            let (user, folder, uid) = (user.clone(), folder.clone(), meta.uid);
-            let final_flags = res!(self.on_store(move |s| s.set_flags(&user, &folder, uid, flags)).await);
-            if let Some(m) = session.messages.iter_mut().find(|m| m.uid == meta.uid) {
-                m.flags = final_flags;
-            }
-            if !silent {
-                let mut parts = vec![fmt!("FLAGS ({})", final_flags.to_imap_list())];
-                if by_uid {
-                    parts.push(fmt!("UID {}", meta.uid.0));
+        }).collect();
+        for chunk in live.chunks(STORE_CHUNK) {
+            let (user, folder) = (user.clone(), folder.clone());
+            let uids: Vec<MessageUid> = chunk.iter().map(|(_, uid)| *uid).collect();
+            let now = res!(self.on_store(move |s| s.update_flags_many(&user, &folder, &uids, update)).await);
+            for (&(idx, uid), flags) in chunk.iter().zip(now) {
+                let final_flags = match flags {
+                    Some(f) => f,
+                    None    => {
+                        session.ghosts.insert(uid.0);
+                        continue;
+                    },
+                };
+                let final_flags = match session.messages.get_mut(idx) {
+                    Some(m) => {
+                        m.flags = keep_recent(final_flags, m.flags);
+                        m.flags
+                    },
+                    None => final_flags,
+                };
+                if !silent {
+                    let mut parts = vec![fmt!("FLAGS ({})", final_flags.to_imap_list())];
+                    if by_uid {
+                        parts.push(fmt!("UID {}", uid.0));
+                    }
+                    let line = fmt!("* {} FETCH ({})\r\n", idx + 1, parts.join(" "));
+                    res!(write_all(stream, line.as_bytes()).await);
                 }
-                let line = fmt!("* {} FETCH ({})\r\n", idx + 1, parts.join(" "));
-                res!(write_all(stream, line.as_bytes()).await);
             }
         }
         Ok(())
@@ -1074,8 +1232,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             Err(search::SearchError::BadCharset) => return write_no(stream, tag,
                 "[BADCHARSET (UTF-8 US-ASCII)] Charset not supported").await,
         };
-        res!(self.refresh_selected(session, false).await);
+        res!(self.sync_view(stream, session, by_uid).await);
         let msgs = &session.messages;
+        let ghosts = &session.ghosts;
         let mut hits: Vec<usize>;
         if key.needs_content() {
             let (user, folder) = match (&session.user, &session.selected) {
@@ -1086,6 +1245,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             let metas = msgs.clone();
             hits = res!(self.on_store(move |s| {
                 let mut hits: Vec<usize> = Vec::new();
+                // A ghost is skipped by the store, so it never matches.
                 let uids: Vec<crate::mail::store::MessageUid> = metas.iter().map(|m| m.uid).collect();
                 res!(s.visit_bytes(&user, &folder, &uids, |uid, bytes| {
                     if let Ok(idx) = metas.binary_search_by_key(&uid.0, |m| m.uid.0) {
@@ -1099,7 +1259,9 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
             }).await);
             hits.sort();
         } else {
-            hits = (0..msgs.len()).filter(|i| key.matches(*i, msgs, None)).collect();
+            hits = (0..msgs.len())
+                .filter(|i| !ghosts.contains(&msgs[*i].uid.0) && key.matches(*i, msgs, None))
+                .collect();
         }
         let mut line = fmt!("* SEARCH");
         for i in &hits {
@@ -1112,6 +1274,153 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         line.push_str("\r\n");
         res!(write_all(stream, line.as_bytes()).await);
         write_ok(stream, tag, if by_uid { "UID SEARCH completed" } else { "SEARCH completed" }).await
+    }
+
+    /// `EXPUNGE`, or with `set` RFC 4315's `UID EXPUNGE`, which removes only the `\\Deleted`
+    /// messages the UID set names. One untagged `EXPUNGE` per message removed, by its
+    /// sequence number at that moment, in the order removed.
+    async fn do_expunge<S: AsyncRead + AsyncWrite + Unpin + Send>(
+        &self,
+        stream:     &mut S,
+        session:    &mut ImapSession,
+        tag:        &str,
+        set:        Option<&str>,
+    )
+        -> Outcome<()>
+    {
+        let (user, folder) = match (&session.user, &session.selected) {
+            (Some(u), Some(f)) => (u.clone(), f.clone()),
+            _ => return write_no(stream, tag, "No mailbox selected").await,
+        };
+        if session.read_only {
+            return write_no(stream, tag, "The mailbox is read-only").await;
+        }
+        // Another session's expunges first, so the sequence numbers below are the client's.
+        res!(self.sync_view(stream, session, true).await);
+        let only: Option<Vec<MessageUid>> = set.map(|set| {
+            resolve_set(set, &session.messages, true).iter()
+                .filter_map(|i| session.messages.get(*i).map(|m| m.uid))
+                .collect()
+        });
+        let removed = res!(self.on_store(move |s| s.expunge(&user, &folder, only.as_deref())).await);
+        res!(Self::forget(stream, session, &removed).await);
+        write_ok(stream, tag, if set.is_some() { "UID EXPUNGE completed" } else { "EXPUNGE completed" }).await
+    }
+
+    /// The messages gone from the folder by this session's own command become ghosts, and
+    /// every ghost is announced, which an EXPUNGE or MOVE may do (RFC 3501 §7.4.1).
+    async fn forget<S: AsyncWrite + Unpin>(
+        stream:     &mut S,
+        session:    &mut ImapSession,
+        gone:       &[MessageUid],
+    )
+        -> Outcome<()>
+    {
+        for uid in gone {
+            session.ghosts.insert(uid.0);
+        }
+        Self::announce_expunged(stream, session).await
+    }
+
+    /// `COPY` and RFC 6851 `MOVE`, by sequence number or by UID, answered with RFC 4315's
+    /// `COPYUID`. A MOVE sends the code untagged first, then an `EXPUNGE` for each message
+    /// that left. The session never enables QRESYNC, so it is never sent `VANISHED`.
+    async fn do_copy<S: AsyncRead + AsyncWrite + Unpin + Send>(
+        &self,
+        stream:     &mut S,
+        session:    &mut ImapSession,
+        tag:        &str,
+        args:       &str,
+        by_uid:     bool,
+        is_move:    bool,
+    )
+        -> Outcome<()>
+    {
+        let verb = match (by_uid, is_move) {
+            (false, false)  => "COPY",
+            (false, true)   => "MOVE",
+            (true,  false)  => "UID COPY",
+            (true,  true)   => "UID MOVE",
+        };
+        let (user, from) = match (&session.user, &session.selected) {
+            (Some(u), Some(f)) => (u.clone(), f.clone()),
+            _ => return write_no(stream, tag, "No mailbox selected").await,
+        };
+        let mut it = ArgIter::new(args);
+        let (set, to) = match (it.next_atom(), it.next_string()) {
+            (Some(set), Some(to))   => (set, FolderName::new(to)),
+            _                       => return write_bad(stream, tag,
+                &fmt!("{} requires a message set and a mailbox", verb)).await,
+        };
+        if is_move && session.read_only {
+            return write_no(stream, tag, "The mailbox is read-only").await;
+        }
+        // A ghost has left the folder already, so it is neither copied nor moved.
+        let uids: Vec<MessageUid> = resolve_set(&set, &session.messages, by_uid).iter()
+            .filter_map(|i| session.messages.get(*i).map(|m| m.uid))
+            .filter(|u| !session.ghosts.contains(&u.0))
+            .collect();
+        let (u, t) = (user.clone(), to.clone());
+        let folders = res!(self.on_store(move |s| s.list_folders(&u)).await);
+        let exists = folders.iter().any(|f| f == &t
+            || (t.as_str().eq_ignore_ascii_case("INBOX") && f.as_str().eq_ignore_ascii_case("INBOX")));
+        if !exists {
+            return write_no(stream, tag, "[TRYCREATE] No such mailbox").await;
+        }
+        if uids.is_empty() {
+            return write_ok(stream, tag, &fmt!("{} completed, nothing to do", verb)).await;
+        }
+        let asked = uids.len();
+        let (u, f) = (user.clone(), from.clone());
+        let outcome = self.on_store(move |s| {
+            let pairs = if is_move {
+                res!(s.move_to(&u, &f, &uids, &t))
+            } else {
+                res!(s.copy(&u, &f, &uids, &t))
+            };
+            let validity = res!(s.folder_status(&u, &t)).uid_validity;
+            Ok((pairs, validity))
+        }).await;
+        let (pairs, validity) = match outcome {
+            Ok(v) => v,
+            Err(e) => {
+                // Some messages may have left before the failure: they are announced as
+                // expunged, and the error is answered NO [UNAVAILABLE] by run.
+                if is_move { res!(self.sync_view(stream, session, true).await); }
+                return Err(err!(e,
+                    "IMAP {} {} -> {}.", verb, from.as_str(), to.as_str();
+                    IO));
+            },
+        };
+        let src: Vec<u32> = pairs.iter().map(|(a, _)| a.0).collect();
+        let dst: Vec<u32> = pairs.iter().map(|(_, b)| b.0).collect();
+        // Derived from what the store filed, so an empty set, which RFC 4315's grammar
+        // forbids, is never formatted.
+        let copyuid = match (uid_set(&src), uid_set(&dst)) {
+            (Some(s), Some(d))  => Some(fmt!("[COPYUID {} {} {}]", validity, s, d)),
+            _                   => None,
+        };
+        if is_move {
+            if let Some(c) = &copyuid {
+                res!(write_all(stream, fmt!("* OK {} Moved\r\n", c).as_bytes()).await);
+            }
+            let moved: Vec<MessageUid> = pairs.iter().map(|(a, _)| *a).collect();
+            res!(Self::forget(stream, session, &moved).await);
+        }
+        // A message the view still held had left the folder, moved or expunged by another
+        // session: it is announced in this response.
+        if pairs.len() < asked {
+            res!(self.sync_view(stream, session, true).await);
+        }
+        match copyuid {
+            None    => write_no(stream, tag,
+                "[EXPUNGEISSUED] Some of the requested messages no longer exist").await,
+            Some(c) => if is_move {
+                write_ok(stream, tag, &fmt!("{} completed", verb)).await
+            } else {
+                write_ok(stream, tag, &fmt!("{} {} completed", c, verb)).await
+            },
+        }
     }
 
     async fn do_append<S: AsyncRead + AsyncWrite + Unpin + Send>(
@@ -1178,8 +1487,13 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         let _ = stream.read_exact(&mut tail).await;
 
         let user = user.clone();
-        res!(self.on_store(move |s| s.append(&user, &folder, &buf, flags, internal)).await);
-        res!(write_ok(stream, tag, "APPEND completed").await);
+        let (validity, uid) = res!(self.on_store(move |s| {
+            let uid = res!(s.append(&user, &folder, &buf, flags, internal));
+            let validity = res!(s.folder_status(&user, &folder)).uid_validity;
+            Ok((validity, uid))
+        }).await);
+        // RFC 4315: the UIDVALIDITY of the target and the UID the message took there.
+        res!(write_ok(stream, tag, &fmt!("[APPENDUID {} {}] APPEND completed", validity, uid.0)).await);
         Ok(false)
     }
 }
@@ -1648,6 +1962,29 @@ fn resolve_set(set: &str, msgs: &[MessageMeta], by_uid: bool) -> Vec<usize> {
     out
 }
 
+/// A UID set in the order given, with each run of consecutive UIDs as `lo:hi`, so that
+/// `COPYUID`'s source and target sets expand to matching lists; `None` for no UIDs, which is
+/// no set.
+fn uid_set(uids: &[u32]) -> Option<String> {
+    if uids.is_empty() { return None; }
+    let mut out = String::new();
+    let mut i = 0;
+    while i < uids.len() {
+        let mut j = i;
+        while j + 1 < uids.len() && uids[j + 1] == uids[j].saturating_add(1) {
+            j += 1;
+        }
+        if !out.is_empty() { out.push(','); }
+        if j > i {
+            out.push_str(&fmt!("{}:{}", uids[i], uids[j]));
+        } else {
+            out.push_str(&fmt!("{}", uids[i]));
+        }
+        i = j + 1;
+    }
+    Some(out)
+}
+
 fn parse_set_number(s: &str, by_uid: bool, max_seq: u32, max_uid: u32) -> u32 {
     if s == "*" { if by_uid { max_uid } else { max_seq } }
     else { s.parse().unwrap_or(0) }
@@ -1714,8 +2051,14 @@ async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> Outcome<Option<Strin
 // │ MISC HELPERS                                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
 
+/// The store's flags for a message with the session's own `\Recent`, which is session state
+/// (RFC 3501 §2.3.2): another session moving the message out of new/ does not take it away.
+fn keep_recent(store: MessageFlags, view: MessageFlags) -> MessageFlags {
+    MessageFlags { recent: view.recent, ..store }
+}
+
 fn capability_list() -> &'static str {
-    "IMAP4rev1 LITERAL+ AUTH=PLAIN AUTH=LOGIN SPECIAL-USE IDLE"
+    "IMAP4rev1 LITERAL+ AUTH=PLAIN AUTH=LOGIN SPECIAL-USE IDLE MOVE UIDPLUS"
 }
 
 /// The RFC 6154 SPECIAL-USE attribute of a well-known folder name, with its leading backslash

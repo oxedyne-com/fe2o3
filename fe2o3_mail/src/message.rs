@@ -15,21 +15,23 @@
 //!
 //! # Character sets
 //!
-//! A body or a header word in a charset other than UTF-8 is decoded as UTF-8 with the
-//! invalid sequences replaced, rather than transcoded, because a transcoder is a table per
-//! charset and this crate carries no such table.  The common case -- UTF-8, and the ASCII
-//! subset every charset shares -- is exact; a legacy ISO-8859 body degrades to readable
-//! text with the odd replacement character rather than failing.
+//! A body is read through `fe2o3_text::mime`'s part walker, the one IMAP SEARCH uses:
+//! base64 and quoted-printable are decoded, and ISO-8859-1, ISO-8859-15 and Windows-1252 are
+//! transcoded to UTF-8. Any other charset is read as UTF-8 with invalid sequences replaced,
+//! which keeps the ASCII every charset shares.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_text::{
     base64,
     mime::{
-        decode_base64_lenient,
-        decode_qp,
         decode_words,
+        entity,
+        Part,
+        Structure,
     },
 };
+
+pub use oxedyne_fe2o3_text::mime::headers;
 
 
 /// A parsed message, reduced to what a reader needs: the headers that identify it and the
@@ -50,7 +52,7 @@ pub struct ParsedMessage {
     pub in_reply_to: String,
     pub references:  String,
     pub body:        String,    // readable text of the message
-    pub attachments: Vec<String>,   // filenames of the non-text parts
+    pub attachments: Vec<String>,   // file names, an attached message by its Subject
 }
 
 impl ParsedMessage {
@@ -61,8 +63,7 @@ impl ParsedMessage {
     /// most need to.  A field that cannot be found is empty, and a body that cannot be
     /// decoded degrades rather than failing.
     pub fn parse(raw: &[u8]) -> Self {
-        let text = String::from_utf8_lossy(raw);
-        let hs   = headers(&text);
+        let hs = headers(raw);
         Self {
             from:        decode_words(&hget(&hs, "from")),
             to:          decode_words(&hget(&hs, "to")),
@@ -72,47 +73,14 @@ impl ParsedMessage {
             message_id:  hget(&hs, "message-id"),
             in_reply_to: hget(&hs, "in-reply-to"),
             references:  hget(&hs, "references"),
-            body:        readable_text(&text),
-            attachments: attachment_names(&text),
+            body:        readable_text(raw),
+            attachments: attachment_names(raw),
         }
     }
 }
 
 
 // ── Reading ─────────────────────────────────────────────────────────────
-
-/// Split the header block from the body at the first blank line, unfold continuation lines,
-/// and return the headers as an ordered list of `(lowercased-name, value)`.
-///
-/// The name is lowercased because a header is looked up by a caller who did not write it and
-/// cannot know whether the sender wrote `Message-ID` or `Message-Id`; the value is left as it
-/// was, since its case may matter.
-pub fn headers(text: &str) -> Vec<(String, String)> {
-    let block = match find_blank_line(text) {
-        Some(i) => &text[..i],
-        None    => text,
-    };
-    let mut out: Vec<(String, String)> = Vec::new();
-    for line in block.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        // A line that begins with a space or tab continues the header above it.
-        if line.starts_with(' ') || line.starts_with('\t') {
-            if let Some(last) = out.last_mut() {
-                last.1.push(' ');
-                last.1.push_str(line.trim());
-                continue;
-            }
-        }
-        if let Some(i) = line.find(':') {
-            let name = line[..i].trim().to_lowercase();
-            let val  = line[i + 1..].trim().to_string();
-            if !name.is_empty() {
-                out.push((name, val));
-            }
-        }
-    }
-    out
-}
 
 /// The first value of a header, or the empty string when it is absent.
 fn hget(hs: &[(String, String)], name: &str) -> String {
@@ -122,101 +90,20 @@ fn hget(hs: &[(String, String)], name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The byte offset of the blank line that ends the header block, `\r\n\r\n` or `\n\n`.
-fn find_blank_line(text: &str) -> Option<usize> {
-    let b = text.as_bytes();
-    let mut i = 0;
-    while i + 1 < b.len() {
-        if b[i] == b'\n' && b[i + 1] == b'\n' {
-            return Some(i);
-        }
-        if i + 3 < b.len() && b[i] == b'\r' && b[i + 1] == b'\n'
-            && b[i + 2] == b'\r' && b[i + 3] == b'\n'
-        {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
-/// The body, which is everything after the blank line that ends the headers.
-fn body_of(text: &str) -> &str {
-    match find_blank_line(text) {
-        Some(i) => {
-            // Step over the separator itself, whichever spelling it was.
-            let b = text.as_bytes();
-            if i + 3 < b.len() && b[i] == b'\r' {
-                &text[i + 4..]
-            } else {
-                &text[i + 2..]
-            }
-        },
-        None => "",
-    }
-}
-
-/// The readable text of a message: the `text/plain` part of a multipart, or the decoded
-/// body, or `text/html` reduced to text where that is all there is.
-///
-/// One level of multipart nesting is followed, which is the shape of a message with an
-/// attachment -- a `multipart/mixed` whose first part is the `multipart/alternative` that
-/// holds the text.
-pub fn readable_text(raw: &str) -> String {
-    let hs    = headers(raw);
-    let ctype = {
-        let c = hget(&hs, "content-type");
-        if c.is_empty() { fmt!("text/plain") } else { c }
-    };
-    let body  = body_of(raw);
-
-    if ctype.to_lowercase().contains("multipart") {
-        if let Some(boundary) = param(&ctype, "boundary") {
-            let marker = fmt!("--{}", boundary);
-            let mut plain: Option<String> = None;
-            let mut html:  Option<String> = None;
-            for part in body.split(marker.as_str()) {
-                let part = part.strip_prefix('\r').unwrap_or(part);
-                let part = part.strip_prefix('\n').unwrap_or(part);
-                let phs  = headers(part);
-                let pct  = hget(&phs, "content-type");
-                let pcte = hget(&phs, "content-transfer-encoding").to_lowercase();
-                let pbody = body_of(part);
-                if pbody.trim().is_empty() {
-                    continue;
-                }
-                let pctl = pct.to_lowercase();
-                if pctl.contains("multipart") && plain.is_none() {
-                    // A nested multipart: read one level down and take its text.
-                    let inner = readable_text(&fmt!("Content-Type: {}\r\n\r\n{}", pct, pbody));
-                    if !inner.trim().is_empty() {
-                        plain = Some(inner);
-                    }
-                    continue;
-                }
-                let decoded = decode_transfer(pbody, &pcte, param(&pct, "charset").as_deref());
-                if pctl.contains("text/plain") && plain.is_none() {
-                    plain = Some(decoded);
-                } else if pctl.contains("text/html") && html.is_none() {
-                    html = Some(decoded);
-                }
-            }
-            if let Some(p) = plain {
-                return norm_lines(p.trim());
-            }
-            if let Some(h) = html {
-                return norm_lines(strip_html(&h).trim());
-            }
-            return String::new();
-        }
-    }
-
-    let cte = hget(&hs, "content-transfer-encoding").to_lowercase();
-    let decoded = decode_transfer(body, &cte, param(&ctype, "charset").as_deref());
-    if ctype.to_lowercase().contains("text/html") {
-        return norm_lines(strip_html(&decoded).trim());
-    }
-    norm_lines(decoded.trim())
+/// The readable text of a message, by its MIME structure (RFC 2046): of a
+/// `multipart/alternative` the plain version, else the richest, and of a `mixed` each inline
+/// text part in order, so a list footer follows the body it is appended to. HTML is reduced
+/// to text; nothing inside an attached message is ever this message's text.
+pub fn readable_text(raw: &[u8]) -> String {
+    let top = entity(raw);
+    let texts: Vec<String> = top.display_parts().iter()
+        .map(|p| match p.media_type().as_str() {
+            "text/html" => norm_lines(strip_html(&p.text()).trim()),
+            _           => norm_lines(p.text().trim()),
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+    texts.join("\n\n")
 }
 
 /// Line endings a reader wants: a message's `\r\n` and bare `\r` reduced to `\n`, so the
@@ -225,62 +112,19 @@ fn norm_lines(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// Decode one part's body out of its transfer encoding, then read the bytes as text.
-fn decode_transfer(body: &str, cte: &str, charset: Option<&str>) -> String {
-    let bytes = match cte.trim() {
-        "base64"           => decode_base64_lenient(body),
-        "quoted-printable" => decode_qp(body),
-        _                  => body.as_bytes().to_vec(),
-    };
-    // Every supported charset shares ASCII, and UTF-8 is the one this crate decodes exactly;
-    // anything else degrades (see the module header).  `charset` is accepted so a future
-    // transcoder has the name to hand.
-    let _ = charset;
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-/// The filenames of the parts that are not the readable text -- what a reader means by "the
-/// attachments".  A part with a `filename` or a `name` parameter, or a `Content-Disposition`
-/// of `attachment`, counts.
-fn attachment_names(raw: &str) -> Vec<String> {
-    let hs = headers(raw);
-    let ctype = hget(&hs, "content-type");
-    let mut out: Vec<String> = Vec::new();
-    if let Some(boundary) = param(&ctype, "boundary") {
-        let marker = fmt!("--{}", boundary);
-        for part in body_of(raw).split(marker.as_str()) {
-            let phs  = headers(part);
-            let disp = hget(&phs, "content-disposition");
-            let pct  = hget(&phs, "content-type");
-            let name = param(&pct, "name")
-                .or_else(|| param(&disp, "filename"));
-            if let Some(n) = name {
-                if !n.trim().is_empty() {
-                    out.push(decode_words(n.trim()));
-                }
-            } else if disp.to_lowercase().contains("attachment") {
-                out.push(fmt!("attachment"));
-            }
-        }
-    }
+/// The names of the attachments, in order: each part with a file name or disposed as an
+/// attachment, and each attached message as one, named by its file name or its Subject and
+/// never looked inside.
+fn attachment_names(raw: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    names_into(&entity(raw), &mut out);
     out
 }
 
-/// The value of a `name="value"` parameter on a header, unquoted.
-fn param(header: &str, name: &str) -> Option<String> {
-    let lower = header.to_lowercase();
-    let key   = fmt!("{}=", name.to_lowercase());
-    let at    = lower.find(&key)?;
-    let after = &header[at + key.len()..];
-    let after = after.trim_start();
-    if let Some(stripped) = after.strip_prefix('"') {
-        let end = stripped.find('"')?;
-        Some(stripped[..end].to_string())
-    } else {
-        let end = after.find(|c: char| c == ';' || c == '\r' || c == '\n' || c == ' ')
-            .unwrap_or(after.len());
-        let v = after[..end].trim();
-        if v.is_empty() { None } else { Some(v.to_string()) }
+fn names_into(p: &Part<'_>, out: &mut Vec<String>) {
+    match &p.structure {
+        Structure::Multipart(kids)  => for k in kids { names_into(k, out); },
+        _                           => if p.is_attachment() { out.push(p.attachment_name()); },
     }
 }
 
@@ -611,7 +455,7 @@ mod tests {
     #[test]
     fn unfolds_a_continued_header() {
         let raw = "Subject: one two\r\n three four\r\nFrom: a@b\r\n\r\nbody\r\n";
-        let hs = headers(raw);
+        let hs = headers(raw.as_bytes());
         assert_eq!(hget(&hs, "subject"), "one two three four");
     }
 
@@ -625,7 +469,7 @@ mod tests {
                    Content-Type: text/html; charset=utf-8\r\n\r\n\
                    <p>the html</p>\r\n\
                    --BB--\r\n";
-        assert_eq!(readable_text(raw), "the plain text");
+        assert_eq!(readable_text(raw.as_bytes()), "the plain text");
     }
 
     #[test]
@@ -635,7 +479,7 @@ mod tests {
                    Content-Type: text/html; charset=utf-8\r\n\r\n\
                    <p>first</p><p>second</p>\r\n\
                    --BB--\r\n";
-        assert_eq!(readable_text(raw), "first\nsecond");
+        assert_eq!(readable_text(raw.as_bytes()), "first\nsecond");
     }
 
     #[test]
@@ -643,7 +487,7 @@ mod tests {
         let raw = "Content-Type: text/plain; charset=utf-8\r\n\
                    Content-Transfer-Encoding: quoted-printable\r\n\r\n\
                    caf=C3=A9\r\n";
-        assert_eq!(readable_text(raw), "café");
+        assert_eq!(readable_text(raw.as_bytes()), "café");
     }
 
     #[test]

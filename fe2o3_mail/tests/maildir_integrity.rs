@@ -6,9 +6,13 @@
 //! so these tests hold the store to RFC 3501 §2.3.1.1: a UID names one message
 //! for as long as the UIDVALIDITY lasts, and UIDNEXT never moves backwards.
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+    prelude::*,
+    file::ExclusiveLock,
+};
 use oxedyne_fe2o3_mail::maildir::MaildirStore;
 use oxedyne_fe2o3_net::mail::store::{
+    FlagUpdate,
     FolderName,
     MailStore,
     MailUser,
@@ -29,6 +33,10 @@ use std::{
         Mutex,
     },
     thread,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 
@@ -78,8 +86,9 @@ fn uid_map(store: &MaildirStore, u: &MailUser, f: &FolderName) -> Outcome<BTreeM
     let msgs = res!(store.list_messages(u, f, true));
     let mut out = BTreeMap::new();
     for m in &msgs {
-        let bytes = res!(store.fetch_bytes(u, f, m.uid));
-        out.insert(m.uid.0, tag_of(&bytes));
+        if let Some(bytes) = res!(store.fetch_bytes(u, f, m.uid)) {
+            out.insert(m.uid.0, tag_of(&bytes));
+        }
     }
     Ok(out)
 }
@@ -229,7 +238,8 @@ fn append_returns_the_uid_of_its_own_message() -> Outcome<()> {
     for i in 0..3 {
         let tag = fmt!("m{}", i);
         let uid = res!(store.append(&u, &inbox, &body(&tag), MessageFlags::default(), None));
-        let got = res!(store.fetch_bytes(&u, &inbox, uid));
+        let got = res!(res!(store.fetch_bytes(&u, &inbox, uid))
+            .ok_or_else(|| err!("UID {} is missing.", uid.0; Missing)));
         assert_eq!(tag_of(&got), tag, "append returned UID {} which is not its own message", uid.0);
     }
     let _ = fs::remove_dir_all(&root);
@@ -382,17 +392,134 @@ fn expunge_reports_only_what_it_removed() -> Outcome<()> {
     for i in 0..2 {
         uids.push(res!(store.append(&u, &inbox, &body(&fmt!("e{}", i)), MessageFlags::default(), None)));
     }
-    let del = MessageFlags { deleted: true, ..MessageFlags::default() };
+    let del = FlagUpdate::Add(MessageFlags { deleted: true, ..MessageFlags::default() });
     for uid in &uids {
-        res!(store.set_flags(&u, &inbox, *uid, del));
+        res!(store.update_flags(&u, &inbox, *uid, del));
     }
     let cur = inbox_dir(&root).join("cur");
     res!(set_mode(&cur, 0o555));
-    let outcome = store.expunge(&u, &inbox);
+    let outcome = store.expunge(&u, &inbox, None);
     res!(set_mode(&cur, 0o755));
     let removed = res!(outcome);
     assert!(removed.is_empty(), "expunge reported {:?}, but no file could be removed", removed);
     assert_eq!(res!(store.list_messages(&u, &inbox, true)).len(), 2);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// Two clients subscribing at once each read, add and save the whole list; without the
+/// user's lock one of them saves a list lacking the other's name.
+#[test]
+fn concurrent_subscribes_keep_every_name() -> Outcome<()> {
+    let root = res!(fresh_root("subscribe"));
+    let store = res!(MaildirStore::new(root.clone(), "test.local"));
+    let u = user();
+    res!(store.ensure_user(&u));
+    let threads = 8;
+    let each = 25;
+    let mut handles = Vec::new();
+    for t in 0..threads {
+        let (store, u) = (store.clone(), u.clone());
+        handles.push(thread::spawn(move || -> Outcome<()> {
+            for i in 0..each {
+                res!(store.subscribe(&u, &FolderName::new(fmt!("F{}_{}", t, i))));
+            }
+            Ok(())
+        }));
+    }
+    for h in handles {
+        match h.join() {
+            Ok(r)   => res!(r),
+            Err(_)  => return Err(err!("A subscribing thread panicked."; Test, Bug)),
+        }
+    }
+    let subs = res!(store.list_subscribed(&u));
+    let mut missing = Vec::new();
+    for t in 0..threads {
+        for i in 0..each {
+            let name = fmt!("F{}_{}", t, i);
+            if !subs.iter().any(|f| f.as_str() == name) { missing.push(name); }
+        }
+    }
+    assert!(missing.is_empty(), "{} of {} subscriptions lost: {:?}",
+        missing.len(), threads * each, missing);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// A holder that never lets go of a folder must show up as an error, not as every session
+/// and delivery on the folder hanging.
+#[test]
+fn a_held_folder_lock_fails_loudly_after_the_wait() -> Outcome<()> {
+    let root = res!(fresh_root("lock_wait"));
+    let store = res!(MaildirStore::new(root.clone(), "test.local"))
+        .with_lock_wait(Duration::from_millis(300));
+    let u = user();
+    res!(store.ensure_user(&u));
+    let inbox = FolderName::new("INBOX");
+    let held = res!(ExclusiveLock::acquire(&inbox_dir(&root).join("hematite-folder.lock")));
+    let t0 = Instant::now();
+    let outcome = store.folder_status(&u, &inbox);
+    let took = t0.elapsed();
+    drop(held);
+    match outcome {
+        Ok(_)   => panic!("folder_status succeeded while another held the folder's lock"),
+        Err(e)  => {
+            assert!(e.tags().contains(&ErrTag::Timeout), "the error is not a Timeout: {}", e);
+            assert!(took >= Duration::from_millis(300) && took < Duration::from_secs(5),
+                "gave up after {:?}", took);
+        },
+    }
+    res!(store.folder_status(&u, &inbox));
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+fn with_id(id: &str, tag: &str) -> Vec<u8> {
+    fmt!("From: bob@example.org\r\nTo: alice@test.local\r\nMessage-ID:\r\n {}\r\nSubject: {}\r\n\r\nid={}\r\n",
+        id, tag, tag).into_bytes()
+}
+
+/// A resend is filed once per Message-ID: a retry answers the UID already given, a message
+/// without one is filed each time, a copy dropped into new/ by another hand counts, an expunged
+/// copy no longer does, and IMAP APPEND is never deduplicated.
+#[test]
+fn a_redelivery_by_message_id_is_filed_once() -> Outcome<()> {
+    let root = res!(fresh_root("dedup"));
+    let store = res!(MaildirStore::new(root.clone(), "test.local"));
+    let u = user();
+    res!(store.ensure_user(&u));
+    let inbox = FolderName::new("INBOX");
+    let flags = MessageFlags { recent: true, ..MessageFlags::default() };
+
+    let first = res!(store.deliver(&u, &inbox, &with_id("<a@x>", "a1"), flags, None));
+    let resend = [b"Received: from mx2 by mx; Mon, 26 Oct 2026 10:00:00 +0000\r\n".as_slice(),
+        &with_id("<a@x>", "a1")].concat();
+    let again = res!(store.deliver(&u, &inbox, &resend, flags, None));
+    assert_eq!(first, again, "the retry answers the UID of the copy already filed");
+    assert_eq!(res!(uid_map(&store, &u, &inbox)).len(), 1);
+
+    res!(store.deliver(&u, &inbox, &body("plain"), flags, None));
+    res!(store.deliver(&u, &inbox, &body("plain"), flags, None));
+    assert_eq!(res!(uid_map(&store, &u, &inbox)).len(), 3, "no Message-ID, no deduplication");
+
+    // Another MDA's copy, never read by this store.
+    res!(fs::write(inbox_dir(&root).join("new").join("1.M1P1.other"), with_id("<b@x>", "b1")), IO, File);
+    res!(store.deliver(&u, &inbox, &with_id("<b@x>", "b1"), flags, None));
+    let map = res!(uid_map(&store, &u, &inbox));
+    assert_eq!(map.len(), 4, "the other hand's copy holds the Message-ID: {:?}", map);
+    assert_eq!(map.values().filter(|t| *t == "b1").count(), 1);
+
+    // Expunged, the copy is gone, and a later delivery is filed afresh.
+    res!(store.update_flags(&u, &inbox, first, FlagUpdate::Add(MessageFlags {
+        deleted: true, ..MessageFlags::default() })));
+    res!(store.expunge(&u, &inbox, None));
+    let after = res!(store.deliver(&u, &inbox, &with_id("<a@x>", "a3"), flags, None));
+    assert!(after.0 > first.0, "filed afresh under a new UID");
+
+    res!(store.append(&u, &inbox, &with_id("<a@x>", "a4"), MessageFlags::default(), None));
+    let map = res!(uid_map(&store, &u, &inbox));
+    assert!(map.values().any(|t| t == "a4"), "APPEND files what the client sends: {:?}", map);
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }

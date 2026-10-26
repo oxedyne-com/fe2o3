@@ -368,3 +368,62 @@ async fn sent_keys_read_a_date_whose_weekday_has_no_comma() -> Outcome<()> {
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }
+
+/// BODY and TEXT look at the text a reader sees, not the transfer encoding it travels in:
+/// a word in a base64 text/plain part, or in a quoted-printable text/html part of a
+/// multipart, in Latin-1 or UTF-8, is found; one only in an attachment's file name is not.
+#[tokio::test]
+async fn search_body_reads_decoded_text_parts() -> Outcome<()> {
+    let seen = MessageFlags::default();
+    // "Grüße aus Köln, zebrafink" in UTF-8, base64.
+    let b64 = "From: a@example.org\r\nSubject: one\r\nMIME-Version: 1.0\r\n\
+        Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n\
+        R3LDvMOfZSBhdXMg\r\nS8O2bG4sIHplYnJhZmluaw==\r\n".as_bytes().to_vec();
+    // A multipart/alternative whose HTML part, Latin-1 quoted-printable, says "Caf=E9 kolibri"
+    // with the word broken across a soft line break.
+    let qp = "From: b@example.org\r\nSubject: two\r\nMIME-Version: 1.0\r\n\
+        Content-Type: multipart/alternative; boundary=\"XX\"\r\n\r\npreamble\r\n\
+        --XX\r\nContent-Type: text/plain; charset=us-ascii\r\n\r\nsee the html\r\n\
+        --XX\r\nContent-Type: text/html; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n\
+        <p>Caf=E9 koli=\r\nbri</p>\r\n--XX--\r\n".as_bytes().to_vec();
+    let plain = "From: c@example.org\r\nSubject: three\r\n\r\nnothing here but R3LD\r\n".as_bytes().to_vec();
+    // A sender name in a Latin-1 encoded-word, and an attachment whose name and base64 body
+    // are not the message's text.
+    let latin = "From: =?ISO-8859-1?Q?Andr=E9?= <d@example.org>\r\nSubject: four\r\n\r\nhi\r\n"
+        .as_bytes().to_vec();
+    let att = "From: e@example.org\r\nSubject: five\r\nMIME-Version: 1.0\r\n\
+        Content-Type: multipart/mixed; boundary=\"YY\"\r\n\r\n\
+        --YY\r\nContent-Type: text/plain; charset=windows-1252\r\n\
+        Content-Transfer-Encoding: quoted-printable\r\n\r\n=93quoted=94 text\r\n\
+        --YY\r\nContent-Type: application/pdf; name=\"wombat.pdf\"\r\n\
+        Content-Disposition: attachment; filename=\"wombat.pdf\"\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\nd29tYmF0IHBkZg==\r\n--YY--\r\n".as_bytes().to_vec();
+    let msgs = vec![
+        (b64, seen, 19723), (qp, seen, 19724), (plain, seen, 19725),
+        (latin, seen, 19726), (att, seen, 19727),
+    ];
+    let (mut c, uids, root) = res!(serve("search_body", msgs).await);
+    let cases: Vec<(&str, Vec<u32>)> = vec![
+        ("BODY zebrafink",                  vec![uids[0]]),
+        ("CHARSET UTF-8 BODY \"köln\"",     vec![uids[0]]),
+        ("BODY kolibri",                    vec![uids[1]]),
+        ("CHARSET UTF-8 BODY \"café\"",     vec![uids[1]]),
+        ("TEXT kolibri",                    vec![uids[1]]),
+        ("BODY R3LD",                       vec![uids[2]]),
+        ("BODY preamble",                   vec![]),
+        ("CHARSET UTF-8 FROM \"andré\"",    vec![uids[3]]),
+        ("CHARSET UTF-8 BODY \"\u{201c}quoted\u{201d}\"", vec![uids[4]]),
+        ("BODY wombat",                     vec![]),
+        ("BODY d29tYmF0",                   vec![]),
+    ];
+    let mut failures = Vec::new();
+    for (q, want) in &cases {
+        match res!(c.uid_search(q).await) {
+            Ok(got) if &got == want => (),
+            other => failures.push(fmt!("{}: want {:?}, got {:?}", q, want, other)),
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+    assert!(failures.is_empty(), "SEARCH BODY:\n{}", failures.join("\n"));
+    Ok(())
+}

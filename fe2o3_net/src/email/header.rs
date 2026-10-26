@@ -118,6 +118,84 @@ pub fn header_fields(headers: &[u8]) -> Outcome<Vec<(String, String)>> {
     Ok(out)
 }
 
+/// The message's `Message-ID`, the first such field's value with its white space removed, or
+/// `None` when it has none or its header section cannot be read as [`header_fields`] reads it.
+/// Only the header section is looked at, so a caller may pass the head of a message alone.
+pub fn message_id(message: &[u8]) -> Option<String> {
+    let (head, _) = split_headers_body(message);
+    let fields = match header_fields(head) {
+        Ok(f)   => f,
+        Err(_)  => return None,
+    };
+    fields.iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("Message-ID"))
+        .map(|(_, v)| v.chars().filter(|c| !c.is_whitespace()).collect::<String>())
+        .filter(|id| !id.is_empty())
+}
+
+/// The header fields a relay, the receiving system or a verifier adds in transit, so that two
+/// deliveries of one sent message differ in them: the trace fields of RFC 5321 §4.4 and RFC 5322
+/// §3.6.7 (`Received`, `Return-Path`), the final delivery's `Delivered-To` and `X-Original-To`,
+/// the verdicts of RFC 8601 and RFC 7208 (`Authentication-Results`, `Received-SPF`), the ARC set
+/// of RFC 8617 (every `ARC-` field), and `DKIM-Signature`, which a signer adds anew, with a new
+/// `t=`, on every attempt; its signature covers fields and a body that are compared anyway.
+/// The `Resent-` fields stay: they are set by whoever resends the message.
+pub const TRANSIT_FIELDS: [&str; 7] = [
+    "Received",
+    "Return-Path",
+    "Delivered-To",
+    "X-Original-To",
+    "Authentication-Results",
+    "Received-SPF",
+    "DKIM-Signature",
+];
+const TRANSIT_PREFIX: &str = "ARC-"; // RFC 8617 §4.1, the ARC set
+
+/// Is the header field `name` one of the [`TRANSIT_FIELDS`] or of the ARC set?
+pub fn is_transit_field(name: &str) -> bool {
+    TRANSIT_FIELDS.iter().any(|t| t.eq_ignore_ascii_case(name))
+        || name.get(..TRANSIT_PREFIX.len()).is_some_and(|p| p.eq_ignore_ascii_case(TRANSIT_PREFIX))
+}
+
+/// What the message's sender set: each header field, folded lines and all, byte for byte and in
+/// order, but the [`TRANSIT_FIELDS`] and the ARC set, and then the body. Two deliveries of one
+/// sent message, whatever the path each took, give equal parts. `None` when the header section
+/// cannot be read as [`header_fields`] reads it.
+pub fn sender_parts(message: &[u8]) -> Option<(Vec<&[u8]>, &[u8])> {
+    let (head, body) = split_headers_body(message);
+    if header_fields(head).is_err() {
+        return None;
+    }
+    // Valid, so every line ends at CRLF and every field starts with a name and a colon. A field
+    // is kept less its last CRLF, so that it compares equal wherever it stands.
+    let mut fields: Vec<&[u8]> = Vec::new();
+    let mut start = 0;  // of the field being read
+    let mut last = 0;   // its end so far, before the CRLF
+    let mut keep = true;
+    let mut at = 0;
+    while at < head.len() {
+        let end = match find_subseq(&head[at..], b"\r\n") {
+            Some(i) => at + i,
+            None    => head.len(),
+        };
+        if head[at] != b' ' && head[at] != b'\t' {
+            if keep && last > start {
+                fields.push(&head[start..last]);
+            }
+            let name = head[at..end].split(|b| *b == b':').next().unwrap_or(&[]);
+            let name = std::str::from_utf8(name).unwrap_or("").trim_end_matches([' ', '\t']);
+            keep = !is_transit_field(name);
+            start = at;
+        }
+        last = end;
+        at = end + 2;
+    }
+    if keep && last > start {
+        fields.push(&head[start..last]);
+    }
+    Some((fields, body))
+}
+
 /// The addresses in an address-list field such as `From`, `Sender` or `To`, each as its bare
 /// addr-spec, in order, with comments and folding white space removed.
 ///

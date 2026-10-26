@@ -1,0 +1,422 @@
+//! Two IMAP sessions on one folder, over the real server and a real Maildir.
+//!
+//! Thunderbird and a phone on one account are two sessions. A flag one sets must not be
+//! undone by the other's stale copy, and a message the other expunges must not shift this
+//! session's sequence numbers until it has been told (RFC 3501 §7.4.1).
+//! From QA F2a's `qa_imap.rs` (D-20261026-01, M1 and M2).
+
+use oxedyne_fe2o3_core::{
+    file::ExclusiveLock,
+    prelude::*,
+};
+use oxedyne_fe2o3_mail::maildir::MaildirStore;
+use oxedyne_fe2o3_net::{
+    imap::server::ImapServer,
+    mail::{
+        store::{
+            FolderName,
+            MailStore,
+            MailUser,
+            MessageFlags,
+        },
+        user::UserStore,
+    },
+};
+
+use std::{
+    fs,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
+
+use tokio::{
+    io::{
+        AsyncBufReadExt,
+        AsyncWriteExt,
+        BufReader,
+    },
+    net::{
+        TcpListener,
+        TcpStream,
+    },
+};
+
+
+#[derive(Clone, Debug)]
+struct OneUser;
+
+impl UserStore for OneUser {
+    fn authenticate(&self, _a: &str, _p: &str) -> Outcome<Option<MailUser>> { self.lookup("") }
+    fn lookup(&self, _a: &str) -> Outcome<Option<MailUser>> {
+        Ok(Some(MailUser {
+            local:          fmt!("alice"),
+            domain:         fmt!("test.local"),
+            delivery_key:   fmt!("test.local/alice"),
+            send_as:        Vec::new(),
+        }))
+    }
+}
+
+/// One logged-in session with INBOX selected.
+struct Sess {
+    r:  BufReader<TcpStream>,
+    n:  u32,
+}
+
+impl Sess {
+    async fn open(port: u16) -> Outcome<Self> {
+        let t = res!(TcpStream::connect(("127.0.0.1", port)).await, IO, Network);
+        let mut s = Sess { r: BufReader::new(t), n: 0 };
+        let mut l = String::new();
+        res!(s.r.read_line(&mut l).await, IO, Network);
+        res!(s.cmd("LOGIN alice@test.local pw").await);
+        res!(s.cmd("SELECT INBOX").await);
+        Ok(s)
+    }
+
+    /// Every line of the reply, the tagged one last.
+    async fn cmd(&mut self, c: &str) -> Outcome<String> {
+        self.n += 1;
+        let tag = fmt!("t{}", self.n);
+        res!(self.r.get_mut().write_all(fmt!("{} {}\r\n", tag, c).as_bytes()).await, IO, Network);
+        let mut out = String::new();
+        loop {
+            let mut l = String::new();
+            if res!(self.r.read_line(&mut l).await, IO, Network) == 0 {
+                return Err(err!("The server closed the connection."; IO, Network));
+            }
+            out.push_str(&l);
+            if l.starts_with(&fmt!("{} ", tag)) { return Ok(out); }
+        }
+    }
+}
+
+/// A Maildir with `n` messages served on a local port.
+async fn setup(name: &str, n: usize) -> Outcome<(u16, PathBuf)> {
+    setup_waiting(name, n, Duration::from_secs(30)).await
+}
+
+/// As `setup`, with the store's lock wait set to `wait`.
+async fn setup_waiting(name: &str, n: usize, wait: Duration) -> Outcome<(u16, PathBuf)> {
+    let root = std::env::temp_dir().join(fmt!("fe2o3_imap_sessions_{}_{}", name, std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    res!(fs::create_dir_all(&root), IO, File);
+    let store = res!(MaildirStore::new(root.clone(), "test.local")).with_lock_wait(wait);
+    let u = match res!(OneUser.lookup("")) {
+        Some(u) => u,
+        None    => return Err(err!("The test user did not resolve."; Test, Bug)),
+    };
+    res!(store.ensure_user(&u));
+    for i in 1..=n {
+        let bytes = fmt!("Subject: m{}\r\n\r\nid=m{}\r\n", i, i);
+        res!(store.append(&u, &FolderName::new("INBOX"), bytes.as_bytes(), MessageFlags::default(), None));
+    }
+    let lis = res!(TcpListener::bind("127.0.0.1:0").await, IO, Network);
+    let port = res!(lis.local_addr(), IO, Network).port();
+    let srv = ImapServer { store, users: OneUser, hostname: Arc::new(fmt!("test.local")) };
+    tokio::spawn(async move {
+        while let Ok((sock, peer)) = lis.accept().await {
+            let s = srv.clone();
+            tokio::spawn(async move { let _ = s.run(sock, peer).await; });
+        }
+    });
+    Ok((port, root))
+}
+
+/// The FLAGS a `UID FETCH n (FLAGS)` reply gives UID `uid`, if it names it.
+fn flags_of(reply: &str, uid: u32) -> Option<String> {
+    for l in reply.lines() {
+        if l.contains(&fmt!("UID {} ", uid)) || l.contains(&fmt!("UID {})", uid)) {
+            if let Some(i) = l.find("FLAGS (") {
+                let rest = &l[i + 7..];
+                return rest.find(')').map(|j| rest[..j].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Another session expunges UID 1; this one, not yet told, marks its message 2, which is UID 2.
+#[tokio::test(flavor = "multi_thread")]
+async fn sequence_numbers_hold_until_the_expunge_is_announced() -> Outcome<()> {
+    let (port, root) = res!(setup("seq", 3).await);
+    let mut a = res!(Sess::open(port).await);
+    let mut b = res!(Sess::open(port).await);
+    res!(b.cmd("UID STORE 1 +FLAGS (\\Deleted)").await);
+    res!(b.cmd("EXPUNGE").await);
+
+    let store = res!(a.cmd("STORE 2 +FLAGS (\\Deleted)").await);
+    assert!(!store.contains("EXPUNGE"), "an EXPUNGE was sent during STORE:\n{}", store);
+    assert!(store.contains("* 2 FETCH (FLAGS (\\Deleted))"), "STORE 2 answered:\n{}", store);
+
+    let fetch = res!(a.cmd("UID FETCH 1:* (UID FLAGS)").await);
+    assert!(fetch.starts_with("* 1 EXPUNGE\r\n"), "the expunge of UID 1 was not announced first:\n{}", fetch);
+    assert_eq!(flags_of(&fetch, 2).as_deref(), Some("\\Deleted"), "UID 2 after STORE 2:\n{}", fetch);
+    assert_eq!(flags_of(&fetch, 3).as_deref(), Some(""), "UID 3 after STORE 2:\n{}", fetch);
+    assert!(fetch.contains("* 1 FETCH (UID 2 "), "UID 2 is not message 1 after the EXPUNGE:\n{}", fetch);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// A non-UID SEARCH answers in the numbers the client holds, and NOOP then announces the
+/// expunge, highest first, and the delivery.
+#[tokio::test(flavor = "multi_thread")]
+async fn search_keeps_the_view_and_noop_reconciles_it() -> Outcome<()> {
+    let (port, root) = res!(setup("search", 4).await);
+    let mut a = res!(Sess::open(port).await);
+    let mut b = res!(Sess::open(port).await);
+    res!(b.cmd("UID STORE 1,3 +FLAGS (\\Deleted)").await);
+    res!(b.cmd("EXPUNGE").await);
+    res!(a.cmd("STORE 4 +FLAGS (\\Flagged)").await);
+
+    let search = res!(a.cmd("SEARCH FLAGGED").await);
+    assert!(search.contains("* SEARCH 4\r\n"), "SEARCH FLAGGED in the client's numbers:\n{}", search);
+    assert!(!search.contains("EXPUNGE"), "an EXPUNGE was sent during SEARCH:\n{}", search);
+
+    let noop = res!(a.cmd("NOOP").await);
+    let want = "* 3 EXPUNGE\r\n* 1 EXPUNGE\r\n";
+    assert!(noop.starts_with(want), "NOOP did not announce 3 then 1:\n{}", noop);
+    assert!(!noop.contains("EXISTS"), "NOOP sent EXISTS with nothing delivered:\n{}", noop);
+    let search = res!(a.cmd("SEARCH FLAGGED").await);
+    assert!(search.contains("* SEARCH 2\r\n"), "SEARCH FLAGGED after NOOP:\n{}", search);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// CHECK (RFC 3501 §6.4.1) is a checkpoint: it completes, and like NOOP it announces another
+/// session's expunge and a delivery.
+#[tokio::test(flavor = "multi_thread")]
+async fn check_completes_and_reconciles_the_view() -> Outcome<()> {
+    let (port, root) = res!(setup("check", 3).await);
+    let mut a = res!(Sess::open(port).await);
+    let mut b = res!(Sess::open(port).await);
+    res!(b.cmd("UID STORE 2 +FLAGS (\\Deleted)").await);
+    res!(b.cmd("EXPUNGE").await);
+    let store = res!(MaildirStore::new(root.clone(), "test.local"));
+    let u = res!(res!(OneUser.lookup("")).ok_or_else(|| err!("No test user."; Test, Bug)));
+    res!(store.append(&u, &FolderName::new("INBOX"), b"Subject: m4\r\n\r\nid=m4\r\n", MessageFlags::default(), None));
+
+    let check = res!(a.cmd("CHECK").await);
+    assert!(check.starts_with("* 2 EXPUNGE\r\n"), "CHECK did not announce the expunge:\n{}", check);
+    assert!(check.contains("* 3 EXISTS\r\n"), "CHECK did not announce the delivery:\n{}", check);
+    assert!(check.lines().last().map_or(false, |l| l.starts_with("t3 OK")), "CHECK answered:\n{}", check);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// An idling session is told of another's expunge, without being asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_announces_an_expunge() -> Outcome<()> {
+    let (port, root) = res!(setup("idle", 2).await);
+    let mut a = res!(Sess::open(port).await);
+    let mut b = res!(Sess::open(port).await);
+    res!(a.r.get_mut().write_all(b"i1 IDLE\r\n").await, IO, Network);
+    let mut l = String::new();
+    res!(a.r.read_line(&mut l).await, IO, Network);
+    assert!(l.starts_with("+"), "IDLE answered {:?}", l);
+    res!(b.cmd("UID STORE 1 +FLAGS (\\Deleted)").await);
+    res!(b.cmd("EXPUNGE").await);
+    l.clear();
+    let got = tokio::time::timeout(Duration::from_secs(15), a.r.read_line(&mut l)).await;
+    assert!(got.is_ok(), "no untagged response within 15 s of the expunge");
+    assert_eq!(l, "* 1 EXPUNGE\r\n");
+    res!(a.r.get_mut().write_all(b"DONE\r\n").await, IO, Network);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// A toggles \Seen on UID 1 while B sets \Flagged once per trial; \Flagged must survive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_concurrent_flag_is_never_lost() -> Outcome<()> {
+    let (port, root) = res!(setup("flags", 1).await);
+    let mut lost = 0;
+    let trials = 40;
+    for _ in 0..trials {
+        let mut a = res!(Sess::open(port).await);
+        let mut b = res!(Sess::open(port).await);
+        res!(b.cmd("UID STORE 1 -FLAGS (\\Flagged)").await);
+        let ta = tokio::spawn(async move {
+            for i in 0..30 {
+                let op = if i % 2 == 0 { "+" } else { "-" };
+                let _ = a.cmd(&fmt!("UID STORE 1 {}FLAGS.SILENT (\\Seen)", op)).await;
+            }
+            a
+        });
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        res!(b.cmd("UID STORE 1 +FLAGS.SILENT (\\Flagged)").await);
+        if ta.await.is_err() { return Err(err!("Session A's task failed."; Test, Bug)); }
+        let f = res!(b.cmd("UID FETCH 1 (FLAGS)").await);
+        if !f.contains("\\Flagged") { lost += 1; }
+    }
+    assert_eq!(lost, 0, "\\Flagged was lost in {} of {} trials", lost, trials);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// "Mark folder read" on 3000 messages while mail arrives: the STORE takes the folder in
+/// chunks, so it finishes in seconds rather than re-reading the folder per message, and the
+/// delivery lands between chunks, well inside the store's lock wait (QA F2a part 3 B, H1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bulk_store_lets_a_delivery_in() -> Outcome<()> {
+    let n = 3000;
+    let (port, root) = res!(setup("bulk", 0).await);
+    let new = root.join("test.local/alice/new");
+    for i in 0..n {
+        res!(fs::write(new.join(fmt!("1800000000.M{}P1Q{}.seed", i, i)), fmt!("Subject: m{}\r\n\r\nx\r\n", i)), IO, File);
+    }
+    let mut a = res!(Sess::open(port).await);
+    let r2 = root.clone();
+    let delivery = tokio::task::spawn_blocking(move || -> Outcome<Duration> {
+        std::thread::sleep(Duration::from_millis(300));
+        let store = res!(MaildirStore::new(r2, "test.local"));
+        let u = res!(res!(OneUser.lookup("")).ok_or_else(|| err!("No test user."; Test, Bug)));
+        let t = std::time::Instant::now();
+        res!(store.append(&u, &FolderName::new("INBOX"), b"Subject: late\r\n\r\nx\r\n", MessageFlags::default(), None));
+        Ok(t.elapsed())
+    });
+    let t = std::time::Instant::now();
+    let reply = res!(a.cmd(&fmt!("STORE 1:{} +FLAGS.SILENT (\\Seen)", n)).await);
+    let took = t.elapsed();
+    let waited = match delivery.await {
+        Ok(r)   => res!(r),
+        Err(_)  => return Err(err!("The delivery task failed."; Test, Bug)),
+    };
+    let _ = fs::remove_dir_all(&root);
+    assert!(reply.lines().last().map_or(false, |l| l.contains(" OK ")), "STORE answered:\n{}", reply);
+    println!("bulk STORE of {} took {:?}; the delivery took {:?}", n, took, waited);
+    assert!(took < Duration::from_secs(20), "the bulk STORE of {} took {:?}", n, took);
+    assert!(waited < Duration::from_secs(5), "the delivery waited {:?} behind the bulk STORE", waited);
+    Ok(())
+}
+
+/// A store error, the lock wait run out here, answers the command `NO [UNAVAILABLE]` and keeps
+/// the session (RFC 5530), where it closed the connection with no reply; a failed SELECT leaves
+/// no mailbox selected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_store_error_is_a_no_and_the_session_lives() -> Outcome<()> {
+    let (port, root) = res!(setup_waiting("unavailable", 2, Duration::from_millis(300)).await);
+    let lockp = root.join("test.local/alice/hematite-folder.lock");
+    for c in ["UID STORE 1 +FLAGS (\\Flagged)", "UID FETCH 1 (BODY[])", "FETCH 1 (BODY[])",
+        "NOOP", "STATUS INBOX (MESSAGES)", "SEARCH ALL", "UID SEARCH ALL", "EXPUNGE",
+        "APPEND INBOX {9}\r\nSubject:\r", "SELECT INBOX"]
+    {
+        let mut s = res!(Sess::open(port).await);
+        let held = res!(ExclusiveLock::acquire(&lockp));
+        let r = s.cmd(c).await;
+        drop(held);
+        let r = res!(r);
+        let last = r.lines().last().unwrap_or("");
+        assert!(last.starts_with(&fmt!("t{} NO [UNAVAILABLE] ", s.n)), "{:?} was answered {:?}", c, r);
+        let after = res!(s.cmd("NOOP").await);
+        assert!(after.lines().last().unwrap_or("").contains(" OK "), "{:?}: then NOOP {:?}", c, after);
+        if c == "SELECT INBOX" {
+            let f = res!(s.cmd("FETCH 1 (FLAGS)").await);
+            assert!(!f.contains(" OK "), "a failed SELECT selected the mailbox: {:?}", f);
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// A bulk FETCH of bodies marks them \Seen a chunk at a time, under one hold of the folder per
+/// chunk, not one hold and one read of the whole folder per message, O(N^2), and a delivery
+/// gets in meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bulk_fetch_marks_seen_by_chunk() -> Outcome<()> {
+    let n = 1500;
+    let (port, root) = res!(setup("bulkfetch", 0).await);
+    let new = root.join("test.local/alice/new");
+    for i in 0..n {
+        res!(fs::write(new.join(fmt!("1800000000.M{}P1Q{}.seed", i, i)), fmt!("Subject: m{}\r\n\r\nx\r\n", i)), IO, File);
+    }
+    let mut a = res!(Sess::open(port).await);
+    let r2 = root.clone();
+    let delivery = tokio::task::spawn_blocking(move || -> Outcome<Duration> {
+        std::thread::sleep(Duration::from_millis(300));
+        let store = res!(MaildirStore::new(r2, "test.local"));
+        let u = res!(res!(OneUser.lookup("")).ok_or_else(|| err!("No test user."; Test, Bug)));
+        let t = std::time::Instant::now();
+        res!(store.append(&u, &FolderName::new("INBOX"), b"Subject: late\r\n\r\nx\r\n", MessageFlags::default(), None));
+        Ok(t.elapsed())
+    });
+    let t = std::time::Instant::now();
+    let reply = res!(a.cmd(&fmt!("FETCH 1:{} (BODY[])", n)).await);
+    let took = t.elapsed();
+    let waited = match delivery.await {
+        Ok(r)   => res!(r),
+        Err(_)  => return Err(err!("The delivery task failed."; Test, Bug)),
+    };
+    let flags = res!(a.cmd(&fmt!("FETCH 1:{} (FLAGS)", n)).await);
+    let _ = fs::remove_dir_all(&root);
+    assert!(reply.lines().last().map_or(false, |l| l.contains(" OK ")), "FETCH answered:\n{}",
+        reply.lines().last().unwrap_or(""));
+    println!("bulk FETCH of {} took {:?}; the delivery took {:?}", n, took, waited);
+    assert!(took < Duration::from_secs(15), "the bulk FETCH of {} took {:?}", n, took);
+    assert!(waited < Duration::from_secs(5), "the delivery waited {:?} behind the bulk FETCH", waited);
+    assert_eq!(reply.matches("FLAGS (\\Seen)").count(), n, "every FETCH response carries the \\Seen it set");
+    let seen = flags.lines().filter(|l| l.contains("\\Seen")).count();
+    assert_eq!(seen, n, "every message fetched is \\Seen");
+    Ok(())
+}
+
+/// SUBSCRIBE and CREATE whose save fails answer NO, where they answered OK and LSUB then lacked
+/// the folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_subscribe_is_a_no() -> Outcome<()> {
+    let (port, root) = res!(setup_waiting("subscribe", 0, Duration::from_millis(300)).await);
+    let lockp = root.join("test.local/alice/hematite-subscriptions.lock");
+    let mut s = res!(Sess::open(port).await);
+    for c in ["SUBSCRIBE Keep", "CREATE Made"] {
+        let held = res!(ExclusiveLock::acquire(&lockp));
+        let r = s.cmd(c).await;
+        drop(held);
+        let r = res!(r);
+        assert!(r.lines().last().unwrap_or("").starts_with(&fmt!("t{} NO ", s.n)), "{:?} was answered {:?}", c, r);
+    }
+    let l = res!(s.cmd("SUBSCRIBE Keep").await);
+    assert!(l.lines().last().unwrap_or("").contains(" OK "), "the retry: {:?}", l);
+    let l = res!(s.cmd("LSUB \"\" \"*\"").await);
+    assert!(l.contains("Keep"), "LSUB: {:?}", l);
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// \Recent is the session's: another session's STORE moves a new message to cur/, and this
+/// session's own STORE and FETCH still show it \Recent, as they did before F2a.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_keeps_its_recent_after_a_store() -> Outcome<()> {
+    let (port, root) = res!(setup("recent", 1).await);
+    let mut a = res!(Sess::open(port).await);
+    let mut b = res!(Sess::open(port).await);
+    let ib = root.join("test.local/alice");
+    res!(fs::write(ib.join("tmp/1900000000.Mx.ext"), b"Subject: r\r\n\r\nid=r\r\n"), IO, File);
+    res!(fs::rename(ib.join("tmp/1900000000.Mx.ext"), ib.join("new/1900000000.Mx.ext")), IO, File);
+    res!(a.cmd("NOOP").await);
+    let f0 = res!(a.cmd("UID FETCH 2 (FLAGS)").await);
+    assert_eq!(flags_of(&f0, 2).as_deref(), Some("\\Recent"), "before: {:?}", f0);
+    res!(b.cmd("NOOP").await);
+    res!(b.cmd("UID STORE 2 +FLAGS (\\Answered)").await);
+    let f1 = res!(a.cmd("UID STORE 2 +FLAGS (\\Flagged)").await);
+    let f2 = res!(a.cmd("UID FETCH 2 (BODY[])").await);
+    let f3 = res!(a.cmd("UID FETCH 2 (FLAGS)").await);
+    let _ = fs::remove_dir_all(&root);
+    for (what, r) in [("STORE", &f1), ("FETCH BODY[]", &f2), ("FETCH", &f3)] {
+        // FETCH BODY[] shows its FLAGS after the literal, on a line of its own.
+        assert!(r.contains("\\Recent)"), "{} dropped \\Recent: {:?}", what, r);
+    }
+    Ok(())
+}
+
+/// System flags are case-insensitive (RFC 3501 §2.3.2): a client's `\seen` is `\Seen` in a
+/// STORE.
+#[tokio::test(flavor = "multi_thread")]
+async fn flag_names_match_in_any_case() -> Outcome<()> {
+    let (port, root) = res!(setup("flagcase", 1).await);
+    let mut a = res!(Sess::open(port).await);
+    res!(a.cmd("UID STORE 1 +FLAGS (\\seen \\FLAGGED)").await);
+    let f1 = res!(a.cmd("UID FETCH 1 (FLAGS)").await);
+    let _ = fs::remove_dir_all(&root);
+    assert_eq!(flags_of(&f1, 1).as_deref(), Some("\\Seen \\Flagged"), "STORE (\\seen \\FLAGGED): {:?}", f1);
+    Ok(())
+}
