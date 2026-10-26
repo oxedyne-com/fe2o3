@@ -98,6 +98,7 @@ pub mod prelude {
         NoExtension,
     };
     pub use crate::app::server::build_outbound_tls_client;
+    pub use oxedyne_fe2o3_net::tls::TrustConfig;
     pub use crate::app::tui::{
         run,
         run_with_extension,
