@@ -51,12 +51,6 @@
 			"text": "https://oxedyne.com",
 		},
 		{
-			"class": "host",
-			"count": (u64|1),
-			"file": "fe2o3_austenite/src/book.rs",
-			"text": "https://need2know.ai",
-		},
-		{
 			"class": "named",
 			"count": (u64|1),
 			"file": "fe2o3_austenite/src/book.rs",
@@ -1467,18 +1461,6 @@
 			"text": "Duration::from_millis(50)",
 		},
 		{
-			"class": "path",
-			"count": (u64|1),
-			"file": "fe2o3_o3db_sync/src/base/constant.rs",
-			"text": "config.jdat",
-		},
-		{
-			"class": "host",
-			"count": (u64|1),
-			"file": "fe2o3_o3db_sync/src/base/constant.rs",
-			"text": "127.0.0.1",
-		},
-		{
 			"class": "named",
 			"count": (u64|1),
 			"file": "fe2o3_o3db_sync/src/base/constant.rs",
@@ -1903,12 +1885,6 @@
 			"count": (u64|1),
 			"file": "fe2o3_pearlite/src/window.rs",
 			"text": "SIDE_MAX",
-		},
-		{
-			"class": "path",
-			"count": (u64|1),
-			"file": "fe2o3_sbj/src/bin/sbj.rs",
-			"text": "key.jdat",
 		},
 		{
 			"class": "path",
