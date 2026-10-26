@@ -87,6 +87,46 @@ fn test_lint_js_hits() -> Outcome<()> {
 }
 
 #[test]
+fn test_lint_js_throw_skip_stops_at_the_statement() -> Outcome<()> {
+    let scan = fixture("hit_throw.js");
+    assert_eq!(texts(&scan, Class::Host),
+        vec!["https://evil.example.com/x", "https://evil.example.com/y"]);
+    assert_eq!(scan.hits.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn test_lint_rust_concatenation_is_folded() -> Outcome<()> {
+    let scan = fixture("hit_concat.rs");
+    assert_eq!(texts(&scan, Class::Host),
+        vec!["https://api.evil.example.com", "https://api.evil.net"]);
+    assert_eq!(scan.hits.len(), 2);
+    assert_eq!(scan.hits[0].line, 2);
+    Ok(())
+}
+
+#[test]
+fn test_lint_js_concatenation_is_folded() -> Outcome<()> {
+    let scan = fixture("hit_concat.js");
+    assert_eq!(texts(&scan, Class::Host),
+        vec!["https://api.example.com", "wss://relay.example.net"]);
+    assert_eq!(scan.hits.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn test_lint_timing_arithmetic_new_and_const_args_hit() -> Outcome<()> {
+    let scan = fixture("hit_timing.rs");
+    assert_eq!(texts(&scan, Class::Timing), vec![
+        "Duration::from_secs(5 * 60)", "Duration::new(30, 0)", "Duration::from_secs(WAIT)",
+        "sleep(WAIT)",
+    ]);
+    assert_eq!(texts(&scan, Class::Named), vec!["RATE_TIMEOUT_SECS"]);
+    assert_eq!(scan.hits.len(), 5);
+    Ok(())
+}
+
+#[test]
 fn test_lint_comments_are_skipped() -> Outcome<()> {
     assert!(fixture("skip_comment.rs").hits.is_empty());
     Ok(())

@@ -339,6 +339,12 @@
 			"text": "/proc/self/status",
 		},
 		{
+			"class": "timing",
+			"count": (u64|1),
+			"file": "fe2o3_core/src/file.rs",
+			"text": "Duration::from_secs(10 * 60)",
+		},
+		{
 			"class": "named",
 			"count": (u64|1),
 			"file": "fe2o3_core/src/log/base.rs",
@@ -3613,6 +3619,12 @@
 			"count": (u64|1),
 			"file": "fe2o3_test/src/scratch.rs",
 			"text": "NAME_ATTEMPTS",
+		},
+		{
+			"class": "timing",
+			"count": (u64|1),
+			"file": "fe2o3_test/src/scratch.rs",
+			"text": "Duration::from_secs(60 * 60)",
 		},
 		{
 			"class": "named",

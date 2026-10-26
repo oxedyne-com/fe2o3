@@ -369,6 +369,7 @@ pub fn scan(src: &str, lang: Lang, file: &str) -> Outcome<Scan> {
     let mut out = Scan::default();
     let fixed = fixed_lines(src, &toks, &lines, file, &mut out.bad_fixed);
     let skip = skipped(&toks, lang);
+    let waits = numeric_consts(&toks, lang, &lines, &fixed, &skip);
 
     let mut i = 0;
     while i < toks.len() {
@@ -388,21 +389,29 @@ pub fn scan(src: &str, lang: Lang, file: &str) -> Outcome<Scan> {
                 continue;
             }
         }
-        if let Some((text, end)) = timing_call(&toks, i, lang) {
+        if let Some((text, end)) = timing_call(&toks, i, lang, &waits) {
             if !covered {
                 out.hits.push(Hit { file: file.to_string(), line, class: Class::Timing, text });
             }
             i = end;
             continue;
         }
-        if toks[i].kind == TokenKind::StringLit && !(lang == Lang::Js && is_module_specifier(&toks, i)) {
-            let content = string_content(&toks[i].text);
-            if let Some(class) = classify(content) {
-                let tline = lines.line_of(toks[i].span.start);
-                if !fixed.contains(&tline) {
-                    out.hits.push(Hit { file: file.to_string(), line: tline, class, text: content.to_string() });
+        // A string, folded with the literal pieces joined to it by `concat!` or `+`, so that a
+        // value split across pieces is classified whole. The hit is on the first piece's line.
+        let folded = match concat_macro(&toks, i, lang) {
+            Some(f) => Some(f),
+            None if toks[i].kind == TokenKind::StringLit
+                && !(lang == Lang::Js && is_module_specifier(&toks, i)) => Some(plus_chain(&toks, i, &skip)),
+            None => None,
+        };
+        if let Some((text, end)) = folded {
+            if let Some(class) = classify(&text) {
+                if !covered {
+                    out.hits.push(Hit { file: file.to_string(), line, class, text });
                 }
             }
+            i = end;
+            continue;
         }
         i += 1;
     }
@@ -554,18 +563,16 @@ fn skipped(toks: &[Token], lang: Lang) -> Vec<bool> {
                 TokenKind::Punct('(') | TokenKind::Punct('[') | TokenKind::Punct('{'))
         {
             span = Some((i, group_end(toks, i + 2)));
-        } else if lang == Lang::Js && (is_ident(t, "console") || is_keyword(t, "throw")) {
-            // `console.log(…)`, `throw new Error(…)`.
-            let mut j = i + 1;
-            while j < toks.len() && j < i + 5 && !is_punct(&toks[j], '(') {
-                j += 1;
+        } else if lang == Lang::Js && is_ident(t, "console") {
+            // `console.log(…)`.
+            if i + 3 < toks.len() && is_punct(&toks[i + 1], '.')
+                && JS_MESSAGE_CALLS.contains(&toks[i + 2].text.as_str()) && is_punct(&toks[i + 3], '(')
+            {
+                span = Some((i, group_end(toks, i + 3)));
             }
-            let ok = if is_ident(t, "console") {
-                i + 2 < toks.len() && JS_MESSAGE_CALLS.contains(&toks[i + 2].text.as_str())
-            } else {
-                true
-            };
-            if ok && j < toks.len() && is_punct(&toks[j], '(') {
+        } else if lang == Lang::Js && is_keyword(t, "throw") {
+            // `throw [new] X(…)`, where `(` is reached within the statement: `throw e;` is not a call.
+            if let Some(j) = throw_call_open(toks, i) {
                 span = Some((i, group_end(toks, j)));
             }
         } else if lang == Lang::Rust && is_keyword(t, "impl") {
@@ -594,6 +601,30 @@ fn skipped(toks: &[Token], lang: Lang) -> Vec<bool> {
         }
     }
     skip
+}
+
+/// The `(` of the error constructor in `throw [new] X.Y(…)` at `i`, if the statement is that call.
+/// The walk stops at `;`, `}` or a token that starts a new line, so it never leaves the statement.
+fn throw_call_open(toks: &[Token], i: usize) -> Option<usize> {
+    let mut j = i + 1;
+    if toks.get(j).map_or(false, |t| is_keyword(t, "new") || is_ident(t, "new")) {
+        j += 1;
+    }
+    let mut want_name = true;
+    while j < toks.len() {
+        let t = &toks[j];
+        if t.leading_trivia.iter().any(|v| matches!(v, Trivia::Newline)) {
+            return None;
+        }
+        match t.kind {
+            TokenKind::Ident if want_name   => want_name = false,
+            TokenKind::Punct('.') if !want_name => want_name = true,
+            TokenKind::Punct('(') if !want_name => return Some(j),
+            _                               => return None,
+        }
+        j += 1;
+    }
+    None
 }
 
 /// The types in this source that are config types: derive `FromDatMap`, or implement `Config`.
@@ -722,37 +753,123 @@ fn is_mutable_name(name: &str) -> bool {
     })
 }
 
-/// A timing call with a literal argument at `i`: its normalised text and the index past it.
-fn timing_call(toks: &[Token], i: usize, lang: Lang) -> Option<(String, usize)> {
+/// The consts in this source that a timing call may take as its argument: bound to literal-only
+/// arithmetic, named outside the mutable vocabulary (those are flagged as named already), and not
+/// marked `// fixed:`.
+fn numeric_consts(
+    toks:   &[Token],
+    lang:   Lang,
+    lines:  &LineIndex,
+    fixed:  &BTreeSet<usize>,
+    skip:   &[bool],
+)
+    -> BTreeSet<String>
+{
+    let mut out = BTreeSet::new();
+    for i in 0..toks.len() {
+        if skip[i] || fixed.contains(&lines.line_of(toks[i].span.start)) {
+            continue;
+        }
+        if let Some((name, end, _)) = const_item(toks, i, lang) {
+            if is_mutable_name(&name) {
+                continue;
+            }
+            let eq = match (i + 1..end).find(|&k| is_punct(&toks[k], '=')) {
+                Some(k) => k,
+                None    => continue,
+            };
+            let mut stop = end;
+            if stop > eq + 1 && is_punct(&toks[stop - 1], ';') {
+                stop -= 1;
+            }
+            if numeric_expr(&toks[eq + 1..stop]).is_some() {
+                out.insert(name);
+            }
+        }
+    }
+    out
+}
+
+/// Is a number token nonzero?
+fn nonzero(t: &Token) -> bool {
+    t.kind == TokenKind::Number && t.text.trim_start_matches(|c| c == '0' || c == '.' || c == '_')
+        .chars().next().map_or(false, |c| c.is_ascii_digit())
+}
+
+/// Literal-only arithmetic (`30`, `5 * 60`, `(1 << 4)`), as normalised text with whether any
+/// number in it is nonzero.
+fn numeric_expr(toks: &[Token]) -> Option<(String, bool)> {
+    if toks.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    let mut any = false;
+    let mut seen = false;
+    for t in toks {
+        let piece = match &t.kind {
+            TokenKind::Number => {
+                seen = true;
+                any = any || nonzero(t);
+                t.text.as_str()
+            }
+            TokenKind::Punct(c) if "*+-/%()".contains(*c)   => t.text.as_str(),
+            TokenKind::Operator(o) if o == "<<" || o == ">>" => t.text.as_str(),
+            _                                               => return None,
+        };
+        if !text.is_empty() && !text.ends_with('(') && piece != ")" {
+            text.push(' ');
+        }
+        text.push_str(piece);
+    }
+    if seen { Some((text, any)) } else { None }
+}
+
+/// The normalised text of a timing call's argument list `toks[open + 1..close]`, when every
+/// argument is literal-only arithmetic or a const of `waits`, and one at least is nonzero.
+fn timing_args(toks: &[Token], waits: &BTreeSet<String>) -> Option<String> {
+    let mut args = Vec::new();
+    let mut live = false;
+    for arg in toks.split(|t| is_punct(t, ',')) {
+        if arg.len() == 1 && arg[0].kind == TokenKind::Ident && waits.contains(&arg[0].text) {
+            live = true;
+            args.push(arg[0].text.clone());
+        } else {
+            let (text, any) = numeric_expr(arg)?;
+            live = live || any;
+            args.push(text);
+        }
+    }
+    if live { Some(args.join(", ")) } else { None }
+}
+
+/// A timing call with a literal argument at `i`: its normalised text and the index past it. The
+/// argument may be literal-only arithmetic or a same-file const in `waits`.
+fn timing_call(toks: &[Token], i: usize, lang: Lang, waits: &BTreeSet<String>) -> Option<(String, usize)> {
     let t = &toks[i];
     if t.kind != TokenKind::Ident {
         return None;
     }
-    let num = |k: usize| -> Option<&Token> {
-        let n = toks.get(k)?;
-        if n.kind == TokenKind::Number && n.text.trim_start_matches(|c| c == '0' || c == '.' || c == '_')
-            .chars().next().map_or(false, |c| c.is_ascii_digit())
-        {
-            Some(n)
-        } else {
-            None
+    // The arguments of the flat group at `open`, which must hold no nested call.
+    let flat = |open: usize| -> Option<(usize, String)> {
+        let end = group_end(toks, open);
+        if end < open + 2 || !is_punct(&toks[end - 1], ')') {
+            return None;
         }
+        Some((end, timing_args(&toks[open + 1..end - 1], waits)?))
     };
     match lang {
         Lang::Rust => {
-            if t.text == "Duration" && i + 5 < toks.len()
+            if t.text == "Duration" && i + 3 < toks.len()
                 && toks[i + 1].kind == TokenKind::Operator("::".to_string())
-                && toks[i + 2].text.starts_with("from_") && is_punct(&toks[i + 3], '(')
-                && is_punct(&toks[i + 5], ')')
+                && (toks[i + 2].text.starts_with("from_") || toks[i + 2].text == "new")
+                && is_punct(&toks[i + 3], '(')
             {
-                let n = num(i + 4)?;
-                return Some((fmt!("Duration::{}({})", toks[i + 2].text, n.text), i + 6));
+                let (end, args) = flat(i + 3)?;
+                return Some((fmt!("Duration::{}({})", toks[i + 2].text, args), end));
             }
-            if t.text == "sleep" && i + 3 < toks.len() && is_punct(&toks[i + 1], '(')
-                && is_punct(&toks[i + 3], ')')
-            {
-                let n = num(i + 2)?;
-                return Some((fmt!("sleep({})", n.text), i + 4));
+            if t.text == "sleep" && i + 1 < toks.len() && is_punct(&toks[i + 1], '(') {
+                let (end, args) = flat(i + 1)?;
+                return Some((fmt!("sleep({})", args), end));
             }
             None
         }
@@ -761,13 +878,84 @@ fn timing_call(toks: &[Token], i: usize, lang: Lang) -> Option<(String, usize)> 
                 && is_punct(&toks[i + 1], '(')
             {
                 let end = group_end(toks, i + 1);
-                // The last argument: a lone number after the final depth-1 comma.
-                if end >= 3 && is_punct(&toks[end - 1], ')') && is_punct(&toks[end - 3], ',') {
-                    let n = num(end - 2)?;
-                    return Some((fmt!("{}({})", t.text, n.text), end));
+                // The last argument, after the final depth-1 comma.
+                let mut depth = 0isize;
+                let mut comma = None;
+                for k in i + 1..end {
+                    match toks[k].kind {
+                        TokenKind::Punct('(') | TokenKind::Punct('[') | TokenKind::Punct('{') => depth += 1,
+                        TokenKind::Punct(')') | TokenKind::Punct(']') | TokenKind::Punct('}') => depth -= 1,
+                        TokenKind::Punct(',') if depth == 1 => comma = Some(k),
+                        _ => {}
+                    }
+                }
+                let c = comma?;
+                if end >= 1 && is_punct(&toks[end - 1], ')') {
+                    let args = timing_args(&toks[c + 1..end - 1], waits)?;
+                    return Some((fmt!("{}({})", t.text, args), end));
                 }
             }
             None
+        }
+    }
+}
+
+/// Rust `concat!(…)` at `i`: its literal arguments joined, and the index past it. Any other
+/// argument stands as `{}`, as in a format string.
+fn concat_macro(toks: &[Token], i: usize, lang: Lang) -> Option<(String, usize)> {
+    if lang != Lang::Rust || !is_ident(&toks[i], "concat") || i + 2 >= toks.len()
+        || !is_punct(&toks[i + 1], '!') || !is_punct(&toks[i + 2], '(')
+    {
+        return None;
+    }
+    let end = group_end(toks, i + 2);
+    let mut text = String::new();
+    let mut j = i + 3;
+    while j + 1 < end {
+        let t = &toks[j];
+        match t.kind {
+            TokenKind::StringLit                    => { text.push_str(string_content(&t.text)); j += 1; }
+            TokenKind::Number | TokenKind::CharLit  => { text.push_str(string_content(&t.text)); j += 1; }
+            TokenKind::Punct(',')                   => j += 1,
+            _ => {
+                // One non-literal argument, up to its depth-0 comma.
+                text.push_str("{}");
+                while j + 1 < end && !is_punct(&toks[j], ',') {
+                    j = match toks[j].kind {
+                        TokenKind::Punct('(') | TokenKind::Punct('[') | TokenKind::Punct('{') => {
+                            group_end(toks, j)
+                        }
+                        _ => j + 1,
+                    };
+                }
+            }
+        }
+    }
+    Some((text, end))
+}
+
+/// The string at `i` joined with the literals that follow it in a `+` chain, and the index past
+/// the last piece. A piece may sit in a one-argument call (`String::from("…")`) or take a
+/// no-argument method (`"…".to_string()`); the chain ends at the first operand that is not a literal.
+fn plus_chain(toks: &[Token], i: usize, skip: &[bool]) -> (String, usize) {
+    let mut text = string_content(&toks[i].text).to_string();
+    let mut j = i; // The current piece's string.
+    loop {
+        let mut k = j + 1;
+        if j >= 1 && is_punct(&toks[j - 1], '(') && toks.get(k).map_or(false, |t| is_punct(t, ')')) {
+            k += 1;
+        }
+        if k + 3 < toks.len() && is_punct(&toks[k], '.') && toks[k + 1].kind == TokenKind::Ident
+            && is_punct(&toks[k + 2], '(') && is_punct(&toks[k + 3], ')')
+        {
+            k += 4;
+        }
+        match (toks.get(k), toks.get(k + 1)) {
+            (Some(p), Some(n)) if is_punct(p, '+') && n.kind == TokenKind::StringLit && !skip[k + 1] => {
+                text.push_str(string_content(&n.text));
+                j = k + 1;
+            }
+            _ => return (text, j + 1),
         }
     }
 }
