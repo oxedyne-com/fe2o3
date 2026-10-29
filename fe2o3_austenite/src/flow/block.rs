@@ -1650,11 +1650,17 @@ impl Work {
 		}
 	}
 
-	/// Forgets the insertions of children already passed, which are never offered again.
+	/// Forgets the insertions of children already passed, which are never offered again. A breakable block
+	/// that spilled is not passed: `idx` moved beyond it when its first fragment was set, but its later
+	/// fragments still carry what it holds -- a footnote's marker among them -- so its insertions are kept
+	/// until the spill is done, or a footnote that split at its foot would be set again in full.
 	fn prune(&mut self) {
-		if self.skips.values().any(|at| *at < self.idx) {
-			let idx = self.idx;
-			Rc::make_mut(&mut self.skips).retain(|_, at| *at >= idx);
+		let live = match self.spill {
+			Some(_)	=> self.idx.saturating_sub(1),	// the spilled block is the child before `idx`
+			None	=> self.idx,
+		};
+		if self.skips.values().any(|at| *at < live) {
+			Rc::make_mut(&mut self.skips).retain(|_, at| *at >= live);
 		}
 	}
 }
