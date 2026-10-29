@@ -109,3 +109,14 @@ fn ext_round_trips_and_purge_leaves_nothing() -> Outcome<()> {
     assert!(st.map.borrow().is_empty());
     Ok(())
 }
+
+#[test]
+fn a_lock_entry_goes_when_its_last_holder_leaves() -> Outcome<()> {
+    let locks = oxedyne_fe2o3_o3db_sync::seqlog::SeqLocks::new();
+    let n = res!(locks.with("a:c", || {
+        locks.with("a", || Ok(7))
+    }));
+    assert_eq!(n, 7);
+    assert_eq!(res!(locks.len()), 0, "an idle key stays in the map");
+    Ok(())
+}

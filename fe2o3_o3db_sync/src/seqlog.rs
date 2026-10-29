@@ -21,6 +21,14 @@ use oxedyne_fe2o3_jdat::{
     map::create_dat_ordmap,
 };
 
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        Mutex,
+    },
+};
+
 /// The three point operations a log needs of a store.
 pub trait SeqStore {
     fn get(&self, key: &Dat) -> Outcome<Option<Dat>>;
@@ -249,5 +257,43 @@ impl SeqLog {
         }
         res!(store.delete(&self.index));
         Ok(())
+    }
+}
+
+/// One mutex per log key, held only while some caller is inside it, so the map is bounded
+/// by the logs in use rather than every log ever touched.
+#[derive(Default)]
+pub struct SeqLocks {
+    map: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl SeqLocks {
+    pub fn new() -> Self { Self::default() }
+
+    /// Run `f` holding the lock for `key`.
+    pub fn with<T, F>(&self, key: &str, f: F) -> Outcome<T>
+    where
+        F: FnOnce() -> Outcome<T>,
+    {
+        let one = {
+            let mut map = lock_mutex!(self.map);
+            map.entry(key.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+        };
+        let out = {
+            let _held = lock_mutex!(one);
+            f()
+        };
+        drop(one);
+        // The entry goes once the map holds the only handle: nobody waits on it.
+        let mut map = lock_mutex!(self.map);
+        if map.get(key).map(|m| Arc::strong_count(m) == 1).unwrap_or(false) {
+            map.remove(key);
+        }
+        out
+    }
+
+    /// How many keys are currently held or waited on.
+    pub fn len(&self) -> Outcome<usize> {
+        Ok(lock_mutex!(self.map).len())
     }
 }
