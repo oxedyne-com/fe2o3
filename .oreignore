@@ -68,3 +68,19 @@ fe2o3_text/tests/unicode_data/BidiCharacterTest.txt
 target/
 fe2o3_namex/namex_echo.jdat
 fe2o3_namex/namex_echo.json
+
+# Ore standard block (2026-10-30, D-20261030-11), less `tls/`, which would also
+# keep new files under fe2o3_net/src/tls/ out of the history.
+node_modules/
+__pycache__/
+.cache/
+.claude/
+.wt*/
+.env*
+*.key
+*.pem
+keys/
+
+# Ore keeps any directory named `tls` out as a secret by name, whatever this file
+# says; fe2o3_net's TLS source lives in one, so it is re-included by name.
+!fe2o3_net/src/tls/
