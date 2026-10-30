@@ -6,7 +6,8 @@
 //! value that must not sit in the file itself is written `{file:secret}` or
 //! `{env:VAR}` and is fetched when the file is read. [`resolve_root`] is the
 //! app-root rule every app shares, and [`path_at`] places one location value
-//! under the root it chose.
+//! under the root it chose. [`Roots`] composes the two for an app whose code,
+//! state and secrets live under separate roots.
 
 use crate::{
     prelude::*,
@@ -274,6 +275,84 @@ pub fn path_at(value: &str, root: &Path, home: Option<&Path>)
         Configuration, Invalid, Path));
     }
     Ok(base.normalise().join(tail).normalise().absolute().as_pathbuf())
+}
+
+/// An app's three roots: `app` for what it ships, `state` for what it writes, `secret` for its
+/// keys and `{file:}` references. Each is chosen by [`resolve_root`] and places its values by
+/// [`path_at`], so the three can sit apart (code, data and secrets on a server) or, by default,
+/// be one directory as before.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Roots {
+    app:    PathBuf,
+    state:  PathBuf,
+    secret: PathBuf,
+    home:   Option<PathBuf>, // Where a '~/' value goes, `HOME` unless replaced
+}
+
+impl Roots {
+    /// Choose the three roots from their specs. An empty `state` or `secret` spec is the app
+    /// root. A spec of `env` reads `<var_prefix>_APP_ROOT`, `<var_prefix>_STATE_ROOT` or
+    /// `<var_prefix>_SECRET_ROOT`. Every root must come out absolute.
+    pub fn resolve(app: &str, state: &str, secret: &str, var_prefix: &str)
+        -> Outcome<Self>
+    {
+        let app = res!(Self::root("app", app, var_prefix));
+        let state = if state.is_empty() {
+            app.clone()
+        } else {
+            res!(Self::root("state", state, var_prefix))
+        };
+        let secret = if secret.is_empty() {
+            app.clone()
+        } else {
+            res!(Self::root("secret", secret, var_prefix))
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from); // fixed: the POSIX home variable
+        Ok(Self { app, state, secret, home })
+    }
+
+    fn root(which: &str, spec: &str, var_prefix: &str)
+        -> Outcome<PathBuf>
+    {
+        let var = fmt!("{}_{}_ROOT", var_prefix, which.to_uppercase());
+        let root = res!(resolve_root(spec, &var));
+        if !root.is_absolute() {
+            return Err(err!(
+                "The {} root {:?} resolves to {:?}, which is not absolute; give an absolute \
+                path, './path', '~/path', '.' or 'env' (read from {}).",
+                which, spec, root, var;
+            Configuration, Invalid, Path));
+        }
+        Ok(root)
+    }
+
+    /// The same roots, with `~/` values placed under `home` (the passwd home, say) instead.
+    pub fn with_home(mut self, home: Option<PathBuf>) -> Self {
+        self.home = home;
+        self
+    }
+
+    pub fn app_root(&self)      -> &Path { &self.app }
+    pub fn state_root(&self)    -> &Path { &self.state }
+    pub fn secret_root(&self)   -> &Path { &self.secret }
+
+    pub fn app(&self, value: &str) -> Outcome<PathBuf> {
+        path_at(value, &self.app, self.home.as_deref())
+    }
+
+    pub fn state(&self, value: &str) -> Outcome<PathBuf> {
+        path_at(value, &self.state, self.home.as_deref())
+    }
+
+    pub fn secret(&self, value: &str) -> Outcome<PathBuf> {
+        path_at(value, &self.secret, self.home.as_deref())
+    }
+
+    /// Expand every reference in `dat` by [`resolve_dat`], reading `{file:}` under the secret
+    /// root.
+    pub fn resolve_secrets(&self, dat: &Dat) -> Outcome<Dat> {
+        resolve_dat(dat, &self.secret)
+    }
 }
 
 /// Where a `{file:` or `{file?:` reference sits in a string.
