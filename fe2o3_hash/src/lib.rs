@@ -38,6 +38,6 @@ pub mod hash;
 pub mod kdf;
 pub mod phash;
 pub mod pow;
-pub mod sha256;
+pub use oxedyne_fe2o3_core::sha256;
 
 pub const VERSION: SemVer = SemVer::new(0,0,1);

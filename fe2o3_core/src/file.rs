@@ -1,9 +1,12 @@
 use crate::{
     prelude::*,
+    byte::B32,
     path::{
         is_filename,
         NormalPath,
     },
+    sha256,
+    string::ToHexString,
 };
 
 use std::{
@@ -158,6 +161,30 @@ pub fn save_atomic(
         res!(f.write_all(data));
         Ok(())
     })
+}
+
+/// `text` under a first line `<prefix> sha256:<hex>`, the hex being the SHA-256 of every byte
+/// after that line. A generated file that is to be rewritten only while nobody has changed it
+/// carries one, and [`stamped`] answers whether it still matches, as dpkg does for a conffile.
+pub fn stamp(text: &str, prefix: &str) -> String {
+    fmt!("{} sha256:{}\n{}", prefix, B32(sha256::digest(text.as_bytes())).to_hex_string(), text)
+}
+
+/// Does `text` begin with a [`stamp`] line for `prefix`, and if so does it still match that line?
+/// `None` where the first line is not `prefix` and a space, and `Some(false)` where any byte has
+/// changed since the stamp was made, in the line or after it.
+pub fn stamped(text: &str, prefix: &str) -> Option<bool> {
+    let line = match text.split_once('\n') {
+        Some((line, _)) => line,
+        None            => text,
+    };
+    match line.strip_prefix(prefix) {
+        Some(tail) if tail.starts_with(' ') => {
+            let rest = text.get(line.len() + 1..).unwrap_or("");
+            Some(stamp(rest, prefix) == text)
+        },
+        _                                   => None,
+    }
 }
 
 /// As [`save_atomic`], with the bytes written by `write` into this call's own

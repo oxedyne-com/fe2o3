@@ -100,6 +100,7 @@ pub mod ord;
 pub mod path;
 pub mod prelude;
 pub mod rand;
+pub mod sha256;
 /// Hearing the operating system ask this process to stop.  There are no signals
 /// on `wasm32`, and the tokio feature that carries them must not reach that
 /// build.

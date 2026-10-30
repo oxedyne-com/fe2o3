@@ -5,8 +5,9 @@
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
-
-use oxedyne_fe2o3_core::prelude::*;
+//!
+//! 30 Oct 2026: moved here from `fe2o3_hash`, which re-exports it, so that `file::stamp` in
+//! this crate can digest a text without a cycle between the two crates.
 
 // The round constants: the first thirty two bits of the fractional parts of the cube roots of
 // the first sixty four primes.
@@ -202,7 +203,8 @@ pub fn digest(msg: &[u8]) -> [u8; DIGEST_LEN] {
 mod tests {
     use super::*;
 
-    use oxedyne_fe2o3_core::{
+    use crate::{
+        prelude::*,
         byte::B32,
         string::ToHexString,
     };
