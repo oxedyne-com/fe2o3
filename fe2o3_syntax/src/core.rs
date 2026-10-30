@@ -199,6 +199,12 @@ impl Syntax {
         }).collect()
     }
 
+    /// The message arguments in the order they were added, less the hidden ones: those help
+    /// and suggestions name.
+    pub fn shown_args(&self) -> Vec<&Arg> {
+        self.args_in_order().into_iter().filter(|a| !a.is_hidden()).collect()
+    }
+
     pub fn get_topic(&self, name: &str) -> Option<&Topic> {
         self.cfg.topics.iter().find(|t| t.name == name)
     }

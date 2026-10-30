@@ -33,6 +33,7 @@ pub struct ArgConfig {
     pub hyph1:  Option<String>,     // Short form switch.
     pub hyph2:  Option<String>,     // Long form switch.
     pub help:   Option<String>,     // Argument help text.
+    pub hidden: bool,               // Parsed, but left out of help and suggestions.
     pub prefs:  SyntaxPrefs,
 }
 
@@ -65,6 +66,16 @@ impl Arg {
         self.cfg.reqd = b;
         self
     }
+
+    /// Keeps the argument out of help and out of "did you mean" suggestions, while it is
+    /// still parsed: for a switch one program passes to another copy of itself.
+    pub fn hidden(mut self, b: bool) -> Self {
+        self.cfg.hidden = b;
+        self
+    }
+
+    /// Is the argument left out of help and suggestions?
+    pub fn is_hidden(&self) -> bool { self.cfg.hidden }
 
     pub fn canonical_name(&self) -> String {
         self.cfg.name.clone()

@@ -643,3 +643,50 @@ fn a_double_dash_ends_the_options() -> Outcome<()> {
     req!(back.get_rest().cloned(), Some(vec![dat!("--dry-run")]));
     Ok(())
 }
+
+// A hidden switch is parsed as any other, but neither help nor a suggestion names it, since only
+// the program itself passes it, to another copy of itself.
+#[test]
+fn a_hidden_switch_is_parsed_but_never_shown() -> Outcome<()> {
+    use oxedyne_fe2o3_syntax::help::{
+        Help,
+        HelpDisplayConfig,
+    };
+    let mut s = Syntax::from(SyntaxConfig { name: fmt!("x"), one_cmd: true, ..Default::default() });
+    let mut watch = Cmd::from(CmdConfig { name: fmt!("watch"), ..Default::default() });
+    watch = res!(watch.add_arg(res!(res!(Arg::new("list")).hyph2("list")).help("List the watched trees")));
+    watch = res!(watch.add_arg(res!(res!(Arg::new("step")).hyph2("step")).help("Take one step").hidden(true)));
+    s = res!(s.add_arg(res!(res!(Arg::new("quiet")).hyph2("quiet")).help("Say less")));
+    s = res!(s.add_arg(res!(res!(Arg::new("trace")).hyph2("trace")).hidden(true)));
+    let syn = res!(s.add_cmd(watch));
+    let s = SyntaxRef::new(syn.clone());
+    // Parsed.
+    let msg = res!(Msg::new(s.clone()).rx_argv(strs(&["watch", "--step"]), Some(argv::SIMILARITY_THRESHOLD)));
+    req!(res!(cmd(&msg, "watch")).has_arg("step"), true);
+    let msg = res!(Msg::new(s.clone()).rx_argv(strs(&["--trace", "watch"]), Some(argv::SIMILARITY_THRESHOLD)));
+    req!(msg.has_arg("trace"), true);
+    // Not shown in help.
+    let help = Help::new(HelpDisplayConfig::plain(80));
+    let pages = [
+        help.summary(&syn),
+        help.all(&syn),
+        res!(help.command_page(&syn, "watch")),
+    ];
+    for lines in &pages {
+        let text = lines.join("\n");
+        req!(text.contains("--step") || text.contains("Take one step") || text.contains("--trace"), false,
+            "{}", text);
+    }
+    req!(res!(help.command_page(&syn, "watch")).join("\n").contains("--list"), true);
+    // Not suggested, though it is the nearest name.
+    for (line, near) in [(["watch", "--stpe"], "--step"), (["--trcae", "watch"], "--trace")] {
+        match Msg::new(s.clone()).rx_argv(strs(&line), Some(argv::SIMILARITY_THRESHOLD)) {
+            Ok(_)   => return Err(err!("'{}' was accepted.", line.join(" "); Test, Unexpected)),
+            Err(e)  => {
+                let e = fmt!("{}", e);
+                req!(e.contains(near), false, "{}", e);
+            }
+        }
+    }
+    Ok(())
+}

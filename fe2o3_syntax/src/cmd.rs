@@ -121,6 +121,12 @@ impl Cmd {
         }).collect()
     }
 
+    /// The command's arguments in the order they were added, less the hidden ones: those help
+    /// and suggestions name.
+    pub fn shown_args(&self) -> Vec<&Arg> {
+        self.args_in_order().into_iter().filter(|a| !a.is_hidden()).collect()
+    }
+
     pub fn help<S: Into<String>>(mut self, s: S) -> Self {
         self.cfg.help = Some(s.into());
         self

@@ -188,7 +188,7 @@ impl Help {
             }
         }
         lines.push(String::new());
-        let margs = syntax.args_in_order();
+        let margs = syntax.shown_args();
         if !margs.is_empty() {
             lines.push(fmt!("OPTIONS:"));
             for arg in margs {
@@ -249,7 +249,7 @@ impl Help {
                 lines.append(&mut self.val_row(rest, "-- ", self.cfg.indent));
             }
         }
-        let args = cmd.args_in_order();
+        let args = cmd.shown_args();
         if !args.is_empty() {
             lines.push(fmt!("OPTIONS:"));
             for arg in args {
@@ -329,7 +329,7 @@ impl Help {
         lines.push(fmt!("USAGE:"));
         lines.append(&mut self.synopsis("", &self.generic_synopsis(syntax)));
         let sub = self.cfg.indent + 4;
-        let margs = syntax.args_in_order();
+        let margs = syntax.shown_args();
         if !cfg.vals.is_empty() || !margs.is_empty() {
             lines.push(fmt!("MSG:"));
             for val in &cfg.vals {
@@ -354,7 +354,7 @@ impl Help {
                 if let Some(rest) = &cmd.config().rest {
                     lines.append(&mut self.val_row(rest, "-- ", sub));
                 }
-                for arg in cmd.args_in_order() {
+                for arg in cmd.shown_args() {
                     lines.append(&mut self.arg_row(arg, sub));
                 }
             }
@@ -393,7 +393,7 @@ impl Help {
         for val in &cmd.config().vals {
             words.push(val.synopsis());
         }
-        for arg in cmd.args_in_order() {
+        for arg in cmd.shown_args() {
             words.push(Self::arg_synopsis(arg));
         }
         // The "--" itself is never required; the rest's arity says what must follow it.
@@ -421,7 +421,7 @@ impl Help {
         for val in &syntax.config().vals {
             words.push(val.synopsis());
         }
-        if !syntax.args.is_empty() {
+        if !syntax.shown_args().is_empty() {
             words.push(fmt!("[<options>]"));
         }
         if !syntax.cmds.is_empty() {

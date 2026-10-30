@@ -1210,11 +1210,11 @@ impl Msg {
             if dashy {
                 let mut names = Vec::new();
                 if let Some(cmd) = active_cmd {
-                    for arg in cmd.args_in_order() {
+                    for arg in cmd.shown_args() {
                         names.append(&mut arg.hyphenated_names());
                     }
                 }
-                for arg in syntax.args_in_order() {
+                for arg in syntax.shown_args() {
                     names.append(&mut arg.hyphenated_names());
                 }
                 let whose = match active_cmd {
