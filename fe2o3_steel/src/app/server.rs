@@ -115,9 +115,16 @@ impl AppShellContext {
     )
         -> Outcome<Evaluation>
     {
+        // The app root holds what Steel ships, the state root what it writes and the secret root
+        // its keys and `{file:}` references; with no state or secret root named, all three are
+        // the app root, as before.
+        let roots = res!(self.app_cfg.roots());
         let root_path = Path::new(&self.app_cfg.app_root)
             .normalise()
             .absolute();
+        let state_path = roots.state_root().normalise().absolute();
+        let secret_path = roots.secret_root().normalise().absolute();
+        crate::srv::admin::audit::set_dir(state_path.clone().as_pathbuf());
 
         info!("Reading server config...");
         let mut server_cfg = res!(ServerConfig::from_datmap(self.app_cfg.server_cfg.clone()));
@@ -129,7 +136,7 @@ impl AppShellContext {
         // secret, which is exactly the leak the file-homing rule exists to stop.
         if !server_cfg.health_token.is_empty() {
             server_cfg.health_token = res!(oxedyne_fe2o3_jdat::cfg::resolve(
-                &server_cfg.health_token, root_path.as_ref()));
+                &server_cfg.health_token, secret_path.as_ref()));
         }
         // A stamp with an unusable name or a relative path is a refusal to start, not a
         // warning: served past, it would be a field that is quietly never in the body, and an
@@ -214,7 +221,7 @@ impl AppShellContext {
         let (log_max, log_keep, log_age) = server_cfg.log_rotation();
         let (log_flush, log_durable) = server_cfg.log_flush();
         log_cfg.file = Some(FileConfig::new(
-            PathBuf::from(&root_path).join("www").join("logs"),
+            res!(roots.state(server_cfg.log_dir())),
             self.app_cfg.app_name.clone(),
             "log".to_string(),
             0,
@@ -267,7 +274,7 @@ impl AppShellContext {
         let mut db_routes: HashMap<String, Vec<ApiRoute>> = HashMap::new();
         for vh in &vhosts_cfg {
             let primary_lc = vh.primary_hostname().to_lowercase();
-            let db_dir = match res!(vh.get_db_dir(&root_path)) {
+            let db_dir = match res!(vh.get_db_dir(&state_path)) {
                 Some(p) => p,
                 None => {
                     info!("Vhost '{}' has no database configured, skipping.",
@@ -294,14 +301,14 @@ impl AppShellContext {
 
         if dev_mode {
             // Dev mode uses a single shared self-signed cert.
-            let tls_dir = res!(server_cfg.get_tls_dir(&root_path, true));
+            let tls_dir = res!(server_cfg.get_tls_dir(&state_path, true));
             let (cert_path, key_path) = server_cfg.tls_pair(&tls_dir);
             debug!("dev tls_dir = {:?}", tls_dir);
             if !cert_path.exists() || !key_path.exists() {
                 info!("Development certificates not found -- generating self-signed cert.");
                 res!(Certificate::new_dev(
                     &server_cfg,
-                    &root_path,
+                    &state_path,
                 ));
             }
         } else if acme_cfg.enabled {
@@ -309,7 +316,7 @@ impl AppShellContext {
                 acme_cfg.directory_url);
         } else {
             // Production without ACME: require per-vhost cert files on disk.
-            let tls_dir = res!(server_cfg.get_tls_dir(&root_path, false));
+            let tls_dir = res!(server_cfg.get_tls_dir(&state_path, false));
             for vh in &vhosts_cfg {
                 let primary = vh.primary_hostname();
                 let vh_dir = tls_dir.join(primary);
@@ -442,7 +449,7 @@ impl AppShellContext {
         // than walking `/proc`. Resident names were checked at validation.
         let host_sampler = crate::srv::admin::host_sampler::HostSampler::new_shared_for_health(
             res!(server_cfg.get_health_residents()),
-            Some(PathBuf::from(&root_path)),
+            Some(PathBuf::from(&state_path)),
         );
         let addr_guard = res!(crate::srv::admin::guard::new_shared_with(
             server_cfg.get_addr_guard_settings(),
@@ -479,7 +486,7 @@ impl AppShellContext {
         // is invoked via `rt.block_on` which makes the runtime
         // current for its body, so any tokio::spawn call from
         // there works.
-        let wallet_path_for_admin = Path::new(&self.app_cfg.app_root)
+        let wallet_path_for_admin = res!(self.app_cfg.wallet_dir(roots.app_root()))
             .join(app_const::WALLET_NAME);
         // Pull the signed-admin-login configuration off the primary
         // vhost, if any. A Steel process can host any number of
@@ -527,14 +534,14 @@ impl AppShellContext {
             Some(mut cfg) => {
                 // Expand `{file:...}` in the submission credential, so the
                 // password is not sitting in config.jdat in the clear.
-                res!(cfg.resolve_secrets(root_path.as_ref()));
+                res!(cfg.resolve_secrets(secret_path.as_ref()));
                 // Sign alerts with the host's own DKIM keys, when it has any.
                 // An unsigned message from a domain that signs everything else
                 // is what a spam filter is entitled to distrust, and the alert
                 // is the one message that has to arrive.
                 let dkim = match res!(server_cfg.get_mail()) {
                     Some(mail_cfg) => res!(
-                        crate::srv::server::load_dkim_signers(&mail_cfg, &root_path)),
+                        crate::srv::server::load_dkim_signers(&mail_cfg, &secret_path)),
                     None => Vec::new(),
                 };
                 let to = cfg.to.join(", ");
@@ -583,7 +590,7 @@ impl AppShellContext {
                     if let Some(tok) = &p.token {
                         if !tok.is_empty() {
                             p.token = Some(res!(oxedyne_fe2o3_jdat::cfg::resolve(
-                                tok, root_path.as_ref())));
+                                tok, secret_path.as_ref())));
                         }
                     }
                 }
@@ -622,7 +629,7 @@ impl AppShellContext {
         };
 
         // Any failure here disables the newsletter with a warning; see `newsletter_sender`.
-        let mail_sender = newsletter_sender(res!(server_cfg.get_mail_any()), &root_path);
+        let mail_sender = newsletter_sender(res!(server_cfg.get_mail_any()), &secret_path);
 
         let admin_state = res!(AdminState::new(
             self.wallet.clone(),
@@ -685,8 +692,8 @@ impl AppShellContext {
             // in-process handler config (e.g. a Stripe secret key).
             let mut api_routes = vh.api_routes.clone();
             for route in &mut api_routes {
-                res!(route.resolve_headers(root_path.as_ref()));
-                res!(route.resolve_config(root_path.as_ref()));
+                res!(route.resolve_headers(secret_path.as_ref()));
+                res!(route.resolve_config(secret_path.as_ref()));
             }
             if !api_routes.is_empty() {
                 info!("Vhost '{}': {} API route(s) configured.",
@@ -705,7 +712,7 @@ impl AppShellContext {
             // Resolve {file:} placeholders in webhook route config.
             let mut webhook_routes = vh.webhook_routes.clone();
             for route in &mut webhook_routes {
-                res!(route.resolve_config(root_path.as_ref()));
+                res!(route.resolve_config(secret_path.as_ref()));
             }
             if !webhook_routes.is_empty() {
                 info!("Vhost '{}': {} webhook route(s) configured.",
@@ -716,7 +723,7 @@ impl AppShellContext {
             // token reaches the sender resolved and never sits in the config in the clear.
             let mut publish = vh.publish.clone();
             if let Some(p) = &mut publish {
-                res!(p.resolve_secrets(root_path.as_ref()));
+                res!(p.resolve_secrets(secret_path.as_ref()));
             }
 
             let publish = publish.map(Arc::new);
@@ -826,7 +833,7 @@ impl AppShellContext {
             protocol,
             Some(traffic.clone()),
             Some(admin_state.clone()),
-        );
+        ).with_roots(state_path.clone(), secret_path.clone());
 
         let server = Server::new(server_context);
 

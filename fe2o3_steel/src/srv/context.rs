@@ -160,7 +160,9 @@ pub struct ServerContext<
     WSH:    WebSocketHandler,
 > {
     pub cfg:        ServerConfig,
-    pub root:       NormPathBuf,
+    pub root:       NormPathBuf,   // the app root: what Steel ships
+    pub state_root: NormPathBuf,   // what it writes: certificates, the mail spool
+    pub secret_root: NormPathBuf,  // its keys: the mail users file, DKIM
     pub vhost_dbs:  VhostDbs<UIDL, UID, DB>,
     pub protocol:   Protocol<WH, WSH>,
     pub traffic:    Option<Arc<TrafficRecorder>>,
@@ -185,6 +187,8 @@ impl<
         Self {
             cfg:            self.cfg.clone(),
             root:           self.root.clone(),
+            state_root:     self.state_root.clone(),
+            secret_root:    self.secret_root.clone(),
             vhost_dbs:      self.vhost_dbs.clone(),
             protocol:       self.protocol.clone(),
             traffic:        self.traffic.clone(),
@@ -220,6 +224,8 @@ impl<
     {
         Self {
             cfg,
+            state_root:     root.clone(),
+            secret_root:    root.clone(),
             root,
             vhost_dbs,
             db_specs,
@@ -229,6 +235,14 @@ impl<
             phantom3:   PhantomData,
             phantom4:   PhantomData,
         }
+    }
+
+    /// The same context, writing under `state_root` and reading keys under `secret_root`
+    /// rather than the app root.
+    pub fn with_roots(mut self, state_root: NormPathBuf, secret_root: NormPathBuf) -> Self {
+        self.state_root = state_root;
+        self.secret_root = secret_root;
+        self
     }
 
     pub fn db_for_vhost(

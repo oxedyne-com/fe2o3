@@ -185,7 +185,7 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
         _ => res!(LogLevel::from_str(constant::DEFAULT_LOG_LEVEL)),
     };
     log_cfg.file = Some(FileConfig::new(
-        PathBuf::from(cfg.app_root.clone()),
+        res!(cfg.roots()).state_root().to_path_buf(),
         cfg.app_name.clone(),
         constant::LOG_FILE_EXTENSION.to_string(),
         0,
@@ -241,7 +241,7 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
         saw_wallet && saw_migrate
     };
     if is_wallet_migrate {
-        res!(migrate_legacy_wallet_inline(&cfg_dir));
+        res!(migrate_legacy_wallet_inline(&res!(cfg.wallet_dir(&cfg_dir))));
         return Ok(());
     }
 
@@ -276,7 +276,7 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
     // │ provides no real defence against the threat model it was built for -- │
     // │ disk theft.                                                           │
     // └───────────────────────────────────────────────────────────────────────┘
-    let wallet_path = cfg_dir.join(constant::WALLET_NAME);
+    let wallet_path = res!(cfg.wallet_dir(&cfg_dir)).join(constant::WALLET_NAME);
     let (wallet, db_default_enc_key, unlocked_admin_name, unlocked_admin_scopes) =
     if wallet_path.is_file() {
         // Tighten a wallet that predates `save_secret` before loading it.

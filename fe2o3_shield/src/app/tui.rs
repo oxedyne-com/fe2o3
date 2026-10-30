@@ -146,7 +146,7 @@ pub fn run() -> Outcome<()> {
         _ => res!(LogLevel::from_str(constant::DEFAULT_LOG_LEVEL)),
     };
     log_cfg.file = Some(FileConfig::new(
-        PathBuf::from(cfg.app_root.clone()),
+        res!(cfg.roots()).state_root().to_path_buf(),
         cfg.app_name.clone(),
         constant::LOG_FILE_EXTENSION.to_string(),
         0,
@@ -167,7 +167,7 @@ pub fn run() -> Outcome<()> {
     // │ from stdin (echo off) with an optional `SHIELD_ADMIN_PASS` env var   │
     // │ override for non-interactive test flows.                              │
     // └───────────────────────────────────────────────────────────────────────┘
-    let wallet_path = cfg_dir.join(constant::WALLET_NAME);
+    let wallet_path = res!(cfg.wallet_dir(&cfg_dir)).join(constant::WALLET_NAME);
     let (wallet, db_default_enc_key) = if wallet_path.is_file() {
         let wallet = res!(Wallet::load(
             wallet_path,
@@ -261,7 +261,7 @@ pub fn run() -> Outcome<()> {
     // └───────────────────────────────────────────────────────────────────────────────────────────┘
 
     let app_root = Path::new(&cfg.app_root);
-    let db_root = app_root.join(constant::DB_DIR);
+    let db_root = res!(cfg.roots()).state_root().join(constant::DB_DIR);
 
 
     let syntax = res!(app_syntax::new_shell(

@@ -270,7 +270,8 @@ impl AppShellContext {
                     let base2x = base2x::HEMATITE64;
                     let b2x_sec = base2x.to_string(&enc_sec);
                     map.insert(dat!("enc_sec"), dat!(b2x_sec));
-                    let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
+                    let wallet_path = res!(self.app_cfg.wallet_dir(Path::new("./")))
+                        .join(app_const::WALLET_NAME);
                     {
                         let mut w = lock_write!(self.wallet);
                         if let Some(enc_sec_map) = w.enc_secs_mut().get_mut(name) {
@@ -820,13 +821,14 @@ impl AppShellContext {
             if msg_cmd.has_args() {
                 if res!(msg_cmd.has_only_arg("create-dev")) {
                     info!("Generating self-signed development certificates...");
+                    let state = res!(self.app_cfg.roots()).state_root().to_path_buf();
                     res!(Certificate::new_dev(
                         &ServerConfig::default(),
-                        &Path::new(&self.app_cfg.app_root).normalise().absolute(),
+                        &state.normalise().absolute(),
                     ));
                     return Ok(Evaluation::Output(fmt!(
                         "Self-signed development certificates generated in {}/tls/{}",
-                        self.app_cfg.app_root,
+                        state.display(),
                         srv_const::TLS_DIR_DEV,
                     )));
                 }
@@ -879,7 +881,7 @@ impl AppShellContext {
                     }
                     return Ok(Evaluation::Output(lines.join("\n")));
                 } else if res!(msg_cmd.has_only_arg("renew")) {
-                    let root = Path::new(&self.app_cfg.app_root).normalise().absolute();
+                    let root = res!(self.app_cfg.roots()).state_root().normalise().absolute();
                     let cache_dir = res!(acme_cfg.get_cache_dir(&root));
                     info!("Clearing ACME cache at {:?} to force renewal on next start-up.",
                         cache_dir);

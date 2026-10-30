@@ -16,13 +16,22 @@ use oxedyne_fe2o3_jdat::{
 
 use std::{
     collections::BTreeMap,
-    path::Path,
+    path::{
+        Path,
+        PathBuf,
+    },
 };
 
 
 #[derive(Clone, Debug, Eq, PartialEq, FromDatMap, ToDatMap)]
 pub struct AppConfig {
     pub app_root:           String,
+    // Where Steel writes (databases, logs, certificates, spool) and where its keys and `{file:}`
+    // references sit. Each takes a `cfg::Roots` spec, and an empty one is the app root.
+    #[optional]
+    pub state_root:         String,
+    #[optional]
+    pub secret_root:        String,
     pub app_name:           String,
     pub app_human_name:     String,
     pub app_description:    String,
@@ -35,7 +44,7 @@ pub struct AppConfig {
 
 impl Config for AppConfig {
     /// Resolves the app root by `cfg::resolve_root`, with `STEEL_APP_ROOT` for `env`, and
-    /// creates it.
+    /// creates it; then checks the state and secret roots and creates the state root.
     fn check_and_fix(&mut self) -> Outcome<()> {
         self.app_root = res!(cfg::resolve_root(&self.app_root, "STEEL_APP_ROOT")) // fixed: the documented env var name
             .to_string_lossy()
@@ -75,6 +84,14 @@ impl Config for AppConfig {
             }
         }
 
+        let roots = res!(self.roots());
+        if !self.state_root.is_empty() {
+            // The secret root is not created: it is the operator's, owned by root.
+            if let Err(e) = std::fs::create_dir_all(roots.state_root()) {
+                return Err(err!(e, "Creating the state root {:?}.", roots.state_root();
+                    IO, Path, Create));
+            }
+        }
         Ok(())
     }
 }
@@ -83,6 +100,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             app_root:           String::new(),
+            state_root:         String::new(),
+            secret_root:        String::new(),
             app_name:           fmt!("steel"),
             app_human_name:     fmt!("Steel Server"),
             app_description:    fmt!("A Hematite Steel Server app."),
@@ -96,6 +115,23 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+
+    /// The app, state and secret roots, with `STEEL_APP_ROOT`, `STEEL_STATE_ROOT` and
+    /// `STEEL_SECRET_ROOT` for `env`.
+    pub fn roots(&self) -> Outcome<cfg::Roots> {
+        cfg::Roots::resolve(&self.app_root, &self.state_root, &self.secret_root,
+            "STEEL") // fixed: the documented env var prefix
+    }
+
+    /// Where the wallet sits: the secret root when one is named, otherwise beside the config,
+    /// so a second instance's `--config` still brings its own.
+    pub fn wallet_dir(&self, cfg_dir: &Path) -> Outcome<PathBuf> {
+        if self.secret_root.is_empty() {
+            Ok(cfg_dir.to_path_buf())
+        } else {
+            Ok(res!(self.roots()).secret_root().to_path_buf())
+        }
+    }
 
     pub fn new() -> Outcome<Self> {
         let mut cfg = Self::default();

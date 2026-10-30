@@ -196,7 +196,7 @@ impl AppShellContext {
                     res!(switch_to_logger_console::<StdoutLoggerConsole<_>>());
                     let mut log_cfg = log_get_config!();
                     log_cfg.file = Some(FileConfig::new(
-                        PathBuf::from(&root_path).join("www").join("logs"),
+                        res!(self.app_cfg.roots()).state_root().join("www").join("logs"), // fixed: Shield's log layout under its state root
                         self.app_cfg.app_name.clone(),
                         "log".to_string(),
                         0,
@@ -290,7 +290,8 @@ impl AppShellContext {
                     } else {
                         self.wallet.enc_secs_mut().insert(name.clone(), dat!(map));
                     }
-                    let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
+                    let wallet_path = res!(self.app_cfg.wallet_dir(Path::new("./")))
+                        .join(app_const::WALLET_NAME);
                     res!(self.wallet.save_secret(
                         &wallet_path, "  ", Some(EncoderConfig::<(), ()>::default()),
                     ));

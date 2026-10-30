@@ -84,6 +84,14 @@ pub const ADMIN_ANON: &str = "(anon)"; // unauthenticated visitor, e.g. a failed
 
 /// Failures are logged at `warn!` and swallowed. The audit log is never allowed
 /// to break the action it is recording.
+/// Where the audit log is written from now on: the state root, set once at start. Until set,
+/// it is the working directory, as before.
+pub fn set_dir(dir: PathBuf) {
+    let _ = AUDIT_DIR.set(dir); // A second start in one process keeps the first directory.
+}
+
+static AUDIT_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 pub fn append(admin: &str, verb: &str, result: &str, detail: &str) {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -93,7 +101,8 @@ pub fn append(admin: &str, verb: &str, result: &str, detail: &str) {
         "{} {} {} {} {}\n",
         secs, admin, verb, result, detail,
     );
-    let path: PathBuf = Path::new("./").join(ADMIN_AUDIT_LOG_NAME);
+    let dir = AUDIT_DIR.get().map(PathBuf::as_path).unwrap_or(Path::new("./"));
+    let path: PathBuf = dir.join(ADMIN_AUDIT_LOG_NAME);
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)

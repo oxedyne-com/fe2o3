@@ -2695,7 +2695,10 @@ pub struct ServerConfig {
 
     // --- Server bind and policy (shared) ------------------------------------
     pub log_level:                      String,         // used by the server once running
-    // The log file's rotation, under `<app root>/www/logs/`. A file past `log_file_max_bytes`
+    // The server log's directory under the state root; empty means `./www/logs`, as before.
+    #[optional]
+    pub log_dir_rel:                    String,
+    // The log file's rotation, under `log_dir_rel`. A file past `log_file_max_bytes`
     // is archived as `<app>.log.<n>.gz`; at most `log_files_max` files are kept, the live one
     // included, and none older than `log_max_age_days`. Zero -- the default for each -- means
     // 1 MiB, every archive, and any age, as before these fields.
@@ -2995,6 +2998,7 @@ impl Default for ServerConfig {
 
         Self {
             tls_dir_rel:                    fmt!("./tls"),
+            log_dir_rel:                    String::new(),
             tls_cert_file:                  fmt!("fullchain.pem"),
             tls_key_file:                   fmt!("privkey.pem"),
             ca_bundle_paths:                TrustConfig::default().ca_bundle_paths,
@@ -3050,6 +3054,15 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+
+    /// The server log's directory, relative to the state root.
+    pub fn log_dir(&self) -> &str {
+        if self.log_dir_rel.is_empty() {
+            constant::LOG_DIR_REL_DEFAULT
+        } else {
+            &self.log_dir_rel
+        }
+    }
 
     /// The log file's size limit, the archives kept beside the live file, and their age limit,
     /// with each zero field read as its default (see `log_file_max_bytes`).

@@ -55,6 +55,7 @@ pub const SALT8: [u8; 8] = [
 // TLS certificate locations.
 pub const TLS_DIR_DEV:                      &'static str = "dev";
 pub const TLS_DIR_PROD:                     &'static str = "prod";
+pub const LOG_DIR_REL_DEFAULT:              &'static str = "./www/logs"; // the server log under the state root, as before
 
 // Credits:
 // Image: https://ascii-generator.site/

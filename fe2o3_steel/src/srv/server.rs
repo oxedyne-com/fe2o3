@@ -126,7 +126,7 @@ impl<
 
         let loaded = res!(Certificate::load(
             &self.context.cfg,
-            &self.context.root,
+            &self.context.state_root,
             dev_mode,
         ));
 
@@ -350,7 +350,8 @@ impl<
                 let tally = self.context.admin_state.as_ref().map(|a| a.mail.clone());
                 if let Err(e) = spawn_mail_listeners(
                     &mail_cfg,
-                    &self.context.root,
+                    &self.context.state_root,
+                    &self.context.secret_root,
                     bounded_acceptor.clone(),
                     &self.context.cfg.server_address,
                     tally,
@@ -646,7 +647,8 @@ impl<
 
 async fn spawn_mail_listeners(
     cfg:            &MailConfig,
-    root:           &oxedyne_fe2o3_core::path::NormPathBuf,
+    state_root:     &oxedyne_fe2o3_core::path::NormPathBuf,
+    secret_root:    &oxedyne_fe2o3_core::path::NormPathBuf,
     tls_acceptor:   BoundedTlsAcceptor,
     bind_address:   &str,
     tally:          Option<Arc<ListenerTally>>,
@@ -667,8 +669,9 @@ async fn spawn_mail_listeners(
         }
     }
 
-    // Resolve paths under the app root.
-    let resolve = |rel: &str| -> PathBuf {
+    // Resolve a path under a root: the spool under the state root, the users file under the
+    // secret root, and an absolute path as itself.
+    let resolve = |root: &oxedyne_fe2o3_core::path::NormPathBuf, rel: &str| -> PathBuf {
         let p = Path::new(rel);
         if p.is_absolute() {
             p.to_path_buf()
@@ -682,7 +685,7 @@ async fn spawn_mail_listeners(
         return Err(err!(
             "MailConfig: maildir_root must be set."; Invalid, Input, Missing));
     } else {
-        resolve(&cfg.maildir_root)
+        resolve(state_root, &cfg.maildir_root)
     };
     if !maildir_root.exists() {
         if let Err(e) = std::fs::create_dir_all(&maildir_root) {
@@ -698,20 +701,20 @@ async fn spawn_mail_listeners(
         return Err(err!(
             "MailConfig: users_file_rel must be set."; Invalid, Input, Missing));
     }
-    let users = PasswdFileUserStore::new(resolve(&cfg.users_file_rel));
+    let users = PasswdFileUserStore::new(resolve(secret_root, &cfg.users_file_rel));
 
     // Outbound spool.
     if cfg.spool_dir_rel.is_empty() {
         return Err(err!(
             "MailConfig: spool_dir_rel must be set."; Invalid, Input, Missing));
     }
-    let spool = res!(OutboundSpool::new(resolve(&cfg.spool_dir_rel)));
+    let spool = res!(OutboundSpool::new(resolve(state_root, &cfg.spool_dir_rel)));
 
     // DKIM signers. Shared with the alerter, which signs its own mail: an
     // unsigned alert from a domain that signs everything else is exactly the
     // message a spam filter is entitled to distrust, and it is the one message
     // that has to arrive.
-    let dkim = res!(load_dkim_signers(cfg, root));
+    let dkim = res!(load_dkim_signers(cfg, secret_root));
 
     let handler = AppMailHandler {
         store:          store.clone(),
