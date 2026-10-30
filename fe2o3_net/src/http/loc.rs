@@ -51,25 +51,18 @@ pub struct HttpLocator {
     pub frag:  String,
 }
 
+/// The request target as it was given: the path, the raw query verbatim and the fragment.  The
+/// parsed `data` is a reading of the query, never its source, so a signed or ordered query
+/// reaches the wire byte for byte (REL-1i: rebuilding it from `data` wrote `"ts"=(u32|..)`).
 impl fmt::Display for HttpLocator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Write the path
         ok!(write!(f, "{}", self.path.as_str()));
-
-        if !self.data.is_empty() {
-            ok!(write!(f, "?"));
-            for (i, (k, v)) in self.data.iter().enumerate() {
-                ok!(write!(f, "{}={}", k, v));
-                if i < self.data.len() - 1 {
-                    ok!(write!(f, "&"));
-                }
-            }
+        if !self.query.is_empty() {
+            ok!(write!(f, "?{}", self.query));
         }
-
         if !self.frag.is_empty() {
             ok!(write!(f, "#{}", self.frag));
         }
-
         Ok(())
     }
 }
@@ -90,12 +83,11 @@ impl HttpLocator {
     fn parse_locator_string(path: &str)
         -> Outcome<(RequestPath, DaticleMap, BTreeMap<String, String>, String, String)>
     {
-        let mut split = path.split('?');
-        let path = RequestPath::new(split.next().unwrap_or_default().to_string());
-        let rest = split.next().unwrap_or_default();
-        let mut split_rest = rest.split('#');
-        let query_string = split_rest.next().unwrap_or_default();
-        let fragment = split_rest.next().unwrap_or_default();
+        // The fragment starts at the first `#`, and the query at the first `?` before it; a `?`
+        // inside the query is part of it (RFC 3986 §3.4).
+        let (target, fragment) = path.split_once('#').unwrap_or((path, ""));
+        let (path, query_string) = target.split_once('?').unwrap_or((target, ""));
+        let path = RequestPath::new(path.to_string());
         let (map, text) = res!(Self::parse_query_string(query_string));
 
         // Retain the raw query verbatim as well as the parsed map: a proxy must
