@@ -872,7 +872,8 @@ fn child_transform(elem: &Elem, ctx: &Transform) -> Transform {
 	}
 }
 
-/// Parses an SVG `transform` list -- `translate`, `matrix`, `scale`, `rotate` -- into one affine map.
+/// Parses an SVG `transform` list -- `translate`, `matrix`, `scale`, `rotate`, `skewX`, `skewY` -- into one
+/// affine map.
 ///
 /// The list reads left to right and the leftmost function is the outermost, so a point is carried by the
 /// rightmost first. Folding each function on the left of the running result builds exactly that order.
@@ -930,6 +931,9 @@ fn function(name: &str, a: &[f32]) -> Transform {
 		"matrix" if a.len() >= 6 => Transform {
 			a: a[0], b: a[1], c: a[2], d: a[3], e: a[4], f: a[5],
 		},
+		// A shear by an angle in degrees: skewX slides x by tan(a) y, skewY slides y by tan(a) x.
+		"skewX" if !a.is_empty() => Transform { c: a[0].to_radians().tan(), ..Transform::IDENTITY },
+		"skewY" if !a.is_empty() => Transform { b: a[0].to_radians().tan(), ..Transform::IDENTITY },
 		_ => Transform::IDENTITY,
 	}
 }
