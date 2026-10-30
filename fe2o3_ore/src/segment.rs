@@ -737,6 +737,19 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 		Ok(())
 	}
 
+	/// As [`Writer::push`], with the record's bytes put into `out` in place of
+	/// being kept, so a caller streaming a batch to a file holds one record at a
+	/// time rather than the batch. `out` is cleared first; the count goes on.
+	pub fn push_into(&mut self, entry: &Entry, out: &mut Vec<u8>)
+		-> Outcome<()>
+	{
+		res!(self.admits(entry));
+		out.clear();
+		res!(self.frame_into(entry, out));
+		self.count += 1;
+		Ok(())
+	}
+
 	/// Writes a run of entries as one packed record.
 	///
 	/// What goes under the compressor is the framing those entries would have had

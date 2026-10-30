@@ -266,10 +266,36 @@ fn replace_file<F>(
             "Could not rename {:?} over {:?}.", tmp, path;
             File, IO, Write));
     }
+    // After the rename `path` holds the new bytes, so a failure here is not a
+    // failure to save: it is a save whose survival of a power cut is unconfirmed,
+    // and it is tagged apart so that a caller can say so rather than "nothing was
+    // saved".
     #[cfg(unix)]
-    res!(sync_parent_dir(path));
+    if let Err(e) = sync_after_rename(path) {
+        sweep_tmps(path, &name, sweep_age, sweep_legacy);
+        return Err(err!(e,
+            "{:?} was replaced, but its directory could not be fsynced, so a power cut \
+            could still bring back what it held before.", path;
+            File, IO, Write, Unconfirmed));
+    }
     sweep_tmps(path, &name, sweep_age, sweep_legacy);
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    // Makes the directory fsync after the rename fail, for this thread's saves.
+    static FAIL_DIR_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The directory fsync of [`replace_file`], which a test can make fail.
+#[cfg(unix)]
+fn sync_after_rename(path: &Path) -> Outcome<()> {
+    #[cfg(test)]
+    if FAIL_DIR_SYNC.with(|f| f.get()) {
+        return Err(err!("A test made the directory fsync after the rename fail."; Test, IO));
+    }
+    sync_parent_dir(path)
 }
 
 /// The permission bits `path` holds now, if it is there to be asked.
@@ -2474,4 +2500,39 @@ mod tests {
             "{} kills of a plain write left no torn file, so the kill tests cannot tell \
             a torn file from a whole one.", KILLS_CAP; Test, Missing))
     }
+
+    /// A directory fsync that fails after the rename is tagged `Unconfirmed`: the
+    /// file holds the new bytes, and only their survival of a power cut is in doubt.
+    /// A failure before the rename is not, and leaves the file as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_dir_fsync_failure_after_the_rename_says_recorded() -> Outcome<()> {
+        let dir = std::env::temp_dir().join(fmt!("fe2o3_dir_sync_{}", std::process::id()));
+        res!(fs::create_dir_all(&dir));
+        let path = dir.join("f");
+        res!(fs::write(&path, b"old"));
+        FAIL_DIR_SYNC.with(|f| f.set(true));
+        let saved = save_atomic_with(&path, SaveMode::Keep, |f| {
+            res!(f.write_all(b"new"));
+            Ok(())
+        });
+        FAIL_DIR_SYNC.with(|f| f.set(false));
+        let e = match saved {
+            Ok(())  => return Err(err!("The failed directory fsync was not reported."; Test, Missing)),
+            Err(e)  => e,
+        };
+        assert!(e.tags().contains(&ErrTag::Unconfirmed), "not tagged apart: {}", e);
+        assert_eq!(res!(fs::read(&path)), b"new".to_vec(), "the rename did not stand");
+        let early = save_atomic_with(&path, SaveMode::Keep, |_| {
+            Err(err!("A write that fails."; Test, IO))
+        });
+        match early {
+            Ok(())  => return Err(err!("A failed write was not reported."; Test, Missing)),
+            Err(e)  => assert!(!e.tags().contains(&ErrTag::Unconfirmed), "{}", e),
+        }
+        assert_eq!(res!(fs::read(&path)), b"new".to_vec(), "a failed write changed the file");
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
 }
