@@ -20,9 +20,14 @@ use syn::{
 };
 
 
-#[proc_macro_derive(FromDatMap, attributes(skip, optional, rename))]
+/// Field attributes: `#[skip]`, `#[optional]` and `#[rename(name = "KEY")]`.  The struct
+/// attribute `#[deny_unknown_keys]` refuses a map holding a key no field reads, naming it, so a
+/// mistyped key in a config is an error rather than a silent default.  A note (a comment on a
+/// line of its own) is not a key.  Without it, such keys are ignored.
+#[proc_macro_derive(FromDatMap, attributes(skip, optional, rename, deny_unknown_keys))]
 pub fn from_datmap(input: TokenStream) -> TokenStream {
     let ast = syn::parse_macro_input!(input as DeriveInput);
+    let deny_unknown = ast.attrs.iter().any(|a| a.path.is_ident("deny_unknown_keys"));
 
     let fields = match ast.data {
         syn::Data::Struct(st) => st.fields,
@@ -90,6 +95,36 @@ pub fn from_datmap(input: TokenStream) -> TokenStream {
     let name = &ast.ident;
     let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
 
+    let unknown_check = match deny_unknown {
+        false => quote! {},
+        true => {
+            let known = keys.clone();
+            let type_name = name.to_string();
+            quote! {
+                const KNOWN: &[&str] = &[#(#known),*];
+                for (k, v) in map.iter() {
+                    if Dat::is_note_entry(k, v) {
+                        continue;
+                    }
+                    let found = match k {
+                        Dat::Str(s) => KNOWN.contains(&s.as_str()),
+                        _ => false,
+                    };
+                    if !found {
+                        let key = match k {
+                            Dat::Str(s) => s.clone(),
+                            other => ::std::format!("{:?}", other),
+                        };
+                        return Err(err!(
+                            "from_datmap: The key '{}' is not one of {}'s: {}.",
+                            key, #type_name, KNOWN.join(", ");
+                        Invalid, Input, Unknown));
+                    }
+                }
+            }
+        },
+    };
+
     let tokens = quote! {
 
         impl #impl_generics FromDatMap for #name #ty_generics #where_clause {
@@ -97,6 +132,7 @@ pub fn from_datmap(input: TokenStream) -> TokenStream {
             fn from_datmap(
                 mut map: ::std::collections::BTreeMap<Dat, Dat>,
             ) -> Outcome<#name> {
+                #unknown_check
                 let mut st = #name::default();
 
                 #(
