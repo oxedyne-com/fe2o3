@@ -260,7 +260,6 @@ pub fn run() -> Outcome<()> {
     // │ technically part of the shell.                                                            │
     // └───────────────────────────────────────────────────────────────────────────────────────────┘
 
-    let app_root = Path::new(&cfg.app_root);
     let db_root = res!(cfg.roots()).state_root().join(constant::DB_DIR);
 
 

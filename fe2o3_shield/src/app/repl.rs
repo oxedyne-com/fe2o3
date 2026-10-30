@@ -64,10 +64,7 @@ use oxedyne_fe2o3_namex::InNamex;
 
 use std::{
     collections::BTreeMap,
-    path::{
-        Path,
-        PathBuf,
-    },
+    path::Path,
 };
 
 use secrecy::{
@@ -186,9 +183,6 @@ impl AppShellContext {
                 // Control
                 "exit"      => evals.push(res!(cmds::exit_shell(&shell_cfg.exit_msg))),
                 "server"    => {
-                    let root_path = Path::new(&self.app_cfg.app_root)
-                        .normalise() // Now a NormPathBuf.
-                        .absolute();
                     // ┌───────────────────────┐
                     // │ Reconfigure logging.  │
                     // └───────────────────────┘
