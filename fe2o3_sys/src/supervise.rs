@@ -402,12 +402,7 @@ impl Supervised {
             Some(d) => d,
             None    => return Ok(Ended { status, oom_kills: 0 }),
         };
-        let events = dir.join("memory.events");
-        let text = res!(io(fs::read_to_string(&events), "read", &events));
-        let oom_kills = text.lines()
-            .find_map(|l| l.strip_prefix("oom_kill "))
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(0);
+        let oom_kills = res!(oom_kills(&dir.join("memory.events")));
         res!(remove_cgroup(&dir));
         Ok(Ended { status, oom_kills })
     }
@@ -516,5 +511,222 @@ impl RestartBudget {
             })
             .count();
         self.max.saturating_sub(used)
+    }
+}
+
+// ── A transient scope of the user manager ───────────────────────────────────────────────────────
+
+/// The byte a child of ours writes first, before it reads anything, so that its supervisor knows
+/// the program itself started and did not fail on the way in.
+pub const HELLO: u8 = b'\x06';	// fixed: ASCII ACK, one byte that no frame begins with
+
+/// Writes [`HELLO`] on the standard output, the first thing a [`Scoped`] child of ours does.
+pub fn say_hello() -> Outcome<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    res!(out.write_all(&[HELLO]), IO, Write);
+    res!(out.flush(), IO, Write);
+    Ok(())
+}
+
+/// How many processes the kernel has killed for want of memory in the cgroup whose `memory.events`
+/// is at `events`, counted over the cgroup and everything below it.
+pub fn oom_kills(events: &Path) -> Outcome<u64> {
+    let text = res!(io(fs::read_to_string(events), "read", events));
+    Ok(text.lines()
+        .find_map(|l| l.strip_prefix("oom_kill "))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0))
+}
+
+fn systemctl_user(args: &[&str]) -> Outcome<String> {
+    let out = res!(Command::new("systemctl").arg("--user").args(args).output(), IO, System);
+    match out.status.success() {
+        true    => Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+        false   => Err(err!("`systemctl --user {}` failed: {}", args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim(); IO, System)),
+    }
+}
+
+/// Does the user manager have the `memory` controller, without which a scope's `MemoryMax` is
+/// silently ignored? Fails where there is no user manager to ask.
+pub fn manager_has_memory() -> Outcome<bool> {
+    let cg = res!(systemctl_user(&["show", "-p", "ControlGroup", "--value"]));
+    if cg.is_empty() {
+        return Ok(false);
+    }
+    let at = Path::new(CGROUP_FS).join(cg.trim_start_matches('/')).join("cgroup.controllers");
+    let text = res!(io(fs::read_to_string(&at), "read", &at));
+    Ok(text.split_whitespace().any(|c| c == "memory"))
+}
+
+/// Starts the user manager's slice `slice` (a full name, `x.slice`) and answers the path of its
+/// `memory.events`.
+pub fn start_slice(slice: &str) -> Outcome<PathBuf> {
+    res!(systemctl_user(&["start", slice]));
+    let cg = res!(systemctl_user(&["show", "-p", "ControlGroup", "--value", slice]));
+    if cg.is_empty() {
+        return Err(err!("The slice {} was started and has no cgroup.", slice; Missing, System));
+    }
+    let at = Path::new(CGROUP_FS).join(cg.trim_start_matches('/')).join("memory.events");
+    match at.is_file() {
+        true    => Ok(at),
+        false   => Err(err!("The slice {} has no {}, so its memory is not accounted.", slice,
+            at.display(); Missing, System)),
+    }
+}
+
+/// A child to be run in a transient scope of the user manager, `systemd-run --user --scope`, in a
+/// slice whose `memory.events` counts the kills of every scope in it. The scope is capped at
+/// `memory_max` with no swap, and its name is `<prefix>-<pid>-<n>-<random>`, so that neither a
+/// failed scope left loaded nor a reused process number can collide with it. The scope execs in
+/// place, so the child keeps the caller's standard streams and environment, and lives in the
+/// manager's cgroup, not the caller's: a child outlives its caller's death and stop.
+///
+/// The child is to write [`HELLO`] first; [`ScopedChild::hello`] reads it, which tells a scope that
+/// never started (no bus, a name taken, a property refused) from the program's own failure.
+#[derive(Debug)]
+pub struct Scoped {
+    cmd:    Command,
+    unit:   String,
+    events: PathBuf,
+}
+
+impl Scoped {
+    /// The command that runs `program` in a scope named after `prefix`, in `slice` (a full name),
+    /// whose `memory.events` is at `events`. Each call within a process takes the next `n`.
+    pub fn new<P: AsRef<OsStr>>(program: P, prefix: &str, slice: &str, events: &Path, memory_max: u64)
+        -> Outcome<Self>
+    {
+        use std::sync::atomic::{
+            AtomicU64,
+            Ordering,
+        };
+        static N: AtomicU64 = AtomicU64::new(0);
+        res!(check_name(prefix));
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let random = oxedyne_fe2o3_core::rand::Rand::rand_u32();
+        let unit = format!("{}-{}-{}-{:08x}", prefix, std::process::id(), n, random);
+        let mut cmd = Command::new("systemd-run");
+        cmd.args(["--user", "--scope", "--quiet"])
+            .arg(format!("--slice={}", slice))
+            .arg(format!("--unit={}", unit))
+            .arg("-p").arg(format!("MemoryMax={}", memory_max))
+            .arg("-p").arg("MemorySwapMax=0")
+            .arg("--")
+            .arg(program)
+            .env(SUPERVISOR_ENV, format!("{}", std::process::id()));
+        Ok(Self { cmd, unit, events: events.to_path_buf() })
+    }
+
+    /// The command, for the program's further arguments, environment and streams. Its arguments
+    /// so far are `systemd-run`'s; those added are the program's.
+    pub fn command(&mut self) -> &mut Command {
+        &mut self.cmd
+    }
+
+    /// The scope's name, without `.scope`.
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+
+    /// Reads the slice's count, then starts the child.
+    pub fn spawn(mut self) -> Outcome<ScopedChild> {
+        let before = res!(oom_kills(&self.events));
+        match self.cmd.spawn() {
+            Ok(child)   => Ok(ScopedChild { child, unit: self.unit, events: self.events, before }),
+            Err(e)      => Err(err!("`systemd-run` could not be started for the scope {}: {}.",
+                self.unit, e; IO, System)),
+        }
+    }
+}
+
+/// A child started in its scope.
+#[derive(Debug)]
+pub struct ScopedChild {
+    child:  Child,
+    unit:   String,
+    events: PathBuf,
+    before: u64,
+}
+
+/// How a scoped child ended, with what its slice's counter says of the kills while it ran.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScopeEnded {
+    pub status: ExitStatus,
+    pub kills:  SliceKills,
+}
+
+/// What the slice's `oom_kill` count did while one child ran.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SliceKills {
+    None,           // the count held
+    Rose(u64),      // the kernel killed this many processes in the slice for memory
+    Unknown,        // the count fell, so the slice was started again, or it could not be read
+}
+
+impl ScopeEnded {
+    /// Was the child itself killed for memory: a kill in the slice, and the child ended by a
+    /// signal? A kill with the child ending cleanly was of another scope in the slice.
+    pub fn oom_killed(&self) -> bool {
+        use std::os::unix::process::ExitStatusExt;
+        matches!(self.kills, SliceKills::Rose(_)) && self.status.signal().is_some()
+    }
+}
+
+impl ScopedChild {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+
+    /// The child, for its standard streams.
+    pub fn child(&mut self) -> &mut Child {
+        &mut self.child
+    }
+
+    /// Reads one byte from the child's piped standard output, and answers whether it was
+    /// [`HELLO`]. `false` means the program never started, and the child's end is
+    /// `systemd-run`'s own; its reason is on the standard error.
+    pub fn hello(&mut self) -> Outcome<bool> {
+        use std::io::Read;
+        let out = match self.child.stdout.as_mut() {
+            Some(o) => o,
+            None    => return Err(err!("The scope {}'s standard output is not piped, so its hello \
+                cannot be read.", self.unit; Invalid, Input)),
+        };
+        let mut byte = [0u8; 1];
+        loop {
+            match out.read(&mut byte) {
+                Ok(0)   => return Ok(false),
+                Ok(_)   => return Ok(byte[0] == HELLO),
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e)  => return Err(err!("The scope {}'s hello could not be read: {}.",
+                    self.unit, e; IO, Read)),
+            }
+        }
+    }
+
+    /// Waits for the child to end and reads the slice's count again. The kernel completes the
+    /// count before the killed child's wait returns, so the read cannot race. A scope that failed
+    /// is reset, best effort, since the manager keeps it loaded until it is.
+    pub fn wait(mut self) -> Outcome<ScopeEnded> {
+        let status = match self.child.wait() {
+            Ok(s)   => s,
+            Err(e)  => return Err(err!("Cannot wait on the scope {}: {}.", self.unit, e;
+                IO, System)),
+        };
+        let kills = match oom_kills(&self.events) {
+            Ok(after) if after == self.before   => SliceKills::None,
+            Ok(after) if after > self.before    => SliceKills::Rose(after - self.before),
+            _                                   => SliceKills::Unknown,
+        };
+        if !status.success() {
+            let _ = systemctl_user(&["reset-failed", &format!("{}.scope", self.unit)]);
+        }
+        Ok(ScopeEnded { status, kills })
     }
 }

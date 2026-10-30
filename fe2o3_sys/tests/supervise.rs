@@ -25,6 +25,9 @@ use oxedyne_fe2o3_sys::supervise::{
     Confined,
     Limit,
     RestartBudget,
+    Scoped,
+    SliceKills,
+    start_slice,
 };
 
 use std::{
@@ -245,5 +248,66 @@ fn a_child_that_arms_its_parents_death_dies_with_its_parent() -> Outcome<()> {
     let ended = res!(parent.wait());
     assert!(!ended.status.success());
     res!(until("the child to die with its parent", || !child.running()));
+    Ok(())
+}
+
+// ── Scoped ──────────────────────────────────────────────────────────────────────────────────────
+
+const TEST_SLICE: &str = "fe2o3_scope_test.slice";  // underscores: a dash would nest it in another slice
+
+/// The test slice's counter, or `None`, said, where there is no user manager with memory.
+fn test_slice() -> Option<PathBuf> {
+    match oxedyne_fe2o3_sys::supervise::manager_has_memory() {
+        Ok(true)    => (),
+        other       => {
+            eprintln!("skipped: no user manager with the memory controller ({:?})", other);
+            return None;
+        },
+    }
+    match start_slice(TEST_SLICE) {
+        Ok(p)   => Some(p),
+        Err(e)  => {
+            eprintln!("skipped: the test slice could not be started: {}", e);
+            None
+        },
+    }
+}
+
+/// **A scoped child over its cap is reported as memory, from the slice's counter.** A shell says
+/// hello, then holds about 100 MB in a variable under a 32 MiB cap.
+#[test]
+fn a_scoped_child_over_its_cap_is_reported_as_memory() -> Outcome<()> {
+    let events = match test_slice() {
+        Some(p) => p,
+        None    => return Ok(()),
+    };
+    let mut scoped = res!(Scoped::new("sh", "fe2o3-scope-test", TEST_SLICE, &events, 32 << 20));
+    scoped.command()
+        .args(["-c", "printf '\\006'; x=$(head -c 100000000 /dev/zero | tr '\\0' a); echo ${#x}"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped());
+    let mut child = res!(scoped.spawn());
+    assert!(res!(child.hello()), "the shell's hello was not read");
+    let ended = res!(child.wait());
+    assert!(ended.oom_killed(), "not reported as memory: {:?}", ended);
+    Ok(())
+}
+
+/// **A scope that never started is told by its missing hello.** The slice named is a service, which
+/// `systemd-run` refuses; the program never runs, and no kill is counted.
+#[test]
+fn a_scope_that_never_started_says_no_hello() -> Outcome<()> {
+    let events = match test_slice() {
+        Some(p) => p,
+        None    => return Ok(()),
+    };
+    let mut scoped = res!(Scoped::new("sh", "fe2o3-scope-test", "not-a-slice.service", &events, 32 << 20));
+    scoped.command().args(["-c", "printf '\\006'"]).stdin(Stdio::null()).stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = res!(scoped.spawn());
+    assert!(!res!(child.hello()), "a hello from a scope that was refused");
+    let ended = res!(child.wait());
+    assert!(!ended.status.success());
+    assert_eq!(ended.kills, SliceKills::None);
     Ok(())
 }
