@@ -16,7 +16,6 @@ use oxedyne_fe2o3_core::{
             StdoutLoggerConsole,
         },
     },
-    path::NormalPath,
 };
 use oxedyne_fe2o3_crypto::{
     enc::EncryptionScheme,
