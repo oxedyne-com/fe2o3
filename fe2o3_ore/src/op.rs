@@ -2345,7 +2345,7 @@ pub(crate) mod tests {
 	#[test]
 	fn op_dat_round_trip() -> Outcome<()> {
 		for op in samples() {
-			let back = res!(Op::from_dat(&op.to_dat()));
+			let back = res!(Op::from_dat(&res!(op.to_dat())));
 			assert_eq!(op, back, "variant {}", op.name());
 		}
 		Ok(())
@@ -2374,7 +2374,7 @@ pub(crate) mod tests {
 			};
 			let back = res!(Op::decode_all(&res!(op.encode())));
 			match back {
-				Op::Splice { insert, .. } => assert_eq!(insert.len(), len),
+				Op::Splice { insert, .. } => assert_eq!(insert.len(), len as u64),
 				other => return Err(err!(
 					"Expected a Splice, got {}.", other.name(); Test, Mismatch)),
 			}
@@ -2475,7 +2475,7 @@ pub(crate) mod tests {
 		assert!(stray.check_placement().is_err());
 		assert!(stray.validate().is_err());
 		// And the decoder refuses it rather than leaving it to a later stage.
-		assert!(Op::from_dat(&stray.to_dat()).is_err());
+		assert!(Op::from_dat(&res!(stray.to_dat())).is_err());
 		assert!(Op::decode_all(&res!(stray.encode())).is_err());
 		// Either origin alone satisfies the rule.
 		for (left, right) in [
@@ -2484,7 +2484,7 @@ pub(crate) mod tests {
 		] {
 			let op = Op::Splice { left, right, remove: Vec::new(), insert: b"x".to_vec().into() };
 			res!(op.check_placement());
-			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+			assert_eq!(op, res!(Op::from_dat(&res!(op.to_dat()))));
 		}
 		// A splice that only removes places nothing and needs no origin.
 		let del = Op::Splice {
@@ -2494,11 +2494,11 @@ pub(crate) mod tests {
 			insert:	Vec::new().into(),
 		};
 		res!(del.validate());
-		assert_eq!(del, res!(Op::from_dat(&del.to_dat())));
+		assert_eq!(del, res!(Op::from_dat(&res!(del.to_dat()))));
 		// A move always places what it names, so it always names where.
 		let nowhere = Op::Move { src: vec![range(1, 0, 4)], left: None, right: None };
 		assert!(nowhere.check_placement().is_err());
-		assert!(Op::from_dat(&nowhere.to_dat()).is_err());
+		assert!(Op::from_dat(&res!(nowhere.to_dat())).is_err());
 		// Even a move of nothing, since the rule is about the operation and not
 		// about how much it happens to carry.
 		let empty = Op::Move { src: Vec::new(), left: None, right: None };
@@ -2512,7 +2512,7 @@ pub(crate) mod tests {
 		let vacant = Op::Note { on: Vec::new(), text: b"about what?".to_vec() };
 		assert!(vacant.check_note().is_err());
 		assert!(vacant.validate().is_err());
-		assert!(Op::from_dat(&vacant.to_dat()).is_err());
+		assert!(Op::from_dat(&res!(vacant.to_dat())).is_err());
 		assert!(Op::decode_all(&res!(vacant.encode())).is_err());
 		// A list of empty ranges names nothing either.
 		let hollow = Op::Note {
@@ -2520,14 +2520,14 @@ pub(crate) mod tests {
 			text:	b"still nothing".to_vec(),
 		};
 		assert!(hollow.check_note().is_err());
-		assert!(Op::from_dat(&hollow.to_dat()).is_err());
+		assert!(Op::from_dat(&res!(hollow.to_dat())).is_err());
 		// One byte is enough.
 		let real = Op::Note {
 			on:		vec![range(1, 3, 3), range(2, 0, 1)],
 			text:	Vec::new(),
 		};
 		res!(real.validate());
-		assert_eq!(real, res!(Op::from_dat(&real.to_dat())));
+		assert_eq!(real, res!(Op::from_dat(&res!(real.to_dat()))));
 		// And every other variant is unaffected by the rule.
 		for op in samples() {
 			if matches!(op, Op::Note { .. }) {
@@ -2646,7 +2646,7 @@ pub(crate) mod tests {
 			assert_eq!(op.placed_len(), 0);
 			assert!(!op.is_move());
 			res!(op.validate());
-			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+			assert_eq!(op, res!(Op::from_dat(&res!(op.to_dat()))));
 			assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))));
 		}
 		// The arity is exact, as it is everywhere else, and the mode is checked
@@ -2686,7 +2686,7 @@ pub(crate) mod tests {
 		assert_eq!(plain.code(), CODE_MARK);
 		assert_eq!(plain.code(), 4, "the wire code a mark has always had");
 		assert_eq!(plain.name(), "Mark");
-		assert_eq!(plain.to_dat(), Dat::List(vec![
+		assert_eq!(res!(plain.to_dat()), Dat::List(vec![
 			Dat::U8(CODE_MARK),
 			Dat::Str(fmt!("v1")),
 		]));
@@ -2705,13 +2705,13 @@ pub(crate) mod tests {
 			assert_eq!(op.code(), CODE_MARK_TIMED, "body {:?} time {:?}", body, time);
 			assert_eq!(op.code(), 9);
 			assert_eq!(op.name(), "Mark", "one variant, so one name");
-			match op.to_dat() {
+			match res!(op.to_dat()) {
 				Dat::List(v) => assert_eq!(v.len(), 4, "the long spelling is four"),
 				other => return Err(err!(
 					"A Mark encodes to {:?}.", other; Test, Mismatch)),
 			}
 			// And back, through both round trips.
-			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+			assert_eq!(op, res!(Op::from_dat(&res!(op.to_dat()))));
 			assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))));
 		}
 		// A code 4 mark and a code 9 mark decode to the same variant.
@@ -2824,7 +2824,7 @@ pub(crate) mod tests {
 			assert_eq!(op.code(), code, "variant {}", name);
 			assert_eq!(op.name(), name);
 			res!(op.validate());
-			assert_eq!(*op, res!(Op::from_dat(&op.to_dat())));
+			assert_eq!(*op, res!(Op::from_dat(&res!(op.to_dat()))));
 			assert_eq!(*op, res!(Op::decode_all(&res!(op.encode()))));
 		}
 		// The codes are pinned: they are on the wire.
@@ -2942,7 +2942,7 @@ pub(crate) mod tests {
 			mark:	None,
 			time:	7,
 		};
-		let dat = op.to_dat();
+		let dat = res!(op.to_dat());
 		let listed = match &dat {
 			Dat::List(v) => v,
 			other => return Err(err!(
@@ -2974,7 +2974,7 @@ pub(crate) mod tests {
 			let op = Op::Reverts { undone: undone.clone() };
 			res!(op.check_reverts());
 			res!(op.validate());
-			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+			assert_eq!(op, res!(Op::from_dat(&res!(op.to_dat()))));
 			assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))));
 		}
 		// Naming nothing, out of order, and repeated, on the way into the structure
@@ -2989,7 +2989,7 @@ pub(crate) mod tests {
 			let op = Op::Reverts { undone: undone.clone() };
 			assert!(op.check_reverts().is_err(), "list {:?}", undone);
 			assert!(op.validate().is_err());
-			assert!(Op::from_dat(&op.to_dat()).is_err());
+			assert!(Op::from_dat(&res!(op.to_dat())).is_err());
 			assert!(Op::decode_all(&res!(op.encode())).is_err());
 		}
 		// An empty list is refused for saying nothing, not for being out of order,
@@ -3133,7 +3133,7 @@ pub(crate) mod tests {
 			right:	None,
 		};
 		for back in [
-			res!(Op::from_dat(&op.to_dat())),
+			res!(Op::from_dat(&res!(op.to_dat()))),
 			res!(Op::decode_all(&res!(op.encode()))),
 		] {
 			match back {
@@ -3166,7 +3166,7 @@ pub(crate) mod tests {
 				right,
 			};
 			assert_eq!(op, res!(Op::decode_all(&res!(op.encode()))));
-			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
+			assert_eq!(op, res!(Op::from_dat(&res!(op.to_dat()))));
 			// A splice carrying the same origins spells them the same way.
 			let sp = Op::Splice {
 				left,
@@ -3175,7 +3175,7 @@ pub(crate) mod tests {
 				insert:	b"x".to_vec().into(),
 			};
 			assert_eq!(sp, res!(Op::decode_all(&res!(sp.encode()))));
-			assert_eq!(sp, res!(Op::from_dat(&sp.to_dat())));
+			assert_eq!(sp, res!(Op::from_dat(&res!(sp.to_dat()))));
 		}
 		Ok(())
 	}
@@ -3288,7 +3288,7 @@ pub(crate) mod tests {
 		let head = res!(Header::new(oid(5, 7), vec![oid(1, 1), oid(2, 2)]));
 		for op in samples() {
 			let rec = Record::new(head.clone(), op);
-			assert_eq!(rec, res!(Record::from_dat(&rec.to_dat())));
+			assert_eq!(rec, res!(Record::from_dat(&res!(rec.to_dat()))));
 			assert_eq!(rec, res!(Record::decode_all(&res!(rec.encode()))));
 		}
 		assert!(Record::from_dat(&Dat::U8(1)).is_err());
@@ -3537,7 +3537,7 @@ pub(crate) mod tests {
 			assert!(op.regions().is_empty(), "a restoration kills nothing");
 			assert_eq!(op.restored(), Some(was), "the range {}", was);
 			// And it survives the wire, which is where a reader meets it.
-			assert_eq!(res!(Op::from_dat(&op.to_dat())).restored(), Some(was));
+			assert_eq!(res!(Op::from_dat(&res!(op.to_dat()))).restored(), Some(was));
 		}
 		// A copy of nothing, and a copy of the wrong length, are refused: a
 		// restoration puts back what was there.

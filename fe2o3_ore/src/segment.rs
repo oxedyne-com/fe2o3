@@ -1737,7 +1737,7 @@ mod tests {
 		let (mut entries, _) = res!(sealed());
 		entries.extend(res!(bare()));
 		for entry in &entries {
-			assert_eq!(&res!(Entry::from_dat(&entry.to_dat())), entry);
+			assert_eq!(&res!(Entry::from_dat(&res!(entry.to_dat()))), entry);
 		}
 		let odd = Dat::List(vec![Dat::U8(9), Dat::List(Vec::new())]);
 		assert!(Entry::from_dat(&odd).is_err());
@@ -2653,7 +2653,7 @@ mod tests {
 		let mut writer: Writer<Fold, 0> = Writer::new(&Head::new(None), Fold, [0u8; 0]);
 		assert_eq!(writer.version(), VERSION);
 		res!(writer.push(&entry));
-		let back = res!(Op::from_dat(&amended.to_dat()));
+		let back = res!(Op::from_dat(&res!(amended.to_dat())));
 		assert_eq!(back, amended, "an amendment did not survive its own encoding");
 		Ok(())
 	}
@@ -3270,7 +3270,7 @@ mod tests {
 		let (_, got) = res!(decode(&bytes, Fold, [0u8; 0]));
 		assert_eq!(got, mixed);
 		for (i, entry) in got.iter().enumerate() {
-			assert_eq!(&res!(Entry::from_dat(&entry.to_dat())), entry,
+			assert_eq!(&res!(Entry::from_dat(&res!(entry.to_dat()))), entry,
 				"entry {} did not round trip as a daticle", i);
 			assert_eq!(res!(entry.id()), res!(entries[i].id()),
 				"entry {} is not the operation it was made from", i);
@@ -3419,7 +3419,7 @@ mod tests {
 			let veiled = res!(bare.veil(&cipher));
 			for (form, entry) in [("bare", bare), ("sealed", sealed), ("veiled", veiled)] {
 				let said = res!(entry.dat_len());
-				let wrote = res!(entry.to_dat().to_bytes(Vec::new())).len();
+				let wrote = res!(res!(entry.to_dat()).to_bytes(Vec::new())).len();
 				assert_eq!(said, wrote,
 					"{}, {}: measured at {} bytes and encoded to {}", name, form, said, wrote);
 			}

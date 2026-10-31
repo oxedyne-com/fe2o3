@@ -394,7 +394,7 @@ mod tests {
 		let env = res!(Envelope::seal_record(&s, &rec));
 		let relabelled = res!(sample_record(oid(4, 18)));
 		let forged = Envelope::new(
-			res!(relabelled.to_dat().to_bytes(Vec::new())),
+			res!(res!(relabelled.to_dat()).to_bytes(Vec::new())),
 			env.signer().to_vec(),
 			env.signature().to_vec(),
 		);
@@ -413,7 +413,7 @@ mod tests {
 			rec.op.clone(),
 		);
 		let forged = Envelope::new(
-			res!(reparented.to_dat().to_bytes(Vec::new())),
+			res!(res!(reparented.to_dat()).to_bytes(Vec::new())),
 			env.signer().to_vec(),
 			env.signature().to_vec(),
 		);

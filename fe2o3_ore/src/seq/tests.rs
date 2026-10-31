@@ -833,7 +833,7 @@ fn the_wire_vocabulary_renders_the_same_repository() -> Outcome<()> {
 		let rec = Record::new(head.clone(), op.clone());
 		let back = res!(Record::decode_all(&res!(rec.encode())));
 		assert_eq!(rec, back);
-		assert_eq!(res!(Record::from_dat(&rec.to_dat())), rec);
+		assert_eq!(res!(Record::from_dat(&res!(rec.to_dat()))), rec);
 		res!(replayed.apply_record(&back));
 	}
 	let repo = res!(replayed.render());

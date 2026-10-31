@@ -560,7 +560,7 @@ impl Message {
 		-> Outcome<Vec<Self>>
 	{
 		let id = res!(entry.id());
-		let whole = res!(entry.to_dat().to_bytes(Vec::new()));
+		let whole = res!(res!(entry.to_dat()).to_bytes(Vec::new()));
 		if whole.len() > PART_MAX {
 			return Err(err!(
 				"The operation {} encodes to {} bytes, and a carrier will put back \
@@ -947,7 +947,7 @@ mod tests {
 	#[test]
 	fn messages_round_trip() -> Outcome<()> {
 		for msg in res!(samples()) {
-			assert_eq!(res!(Message::from_dat(&msg.to_dat())), msg, "as a daticle");
+			assert_eq!(res!(Message::from_dat(&res!(msg.to_dat()))), msg, "as a daticle");
 			let bytes = res!(msg.encode());
 			assert_eq!(res!(Message::decode(&bytes)), msg, "as bytes");
 			assert_eq!(&bytes[..MAGIC.len()], &MAGIC);
@@ -979,7 +979,7 @@ mod tests {
 			},
 		);
 		let entry = Entry::Sealed(res!(Envelope::seal_record(&signer, &rec)));
-		let was = res!(entry.to_dat().to_bytes(Vec::new()));
+		let was = res!(res!(entry.to_dat()).to_bytes(Vec::new()));
 		let pieces = res!(Message::part(&entry, 4_096));
 		assert!(pieces.len() > 4, "an entry of {} bytes made {} pieces", was.len(), pieces.len());
 
@@ -1004,7 +1004,7 @@ mod tests {
 				"A completed run yielded {:?} rather than a send.", other; Test, Mismatch)),
 		};
 		assert_eq!(back.len(), 1);
-		assert_eq!(res!(back[0].to_dat().to_bytes(Vec::new())), was,
+		assert_eq!(res!(res!(back[0].to_dat()).to_bytes(Vec::new())), was,
 			"the entry that came back is not the entry that went, byte for byte");
 		// And the signature over those bytes still verifies.
 		match &back[0] {
@@ -1030,7 +1030,7 @@ mod tests {
 			res!(Header::new(oid(9, 2), vec![oid(9, 1)])),
 			Op::Mark { name: fmt!("wide"), body: Some(vec![0x7eu8; 30_000]), time: None },
 		));
-		let was = res!(entry.to_dat().to_bytes(Vec::new()));
+		let was = res!(res!(entry.to_dat()).to_bytes(Vec::new()));
 		for cap in [96usize, 200, 1_024, 4_096, 65_536, 1 << 20] {
 			let pieces = res!(Message::part(&entry, cap));
 			let mut seen: Vec<u8> = Vec::new();
@@ -1110,7 +1110,7 @@ mod tests {
 		assert!(parts.absorb(rubbish[1].clone()).is_err(), "bytes that are not an entry");
 
 		// Pieces that make an entry which is not the one they claim.
-		let whole = res!(entry.to_dat().to_bytes(Vec::new()));
+		let whole = res!(res!(entry.to_dat()).to_bytes(Vec::new()));
 		let mut parts = Parts::new();
 		assert!(parts.absorb(Message::Part {
 			id:		oid(7, 7),
@@ -1125,7 +1125,7 @@ mod tests {
 			Message::Part { id: oid(5, 2), seq: 3, total: 3, bytes: vec![1] },
 			Message::Part { id: oid(5, 2), seq: 0, total: 2, bytes: Vec::new() },
 		] {
-			assert!(Message::from_dat(&wrong.to_dat()).is_err(),
+			assert!(Message::from_dat(&res!(wrong.to_dat())).is_err(),
 				"a part {:?} was accepted", wrong);
 		}
 		Ok(())
@@ -1172,7 +1172,7 @@ mod tests {
 			res!(Header::new(oid(5, 2), vec![oid(5, 1)])),
 			Op::Mark { name: fmt!("five"), body: None, time: None },
 		));
-		let mut not_text = res!(mark.to_dat().to_bytes(Vec::new()));
+		let mut not_text = res!(res!(mark.to_dat()).to_bytes(Vec::new()));
 		let at = res!(not_text.windows(4).position(|w| w == b"five").ok_or_else(|| err!(
 			"The name of the mark is not in its own encoding."; Test, Missing)));
 		not_text[at] = 0xff;
@@ -1213,7 +1213,7 @@ mod tests {
 			res!(Header::new(oid(8, 2), vec![oid(8, 1)])),
 			Op::Mark { name: fmt!("eight"), body: Some(vec![0x21u8; 4_000]), time: None },
 		));
-		let was = res!(entry.to_dat().to_bytes(Vec::new()));
+		let was = res!(res!(entry.to_dat()).to_bytes(Vec::new()));
 		let pieces = res!(Message::part(&entry, 512));
 		assert!(pieces.len() >= 4);
 
@@ -1239,7 +1239,7 @@ mod tests {
 				"The rerun yielded {:?} rather than a send.", other; Test, Mismatch)),
 		};
 		assert_eq!(back.len(), 1, "the rerun produced {} entries", back.len());
-		assert_eq!(res!(back[0].to_dat().to_bytes(Vec::new())), was,
+		assert_eq!(res!(res!(back[0].to_dat()).to_bytes(Vec::new())), was,
 			"the rerun did not put the operation back as it was");
 		assert!(!parts.pending());
 		Ok(())
@@ -1362,7 +1362,7 @@ mod tests {
 		// And an empty one is refused rather than carried, since it asks for
 		// nothing.
 		let empty = Message::Forgotten { entries: Vec::new() };
-		assert!(Message::from_dat(&empty.to_dat()).is_err(),
+		assert!(Message::from_dat(&res!(empty.to_dat())).is_err(),
 			"an empty replacement was taken for a message");
 		Ok(())
 	}
@@ -1419,7 +1419,7 @@ mod tests {
 		// And the frozen bytes still read.
 		assert_eq!(res!(Message::decode(want)), pieces[0]);
 		// The payload is a prefix of the entry's own bytes, which is the claim.
-		let whole = res!(entry.to_dat().to_bytes(Vec::new()));
+		let whole = res!(res!(entry.to_dat()).to_bytes(Vec::new()));
 		assert_eq!(&want[63..], &whole[..33],
 			"a piece carries something other than the entry's own bytes");
 		Ok(())
@@ -1523,7 +1523,7 @@ mod tests {
 		// Built by hand, out of order, it still encodes canonically.
 		let odd = Message::Hello { heads: vec![oid(3, 1), oid(1, 1)] };
 		assert_eq!(
-			res!(Message::from_dat(&odd.to_dat())),
+			res!(Message::from_dat(&res!(odd.to_dat()))),
 			Message::hello(vec![oid(1, 1), oid(3, 1)]),
 		);
 		// And a daticle spelling it otherwise is refused rather than sorted.
