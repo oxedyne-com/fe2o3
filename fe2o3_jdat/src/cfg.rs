@@ -7,7 +7,9 @@
 //! `{env:VAR}` and is fetched when the file is read. [`resolve_root`] is the
 //! app-root rule every app shares, and [`path_at`] places one location value
 //! under the root it chose. [`Roots`] composes the two for an app whose code,
-//! state and secrets live under separate roots.
+//! state and secrets live under separate roots. [`fill_from_template`] fills
+//! what an installed file leaves out from the release's embedded template, so a
+//! file written for an earlier release still loads.
 
 use crate::{
     prelude::*,
@@ -457,6 +459,62 @@ pub fn resolve_dat(dat: &Dat, root: &Path)
     })
 }
 
+
+
+/// Decode an embedded configuration template, a jdat map, refusing loudly anything else, so a
+/// broken template is never read as an empty one.
+pub fn template_map(template: &str) -> Outcome<DaticleMap> {
+    match res!(Dat::decode_string(template).map_err(|e| err!(e,
+        "The configuration template could not be decoded."; Configuration, Decode)))
+    {
+        Dat::Map(m) => Ok(m),
+        other       => Err(err!(
+            "The configuration template is a {:?}, not a map.", other.kind();
+            Configuration, Invalid)),
+    }
+}
+
+/// Fill what an installed configuration leaves out from the release's template, so a file
+/// written for an earlier release still loads once a later one adds an optional key. Each named
+/// section `map` lacks is taken whole from `template`; each key a present section lacks is
+/// taken from the template's section. A key the file sets is kept, and nothing outside the
+/// named sections is touched, so those keys stay required.
+///
+/// The template must decode to a map holding every named section as a map, and an installed
+/// section must be a map: each fault is refused by name.
+pub fn fill_from_template(map: &mut DaticleMap, template: &str, sections: &[&str])
+    -> Outcome<()>
+{
+    let tmpl = res!(template_map(template));
+    fill_from_template_map(map, &tmpl, sections)
+}
+
+/// [`fill_from_template`], for a template already decoded by [`template_map`].
+pub fn fill_from_template_map(map: &mut DaticleMap, tmpl: &DaticleMap, sections: &[&str])
+    -> Outcome<()>
+{
+    for sec in sections.iter() {
+        let key = Dat::Str(fmt!("{}", sec));
+        let shipped = match tmpl.get(&key) {
+            Some(Dat::Map(m))   => m,
+            Some(other)         => return Err(err!(
+                "The configuration template's '{}' section is a {:?}, not a map.",
+                sec, other.kind(); Configuration, Invalid)),
+            None                => return Err(err!(
+                "The configuration template has no '{}' section.", sec;
+                Configuration, Missing)),
+        };
+        match map.entry(key).or_insert_with(|| Dat::Map(DaticleMap::new())) {
+            Dat::Map(got)   => for (k, v) in shipped.iter() {
+                got.entry(k.clone()).or_insert_with(|| v.clone());
+            },
+            other           => return Err(err!(
+                "The configuration's '{}' section is a {:?}, not a map.", sec, other.kind();
+                Configuration, Invalid)),
+        }
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
