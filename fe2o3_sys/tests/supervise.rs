@@ -24,6 +24,8 @@ use oxedyne_fe2o3_sys::supervise::{
     CgroupRoot,
     Confined,
     Limit,
+    memory_peak,
+    own_cgroup,
     RestartBudget,
     Scoped,
     SliceKills,
@@ -309,5 +311,28 @@ fn a_scope_that_never_started_says_no_hello() -> Outcome<()> {
     let ended = res!(child.wait());
     assert!(!ended.status.success());
     assert_eq!(ended.kills, SliceKills::None);
+    Ok(())
+}
+
+/// **A cgroup's peak is read where the kernel keeps one, and its absence is no error.** The test's
+/// own cgroup has a `memory.peak` on any kernel since 5.19; a directory without one answers `None`,
+/// and one holding other than a count is refused.
+#[test]
+fn a_cgroups_memory_peak_is_read_and_its_absence_is_none() -> Outcome<()> {
+    let own = res!(own_cgroup());
+    match (own.join("memory.peak").is_file(), res!(memory_peak(&own))) {
+        (true, Some(n))     => assert!(n > 0, "the test's own cgroup has held nothing"),
+        (false, None)       => (),
+        (file, got)         => return Err(err!(
+            "memory.peak there: {}, and read as {:?}.", file, got; Test, Mismatch)),
+    }
+    let dir = std::env::temp_dir().join(format!("fe2o3-peak-{}", std::process::id()));
+    res!(io(fs::create_dir_all(&dir), "create"));
+    assert_eq!(res!(memory_peak(&dir)), None);
+    res!(io(fs::write(dir.join("memory.peak"), "1234\n"), "write"));
+    assert_eq!(res!(memory_peak(&dir)), Some(1234));
+    res!(io(fs::write(dir.join("memory.peak"), "max\n"), "write"));
+    assert!(memory_peak(&dir).is_err(), "a peak that is not a count was read");
+    res!(io(fs::remove_dir_all(&dir), "remove"));
     Ok(())
 }

@@ -539,6 +539,25 @@ pub fn oom_kills(events: &Path) -> Outcome<u64> {
         .unwrap_or(0))
 }
 
+/// The most memory, in bytes, the cgroup `cgroup` has held since it was made, from its
+/// `memory.peak`; `None` where the kernel keeps none there (the root cgroup, or before Linux 5.19).
+/// A child reads its own scope's with [`own_cgroup`] before it ends, since a transient scope's
+/// cgroup goes with its last process and its parent cannot read it after.
+pub fn memory_peak(cgroup: &Path) -> Outcome<Option<u64>> {
+    let at = cgroup.join("memory.peak");
+    let text = match fs::read_to_string(&at) {
+        Ok(t)                                       => t,
+        Err(e) if e.kind() == ErrorKind::NotFound   => return Ok(None),
+        Err(e)                                      => return Err(err!(
+            "Cannot read {}: {}.", at.display(), e; IO, Read)),
+    };
+    match text.trim().parse::<u64>() {
+        Ok(n)   => Ok(Some(n)),
+        Err(_)  => Err(err!("{} holds {:?}, not a count of bytes.", at.display(), text.trim();
+            Decode, Input, Invalid)),
+    }
+}
+
 fn systemctl_user(args: &[&str]) -> Outcome<String> {
     let out = res!(Command::new("systemctl").arg("--user").args(args).output(), IO, System);
     match out.status.success() {
