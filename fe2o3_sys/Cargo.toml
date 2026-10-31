@@ -20,6 +20,9 @@ clock = ["dep:nix", "nix/time"]
 # signal: signals to the caller's own process group and to one process, safe over nix. Off by
 # default for the same reason.
 signal = ["dep:nix", "nix/signal", "nix/process"]
+# rename: two paths exchanged in one step (renameat2 with RENAME_EXCHANGE), safe over nix. Off
+# by default for the same reason.
+rename = ["dep:nix", "nix/fs"]
 # supervise: spawns a child confined to a cgroup v2 memory cap under a delegated root, or to an
 # address-space rlimit where there is none, arms a child's death with its parent's, and keeps a
 # restart budget. Builds on signal.

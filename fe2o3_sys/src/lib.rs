@@ -8,7 +8,8 @@
 //!
 //! The optional `inotify` feature adds a watcher for directory trees on Linux, built on
 //! `nix`, the optional `clock` feature the boot clock and a check for the machine
-//! having slept, and the optional `signal` feature signals to a process group; without
+//! having slept, the optional `signal` feature signals to a process group, and the optional
+//! `rename` feature exchanges two paths in one step; without
 //! them the crate has no third-party dependency at all.
 //!
 //! Intended consumers include admin dashboards, long-running
@@ -34,6 +35,8 @@ pub mod mem;
 pub mod net;
 pub mod parse;
 pub mod proc_self;
+#[cfg(all(target_os = "linux", feature = "rename"))]
+pub mod rename;
 pub mod resident;
 #[cfg(all(target_os = "linux", feature = "signal"))]
 pub mod signal;
