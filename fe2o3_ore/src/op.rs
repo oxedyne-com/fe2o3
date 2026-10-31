@@ -610,6 +610,83 @@ impl Stub {
 	}
 }
 
+/// What a splice inserts: the bytes, or only their length where the bytes are
+/// left in the store they were read from.
+///
+/// An elided body cannot be encoded. [`Op::to_dat`], [`Record::to_dat`] and
+/// `segment::Entry::to_dat` refuse it, so an elided operation is never hashed,
+/// signed, framed, sent or written, whoever opened the log elided. Equality is
+/// structural: a held and an elided body are never equal, two elided ones are
+/// when their lengths are, and two held ones when their bytes are.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Body {
+	Held(Arc<[u8]>),	// the bytes
+	Elided(u64),		// the length; the bytes are in the store
+}
+
+impl Body {
+
+	pub fn len(&self) -> u64 {
+		match self {
+			Self::Held(b)	=> b.len() as u64,
+			Self::Elided(n)	=> *n,
+		}
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.len() == 0
+	}
+
+	/// Are the bytes left in the store?
+	pub fn is_elided(&self) -> bool {
+		matches!(self, Self::Elided(_))
+	}
+
+	/// The bytes, where they are held.
+	pub fn bytes(&self) -> Option<&[u8]> {
+		match self {
+			Self::Held(b)	=> Some(b),
+			Self::Elided(_)	=> None,
+		}
+	}
+
+	/// The shared buffer, where the bytes are held.
+	pub fn shared(&self) -> Option<&Arc<[u8]>> {
+		match self {
+			Self::Held(b)	=> Some(b),
+			Self::Elided(_)	=> None,
+		}
+	}
+
+	/// The same body with its bytes let go. An empty insertion stays held, since
+	/// an elided body of length zero is refused by [`Op::validate`] and there is
+	/// nothing to let go.
+	pub fn elided(&self) -> Self {
+		match self {
+			Self::Held(b) if b.is_empty()	=> self.clone(),
+			_								=> Self::Elided(self.len()),
+		}
+	}
+}
+
+impl From<Arc<[u8]>> for Body {
+	fn from(b: Arc<[u8]>) -> Self {
+		Self::Held(b)
+	}
+}
+
+impl From<Vec<u8>> for Body {
+	fn from(b: Vec<u8>) -> Self {
+		Self::Held(b.into())
+	}
+}
+
+impl From<&[u8]> for Body {
+	fn from(b: &[u8]) -> Self {
+		Self::Held(b.into())
+	}
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Op {
 	FileCreate {
@@ -659,7 +736,7 @@ pub enum Op {
 		left: Option<Anchor>,			// binds after a byte
 		right: Option<Anchor>,			// binds before a byte
 		remove: Vec<ContentRange>,
-		insert: Arc<[u8]>,				// shared, so a clone copies no bytes
+		insert: Body,					// shared, so a clone copies no bytes
 	},
 	Move {
 		src: Vec<ContentRange>,			// in the order it lands in
@@ -1020,7 +1097,7 @@ impl Op {
 						left:	None,
 						right:	None,
 						remove:	vec![res!(ContentRange::new(id, 0, insert.len() as u64))],
-						insert:	Arc::from(Vec::new()),
+						insert:	Body::from(Vec::new()),
 					});
 				}
 				Ok(Undoing {
@@ -1115,6 +1192,13 @@ impl Op {
 	pub fn validate(&self)
 		-> Outcome<()>
 	{
+		// An empty insertion is held empty: an elided body of nothing would claim
+		// bytes in the store that no record holds.
+		if let Self::Splice { insert: Body::Elided(0), .. } = self {
+			return Err(err!(
+				"A Splice names an elided insertion of no bytes; an empty \
+				insertion is held, not elided."; Invalid, Input));
+		}
 		let (left, right) = self.origins();
 		if let Some(a) = left {
 			if a.side != Side::After {
@@ -1230,8 +1314,11 @@ impl Op {
 	/// field is a single byte and so keeps only the low eight bits of the
 	/// length of anything longer than 255 bytes. A path is a byte payload for the
 	/// same reason a path is not a string: neither is the caller's to constrain.
-	pub fn to_dat(&self) -> Dat {
-		match self {
+	///
+	/// An elided body is refused: its bytes are not here to encode, and an
+	/// encoding without them would hash, sign and frame a different operation.
+	pub fn to_dat(&self) -> Outcome<Dat> {
+		Ok(match self {
 			Self::FileCreate { path } => Dat::List(vec![
 				Dat::U8(CODE_FILE_CREATE),
 				Dat::BU64(path.clone()),
@@ -1270,7 +1357,14 @@ impl Op {
 				Anchor::opt_to_dat(left),
 				Anchor::opt_to_dat(right),
 				Dat::List(remove.iter().map(|r| r.to_dat()).collect()),
-				Dat::BU64(insert.to_vec()),
+				match insert {
+					Body::Held(b)	=> Dat::BU64(b.to_vec()),
+					Body::Elided(n)	=> return Err(err!(
+						"A Splice whose {} inserted bytes were left in the store \
+						cannot be encoded; only an operation holding its bytes can \
+						be hashed, signed, framed, sent or written.", n;
+					Bug, Missing)),
+				},
 			]),
 			Self::Move { src, left, right } => Dat::List(vec![
 				Dat::U8(CODE_MOVE),
@@ -1326,7 +1420,7 @@ impl Op {
 				Dat::U8(CODE_FORGOTTEN),
 				placing.to_dat(),
 			]),
-		}
+		})
 	}
 
 	/// The placement rule is checked here rather than left to the sequence,
@@ -1520,7 +1614,7 @@ impl Op {
 	pub fn encode_into(&self, buf: &mut Vec<u8>)
 		-> Outcome<()>
 	{
-		let body = res!(self.to_dat().to_bytes(Vec::new()));
+		let body = res!(res!(self.to_dat()).to_bytes(Vec::new()));
 		varint_encode(body.len() as u64, buf);
 		buf.extend_from_slice(&body);
 		Ok(())
@@ -1702,12 +1796,30 @@ impl Record {
 		self.head.parents()
 	}
 
-	/// The shape is `[head, op]`.
-	pub fn to_dat(&self) -> Dat {
-		Dat::List(vec![
+	/// The shape is `[head, op]`. An elided body is refused, by [`Op::to_dat`],
+	/// naming this record.
+	pub fn to_dat(&self) -> Outcome<Dat> {
+		let op = match self.op.to_dat() {
+			Ok(d)	=> d,
+			Err(e)	=> return Err(err!(e,
+				"Operation {} cannot be encoded.", self.id();
+			Bug, Missing)),
+		};
+		Ok(Dat::List(vec![
 			self.head.to_dat(),
-			self.op.to_dat(),
-		])
+			op,
+		]))
+	}
+
+	/// The same record with any inserted bytes let go, leaving their length.
+	pub fn elided(self) -> Self {
+		match self.op {
+			Op::Splice { left, right, remove, insert } => Self {
+				head:	self.head,
+				op:		Op::Splice { left, right, remove, insert: insert.elided() },
+			},
+			_ => self,
+		}
 	}
 
 	pub fn from_dat(dat: &Dat)
@@ -1728,7 +1840,7 @@ impl Record {
 	pub fn encode_into(&self, buf: &mut Vec<u8>)
 		-> Outcome<()>
 	{
-		let body = res!(self.to_dat().to_bytes(Vec::new()));
+		let body = res!(res!(self.to_dat()).to_bytes(Vec::new()));
 		varint_encode(body.len() as u64, buf);
 		buf.extend_from_slice(&body);
 		Ok(())
@@ -3471,5 +3583,76 @@ pub(crate) mod tests {
 			insert:	b"abcdef".to_vec().into(),
 		}.restored(), None);
 		Ok(())
+	}
+
+	/// A splice of `n` bytes, inserted into an empty file's origin anchor.
+	fn sized_splice(insert: Body) -> Op {
+		Op::Splice {
+			left:	Some(Anchor::after(content(1, 0))),
+			right:	None,
+			remove:	Vec::new(),
+			insert,
+		}
+	}
+
+	/// The safety the elided replay rests on: an operation whose bytes were
+	/// left in the store cannot be turned into bytes of its own.
+	#[test]
+	fn an_elided_body_cannot_be_encoded() -> Outcome<()> {
+		let held = sized_splice(Body::from(b"hello".to_vec()));
+		let elided = sized_splice(Body::Elided(5));
+		assert!(held.to_dat().is_ok());
+		assert!(elided.to_dat().is_err(), "an elided body encoded");
+		assert!(elided.encode().is_err(), "an elided body framed");
+		assert!(elided.hash((), [0u8; 0]).is_err(), "an elided body hashed");
+		// An empty insertion is held, so an elided one of no bytes is refused.
+		assert!(sized_splice(Body::Elided(0)).validate().is_err());
+		assert!(sized_splice(Body::Elided(5)).validate().is_ok());
+		// Letting the bytes go keeps the length, and keeps an empty body held.
+		assert_eq!(Body::from(b"hello".to_vec()).elided(), Body::Elided(5));
+		assert_eq!(Body::from(Vec::new()).elided(), Body::from(Vec::new()));
+		Ok(())
+	}
+
+	#[test]
+	fn an_elided_record_cannot_be_hashed_or_framed() -> Outcome<()> {
+		let rec = Record::new(
+			res!(Header::new(oid(2, 9), vec![oid(1, 1)])),
+			sized_splice(Body::from(b"hello".to_vec())),
+		);
+		assert!(rec.to_dat().is_ok());
+		let gone = rec.clone().elided();
+		assert_eq!(gone.op.placed_len(), rec.op.placed_len(), "the length survives");
+		match gone.to_dat() {
+			Ok(_)	=> panic!("an elided record encoded"),
+			Err(e)	=> assert!(fmt!("{}", e).contains(&fmt!("{}", rec.id())),
+				"the refusal names the record: {}", e),
+		}
+		assert!(gone.encode().is_err(), "an elided record framed");
+		assert!(gone.hash((), [0u8; 0]).is_err(), "an elided record hashed");
+		// Only a splice has bytes to let go.
+		let mark = Record::new(
+			res!(Header::new(oid(2, 10), vec![oid(2, 9)])),
+			Op::Mark { name: fmt!("m"), body: None, time: None },
+		);
+		assert_eq!(mark.clone().elided(), mark);
+		Ok(())
+	}
+
+	/// Structural, so the relation stays transitive: a held and an elided body
+	/// are never equal, whatever their lengths.
+	#[test]
+	fn a_held_and_an_elided_body_are_not_equal() {
+		let held = Body::from(b"abc".to_vec());
+		assert_ne!(held, Body::Elided(3));
+		assert_ne!(sized_splice(held.clone()), sized_splice(Body::Elided(3)));
+		assert_eq!(Body::Elided(3), Body::Elided(3));
+		assert_ne!(Body::Elided(3), Body::Elided(4));
+		assert_eq!(held, Body::from(b"abc".to_vec()));
+		assert_ne!(held, Body::from(b"abd".to_vec()));
+		assert_eq!(held.len(), 3);
+		assert_eq!(Body::Elided(3).len(), 3);
+		assert!(Body::Elided(3).bytes().is_none());
+		assert_eq!(held.bytes(), Some(&b"abc"[..]));
 	}
 }

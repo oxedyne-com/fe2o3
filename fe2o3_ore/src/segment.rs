@@ -496,7 +496,7 @@ impl Entry {
 			Invalid, Input, Duplicate));
 		}
 		let head = res!(self.head());
-		let plain = res!(self.to_dat().to_bytes(Vec::new()));
+		let plain = res!(res!(self.to_dat()).to_bytes(Vec::new()));
 		Ok(Self::Veiled(Veiled { head, body: res!(enc.encrypt(&plain)) }))
 	}
 
@@ -567,7 +567,7 @@ impl Entry {
 	pub fn dat_len(&self)
 		-> Outcome<usize>
 	{
-		Ok(res!(self.to_dat().byte_len().ok_or_else(|| err!(
+		Ok(res!(res!(self.to_dat()).byte_len().ok_or_else(|| err!(
 			"A {} holds a daticle whose encoded length cannot be known without \
 			encoding it, which is a kind no entry was ever built to carry.", self.name();
 		Bug, Invalid))))
@@ -579,15 +579,17 @@ impl Entry {
 	/// message. A segment does not use it: there the kind is a byte of the frame
 	/// and the body stands alone, so that the digest can cover both without
 	/// re-encoding.
-	pub fn to_dat(&self) -> Dat {
-		Dat::List(vec![
+	///
+	/// A bare record whose body is elided is refused, by [`Record::to_dat`].
+	pub fn to_dat(&self) -> Outcome<Dat> {
+		Ok(Dat::List(vec![
 			Dat::U8(self.kind()),
 			match self {
-				Self::Bare(rec)	=> rec.to_dat(),
+				Self::Bare(rec)	=> res!(rec.to_dat()),
 				Self::Sealed(e)	=> e.to_dat(),
 				Self::Veiled(v)	=> v.to_dat(),
 			},
-		])
+		]))
 	}
 
 	pub fn from_dat(dat: &Dat)
@@ -622,7 +624,7 @@ impl Entry {
 		-> Outcome<Vec<u8>>
 	{
 		let dat = match self {
-			Self::Bare(rec)	=> rec.to_dat(),
+			Self::Bare(rec)	=> res!(rec.to_dat()),
 			Self::Sealed(e)	=> e.to_dat(),
 			Self::Veiled(v)	=> v.to_dat(),
 		};
@@ -3425,6 +3427,26 @@ mod tests {
 		assert_eq!(seen.len(), highest_code(VERSION) as usize,
 			"the corpus covers {} of the {} operation codes this version writes",
 			seen.len(), highest_code(VERSION));
+		Ok(())
+	}
+
+	/// No elided body reaches a segment, a veil or a carrier's measure.
+	#[test]
+	fn an_elided_entry_is_never_written() -> Outcome<()> {
+		let entries = res!(bare());
+		let rec = res!(entries.iter().find_map(|e| match e {
+			Entry::Bare(r) if matches!(&r.op, Op::Splice { insert, .. } if !insert.is_empty())
+				=> Some(r.clone()),
+			_	=> None,
+		}).ok_or_else(|| err!("The fixture holds no splice inserting bytes."; Test, Missing)));
+		let gone = Entry::Bare(rec.elided());
+		assert!(gone.to_dat().is_err(), "an elided entry encoded");
+		assert!(gone.body().is_err(), "an elided entry gave a body");
+		assert!(gone.dat_len().is_err(), "an elided entry was measured");
+		let head = Head::new(Some(ReplicaId::new(4)));
+		let mut writer: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		assert!(writer.push(&gone).is_err(), "an elided entry was framed");
+		assert!(writer.push_packed(&[gone.clone()]).is_err(), "an elided entry was packed");
 		Ok(())
 	}
 }

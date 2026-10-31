@@ -67,7 +67,7 @@ impl Envelope {
 	pub fn seal_record<S: Signer>(scheme: &S, rec: &Record)
 		-> Outcome<Self>
 	{
-		Self::seal(scheme, res!(rec.to_dat().to_bytes(Vec::new())))
+		Self::seal(scheme, res!(res!(rec.to_dat()).to_bytes(Vec::new())))
 	}
 
 	/// `scheme` supplies the algorithm only; its own keys are set aside and the

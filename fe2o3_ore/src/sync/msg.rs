@@ -331,7 +331,7 @@ impl Message {
 	/// The shape is `[kind, body]`. The table of a sketch is a [`Dat::BU64`]: it
 	/// readily exceeds the 255 bytes a [`Dat::BU8`] length field can express, and
 	/// a truncated length there would corrupt silently.
-	pub fn to_dat(&self) -> Dat {
+	pub fn to_dat(&self) -> Outcome<Dat> {
 		let body = match self {
 			Self::Hello { heads } => Dat::List(
 				canonical(heads.clone()).iter().map(|h| h.to_dat()).collect(),
@@ -342,7 +342,7 @@ impl Message {
 				Dat::U64(*count),
 			]),
 			Self::Send { entries } => Dat::List(
-				entries.iter().map(|e| e.to_dat()).collect(),
+				res!(entries.iter().map(|e| e.to_dat()).collect::<Outcome<Vec<_>>>()),
 			),
 			Self::Done => Dat::List(Vec::new()),
 			Self::Part { id, seq, total, bytes } => Dat::List(vec![
@@ -352,11 +352,11 @@ impl Message {
 				Dat::BU64(bytes.clone()),
 			]),
 			Self::Forgotten { entries } => Dat::List(
-				entries.iter().map(|e| e.to_dat()).collect(),
+				res!(entries.iter().map(|e| e.to_dat()).collect::<Outcome<Vec<_>>>()),
 			),
 			Self::Resume { at } => at.to_dat(),
 		};
-		Dat::List(vec![Dat::U8(self.kind()), body])
+		Ok(Dat::List(vec![Dat::U8(self.kind()), body]))
 	}
 
 	pub fn from_dat(dat: &Dat)
@@ -509,7 +509,7 @@ impl Message {
 	{
 		buf.extend_from_slice(&MAGIC);
 		buf.push(self.version());
-		let body = res!(self.to_dat().to_bytes(Vec::new()));
+		let body = res!(res!(self.to_dat()).to_bytes(Vec::new()));
 		buf.extend_from_slice(&body);
 		Ok(())
 	}
@@ -531,7 +531,7 @@ impl Message {
 	pub fn encoded_len(&self)
 		-> Outcome<usize>
 	{
-		let body = res!(self.to_dat().byte_len().ok_or_else(|| err!(
+		let body = res!(res!(self.to_dat()).byte_len().ok_or_else(|| err!(
 			"A {} message holds a daticle whose encoded length cannot be known \
 			without encoding it, which is a kind no message was built to carry.",
 			self.name();

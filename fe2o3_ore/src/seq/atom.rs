@@ -23,6 +23,7 @@ use crate::id::{
 	OpId,
 };
 use crate::op::{
+	Body,
 	Op,
 	Placing,
 };
@@ -30,7 +31,6 @@ use crate::op::{
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 
 // The byte a file's origin anchor holds.  It is born dead and never renders, so
@@ -42,7 +42,7 @@ pub const ORIGIN: u8 = 0;
 /// Every atom an operation set creates, keyed by the operation that created it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Atoms {
-	map: BTreeMap<OpId, Arc<[u8]>>, // inserted bytes, by creating operation
+	map: BTreeMap<OpId, Body>, // inserted bytes, or their length, by creating operation
 }
 
 impl Atoms {
@@ -59,10 +59,10 @@ impl Atoms {
 	pub fn build(ops: &[(OpId, &Op)])
 		-> Outcome<Self>
 	{
-		let mut map: BTreeMap<OpId, Arc<[u8]>> = BTreeMap::new();
+		let mut map: BTreeMap<OpId, Body> = BTreeMap::new();
 		for (id, op) in ops {
 			let made = match op {
-				Op::FileCreate { .. }				=> Arc::from(vec![ORIGIN]),
+				Op::FileCreate { .. }				=> Body::from(vec![ORIGIN]),
 				// Shares the operation's buffer rather than copying it. Held three
 				// times -- here, in the log's record, and in the sequence's
 				// `Applied` -- the content of a real history cost 7.63 kB of
@@ -78,9 +78,9 @@ impl Atoms {
 				// later operation named inside it still names something. The
 				// bytes are gone; what stands in for them is never read, because
 				// [`crate::seq::claim::Dead`] buries the whole run.
-				Op::Forgotten { placing: Placing::File }	=> Arc::from(vec![ORIGIN]),
+				Op::Forgotten { placing: Placing::File }	=> Body::from(vec![ORIGIN]),
 				Op::Forgotten { placing: Placing::Splice { len, .. } } if *len > 0
-					=> Arc::from(vec![0u8; *len as usize]),
+					=> Body::from(vec![0u8; *len as usize]),
 				_						=> continue,
 			};
 			if map.insert(*id, made).is_some() {
@@ -94,15 +94,15 @@ impl Atoms {
 	}
 
 	pub fn get(&self, id: &OpId)
-		-> Option<&[u8]>
+		-> Option<&Body>
 	{
-		self.map.get(id).map(|v| &v[..])
+		self.map.get(id)
 	}
 
 	/// An operation that inserted nothing creates no atom, so its run is zero
 	/// rather than absent.
 	pub fn run_len(&self, id: &OpId) -> u64 {
-		self.map.get(id).map(|v| v.len() as u64).unwrap_or(0)
+		self.map.get(id).map(|v| v.len()).unwrap_or(0)
 	}
 
 	pub fn count(&self) -> usize {
@@ -121,18 +121,20 @@ impl Atoms {
 	/// something else entirely. The meaning changed under the name on 2026-08-20,
 	/// when the buffer came to be shared; the arithmetic did not.
 	pub fn total(&self) -> u64 {
-		self.map.values().map(|v| v.len() as u64).sum()
+		self.map.values().map(|v| v.len()).sum()
 	}
 
 	/// In ascending order of creating operation.
 	pub fn iter(&self)
-		-> impl Iterator<Item = (&OpId, &[u8])>
+		-> impl Iterator<Item = (&OpId, &Body)>
 	{
-		self.map.iter().map(|(id, v)| (id, &v[..]))
+		self.map.iter()
 	}
 
 	/// Fails when the range names an atom the set does not hold, or reaches past
 	/// the end of one it does; either means the set is not causally complete.
+	/// Fails too on an atom whose bytes were left in the store: only a fill
+	/// from the store may supply those.
 	pub fn slice(&self, range: &ContentRange)
 		-> Outcome<&[u8]>
 	{
@@ -143,12 +145,18 @@ impl Atoms {
 				created.", range;
 			Invalid, Input, Missing)),
 		};
-		if range.to() > atom.len() as u64 {
+		if range.to() > atom.len() {
 			return Err(err!(
 				"The content range {} reaches past the {} bytes its atom holds.",
 				range, atom.len();
 			Invalid, Input, Range));
 		}
-		Ok(&atom[range.from() as usize..range.to() as usize])
+		match atom.bytes() {
+			Some(b)	=> Ok(&b[range.from() as usize..range.to() as usize]),
+			None	=> Err(err!(
+				"The content range {} names an atom whose {} bytes were left in the \
+				store, which only a fill from the store can read.", range, atom.len();
+			Bug, Missing)),
+		}
 	}
 }
