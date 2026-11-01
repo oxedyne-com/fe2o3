@@ -295,6 +295,11 @@ async fn move_answers_copyuid_and_expunge() -> Outcome<()> {
     res!(c.cmd("EXAMINE INBOX").await);
     let lines = res!(c.cmd("UID MOVE 1:* Archive").await);
     assert!(last(&lines).contains(" NO "), "MOVE out of a read-only selection: {:?}", lines);
+    // Nor may a flag change (RFC 3501 §6.3.2), by sequence or by UID.
+    for cmd in ["STORE 1 +FLAGS (\\Flagged)", "UID STORE 1:* +FLAGS.SILENT (\\Seen)"] {
+        let lines = res!(c.cmd(cmd).await);
+        assert!(last(&lines).contains(" NO "), "{} in a read-only selection: {:?}", cmd, lines);
+    }
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }

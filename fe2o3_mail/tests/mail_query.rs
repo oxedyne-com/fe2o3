@@ -14,6 +14,7 @@ use oxedyne_fe2o3_mail::{
         },
         Roles,
         Target,
+        UidSet,
     },
 };
 use oxedyne_fe2o3_net::{
@@ -229,6 +230,32 @@ async fn folders_counts_and_names_the_inbox_on_steel() -> Outcome<()> {
     let inbox = res!(fs.iter().find(|f| f.role == Some(Role::Inbox))
         .ok_or_else(|| err!("No inbox: {:?}", fs; Test, Missing)));
     assert_eq!(inbox.count, Some(5));
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+/// Each read-only query opens its folder with `EXAMINE` (mail design I7): Steel refuses a flag
+/// write in that session, which it does only after `EXAMINE`, and a `SELECT` after them all is
+/// read-write again.
+#[tokio::test]
+async fn queries_examine_so_the_session_cannot_write_and_recent_is_kept() -> Outcome<()> {
+    let (mut c, roles, root) = res!(steel("examine").await);
+    let one = UidSet::from([1u32]);
+    let lim = limits(1000);
+    res!(query::list(&mut c, &roles, &Target::Inbox, &Range::default(), &lim).await);
+    assert!(c.uid_store_flags(&one, &["\\Flagged"], &[]).await.is_err(),
+        "a flag write was taken after list, so it opened with SELECT");
+    res!(query::find(&mut c, &roles, &Target::Inbox, "umart", &Range::default(), &lim).await);
+    assert!(c.uid_store_flags(&one, &["\\Flagged"], &[]).await.is_err(),
+        "a flag write was taken after find");
+    res!(query::read(&mut c, &roles, &Target::Inbox, 1, &lim).await);
+    assert!(c.uid_store_flags(&one, &["\\Flagged"], &[]).await.is_err(),
+        "a flag write was taken after read");
+    res!(query::raw(&mut c, &roles, &Target::Inbox, 1, 100).await);
+    assert!(c.uid_store_flags(&one, &["\\Flagged"], &[]).await.is_err(),
+        "a flag write was taken after raw");
+    let st = res!(c.select("INBOX").await);
+    assert!(!st.read_only, "SELECT after the queries is read-write again");
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }

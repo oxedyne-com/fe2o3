@@ -2,8 +2,9 @@
 //! newest messages of a folder, a search of From and Subject, one message read by part, one
 //! message raw, and the folders by role.
 //!
-//! - Nothing here marks a message read: every body is fetched with `BODY.PEEK`, so a daimon's
-//!   read leaves `\Seen` as it found it.
+//! - Nothing here changes the mailbox: every folder is opened with `EXAMINE`, so the session can
+//!   write no flag and `\Recent` is left for the next `SELECT` (UNBLOCK-63), and every body is
+//!   fetched with `BODY.PEEK`, so a daimon's read leaves `\Seen` as it found it.
 //! - A folder is named by its role ([`Target`]), resolved by its RFC 6154 attribute, so Gmail's
 //!   "[Gmail]/All Mail" and a localised "[Gmail]/Gesendet" are found without their names.
 //! - [`find`] trusts the server's `SEARCH` for candidates only, since a server may match more
@@ -218,7 +219,7 @@ pub async fn list<S: MailSession>(
     -> Outcome<Listing>
 {
     let mailbox = res!(resolve(roles, target));
-    let st = res!(s.select(&mailbox, &SelectWith::Plain).await);
+    let st = res!(s.examine(&mailbox, &SelectWith::Plain).await);
     let crit = res!(range.criteria());
     let mut uids = res!(s.uid_search(if crit.is_empty() { "ALL" } else { &crit }).await);
     uids.sort_unstable();
@@ -247,7 +248,7 @@ pub async fn find<S: MailSession>(
             Invalid, Input));
     }
     let mailbox = res!(resolve(roles, target));
-    let st = res!(s.select(&mailbox, &SelectWith::Plain).await);
+    let st = res!(s.examine(&mailbox, &SelectWith::Plain).await);
     let q = fmt!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
     let charset = if text.is_ascii() { "" } else { "CHARSET UTF-8 " };
     let crit = res!(range.criteria());
@@ -294,7 +295,7 @@ pub async fn read<S: MailSession>(
     -> Outcome<Option<Read>>
 {
     let mailbox = res!(resolve(roles, target));
-    res!(s.select(&mailbox, &SelectWith::Plain).await);
+    res!(s.examine(&mailbox, &SelectWith::Plain).await);
     let one = UidSet::from([uid]);
     let m = match res!(s.uid_fetch(&one, FetchWhat::Structure).await).into_iter()
         .find(|m| m.uid == uid)
@@ -382,7 +383,7 @@ pub async fn raw<S: MailSession>(
     -> Outcome<Option<Raw>>
 {
     let mailbox = res!(resolve(roles, target));
-    res!(s.select(&mailbox, &SelectWith::Plain).await);
+    res!(s.examine(&mailbox, &SelectWith::Plain).await);
     Ok(res!(s.uid_fetch_section(uid, "", max).await).map(|m| Raw {
         cut:    (m.body.len() as u32) < m.size,
         size:   m.size,

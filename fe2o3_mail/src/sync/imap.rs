@@ -35,6 +35,10 @@ impl MailSession for ImapClient {
         self.select_with(mailbox, with).await
     }
 
+    async fn examine(&mut self, mailbox: &str, with: &SelectWith) -> Outcome<MailboxStatus> {
+        self.examine_with(mailbox, with).await
+    }
+
     async fn uid_fetch(&mut self, uids: &UidSet, what: FetchWhat) -> Outcome<Vec<FetchedMessage>> {
         ImapClient::uid_fetch(self, uids, what).await
     }

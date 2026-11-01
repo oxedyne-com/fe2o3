@@ -558,6 +558,11 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                     }
                 };
                 let flags = it.next_paren_list().unwrap_or_default();
+                // RFC 3501 §6.3.2: an EXAMINE'd mailbox takes no permanent change.
+                if session.read_only {
+                    res!(write_no(stream, tag, "The mailbox is read-only").await);
+                    return Ok(false);
+                }
                 res!(self.do_store(stream, session, &seq_set, &op, &flags, false).await);
                 res!(write_ok(stream, tag, "STORE completed").await);
                 Ok(false)
@@ -628,6 +633,10 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                             }
                         };
                         let flags = it.next_paren_list().unwrap_or_default();
+                        if session.read_only {
+                            res!(write_no(stream, tag, "The mailbox is read-only").await);
+                            return Ok(false);
+                        }
                         res!(self.do_store(stream, session, &seq_set, &op, &flags, true).await);
                         res!(write_ok(stream, tag, "UID STORE completed").await);
                     }

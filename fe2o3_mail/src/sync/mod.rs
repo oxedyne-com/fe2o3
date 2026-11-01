@@ -97,6 +97,9 @@ pub trait MailSession {
     async fn create(&mut self, mailbox: &str) -> Outcome<()>;
     /// `SELECT`; a QRESYNC select must have QRESYNC enabled first, which the session does.
     async fn select(&mut self, mailbox: &str, with: &SelectWith) -> Outcome<MailboxStatus>;
+    /// `EXAMINE`: the mailbox opened read-only, so the session can write no flag and `\Recent`
+    /// is left for the next `SELECT`.
+    async fn examine(&mut self, mailbox: &str, with: &SelectWith) -> Outcome<MailboxStatus>;
     async fn uid_fetch(&mut self, uids: &UidSet, what: FetchWhat) -> Outcome<Vec<FetchedMessage>>;
     async fn uid_fetch_changed(&mut self, uids: &UidSet, what: FetchWhat, modseq: u64)
         -> Outcome<FetchChanged>;

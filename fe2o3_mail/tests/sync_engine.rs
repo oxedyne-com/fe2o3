@@ -74,6 +74,7 @@ struct Server {
     caps:       Vec<String>,
     folders:    BTreeMap<String, Folder>,
     open:       Option<String>,
+    read_only:  bool,       // opened with EXAMINE, so a flag write, move or expunge is refused
     loose:      bool,       // SEARCH answers every UID, as Steel's did (B1)
     log:        Vec<String>,
     gm_next:    u64,
@@ -89,6 +90,39 @@ impl Server {
         let mut s = Self { caps: caps.split_whitespace().map(String::from).collect(), ..Default::default() };
         s.folder("INBOX", "", 100);
         s
+    }
+
+    /// `SELECT` or `EXAMINE`, as `verb` names; read-write until `examine` says otherwise.
+    fn open_box(&mut self, verb: &str, mb: &str, with: &SelectWith) -> Outcome<MailboxStatus> {
+        self.log.push(fmt!("{} {} {}", verb, mb, match with {
+            SelectWith::Plain           => "",
+            SelectWith::CondStore       => "CONDSTORE",
+            SelectWith::QResync { .. }  => "QRESYNC",
+        }));
+        let modseqs = self.cap("CONDSTORE") || self.cap("QRESYNC");
+        let f = res!(self.folders.get(mb).ok_or_else(|| err!("No mailbox {}.", mb; Missing)));
+        let mut st = MailboxStatus {
+            name:           mb.to_string(),
+            exists:         f.msgs.len() as u32,
+            uid_validity:   f.uv,
+            uid_next:       f.next,
+            highest_modseq: if modseqs { Some(f.modseq) } else { None },
+            ..Default::default()
+        };
+        if let SelectWith::QResync { uid_validity, modseq, known } = with {
+            if *uid_validity == f.uv {
+                st.changed = f.msgs.iter().filter(|m| m.modseq > *modseq)
+                    .map(|m| Server::fetched(m, FetchWhat::Flags, false)).collect();
+                for (u, ms) in &f.expunged {
+                    if *ms > *modseq && known.as_ref().map(|k| k.contains(*u)).unwrap_or(true) {
+                        st.vanished.insert(*u);
+                    }
+                }
+            }
+        }
+        self.open = Some(mb.to_string());
+        self.read_only = false;
+        Ok(st)
     }
 
     fn folder(&mut self, name: &str, attr: &str, uv: u32) {
@@ -200,33 +234,12 @@ impl MailSession for Server {
     }
 
     async fn select(&mut self, mb: &str, with: &SelectWith) -> Outcome<MailboxStatus> {
-        self.log.push(fmt!("SELECT {} {}", mb, match with {
-            SelectWith::Plain           => "",
-            SelectWith::CondStore       => "CONDSTORE",
-            SelectWith::QResync { .. }  => "QRESYNC",
-        }));
-        let modseqs = self.cap("CONDSTORE") || self.cap("QRESYNC");
-        let f = res!(self.folders.get(mb).ok_or_else(|| err!("No mailbox {}.", mb; Missing)));
-        let mut st = MailboxStatus {
-            name:           mb.to_string(),
-            exists:         f.msgs.len() as u32,
-            uid_validity:   f.uv,
-            uid_next:       f.next,
-            highest_modseq: if modseqs { Some(f.modseq) } else { None },
-            ..Default::default()
-        };
-        if let SelectWith::QResync { uid_validity, modseq, known } = with {
-            if *uid_validity == f.uv {
-                st.changed = f.msgs.iter().filter(|m| m.modseq > *modseq)
-                    .map(|m| Server::fetched(m, FetchWhat::Flags, false)).collect();
-                for (u, ms) in &f.expunged {
-                    if *ms > *modseq && known.as_ref().map(|k| k.contains(*u)).unwrap_or(true) {
-                        st.vanished.insert(*u);
-                    }
-                }
-            }
-        }
-        self.open = Some(mb.to_string());
+        self.open_box("SELECT", mb, with)
+    }
+
+    async fn examine(&mut self, mb: &str, with: &SelectWith) -> Outcome<MailboxStatus> {
+        let st = res!(self.open_box("EXAMINE", mb, with));
+        self.read_only = true;
         Ok(st)
     }
 
@@ -297,6 +310,9 @@ impl MailSession for Server {
     }
 
     async fn uid_store_flags(&mut self, uids: &UidSet, add: &[&str], remove: &[&str]) -> Outcome<()> {
+        if self.read_only {
+            return Err(err!("NO The mailbox is read-only: UID STORE {}.", uids; Invalid, Input));
+        }
         self.log.push(fmt!("UID STORE {} +{:?} -{:?}", uids, add, remove));
         let f = res!(self.cur());
         f.modseq += 1;
@@ -1158,5 +1174,24 @@ async fn test_folders_finds_all_mail_and_sent_by_role_on_gmail_00() -> Outcome<(
         "a folder named Sent without the attribute was given the role");
     assert!(!fs.iter().any(|f| f.name == "[Gmail]"), "a \\Noselect parent was listed");
     assert_eq!(res!(query::resolve(&roles, &Target::Role(SpecialUse::Sent))), "[Gmail]/Gesendet");
+    Ok(())
+}
+
+/// The read-only queries open their folder with `EXAMINE`, never `SELECT` (mail design I7), so
+/// the session they leave behind can write no flag.
+#[tokio::test]
+async fn test_queries_open_with_examine_00() -> Outcome<()> {
+    use oxedyne_fe2o3_mail::sync::query;
+    let mut s = account("");
+    s.deliver("INBOX", "a@x");
+    let (_, roles) = res!(roles(&mut s).await);
+    let lim = query::Limits { max_rows: 10, max_read_bytes: 1000, max_folders: 10 };
+    res!(query::list(&mut s, &roles, &Target::Inbox, &query::Range::default(), &lim).await);
+    res!(query::raw(&mut s, &roles, &Target::Inbox, 1, 100).await);
+    let opens: Vec<&String> = s.log.iter()
+        .filter(|l| l.starts_with("SELECT") || l.starts_with("EXAMINE")).collect();
+    assert_eq!(opens, vec!["EXAMINE INBOX ", "EXAMINE INBOX "], "a query opened with SELECT");
+    assert!(s.uid_store_flags(&UidSet::from([1u32]), &["\\Seen"], &[]).await.is_err(),
+        "a flag write was taken after a query");
     Ok(())
 }
