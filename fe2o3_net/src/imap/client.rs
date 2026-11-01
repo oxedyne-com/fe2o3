@@ -324,6 +324,24 @@ impl ImapClient {
         }
     }
 
+    /// Speaks IMAP over a TCP stream someone else connected, for a process that may not dial
+    /// itself: a sandboxed child handed a socket by a broker that vetted the end. The stream is
+    /// protected as `cfg.security` says and the certificate checked against `cfg.host`, exactly
+    /// as [`Self::connect_with`] does; `cfg.addr` and `cfg.port` are not used. Having no way to
+    /// dial, the client makes no fresh connection for a dropped one: the drop reaches the caller,
+    /// who asks the broker for another stream.
+    pub async fn connect_over(
+        cfg:        &ImapConfig,
+        tls_cfg:    Arc<ClientConfig>,
+        plain:      TcpStream,
+    )
+        -> Outcome<Self>
+    {
+        let mut c = res!(Self::open_over(cfg, tls_cfg, plain).await);
+        c.retries = 0;
+        Ok(c)
+    }
+
     /// One attempt at a connection, with no retry of its own.
     async fn open(
         cfg:        &ImapConfig,
@@ -343,7 +361,17 @@ impl ImapClient {
                 "Timeout connecting to IMAP server {}.", addr;
                 IO, Network, Timeout)),
         };
+        Self::open_over(cfg, tls_cfg, plain).await
+    }
 
+    /// Protects a connected stream, reads the greeting and the capabilities.
+    async fn open_over(
+        cfg:        &ImapConfig,
+        tls_cfg:    Arc<ClientConfig>,
+        plain:      TcpStream,
+    )
+        -> Outcome<Self>
+    {
         let stream = match cfg.security {
             Security::ImplicitTls =>
                 res!(tls::upgrade(plain, &cfg.host, tls_cfg.clone(), cfg.timeout).await),
@@ -2972,6 +3000,53 @@ mod tests {
         let tls_cfg = Arc::new(res!(tls::client_config_trusting(&tls::TrustConfig::default(), ca.as_bytes())));
         let c = res!(ImapClient::connect(&base.with_tls(tls_cfg)).await);
         req!(true, c.has_cap("SPECIAL-USE"), "the greeting was not read over TLS");
+        Ok(())
+    }
+
+    /// A pinned address weakens nothing: the certificate is still checked against `host`, so the
+    /// same server under a name its certificate does not carry is refused.
+    #[tokio::test]
+    async fn test_a_pinned_address_still_checks_the_host_name_00() -> Outcome<()> {
+        let (addr, ca) = res!(private_tls_server(1).await);
+        let tls_cfg = Arc::new(res!(tls::client_config_trusting(&tls::TrustConfig::default(), ca.as_bytes())));
+        let cfg = ImapConfig::new(fmt!("imap.other.test"), addr.port(), Security::ImplicitTls)
+            .with_addr(addr)
+            .with_retries(0)
+            .with_timeout(Duration::from_secs(10))
+            .with_tls(tls_cfg);
+        match ImapClient::connect(&cfg).await {
+            Ok(_)  => return Err(err!("A certificate for another name was trusted."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Security),
+                "the refusal was not tagged Security: {:?}", e.tags()),
+        }
+        Ok(())
+    }
+
+    /// A stream connected by someone else carries the conversation, with the certificate checked
+    /// against `host`: the right name greets over TLS, a wrong one is refused, and the client
+    /// makes no fresh connection of its own.
+    #[tokio::test]
+    async fn test_connect_over_a_given_stream_checks_the_host_name_00() -> Outcome<()> {
+        let (addr, ca) = res!(private_tls_server(2).await);
+        let tls_cfg = Arc::new(res!(tls::client_config_trusting(&tls::TrustConfig::default(), ca.as_bytes())));
+        // An address nothing listens on: connect_over must not dial it.
+        let unused = SocketAddr::from(([127, 0, 0, 1], 9));
+        let dial = || async {
+            TcpStream::connect(addr).await.map_err(|e| err!(e, "Dialling the test server."; Test, IO))
+        };
+        let good = ImapConfig::new(fmt!("imap.world.test"), 9, Security::ImplicitTls)
+            .with_addr(unused)
+            .with_timeout(Duration::from_secs(10));
+        let c = res!(ImapClient::connect_over(&good, tls_cfg.clone(), res!(dial().await)).await);
+        req!(true, c.has_cap("SPECIAL-USE"), "the greeting was not read over TLS");
+        req!(0, c.retries, "a client that cannot dial kept a retry");
+        let bad = ImapConfig::new(fmt!("imap.other.test"), 9, Security::ImplicitTls)
+            .with_timeout(Duration::from_secs(10));
+        match ImapClient::connect_over(&bad, tls_cfg, res!(dial().await)).await {
+            Ok(_)  => return Err(err!("A certificate for another name was trusted."; Test, Invalid)),
+            Err(e) => req!(true, e.tags().contains(&ErrTag::Security),
+                "the refusal was not tagged Security: {:?}", e.tags()),
+        }
         Ok(())
     }
 

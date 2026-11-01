@@ -437,5 +437,24 @@ pub fn test_smtp_submit(filter: &'static str) -> Outcome<()> {
         })
     }));
 
+    res!(test_it(filter, &["Submit and verify over a stream connected by another", "all", "smtp", "submit", "verify"], || {
+        res!(runtime()).block_on(async {
+            let (addr, client, submitted) = res!(real_submission().await);
+            // The config names an address nothing listens on: the _over forms must not dial it.
+            let cfg = real_cfg(SocketAddr::from(([127, 0, 0, 1], 9)), PASS);
+            let dial = || async {
+                tokio::net::TcpStream::connect(addr).await
+                    .map_err(|e| err!(e, "Dialling the test server."; Test, IO))
+            };
+            res!(client.verify_over(&cfg, res!(dial().await)).await);
+            req!(0, res!(count(&submitted)), "the check submitted a message");
+            let qid = res!(client.submit_over(&cfg, res!(dial().await), USER,
+                &[fmt!("bob@example.net")], &body()).await);
+            req!(true, qid.contains("REAL1"), "the queue id: {}", qid);
+            req!(1, res!(count(&submitted)));
+            Ok(())
+        })
+    }));
+
     Ok(())
 }

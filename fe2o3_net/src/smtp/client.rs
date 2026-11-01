@@ -540,6 +540,40 @@ impl OutboundClient {
         Ok(())
     }
 
+    /// [`Self::submit`] over a TCP stream someone else connected, for a process that may not
+    /// dial itself: a sandboxed child handed a socket by a broker that vetted the end. The stream
+    /// is protected as `cfg.security` says and the certificate checked against `cfg.host`;
+    /// `cfg.addr` and `cfg.port` are not used.
+    pub async fn submit_over(
+        &self,
+        cfg:        &SubmissionConfig,
+        plain:      TcpStream,
+        mail_from:  &str,
+        rcpt_to:    &[String],
+        body:       &[u8],
+    )
+        -> Outcome<String>
+    {
+        if rcpt_to.is_empty() {
+            return Err(err!(
+                "OutboundClient::submit_over called with no recipients.";
+                Invalid, Input, Missing));
+        }
+        let conv = Conversation::over(plain, &cfg.host, cfg.timeout);
+        let mut conv = res!(self.converse(cfg, conv).await);
+        let queue_id = res!(transact(&mut conv, mail_from, rcpt_to, body).await);
+        conv.quit().await;
+        Ok(queue_id)
+    }
+
+    /// [`Self::verify`] over a TCP stream someone else connected, as [`Self::submit_over`].
+    pub async fn verify_over(&self, cfg: &SubmissionConfig, plain: TcpStream) -> Outcome<()> {
+        let conv = Conversation::over(plain, &cfg.host, cfg.timeout);
+        let conv = res!(self.converse(cfg, conv).await);
+        conv.quit().await;
+        Ok(())
+    }
+
     /// An authenticated submission session, ready for MAIL FROM.
     async fn open_submission(&self, cfg: &SubmissionConfig) -> Outcome<Conversation> {
         let addr = match cfg.addr {
@@ -561,8 +595,12 @@ impl OutboundClient {
             },
         };
 
-        let mut conv = res!(Conversation::connect(addr, &cfg.host, cfg.timeout).await);
+        let conv = res!(Conversation::connect(addr, &cfg.host, cfg.timeout).await);
+        self.converse(cfg, conv).await
+    }
 
+    /// Greeting, EHLO, TLS (implicit or STARTTLS) and AUTH on a connected conversation.
+    async fn converse(&self, cfg: &SubmissionConfig, mut conv: Conversation) -> Outcome<Conversation> {
         // TLS from the first byte, or in the clear until STARTTLS lifts it.
         if cfg.security == Security::ImplicitTls {
             conv = res!(conv.upgrade(self.tls_config.clone()).await);
@@ -687,7 +725,12 @@ impl Conversation {
             Err(_)     => return Err(err!(
                 "Timeout connecting to {} at {}.", peer, addr; IO, Network, Timeout)),
         };
-        Ok(Self { stream: ClientStream::Plain(plain), peer: peer.to_string(), timeout: deadline })
+        Ok(Self::over(plain, peer, deadline))
+    }
+
+    /// A stream already connected, by this process or another.
+    fn over(plain: TcpStream, peer: &str, deadline: Duration) -> Self {
+        Self { stream: ClientStream::Plain(plain), peer: peer.to_string(), timeout: deadline }
     }
 
     /// TLS over the plain stream, from the first byte or once STARTTLS has been agreed.
