@@ -20,6 +20,8 @@ use oxedyne_fe2o3_jdat::{
     cfg::Config,
 };
 
+use std::collections::BTreeMap; // the ToDatMap derive names it
+
 /// Bytes of the length prefix. // fixed: the frame format, a u32 big-endian body length
 pub const PREFIX_LEN: usize = 4;
 
