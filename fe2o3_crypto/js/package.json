@@ -1,0 +1,6 @@
+{
+	"name": "fe2o3-crypto-js",
+	"private": true,
+	"type": "module",
+	"description": "The JavaScript twin of fe2o3_crypto::pad. No dependencies, no build step."
+}
