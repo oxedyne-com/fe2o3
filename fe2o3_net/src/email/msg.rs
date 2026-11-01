@@ -134,7 +134,9 @@ impl EmailMessage {
             if byts_read == 1 && line[0] == b'.' {
                 break;
             }
-            let line = String::from_utf8_lossy(&line);
+            // Undo the sender's dot-stuffing (RFC 5321 4.5.2).
+            let line = if line.first() == Some(&b'.') { &line[1..] } else { &line[..] };
+            let line = String::from_utf8_lossy(line);
             debug!("### line={}", line);
             res!(parser.push_line(&line));
         }

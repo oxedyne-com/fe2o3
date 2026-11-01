@@ -46,6 +46,7 @@ Message-ID: <12345.67890@servera.example.org>\r
 \r
 This is a test message sent from Server A to Server B.\r
 \r
+..A stuffed line.\r
 Best regards,\r
 Sender\r
 .\r\n";
@@ -64,7 +65,7 @@ Sender\r
             from:       fmt!("Sender <sender@example.org>"),
             to:         vec![fmt!("Recipient <recipient@example.com>")],
             subject:    fmt!("Test message"),
-            body:       fmt!("This is a test message sent from Server A to Server B.\n\nBest regards,\nSender\n"),
+            body:       fmt!("This is a test message sent from Server A to Server B.\n\n.A stuffed line.\nBest regards,\nSender\n"),
             headers:    vec![
                 EmailHeader::Received(fmt!("from servera.example.org (servera.example.org [192.168.0.1]) by serverb.example.com (ExampleMTA) with ESMTP id 12345678 for <recipient@example.com>; Fri, 11 Jun 2023 09:30:00 -0500 (EST)")),
                 EmailHeader::Date(fmt!("Fri, 11 Jun 2023 09:30:00 -0500")),
