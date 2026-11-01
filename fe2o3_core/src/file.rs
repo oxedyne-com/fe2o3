@@ -202,17 +202,131 @@ pub fn save_atomic_with<F>(
     replace_file(path, mode, TMP_SWEEP_AGE, false, write)
 }
 
-/// The file a leftover temporary of [`save_atomic`] was to replace, and the pid
-/// of the writer that made it, where `entry` is strictly the hidden
-/// `.<name>.<digits>.<digits>.tmp` a writer names its temporary; `None` for
-/// any other name. A walker that must never take a write cut short for content,
-/// such as a version control capture, asks this of each name it meets, and can
-/// ask whether the writer still runs before it removes what it left.
-pub fn save_atomic_leftover(entry: &OsStr) -> Option<(OsString, u32)> {
+/// A file or link made whole at its writer's own temporary beside the path it is
+/// to replace, and fsynced, but not yet renamed into place.
+///
+/// The temporary is named `.<tag>.<name>.<pid>.<n>.tmp`, where `tag` is the
+/// caller's own, so that what a writer cut short leaves can be told from any file
+/// somebody else made, which [`staged_leftover`] does: a walker that removes what
+/// a writer left need never take a stranger's `.notes.2025.11.tmp` for one.
+///
+/// Staging and landing are apart so that a caller placing many files can fsync
+/// them all, rename them all, and then fsync each directory once, rather than
+/// paying for a directory fsync per file. [`Staged::land`] does not fsync the
+/// directory: until the caller has done so with [`sync_parent_dir`], a power cut
+/// may bring back what the path held before. Dropped unlanded, the temporary is
+/// removed and the path is as it was.
+#[must_use = "a staged file is removed, unlanded, when it is dropped"]
+#[derive(Debug)]
+pub struct Staged {
+    tmp:    Option<PathBuf>,
+    path:   PathBuf,
+}
+
+impl Staged {
+
+    /// The path this lands at.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The temporary that stands beside it until it lands.
+    pub fn temporary(&self) -> Option<&Path> {
+        self.tmp.as_deref()
+    }
+
+    /// Renames the temporary over the path, whole: a reader or a crash finds the
+    /// old entry or the new one and never part of either. The directory is not
+    /// fsynced here; see [`Staged`]. A temporary that is gone, as another writer's
+    /// cleanup may take it, is an error tagged `Missing`, and the path is as it was.
+    pub fn land(mut self) -> Outcome<()> {
+        let tmp = match self.tmp.take() {
+            Some(t) => t,
+            None    => return Ok(()),
+        };
+        if let Err(e) = fs::rename(&tmp, &self.path) {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Err(err!(e,
+                    "The temporary {:?} is gone, most likely removed by another \
+                    writer's cleanup, so {:?} was not changed.", tmp, self.path;
+                    File, IO, Missing));
+            }
+            let _ = fs::remove_file(&tmp);
+            return Err(err!(e,
+                "Could not rename {:?} over {:?}.", tmp, self.path;
+                File, IO, Write));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if let Some(tmp) = self.tmp.take() {
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// Writes `path`'s new bytes, by `write`, into this writer's own temporary
+/// beside it, tagged `tag` (see [`Staged`]), with the mode `mode` says, and
+/// fsyncs and closes it. Nothing at `path` changes until [`Staged::land`]. An
+/// error from `write` removes the temporary.
+pub fn stage_file<F>(
+    path:   &Path,
+    mode:   SaveMode,
+    tag:    &OsStr,
+    write:  F,
+)
+    -> Outcome<Staged>
+    where F: FnOnce(&mut File) -> Outcome<()>
+{
+    let name = res!(file_name_of(path));
+    let tmp = res!(write_tmp(path, &name, Some(tag), mode, write));
+    Ok(Staged { tmp: Some(tmp), path: path.to_path_buf() })
+}
+
+/// Makes a symbolic link to `target` at this writer's own temporary beside
+/// `path`, tagged `tag` (see [`Staged`]), so that landing it replaces whatever
+/// stands at `path` whole: never the remove-then-`symlink` that a kill between
+/// the two leaves with nothing at the path for good.
+#[cfg(unix)]
+pub fn stage_link(path: &Path, target: &Path, tag: &OsStr) -> Outcome<Staged> {
+    let name = res!(file_name_of(path));
+    let pid = std::process::id();
+    for _ in 0..TMP_TRIES {
+        let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_file_name(tmp_name(Some(tag), &name, pid, n));
+        match std::os::unix::fs::symlink(target, &tmp) {
+            Ok(()) => return Ok(Staged { tmp: Some(tmp), path: path.to_path_buf() }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(err!(e,
+                "Could not make the temporary link {:?} -> {:?}.", tmp, target;
+                File, IO, Create)),
+        }
+    }
+    Err(err!(
+        "All {} fresh temporary names tried for the link {:?} were already taken.",
+        TMP_TRIES, path;
+        File, IO, Create, Exists))
+}
+
+/// The file a temporary of [`stage_file`] or [`stage_link`] made with `tag` was
+/// to replace, and the pid of the writer that made it, where `entry` is strictly
+/// `.<tag>.<name>.<digits>.<digits>.tmp`; `None` for any other name, and so for
+/// every temporary another program, or another tag, makes. A walker that must
+/// never take a write cut short for content, such as a version control capture,
+/// asks this of each name it meets with its own tag, and can ask whether the
+/// writer still runs before it removes what it left.
+pub fn staged_leftover(entry: &OsStr, tag: &OsStr) -> Option<(OsString, u32)> {
     let digits = |p: &[u8]| !p.is_empty() && p.iter().all(u8::is_ascii_digit);
-    let mid = match entry.as_encoded_bytes().strip_prefix(b".").and_then(|r| r.strip_suffix(b".tmp")) {
-        Some(m) => m,
-        None    => return None,
+    let mid = match entry.as_encoded_bytes().strip_prefix(b".")
+        .and_then(|r| r.strip_prefix(tag.as_encoded_bytes()))
+        .and_then(|r| r.strip_prefix(b"."))
+        .and_then(|r| r.strip_suffix(b".tmp"))
+    {
+        Some(m) if !tag.is_empty() => m,
+        _                          => return None,
     };
     let mut parts = mid.rsplitn(3, |b| *b == b'.');
     let (n, pid, name) = match (parts.next(), parts.next(), parts.next()) {
@@ -237,68 +351,25 @@ pub fn save_atomic_leftover(entry: &OsStr) -> Option<(OsString, u32)> {
     }
 }
 
-/// Replaces whatever stands at `path` with a symbolic link to `target`, whole:
-/// the link is made at this writer's own hidden sibling, named as
-/// [`save_atomic`] names its temporary, and renamed over `path`, so a reader or
-/// a crash finds the old entry or the new link and never nothing at all, which
-/// a remove followed by a `symlink` leaves for good if it is killed between the
-/// two. The directory is fsynced after the rename, as [`save_atomic`] does.
-#[cfg(unix)]
-pub fn replace_link(path: &Path, target: &Path) -> Outcome<()> {
-    let name = res!(file_name_of(path));
-    let pid = std::process::id();
-    let mut made = None;
-    for _ in 0..TMP_TRIES {
-        let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let tmp = path.with_file_name(tmp_name(&name, pid, n));
-        match std::os::unix::fs::symlink(target, &tmp) {
-            Ok(()) => {
-                made = Some(tmp);
-                break;
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(err!(e,
-                "Could not make the temporary link {:?} -> {:?}.", tmp, target;
-                File, IO, Create)),
-        }
-    }
-    let tmp = match made {
-        Some(t) => t,
-        None    => return Err(err!(
-            "All {} fresh temporary names tried for the link {:?} were already taken.",
-            TMP_TRIES, path;
-            File, IO, Create)),
-    };
-    if let Err(e) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err!(e,
-            "Could not rename the link {:?} over {:?}.", tmp, path;
-            File, IO, Write));
-    }
-    sync_parent_dir(path)
-}
-
-/// The one body of [`save_atomic`] and [`save_secret`]. `sweep_legacy` also
-/// removes `<name>.tmp`, a name only the secret saves ever wrote and which an
-/// ordinary neighbour could be using, and `sweep_age` lets a test put the sweep
-/// onto a live writer's file.
-fn replace_file<F>(
-    path:           &Path,
-    mode:           SaveMode,
-    sweep_age:      Duration,
-    sweep_legacy:   bool,
-    write:          F,
+/// Makes this writer's own temporary beside `path`, gives it its mode, writes
+/// it by `write`, fsyncs it and closes it, and says where it is. Any failure
+/// removes it. The first half of every whole-file replacement.
+fn write_tmp<F>(
+    path:   &Path,
+    name:   &OsStr,
+    tag:    Option<&OsStr>,
+    mode:   SaveMode,
+    write:  F,
 )
-    -> Outcome<()>
+    -> Outcome<PathBuf>
     where F: FnOnce(&mut File) -> Outcome<()>
 {
-    let name = res!(file_name_of(path));
     #[cfg(unix)]
     let old = match mode {
         SaveMode::Keep  => mode_bits_of(path),
         SaveMode::Owner => None,
     };
-    let (tmp, mut f) = res!(create_tmp(path, &name, mode));
+    let (tmp, mut f) = res!(create_tmp(path, name, tag, mode));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -328,6 +399,25 @@ fn replace_file<F>(
     }
     // Closed before the rename, which off unix cannot move a file still open.
     drop(f);
+    Ok(tmp)
+}
+
+/// The one body of [`save_atomic`] and [`save_secret`]. `sweep_legacy` also
+/// removes `<name>.tmp`, a name only the secret saves ever wrote and which an
+/// ordinary neighbour could be using, and `sweep_age` lets a test put the sweep
+/// onto a live writer's file.
+fn replace_file<F>(
+    path:           &Path,
+    mode:           SaveMode,
+    sweep_age:      Duration,
+    sweep_legacy:   bool,
+    write:          F,
+)
+    -> Outcome<()>
+    where F: FnOnce(&mut File) -> Outcome<()>
+{
+    let name = res!(file_name_of(path));
+    let tmp = res!(write_tmp(path, &name, None, mode, write));
     if let Err(e) = fs::rename(&tmp, path) {
         if e.kind() == std::io::ErrorKind::NotFound {
             // No other writer makes this name, so it is gone because another
@@ -691,6 +781,7 @@ fn file_name_of(path: &Path) -> Outcome<OsString> {
 fn create_tmp(
     path:   &Path,
     name:   &OsStr,
+    tag:    Option<&OsStr>,
     mode:   SaveMode,
 )
     -> Outcome<(PathBuf, File)>
@@ -698,7 +789,7 @@ fn create_tmp(
     let pid = std::process::id();
     for _ in 0..TMP_TRIES {
         let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let tmp = path.with_file_name(tmp_name(name, pid, n));
+        let tmp = path.with_file_name(tmp_name(tag, name, pid, n));
         let mut opts = OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
@@ -723,12 +814,17 @@ fn create_tmp(
 }
 
 /// The temporary name writer `n` of process `pid` gives file `name`:
-/// `.<name>.<pid>.<n>.tmp`, hidden so that a listing or a sync tool that skips
-/// dot files never takes it for a file of the tree.
-fn tmp_name(name: &OsStr, pid: u32, n: u64) -> OsString {
+/// `.<name>.<pid>.<n>.tmp`, or `.<tag>.<name>.<pid>.<n>.tmp` for a [`Staged`]
+/// file, hidden so that a listing or a sync tool that skips dot files never
+/// takes it for a file of the tree.
+fn tmp_name(tag: Option<&OsStr>, name: &OsStr, pid: u32, n: u64) -> OsString {
     // Built as an `OsString`, not via `to_string_lossy`, so a non-UTF-8 file
     // name is not mangled into one that could collide with another file's.
     let mut tmp = OsString::from(".");
+    if let Some(tag) = tag {
+        tmp.push(tag);
+        tmp.push(".");
+    }
     tmp.push(name);
     tmp.push(fmt!(".{}.{}.tmp", pid, n));
     tmp
@@ -2247,48 +2343,77 @@ mod tests {
         Ok(())
     }
 
-    /// A save leaves no temporary behind, and a symlink at the path is replaced
-    /// by a file and not written through, so what it pointed at is untouched.
+    /// Only a temporary made with the caller's own tag is its leftover: a file of
+    /// the same shape anybody else made, `.notes.2025.11.tmp` among them, is not.
     #[test]
-    fn test_save_atomic_leftover_names_only_a_writers_temporary() -> Outcome<()> {
+    fn test_staged_leftover_names_only_a_temporary_of_its_own_tag() -> Outcome<()> {
+        let tag = OsStr::new("ore-tmp");
         let pid = std::process::id();
-        let mine = tmp_name(OsStr::new("b.txt"), pid, 7);
-        if save_atomic_leftover(&mine) != Some((OsString::from("b.txt"), pid)) {
+        let mine = tmp_name(Some(tag), OsStr::new("b.txt"), pid, 7);
+        if staged_leftover(&mine, tag) != Some((OsString::from("b.txt"), pid)) {
             return Err(err!("{:?} was not read as a leftover of b.txt by {}.", mine, pid;
                 Test, Mismatch));
         }
-        for other in [".b.txt.tmp", "b.txt.1.2.tmp", ".1.2.tmp", ".b.txt.x.2.tmp", ".b.txt.1.2.tmpx",
-            ".b.txt.1..tmp", "notes.tmp", ".b.txt.99999999999.2.tmp"]
+        for other in [".notes.2025.11.tmp", ".b.txt.1.2.tmp", ".ore-tmp.b.txt.tmp", "ore-tmp.b.txt.1.2.tmp",
+            ".ore-tmp.1.2.tmp", ".ore-tmp..1.2.tmp", ".ore-tmp.b.txt.x.2.tmp", ".ore-tmp.b.txt.1.2.tmpx",
+            ".ore-tmp.b.txt.1..tmp", ".other.b.txt.1.2.tmp", ".ore-tmpb.txt.1.2.tmp",
+            ".ore-tmp.b.txt.99999999999.2.tmp"]
         {
-            if let Some(got) = save_atomic_leftover(OsStr::new(other)) {
+            if let Some(got) = staged_leftover(OsStr::new(other), tag) {
                 return Err(err!("{:?} was read as a leftover: {:?}.", other, got; Test, Mismatch));
             }
         }
+        if staged_leftover(&mine, OsStr::new("")) != None {
+            return Err(err!("An empty tag claimed {:?}.", mine; Test, Mismatch));
+        }
         // A dotted name keeps its own dots.
-        if save_atomic_leftover(OsStr::new(".a.b.c.12.3.tmp")) != Some((OsString::from("a.b.c"), 12)) {
+        if staged_leftover(OsStr::new(".ore-tmp.a.b.c.12.3.tmp"), tag) != Some((OsString::from("a.b.c"), 12)) {
             return Err(err!("A dotted name was not read whole."; Test, Mismatch));
         }
         Ok(())
     }
 
+    /// A staged file changes nothing until it lands, lands whole with its mode, and
+    /// dropped unlanded leaves nothing behind; a staged link replaces a file whole.
     #[test]
-    fn test_replace_link_swaps_a_file_for_a_link_and_leaves_nothing_beside_it() -> Outcome<()> {
-        let dir = scratch_path("replace_link");
+    fn test_staged_files_and_links_land_whole_and_leave_nothing_beside_them() -> Outcome<()> {
+        let dir = scratch_path("staged");
         res!(fs::create_dir(&dir));
         let outcome = (|| -> Outcome<()> {
+            use std::io::Write;
+            let tag = OsStr::new("ore-tmp");
             let at = dir.join("here");
-            res!(fs::write(&at, b"a file"));
-            res!(replace_link(&at, Path::new("there")));
-            let read = res!(fs::read_link(&at));
-            if read != Path::new("there") {
-                return Err(err!("The link reads {:?}.", read; Test, Mismatch));
+            res!(fs::write(&at, b"old"));
+            let names = |d: &Path| -> Outcome<Vec<OsString>> {
+                let mut n: Vec<OsString> = res!(fs::read_dir(d)).flatten().map(|e| e.file_name()).collect();
+                n.sort();
+                Ok(n)
+            };
+            let staged = res!(stage_file(&at, SaveMode::Keep, tag, |f| { res!(f.write_all(b"new")); Ok(()) }));
+            let tmp = match staged.temporary() {
+                Some(t) => t.to_path_buf(),
+                None    => return Err(err!("A staged file has no temporary."; Test, Missing)),
+            };
+            if res!(fs::read(&at)) != b"old" || res!(fs::read(&tmp)) != b"new"
+                || staged_leftover(tmp.file_name().unwrap_or_default(), tag).is_none()
+            {
+                return Err(err!("Staging changed {:?}, or its temporary {:?} is wrong.", at, tmp; Test, Mismatch));
             }
-            res!(replace_link(&at, Path::new("elsewhere")));
-            let read = res!(fs::read_link(&at));
-            let names: Vec<_> = res!(fs::read_dir(&dir)).flatten().map(|e| e.file_name()).collect();
-            if read != Path::new("elsewhere") || names != [OsString::from("here")] {
-                return Err(err!("The link reads {:?}, beside {:?}.", read, names; Test, Mismatch));
+            res!(staged.land());
+            if res!(fs::read(&at)) != b"new" || res!(names(&dir)) != [OsString::from("here")] {
+                return Err(err!("A landed file is wrong, or left {:?}.", res!(names(&dir)); Test, Mismatch));
             }
+            let dropped = res!(stage_file(&at, SaveMode::Keep, tag, |f| { res!(f.write_all(b"no")); Ok(()) }));
+            drop(dropped);
+            if res!(fs::read(&at)) != b"new" || res!(names(&dir)) != [OsString::from("here")] {
+                return Err(err!("A dropped staging changed the file or left {:?}.", res!(names(&dir)); Test, Mismatch));
+            }
+            res!(res!(stage_link(&at, Path::new("there"), tag)).land());
+            let read = res!(fs::read_link(&at));
+            if read != Path::new("there") || res!(names(&dir)) != [OsString::from("here")] {
+                return Err(err!("The link reads {:?}, beside {:?}.", read, res!(names(&dir)); Test, Mismatch));
+            }
+            res!(sync_parent_dir(&at));
             Ok(())
         })();
         let _ = fs::remove_dir_all(&dir);
@@ -2332,7 +2457,7 @@ mod tests {
     /// that skips dot files, never takes it for a file of the tree.
     #[test]
     fn test_save_atomic_temporary_name_is_hidden() -> Outcome<()> {
-        let tmp = tmp_name(OsStr::new("book.pdf"), 7, 3);
+        let tmp = tmp_name(None, OsStr::new("book.pdf"), 7, 3);
         if tmp != OsStr::new(".book.pdf.7.3.tmp") {
             return Err(err!("The temporary of book.pdf was named {:?}, not .book.pdf.7.3.tmp.", tmp;
                 Test, Mismatch));
