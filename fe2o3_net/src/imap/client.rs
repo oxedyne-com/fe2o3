@@ -2959,12 +2959,32 @@ mod tests {
 
     /// An implicit-TLS server vouched for by a private CA, which greets each of `n` connections.
     async fn private_tls_server(n: usize) -> Outcome<(SocketAddr, String)> {
+        tls_server(n, false).await
+    }
+
+    /// Presents the leaf for `imap.world.test` whatever name the client asks for, as a server
+    /// reached under the wrong name would.
+    #[derive(Debug)]
+    struct OneLeaf(Arc<tokio_rustls::rustls::sign::CertifiedKey>);
+
+    impl tokio_rustls::rustls::server::ResolvesServerCert for OneLeaf {
+        fn resolve(&self, _hello: tokio_rustls::rustls::server::ClientHello<'_>)
+            -> Option<Arc<tokio_rustls::rustls::sign::CertifiedKey>>
+        {
+            Some(self.0.clone())
+        }
+    }
+
+    /// [`private_tls_server`], with `one_leaf` presenting `imap.world.test` to every name.
+    async fn tls_server(n: usize, one_leaf: bool) -> Outcome<(SocketAddr, String)> {
         use tokio_rustls::{rustls::ServerConfig, TlsAcceptor};
         let mint = res!(tls::Mint::new(&[tls::NameRule::Exact(fmt!("imap.world.test"))], 1));
         let ca   = mint.ca_pem();
-        let scfg = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_cert_resolver(Arc::new(mint));
+        let builder = ServerConfig::builder().with_no_client_auth();
+        let scfg = match one_leaf {
+            true    => builder.with_cert_resolver(Arc::new(OneLeaf(res!(mint.leaf("imap.world.test"))))),
+            false   => builder.with_cert_resolver(Arc::new(mint)),
+        };
         let acceptor = TlsAcceptor::from(Arc::new(scfg));
         let listener = res!(TcpListener::bind("127.0.0.1:0").await
             .map_err(|e| err!(e, "Binding the test server."; Test, IO)));
@@ -3007,7 +3027,7 @@ mod tests {
     /// same server under a name its certificate does not carry is refused.
     #[tokio::test]
     async fn test_a_pinned_address_still_checks_the_host_name_00() -> Outcome<()> {
-        let (addr, ca) = res!(private_tls_server(1).await);
+        let (addr, ca) = res!(tls_server(1, true).await);
         let tls_cfg = Arc::new(res!(tls::client_config_trusting(&tls::TrustConfig::default(), ca.as_bytes())));
         let cfg = ImapConfig::new(fmt!("imap.other.test"), addr.port(), Security::ImplicitTls)
             .with_addr(addr)
@@ -3027,7 +3047,7 @@ mod tests {
     /// makes no fresh connection of its own.
     #[tokio::test]
     async fn test_connect_over_a_given_stream_checks_the_host_name_00() -> Outcome<()> {
-        let (addr, ca) = res!(private_tls_server(2).await);
+        let (addr, ca) = res!(tls_server(2, true).await);
         let tls_cfg = Arc::new(res!(tls::client_config_trusting(&tls::TrustConfig::default(), ca.as_bytes())));
         // An address nothing listens on: connect_over must not dial it.
         let unused = SocketAddr::from(([127, 0, 0, 1], 9));
