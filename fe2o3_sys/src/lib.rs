@@ -35,6 +35,8 @@ pub mod net;
 pub mod parse;
 pub mod proc_self;
 pub mod resident;
+#[cfg(all(target_os = "linux", feature = "session"))]
+pub mod session;
 #[cfg(all(target_os = "linux", feature = "signal"))]
 pub mod signal;
 pub mod snapshot;

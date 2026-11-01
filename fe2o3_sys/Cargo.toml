@@ -24,6 +24,9 @@ signal = ["dep:nix", "nix/signal", "nix/process"]
 # address-space rlimit where there is none, arms a child's death with its parent's, and keeps a
 # restart budget. Builds on signal.
 supervise = ["signal"]
+# session: drops a root process to a user's uid, gid and groups and checks the drop held, starts a
+# new session, and tests that a path and its ancestors are root-owned and not group- or other-writable.
+session = ["dep:nix", "nix/user", "nix/process"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }
