@@ -202,6 +202,82 @@ pub fn save_atomic_with<F>(
     replace_file(path, mode, TMP_SWEEP_AGE, false, write)
 }
 
+/// The file a leftover temporary of [`save_atomic`] was to replace, and the pid
+/// of the writer that made it, where `entry` is strictly the hidden
+/// `.<name>.<digits>.<digits>.tmp` a writer names its temporary; `None` for
+/// any other name. A walker that must never take a write cut short for content,
+/// such as a version control capture, asks this of each name it meets, and can
+/// ask whether the writer still runs before it removes what it left.
+pub fn save_atomic_leftover(entry: &OsStr) -> Option<(OsString, u32)> {
+    let digits = |p: &[u8]| !p.is_empty() && p.iter().all(u8::is_ascii_digit);
+    let mid = match entry.as_encoded_bytes().strip_prefix(b".").and_then(|r| r.strip_suffix(b".tmp")) {
+        Some(m) => m,
+        None    => return None,
+    };
+    let mut parts = mid.rsplitn(3, |b| *b == b'.');
+    let (n, pid, name) = match (parts.next(), parts.next(), parts.next()) {
+        (Some(n), Some(pid), Some(name)) => (n, pid, name),
+        _                                => return None,
+    };
+    if name.is_empty() || !digits(n) || !digits(pid) {
+        return None;
+    }
+    let pid = match std::str::from_utf8(pid).ok().and_then(|p| p.parse::<u32>().ok()) {
+        Some(p) => p,
+        None    => return None,
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some((OsStr::from_bytes(name).to_os_string(), pid))
+    }
+    #[cfg(not(unix))]
+    {
+        Some((OsString::from(String::from_utf8_lossy(name).into_owned()), pid))
+    }
+}
+
+/// Replaces whatever stands at `path` with a symbolic link to `target`, whole:
+/// the link is made at this writer's own hidden sibling, named as
+/// [`save_atomic`] names its temporary, and renamed over `path`, so a reader or
+/// a crash finds the old entry or the new link and never nothing at all, which
+/// a remove followed by a `symlink` leaves for good if it is killed between the
+/// two. The directory is fsynced after the rename, as [`save_atomic`] does.
+#[cfg(unix)]
+pub fn replace_link(path: &Path, target: &Path) -> Outcome<()> {
+    let name = res!(file_name_of(path));
+    let pid = std::process::id();
+    let mut made = None;
+    for _ in 0..TMP_TRIES {
+        let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_file_name(tmp_name(&name, pid, n));
+        match std::os::unix::fs::symlink(target, &tmp) {
+            Ok(()) => {
+                made = Some(tmp);
+                break;
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(err!(e,
+                "Could not make the temporary link {:?} -> {:?}.", tmp, target;
+                File, IO, Create)),
+        }
+    }
+    let tmp = match made {
+        Some(t) => t,
+        None    => return Err(err!(
+            "All {} fresh temporary names tried for the link {:?} were already taken.",
+            TMP_TRIES, path;
+            File, IO, Create)),
+    };
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err!(e,
+            "Could not rename the link {:?} over {:?}.", tmp, path;
+            File, IO, Write));
+    }
+    sync_parent_dir(path)
+}
+
 /// The one body of [`save_atomic`] and [`save_secret`]. `sweep_legacy` also
 /// removes `<name>.tmp`, a name only the secret saves ever wrote and which an
 /// ordinary neighbour could be using, and `sweep_age` lets a test put the sweep
@@ -2173,6 +2249,52 @@ mod tests {
 
     /// A save leaves no temporary behind, and a symlink at the path is replaced
     /// by a file and not written through, so what it pointed at is untouched.
+    #[test]
+    fn test_save_atomic_leftover_names_only_a_writers_temporary() -> Outcome<()> {
+        let pid = std::process::id();
+        let mine = tmp_name(OsStr::new("b.txt"), pid, 7);
+        if save_atomic_leftover(&mine) != Some((OsString::from("b.txt"), pid)) {
+            return Err(err!("{:?} was not read as a leftover of b.txt by {}.", mine, pid;
+                Test, Mismatch));
+        }
+        for other in [".b.txt.tmp", "b.txt.1.2.tmp", ".1.2.tmp", ".b.txt.x.2.tmp", ".b.txt.1.2.tmpx",
+            ".b.txt.1..tmp", "notes.tmp", ".b.txt.99999999999.2.tmp"]
+        {
+            if let Some(got) = save_atomic_leftover(OsStr::new(other)) {
+                return Err(err!("{:?} was read as a leftover: {:?}.", other, got; Test, Mismatch));
+            }
+        }
+        // A dotted name keeps its own dots.
+        if save_atomic_leftover(OsStr::new(".a.b.c.12.3.tmp")) != Some((OsString::from("a.b.c"), 12)) {
+            return Err(err!("A dotted name was not read whole."; Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_replace_link_swaps_a_file_for_a_link_and_leaves_nothing_beside_it() -> Outcome<()> {
+        let dir = scratch_path("replace_link");
+        res!(fs::create_dir(&dir));
+        let outcome = (|| -> Outcome<()> {
+            let at = dir.join("here");
+            res!(fs::write(&at, b"a file"));
+            res!(replace_link(&at, Path::new("there")));
+            let read = res!(fs::read_link(&at));
+            if read != Path::new("there") {
+                return Err(err!("The link reads {:?}.", read; Test, Mismatch));
+            }
+            res!(replace_link(&at, Path::new("elsewhere")));
+            let read = res!(fs::read_link(&at));
+            let names: Vec<_> = res!(fs::read_dir(&dir)).flatten().map(|e| e.file_name()).collect();
+            if read != Path::new("elsewhere") || names != [OsString::from("here")] {
+                return Err(err!("The link reads {:?}, beside {:?}.", read, names; Test, Mismatch));
+            }
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(&dir);
+        outcome
+    }
+
     #[test]
     fn test_save_atomic_replaces_a_symlink_and_leaves_its_target_alone() -> Outcome<()> {
         let dir = scratch_path("atomic_link");
