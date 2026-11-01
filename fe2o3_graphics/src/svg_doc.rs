@@ -18,7 +18,8 @@
 //! [`SvgOp::Image`]. What is still left at the door: `<clipPath>` and markers (arrowheads);
 //! `filter`/`pattern`; a `<text>` rotated or sheared by its frame keeps its position but is shaped upright;
 //! and an `<image>` under a rotation or shear is placed by its axis-aligned bounds.
-//! A gradient fill (`url(#id)`) resolves to the flat mean of its stops -- a true axial or radial shading
+//! A gradient fill (`url(#id)`) resolves to the flat mean of its stops, a stopless one taking them along its
+//! `href` chain as Inkscape writes them -- a true axial or radial shading
 //! would need a paint the op set does not model -- and a reference to nothing draws nothing rather than
 //! failing the read. A file reaching past all this is read as far as it fits and the rest is left.
 //!
@@ -189,7 +190,9 @@ pub fn read_document(src: &str) -> Outcome<SvgPicture> {
 	let (vx, vy, vw, vh) = res!(view_box(root));
 
 	let mut defs = Defs { outlines: HashMap::new(), gradients: HashMap::new() };
-	collect_defs(root, &mut defs);
+	let mut links: HashMap<String, String> = HashMap::new();
+	collect_defs(root, &mut defs, &mut links);
+	resolve_gradient_links(&mut defs.gradients, &links);
 
 	// Everything is expressed relative to the viewBox origin, so the walk begins with a translation that
 	// carries that origin to (0, 0); a Typst file's origin is already there and the translation is nil.
@@ -221,15 +224,22 @@ fn view_box(root: &Elem) -> Outcome<(f32, f32, f32, f32)> {
 /// Gathers the `<defs>` store in one descent: every element with an `id` that yields an outline (for a
 /// `<use>` to fetch), and every gradient's flat mean colour (for a `url(#id)` fill to resolve to). The
 /// search descends the whole tree, since Inkscape files an id-bearing shape wherever it likes, not only
-/// under `<defs>`.
-fn collect_defs(elem: &Elem, out: &mut Defs) {
+/// under `<defs>`. A gradient with no stops of its own is noted in `links` with the id its `href` names,
+/// for [`resolve_gradient_links`] to settle once every gradient is known.
+fn collect_defs(elem: &Elem, out: &mut Defs, links: &mut HashMap<String, String>) {
 	for child in elem.elems() {
 		let name = child.name.local();
 		match name {
 			"linearGradient" | "radialGradient" => {
 				if let Some(id) = child.attr("id") {
-					if let Some(c) = gradient_mean(child) {
-						out.gradients.insert(id.to_string(), c);
+					match gradient_mean(child) {
+						Some(c)	=> { out.gradients.insert(id.to_string(), c); },
+						None	=> {
+							let href = child.attr("xlink:href").or_else(|| child.attr("href"));
+							if let Some(target) = href.and_then(|h| h.trim().strip_prefix('#')) {
+								links.insert(id.to_string(), target.to_string());
+							}
+						},
 					}
 				}
 			},
@@ -248,8 +258,31 @@ fn collect_defs(elem: &Elem, out: &mut Defs) {
 				}
 			},
 		}
-		collect_defs(child, out);
+		collect_defs(child, out, links);
 	}
+}
+
+/// Gives each stopless gradient the colour of the first gradient along its `href` chain that has stops
+/// of its own, as SVG 1.1 §13.2.2 has a gradient inherit its referent's stops when it carries none.
+/// Inkscape writes every positioned gradient this way, a stopless link over a shared swatch, so without
+/// this the fill draws nothing. A chain is followed at most once round the whole link set, so a cycle,
+/// or a link to nothing, ends in no colour and the fill is left unpainted.
+fn resolve_gradient_links(gradients: &mut HashMap<String, Rgba>, links: &HashMap<String, String>) {
+	let mut found: Vec<(String, Rgba)> = Vec::new();
+	for (id, first) in links {
+		let mut target = first;
+		for _ in 0..links.len() {
+			if let Some(c) = gradients.get(target) {
+				found.push((id.clone(), *c));
+				break;
+			}
+			match links.get(target) {
+				Some(next)	=> target = next,
+				None		=> break,
+			}
+		}
+	}
+	gradients.extend(found);
 }
 
 /// The flat mean colour of a gradient's stops: each stop's `stop-color` weighted equally, its
