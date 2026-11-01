@@ -18,10 +18,12 @@
 //! [`SvgOp::Image`]. What is still left at the door: `<clipPath>` and markers (arrowheads);
 //! `filter`/`pattern`; a `<text>` rotated or sheared by its frame keeps its position but is shaped upright;
 //! and an `<image>` under a rotation or shear is placed by its axis-aligned bounds.
-//! A gradient fill (`url(#id)`) resolves to the flat mean of its stops, a stopless one taking them along its
-//! `href` chain as Inkscape writes them -- a true axial or radial shading
-//! would need a paint the op set does not model -- and a reference to nothing draws nothing rather than
-//! failing the read. A file reaching past all this is read as far as it fits and the rest is left.
+//! A gradient fill or stroke (`url(#id)`) comes out as an [`SvgOp::Shade`]: a linear or radial
+//! [`Shading`] whose frame carries the gradient's `gradientTransform` and, for `objectBoundingBox`, the
+//! shape's bounding box, its stops and every unset attribute taken along the `href` chain as Inkscape
+//! writes them (SVG 1.1 13.2). Only `spreadMethod="pad"` is modelled (`reflect` and `repeat` are read as
+//! pad), and a radial's focal point (`fx`/`fy`) is taken to be its centre. A reference to nothing draws
+//! nothing rather than failing the read. A file reaching past all this is read as far as it fits and the rest is left.
 //!
 //! The one thing worth stating is what happens to a typesetter's text. It does not leave `<text>` in its
 //! SVG; it bakes each glyph to an outline, files the outline once as a `<symbol>`, and places it with a
@@ -37,7 +39,13 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::colour::Rgba;
+use crate::colour::{
+	Gradient,
+	Ink,
+	Rgba,
+	Shading,
+	Stop,
+};
 use crate::path::{
 	Bounds,
 	Path,
@@ -63,6 +71,7 @@ use oxedyne_fe2o3_text::xml::{
 };
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// One drawing operation read from an SVG document: a filled or a stroked path, a live text run, or a
 /// decoded raster, in the document's own frame (y down, `viewBox` units). Path geometry is flattened of
@@ -72,6 +81,8 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 pub enum SvgOp {
 	Fill { path: Path, colour: Rgba },
+	// A path filled with a gradient; a gradient stroke arrives as its stroked outline, filled.
+	Shade { path: Path, shading: Shading },
 	Stroke { path: Path, colour: Rgba, stroke: Stroke },
 	// A live `<text>`/`<tspan>` run left unshaped: `local` maps its own frame (y down) to the picture
 	// frame, `x`/`y` are the anchor and baseline in that frame, `size` the font-size in its units.
@@ -117,10 +128,87 @@ pub struct SvgPicture {
 }
 
 /// The store `<defs>` fills for the draw walk to draw from: outlines a `<use>` fetches by id, and the
-/// flat mean colour a gradient `url(#id)` fill resolves to.
+/// gradients a `url(#id)` paint resolves to.
 struct Defs {
-	outlines:	HashMap<String, Path>,	// id -> concatenated outline, for <use>
-	gradients:	HashMap<String, Rgba>,	// id -> flat mean of the gradient's stops
+	outlines:	HashMap<String, Path>,			// id -> concatenated outline, for <use>
+	gradients:	HashMap<String, Rc<GradDef>>,	// id -> the gradient, its href chain resolved
+}
+
+/// A gradient element as written, before its `href` chain is followed: each attribute it sets, its stops
+/// if it has any, and the id it links to.
+struct GradSrc {
+	radial:	bool,
+	attrs:	HashMap<&'static str, String>,
+	stops:	Option<Vec<Stop>>,
+	href:	Option<String>,
+}
+
+// The attributes a gradient inherits along its href; the first group only from a gradient of its own kind.
+const LINEAR_GEOM:	[&str; 4] = ["x1", "y1", "x2", "y2"];
+const RADIAL_GEOM:	[&str; 3] = ["cx", "cy", "r"];
+const SHARED:		[&str; 2] = ["gradientUnits", "gradientTransform"];
+
+/// A gradient ready to place on a shape: its geometry (`x1 y1 x2 y2`, or `cx cy r` and a zero), read in
+/// user units for `userSpaceOnUse` and as fractions of the box for `objectBoundingBox`.
+#[derive(Debug)]
+struct GradDef {
+	radial:		bool,
+	geom:		[f32; 4],
+	user:		bool,		// gradientUnits="userSpaceOnUse"
+	transform:	Transform,	// gradientTransform
+	stops:		Vec<Stop>,
+}
+
+impl GradDef {
+	/// The shading this gradient paints on a shape whose own-frame bounds are `bbox`, the shape placed in
+	/// the picture by `local`. A bounding-box gradient on a shape with no width or height paints nothing,
+	/// as SVG has it.
+	fn shading(&self, bbox: Option<Bounds>, local: &Transform) -> Option<Shading> {
+		let unit = if self.user {
+			Transform::IDENTITY
+		} else {
+			let b = bbox?;
+			let (w, h) = (b.x1 - b.x0, b.y1 - b.y0);
+			if !(w > 0.0) || !(h > 0.0) {
+				return None;
+			}
+			Transform { a: w, b: 0.0, c: 0.0, d: h, e: b.x0, f: b.y0 }
+		};
+		let g		= self.geom;
+		let stops	= self.stops.clone();
+		let grad = if !self.radial {
+			Gradient::Linear { from: (g[0], g[1]), to: (g[2], g[3]), stops }
+		} else if g[2] > 0.0 {
+			Gradient::Radial { centre: (g[0], g[1]), radius: g[2], stops }
+		} else {
+			// A zero radius paints the last stop's colour (SVG 1.1 13.2.3): a gradient of no extent.
+			Gradient::Linear { from: (g[0], g[1]), to: (g[0], g[1]), stops }
+		};
+		Some(Shading { grad, frame: self.transform.then(&unit).then(local) })
+	}
+
+	/// The flat mean of the stops, for a text run, which takes one colour.
+	fn mean(&self) -> Rgba {
+		Shading { grad: Gradient::Linear { from: (0.0, 0.0), to: (1.0, 0.0), stops: self.stops.clone() },
+			frame: Transform::IDENTITY }.mean()
+	}
+}
+
+/// A resolved `fill` or `stroke` paint.
+#[derive(Clone)]
+enum Fill {
+	Flat(Rgba),
+	Grad(Rc<GradDef>),
+}
+
+impl Fill {
+	/// The one colour a consumer without shading paints this with.
+	fn colour(&self) -> Rgba {
+		match self {
+			Self::Flat(c)	=> *c,
+			Self::Grad(g)	=> g.mean(),
+		}
+	}
 }
 
 /// The presentation state inherited down the group tree: fill and stroke and their opacities, the pen's
@@ -129,10 +217,10 @@ struct Defs {
 /// state is SVG's own defaults: a black fill, no stroke, full opacity, non-zero winding.
 #[derive(Clone)]
 struct Paint {
-	fill:			Option<Rgba>,	// resolved fill colour, or None for `fill:none`
+	fill:			Option<Fill>,	// resolved fill paint, or None for `fill:none`
 	fill_opacity:	f32,
 	even_odd:		bool,			// fill-rule="evenodd"
-	stroke:			Option<Rgba>,	// resolved stroke colour, or None for no stroke
+	stroke:			Option<Fill>,	// resolved stroke paint, or None for no stroke
 	stroke_opacity:	f32,
 	width:			f32,			// stroke width, in the element's own frame
 	cap:			Cap,
@@ -150,7 +238,7 @@ struct Paint {
 impl Default for Paint {
 	fn default() -> Self {
 		Self {
-			fill:			Some(Rgba::BLACK),
+			fill:			Some(Fill::Flat(Rgba::BLACK)),
 			fill_opacity:	1.0,
 			even_odd:		false,
 			stroke:			None,
@@ -190,9 +278,9 @@ pub fn read_document(src: &str) -> Outcome<SvgPicture> {
 	let (vx, vy, vw, vh) = res!(view_box(root));
 
 	let mut defs = Defs { outlines: HashMap::new(), gradients: HashMap::new() };
-	let mut links: HashMap<String, String> = HashMap::new();
-	collect_defs(root, &mut defs, &mut links);
-	resolve_gradient_links(&mut defs.gradients, &links);
+	let mut srcs: HashMap<String, GradSrc> = HashMap::new();
+	collect_defs(root, &mut defs, &mut srcs);
+	defs.gradients = resolve_gradient_links(&srcs, vw, vh);
 
 	// Everything is expressed relative to the viewBox origin, so the walk begins with a translation that
 	// carries that origin to (0, 0); a Typst file's origin is already there and the translation is nil.
@@ -222,25 +310,16 @@ fn view_box(root: &Elem) -> Outcome<(f32, f32, f32, f32)> {
 }
 
 /// Gathers the `<defs>` store in one descent: every element with an `id` that yields an outline (for a
-/// `<use>` to fetch), and every gradient's flat mean colour (for a `url(#id)` fill to resolve to). The
-/// search descends the whole tree, since Inkscape files an id-bearing shape wherever it likes, not only
-/// under `<defs>`. A gradient with no stops of its own is noted in `links` with the id its `href` names,
-/// for [`resolve_gradient_links`] to settle once every gradient is known.
-fn collect_defs(elem: &Elem, out: &mut Defs, links: &mut HashMap<String, String>) {
+/// `<use>` to fetch), and every gradient as written (for a `url(#id)` paint to resolve to). The search
+/// descends the whole tree, since Inkscape files an id-bearing shape wherever it likes, not only under
+/// `<defs>`. The gradients are settled by [`resolve_gradient_links`] once every one is known.
+fn collect_defs(elem: &Elem, out: &mut Defs, srcs: &mut HashMap<String, GradSrc>) {
 	for child in elem.elems() {
 		let name = child.name.local();
 		match name {
 			"linearGradient" | "radialGradient" => {
 				if let Some(id) = child.attr("id") {
-					match gradient_mean(child) {
-						Some(c)	=> { out.gradients.insert(id.to_string(), c); },
-						None	=> {
-							let href = child.attr("xlink:href").or_else(|| child.attr("href"));
-							if let Some(target) = href.and_then(|h| h.trim().strip_prefix('#')) {
-								links.insert(id.to_string(), target.to_string());
-							}
-						},
-					}
+					srcs.insert(id.to_string(), gradient_src(child, name == "radialGradient"));
 				}
 			},
 			_ => {
@@ -258,43 +337,85 @@ fn collect_defs(elem: &Elem, out: &mut Defs, links: &mut HashMap<String, String>
 				}
 			},
 		}
-		collect_defs(child, out, links);
+		collect_defs(child, out, srcs);
 	}
 }
 
-/// Gives each stopless gradient the colour of the first gradient along its `href` chain that has stops
-/// of its own, as SVG 1.1 §13.2.2 has a gradient inherit its referent's stops when it carries none.
-/// Inkscape writes every positioned gradient this way, a stopless link over a shared swatch, so without
-/// this the fill draws nothing. A chain is followed at most once round the whole link set, so a cycle,
-/// or a link to nothing, ends in no colour and the fill is left unpainted.
-fn resolve_gradient_links(gradients: &mut HashMap<String, Rgba>, links: &HashMap<String, String>) {
-	let mut found: Vec<(String, Rgba)> = Vec::new();
-	for (id, first) in links {
-		let mut target = first;
-		for _ in 0..links.len() {
-			if let Some(c) = gradients.get(target) {
-				found.push((id.clone(), *c));
-				break;
+/// Settles every gradient along its `href` chain, as SVG 1.1 13.2 has a gradient take its stops, and any
+/// attribute it leaves unset, from the one it links to: the geometry only from a gradient of its own kind,
+/// the units, the transform and the stops from either. Inkscape writes every positioned gradient this way,
+/// a stopless link over a shared swatch. A chain is followed at most once round the whole set, so a cycle
+/// ends; a gradient that finds no stops is left out, and a fill naming it is unpainted. `vw`/`vh` are the
+/// viewport a `userSpaceOnUse` percentage is read against.
+fn resolve_gradient_links(srcs: &HashMap<String, GradSrc>, vw: f32, vh: f32)
+	-> HashMap<String, Rc<GradDef>>
+{
+	let mut out = HashMap::new();
+	for (id, own) in srcs {
+		let mut attrs: HashMap<&'static str, String> = HashMap::new();
+		let mut stops: Option<Vec<Stop>> = None;
+		let mut cur = own;
+		for _ in 0..=srcs.len() {
+			let same_kind = cur.radial == own.radial;
+			for (k, v) in &cur.attrs {
+				let geom = LINEAR_GEOM.contains(k) || RADIAL_GEOM.contains(k);
+				if (!geom || same_kind) && !attrs.contains_key(k) {
+					attrs.insert(*k, v.clone());
+				}
 			}
-			match links.get(target) {
-				Some(next)	=> target = next,
+			if stops.is_none() {
+				stops = cur.stops.clone();
+			}
+			match cur.href.as_ref().and_then(|h| srcs.get(h)) {
+				Some(next)	=> cur = next,
 				None		=> break,
 			}
 		}
+		let stops = match stops {
+			Some(st) if !st.is_empty()	=> st,
+			_							=> continue,
+		};
+		let user = attrs.get("gradientUnits").map(|u| u.trim() == "userSpaceOnUse").unwrap_or(false);
+		let transform = attrs.get("gradientTransform").map(|t| parse_transform(t))
+			.unwrap_or(Transform::IDENTITY);
+		// A coordinate in user units, or a fraction of the box; a percentage is of the viewport in user
+		// space (the radius of its normalised diagonal) and of the box otherwise.
+		let diag = ((vw * vw + vh * vh) / 2.0).sqrt();
+		let coord = |k: &str, default: f32, span: f32| -> f32 {
+			match attrs.get(k) {
+				Some(v) => {
+					let v = v.trim();
+					match v.strip_suffix('%') {
+						Some(p)	=> number(p) / 100.0 * if user { span } else { 1.0 },
+						None	=> length_num(v),
+					}
+				},
+				None => default * if user { span } else { 1.0 },
+			}
+		};
+		let geom = if own.radial {
+			[coord("cx", 0.5, vw), coord("cy", 0.5, vh), coord("r", 0.5, diag), 0.0]
+		} else {
+			[coord("x1", 0.0, vw), coord("y1", 0.0, vh), coord("x2", 1.0, vw), coord("y2", 0.0, vh)]
+		};
+		out.insert(id.clone(), Rc::new(GradDef { radial: own.radial, geom, user, transform, stops }));
 	}
-	gradients.extend(found);
+	out
 }
 
-/// The flat mean colour of a gradient's stops: each stop's `stop-color` weighted equally, its
-/// `stop-opacity` folded into the alpha. A gradient with no stops of its own yields nothing, and the
-/// caller leaves such a fill unpainted. This is the flat approximation a true axial or radial shading is
-/// reduced to, since the flat op set carries no paint that varies across a shape.
-fn gradient_mean(grad: &Elem) -> Option<Rgba> {
-	let mut r = 0.0f32;
-	let mut g = 0.0f32;
-	let mut b = 0.0f32;
-	let mut a = 0.0f32;
-	let mut n = 0.0f32;
+/// One gradient element as written: the attributes it sets, its stops (each `stop-opacity` folded into
+/// the alpha, an offset short of the one before it raised to that one, as SVG 1.1 13.2.4 has it) or none
+/// when it carries none, and the id its `href` names.
+fn gradient_src(grad: &Elem, radial: bool) -> GradSrc {
+	let mut attrs = HashMap::new();
+	let keys: &[&'static str] = if radial { &RADIAL_GEOM } else { &LINEAR_GEOM };
+	for k in keys.iter().chain(SHARED.iter()) {
+		if let Some(v) = grad.attr(k) {
+			attrs.insert(*k, v.to_string());
+		}
+	}
+	let mut stops: Vec<Stop> = Vec::new();
+	let mut last = 0.0f32;
 	for stop in grad.elems() {
 		if stop.name.local() != "stop" {
 			continue;
@@ -306,21 +427,21 @@ fn gradient_mean(grad: &Elem) -> Option<Rgba> {
 		let op = prop(stop, style, "stop-opacity")
 			.map(|v| number(&v).clamp(0.0, 1.0))
 			.unwrap_or(1.0);
-		r += col.r as f32;
-		g += col.g as f32;
-		b += col.b as f32;
-		a += (col.a as f32) * op;
-		n += 1.0;
+		let at = match stop.attr("offset").map(|o| o.trim()) {
+			Some(o) => match o.strip_suffix('%') {
+				Some(p)	=> number(p) / 100.0,
+				None	=> number(o),
+			},
+			None => 0.0,
+		};
+		let at = at.clamp(0.0, 1.0).max(last);
+		last = at;
+		stops.push(Stop { at, colour: Ink::Rgb(fade(col, op)) });
 	}
-	if n < 1.0 {
-		return None;
-	}
-	Some(Rgba::new(
-		(r / n).round() as u8,
-		(g / n).round() as u8,
-		(b / n).round() as u8,
-		(a / n).round().clamp(0.0, 255.0) as u8,
-	))
+	let href = grad.attr("xlink:href").or_else(|| grad.attr("href"))
+		.and_then(|h| h.trim().strip_prefix('#'))
+		.map(|h| h.to_string());
+	GradSrc { radial, attrs, stops: if stops.is_empty() { None } else { Some(stops) }, href }
 }
 
 /// Appends every shape outline held under an element into one builder, descending through any groups and
@@ -521,9 +642,9 @@ fn style_prop(style: &str, name: &str) -> Option<String> {
 	None
 }
 
-/// Resolves a `fill`/`stroke` value to a colour, or `None` for `none`, an unknown paint, or a reference
-/// to nothing. A `url(#id)` fill resolves to the flat mean of the named gradient's stops.
-fn resolve_fill(v: &str, defs: &Defs) -> Option<Rgba> {
+/// Resolves a `fill`/`stroke` value to a paint, or `None` for `none`, an unknown paint, or a reference
+/// to nothing. A `url(#id)` paint resolves to the named gradient.
+fn resolve_fill(v: &str, defs: &Defs) -> Option<Fill> {
 	let s = v.trim();
 	if s.is_empty() || s == "none" || s == "context-fill" || s == "context-stroke" {
 		return None;
@@ -531,9 +652,9 @@ fn resolve_fill(v: &str, defs: &Defs) -> Option<Rgba> {
 	if let Some(rest) = s.strip_prefix("url(") {
 		// The id inside `url(#id)`, taking everything up to the closing parenthesis and dropping the hash.
 		let id = rest.split(')').next().unwrap_or("").trim().trim_start_matches('#');
-		return defs.gradients.get(id).copied();
+		return defs.gradients.get(id).map(|g| Fill::Grad(g.clone()));
 	}
-	paint_colour(s, Some(defs))
+	paint_colour(s, Some(defs)).map(Fill::Flat)
 }
 
 /// Places a `<use>`'s referenced outline: its target fetched by id, offset by the element's `x`/`y`, and
@@ -584,7 +705,7 @@ impl TextState {
 			anchor:	paint.text_anchor,
 			italic:	paint.italic,
 			bold:	paint.bold,
-			colour:	paint.fill.unwrap_or(Rgba::BLACK),
+			colour:	paint.fill.as_ref().map(Fill::colour).unwrap_or(Rgba::BLACK),
 		}
 	}
 }
@@ -619,16 +740,16 @@ fn text_state(base: &TextState, elem: &Elem, defs: &Defs) -> TextState {
 	// stroke alone, with no fill declared, likewise sets the colour.
 	if let Some(v) = prop(elem, style, "fill") {
 		match resolve_fill(&v, defs) {
-			Some(c)	=> s.colour = c,
+			Some(c)	=> s.colour = c.colour(),
 			None	=> {
 				if let Some(sc) = prop(elem, style, "stroke").and_then(|w| resolve_fill(&w, defs)) {
-					s.colour = sc;
+					s.colour = sc.colour();
 				}
 			},
 		}
 	} else if let Some(v) = prop(elem, style, "stroke") {
 		if let Some(c) = resolve_fill(&v, defs) {
-			s.colour = c;
+			s.colour = c.colour();
 		}
 	}
 	s
@@ -764,25 +885,44 @@ fn emit_shape(
 )
 	-> Outcome<()>
 {
-	let placed = res!(shape.transform(local));
+	let placed	= res!(shape.transform(local));
+	let bbox	= shape.bounds(&Transform::IDENTITY);	// the box an objectBoundingBox gradient spans
 
-	if let Some(colour) = paint.fill {
-		let colour = fade(colour, paint.fill_opacity * paint.opacity);
-		if colour.a > 0 {
-			let path = if paint.even_odd {
-				res!(placed.even_odd_as_non_zero())
-			} else {
-				placed.clone()
-			};
-			ops.push(SvgOp::Fill { path, colour });
-		}
+	match &paint.fill {
+		Some(Fill::Flat(colour)) => {
+			let colour = fade(*colour, paint.fill_opacity * paint.opacity);
+			if colour.a > 0 {
+				let path = if paint.even_odd { res!(placed.even_odd_as_non_zero()) } else { placed.clone() };
+				ops.push(SvgOp::Fill { path, colour });
+			}
+		},
+		Some(Fill::Grad(g)) => {
+			if let Some(sh) = g.shading(bbox, local) {
+				let shading	= sh.faded(paint.fill_opacity * paint.opacity);
+				let path	= if paint.even_odd { res!(placed.even_odd_as_non_zero()) } else { placed.clone() };
+				ops.push(SvgOp::Shade { path, shading });
+			}
+		},
+		None => {},
 	}
-	if let Some(colour) = paint.stroke {
-		let colour = fade(colour, paint.stroke_opacity * paint.opacity);
-		if colour.a > 0 {
-			let stroke = res!(pen(paint, local));
-			ops.push(SvgOp::Stroke { path: placed, colour, stroke });
-		}
+	match &paint.stroke {
+		Some(Fill::Flat(colour)) => {
+			let colour = fade(*colour, paint.stroke_opacity * paint.opacity);
+			if colour.a > 0 {
+				let stroke = res!(pen(paint, local));
+				ops.push(SvgOp::Stroke { path: placed, colour, stroke });
+			}
+		},
+		Some(Fill::Grad(g)) => {
+			// A shaded stroke is its outline filled: the pen's area as a path, under the same shading.
+			if let Some(sh) = g.shading(bbox, local) {
+				let shading	= sh.faded(paint.stroke_opacity * paint.opacity);
+				let stroke	= res!(pen(paint, local));
+				let path	= res!(placed.stroke(&stroke));
+				ops.push(SvgOp::Shade { path, shading });
+			}
+		},
+		None => {},
 	}
 	Ok(())
 }

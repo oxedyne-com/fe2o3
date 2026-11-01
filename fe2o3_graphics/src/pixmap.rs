@@ -7,6 +7,7 @@ use crate::{
 	colour::{
 		Gradient,
 		Rgba,
+		Shading,
 	},
 	jpeg,
 	path::{
@@ -267,11 +268,43 @@ impl Pixmap {
 	)
 		-> Outcome<()>
 	{
+		self.fill_gradient_in(path, t, grad, t, clip, rule)
+	}
+
+	/// Fills a path with a [`Shading`]: its gradient carried by its own frame into the path's, and both
+	/// then by `t` to the device.
+	pub fn fill_shading(
+		&mut self,
+		path:	&Path,
+		t:		&Transform,
+		shade:	&Shading,
+		clip:	Option<Bounds>,
+		rule:	FillRule,
+	)
+		-> Outcome<()>
+	{
+		let gt = shade.frame.then(t);
+		self.fill_gradient_in(path, t, &shade.grad, &gt, clip, rule)
+	}
+
+	/// Fills a path placed by `t` with a gradient placed by `gt`, which maps the gradient's own space to
+	/// the device; [`Self::fill_gradient`] is the case where the two are the same.
+	pub fn fill_gradient_in(
+		&mut self,
+		path:	&Path,
+		t:		&Transform,
+		grad:	&Gradient,
+		gt:		&Transform,
+		clip:	Option<Bounds>,
+		rule:	FillRule,
+	)
+		-> Outcome<()>
+	{
 		if path.is_empty() {
 			return Ok(());
 		}
 		let grad = res!(grad.prepare());
-		let inv = match t.invert() {
+		let inv = match gt.invert() {
 			Some(inv) => inv,
 			// A degenerate transform paints the shape's own last colour rather than nothing, since
 			// the shape is still there to be filled even where its shading is not.
