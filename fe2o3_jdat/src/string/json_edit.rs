@@ -177,6 +177,18 @@ impl JsonObjectText {
     }
 }
 
+/// The text of the value of the top-level member named `key` in `text`, borrowed from it, and
+/// nothing when the object has no such member.
+///
+/// `text` is held to the grammar and `limits` that [`JsonObjectText::new_with_limits`] holds it
+/// to, and the member is found by its unescaped name, but no value is copied or decoded: a large
+/// object read for one small member costs one walk, and a caller holding the text in wiped memory
+/// leaves no copy of any value behind.  Member names are read, to refuse one named twice.
+pub fn member<'a>(text: &'a str, key: &str, limits: &DecodeLimits) -> Outcome<Option<&'a str>> {
+    let (members, _) = res!(JsonObjectText::scan(text, limits));
+    Ok(members.into_iter().find(|m| m.key == key).map(|m| &text[m.val]))
+}
+
 /// A walk through JSON text that checks the grammar and builds no value.
 struct Walk<'a> {
     b:      &'a [u8],
@@ -218,7 +230,7 @@ impl<'a> Walk<'a> {
         match self.peek() {
             Some(b'{')                  => self.object(depth).map(|_| ()),
             Some(b'[')                  => self.array(depth),
-            Some(b'"')                  => self.string().map(|_| ()),
+            Some(b'"')                  => self.string_to(None),
             Some(b't')                  => self.literal("true"),
             Some(b'f')                  => self.literal("false"),
             Some(b'n')                  => self.literal("null"),
@@ -364,21 +376,35 @@ impl<'a> Walk<'a> {
 
     /// The string whose '"' is at the cursor, unescaped.
     fn string(&mut self) -> Outcome<String> {
+        let mut out = String::new();
+        res!(self.string_to(Some(&mut out)));
+        Ok(out)
+    }
+
+    /// Reads the string whose '"' is at the cursor, unescaped into `out` when there is one.  A
+    /// value is read with none, so the walk copies no value it passes.
+    fn string_to(&mut self, mut out: Option<&mut String>) -> Outcome<()> {
         let open = self.pos;
         self.pos += 1;
-        let mut out = String::new();
         let mut run = self.pos; // start of the unescaped run being read
         loop {
             match self.peek() {
                 Some(b'"') => {
-                    out.push_str(res!(str::from_utf8(&self.b[run..self.pos]), Decode, UTF8));
+                    let txt = res!(str::from_utf8(&self.b[run..self.pos]), Decode, UTF8);
+                    if let Some(o) = out.as_mut() {
+                        o.push_str(txt);
+                    }
                     self.pos += 1;
-                    return Ok(out);
+                    return Ok(());
                 },
                 Some(b'\\') => {
-                    out.push_str(res!(str::from_utf8(&self.b[run..self.pos]), Decode, UTF8));
+                    let txt = res!(str::from_utf8(&self.b[run..self.pos]), Decode, UTF8);
                     self.pos += 1;
-                    out.push(res!(self.escape()));
+                    let c = res!(self.escape());
+                    if let Some(o) = out.as_mut() {
+                        o.push_str(txt);
+                        o.push(c);
+                    }
                     run = self.pos;
                 },
                 Some(b) if b < 0x20 => return Err(err!(

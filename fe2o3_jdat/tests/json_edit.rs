@@ -2,7 +2,9 @@
 //! it is asked to change comes back as it was, and text that is not one JSON object is refused.
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::bdat::DecodeLimits;
 use oxedyne_fe2o3_jdat::string::json_edit::JsonObjectText;
+use oxedyne_fe2o3_jdat::string::json_edit::member;
 
 
 fn edit(s: &str) -> JsonObjectText {
@@ -156,4 +158,72 @@ fn test_get_str_decodes_a_top_level_string_00() {
     assert_eq!(o.get_str("n"), None);
     assert_eq!(o.get_str("meta"), None);
     assert_eq!(o.get_str("missing"), None);
+}
+
+// ┌───────────────────────────────────────────────────────────────┐
+// │ member: one member borrowed from the text                     │
+// └───────────────────────────────────────────────────────────────┘
+
+fn member_of<'a>(s: &'a str, key: &str) -> Outcome<Option<&'a str>> {
+    member(s, key, &DecodeLimits::text())
+}
+
+#[test]
+fn test_member_found_past_a_large_member_written_first_00() -> Outcome<()> {
+    // The member sought comes after one whose strings hold braces, brackets, quotes, commas,
+    // colons and escapes, and whose nested objects name the same key.
+    let s = r#" { "chats": [{"t":"a } ] \" , \\", "mail":{"x":1}, "q":"}\"{"}, [[]], {}],
+        "mail" : {"sel":"m1","accounts":[{"id":"m1","pass":"p\"w}"}]} ,"z":null } "#;
+    assert_eq!(res!(member_of(s, "mail")),
+        Some(r#"{"sel":"m1","accounts":[{"id":"m1","pass":"p\"w}"}]}"#));
+    assert_eq!(res!(member_of(s, "z")), Some("null"));
+    assert_eq!(res!(member_of(s, "t")), None);
+    assert_eq!(res!(member_of(s, "nope")), None);
+    // A value is borrowed from the text, never copied.
+    let v = match res!(member_of(s, "mail")) {
+        Some(v) => v,
+        None    => return Err(err!("mail must be found"; Missing)),
+    };
+    let off = v.as_ptr() as usize - s.as_ptr() as usize;
+    assert_eq!(&s[off..off + v.len()], v);
+    Ok(())
+}
+
+#[test]
+fn test_member_scalars_and_order_00() -> Outcome<()> {
+    let s = r#"{"n":-1.5e3,"t":true,"s":"x","e":{}}"#;
+    assert_eq!(res!(member_of(s, "n")), Some("-1.5e3"));
+    assert_eq!(res!(member_of(s, "t")), Some("true"));
+    assert_eq!(res!(member_of(s, "s")), Some(r#""x""#));
+    assert_eq!(res!(member_of(s, "e")), Some("{}"));
+    assert_eq!(res!(member_of("{}", "n")), None);
+    Ok(())
+}
+
+#[test]
+fn test_member_found_by_its_unescaped_name_00() -> Outcome<()> {
+    let s = r#"{"mail":7,"q\"k":8}"#;
+    assert_eq!(res!(member_of(s, "mail")), Some("7"));
+    assert_eq!(res!(member_of(s, "q\"k")), Some("8"));
+    Ok(())
+}
+
+#[test]
+fn test_member_refuses_what_is_not_one_object_00() -> Outcome<()> {
+    for bad in [
+        r#"[1]"#,
+        r#"{"a":1"#,
+        r#"{"a":"x}"#,
+        r#"{"a":1,"a":2}"#,
+        r#"{"a":1} {}"#,
+        r#"{"a":"\q"}"#,
+        r#"{"a":}"#,
+        "",
+    ] {
+        assert!(member_of(bad, "a").is_err(), "{:?} must be refused", bad);
+    }
+    // The limits bound the length.
+    let lim = DecodeLimits::text().with_max_bytes(8);
+    assert!(member(r#"{"a":"123456"}"#, "a", &lim).is_err());
+    Ok(())
 }
