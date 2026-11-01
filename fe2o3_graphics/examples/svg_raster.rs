@@ -13,7 +13,6 @@ use oxedyne_fe2o3_graphics::path::{
 	Pt,
 };
 use oxedyne_fe2o3_graphics::pixmap::Pixmap;
-use oxedyne_fe2o3_graphics::raster::FillRule;
 use oxedyne_fe2o3_graphics::stroke::Stroke;
 use oxedyne_fe2o3_graphics::svg_doc::{
 	self,
@@ -48,9 +47,6 @@ fn main() -> Outcome<()> {
 		match op {
 			SvgOp::Fill { path, colour } => {
 				res!(pm.fill_path(&path, &t, colour, None));
-			},
-			SvgOp::Shade { path, shading } => {
-				res!(pm.fill_shading(&path, &t, &shading, None, FillRule::NonZero));
 			},
 			SvgOp::Stroke { path, colour, stroke } => {
 				if stroke.dash.is_some() {

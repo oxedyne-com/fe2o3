@@ -16,13 +16,13 @@ use oxedyne_fe2o3_graphics::{
 	},
 };
 
-/// The mean colour of each shaded path in the document, in document order.
+/// The colour of each filled path in the document, in document order.
 fn fill_colours(src: &str) -> Outcome<Vec<Rgba>> {
 	let pic = res!(svg_doc::read_document(src));
 	let mut out = Vec::new();
 	for op in &pic.ops {
-		if let SvgOp::Shade { shading, .. } = op {
-			out.push(shading.mean());
+		if let SvgOp::Fill { colour, .. } = op {
+			out.push(*colour);
 		}
 	}
 	Ok(out)

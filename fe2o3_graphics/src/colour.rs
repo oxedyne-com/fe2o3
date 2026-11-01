@@ -7,9 +7,6 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::path::Pt;
-use crate::transform::Transform;
-
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::hash::{
@@ -503,80 +500,6 @@ impl Gradient {
 			}
 		}
 		last.colour.to_rgba()
-	}
-}
-
-/// A gradient placed in a picture: the gradient in its own space and the frame that carries that space
-/// into the picture's. An SVG gradient is written in a space of its own -- its `gradientTransform`, and for
-/// `objectBoundingBox` the shape's bounding box, stand between it and the shape -- so the frame keeps that
-/// mapping whole rather than baking it into the gradient's points, where a shear or a non-uniform scale
-/// would bend a circle into an ellipse the [`Gradient`] cannot hold.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Shading {
-	pub grad:	Gradient,
-	pub frame:	Transform,	// gradient space -> the frame of the path it fills
-}
-
-impl Shading {
-
-	/// The same shading carried on through a further transform, as its path is.
-	pub fn then(&self, t: &Transform) -> Self {
-		Self { grad: self.grad.clone(), frame: self.frame.then(t) }
-	}
-
-	/// The shading with every stop's alpha scaled by `factor`, for a fill-opacity or a group opacity.
-	pub fn faded(&self, factor: f32) -> Self {
-		let f = factor.clamp(0.0, 1.0);
-		let fade = |stops: &[Stop]| -> Vec<Stop> {
-			stops.iter().map(|s| {
-				let a = ((s.colour.alpha() as f32) * f).round().clamp(0.0, 255.0) as u8;
-				Stop { at: s.at, colour: s.colour.with_alpha(a) }
-			}).collect()
-		};
-		let grad = match &self.grad {
-			Gradient::Linear { from, to, stops }		=>
-				Gradient::Linear { from: *from, to: *to, stops: fade(stops) },
-			Gradient::Radial { centre, radius, stops }	=>
-				Gradient::Radial { centre: *centre, radius: *radius, stops: fade(stops) },
-		};
-		Self { grad, frame: self.frame }
-	}
-
-	/// The colour at a point of the path's frame. A frame that cannot be inverted has collapsed the
-	/// gradient to a line, and the point takes the last stop.
-	pub fn colour_at(&self, p: Pt) -> Outcome<Rgba> {
-		let grad = res!(self.grad.prepare());
-		match self.frame.invert() {
-			Some(inv)	=> {
-				let q = inv.apply(p);
-				Ok(grad.sample(grad.position(q.x, q.y)))
-			},
-			None		=> Ok(grad.sample(f32::INFINITY)),
-		}
-	}
-
-	/// The flat mean of the stops, for a consumer that can only paint one colour (a text run).
-	pub fn mean(&self) -> Rgba {
-		let stops = self.grad.stops();
-		if stops.is_empty() {
-			return Rgba::TRANSPARENT;
-		}
-		let n = stops.len() as f32;
-		let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-		for s in stops {
-			let c = s.colour.to_rgba();
-			r += c.r as f32;
-			g += c.g as f32;
-			b += c.b as f32;
-			a += c.a as f32;
-		}
-		let ch = |v: f32| (v / n).round().clamp(0.0, 255.0) as u8;
-		Rgba::new(ch(r), ch(g), ch(b), ch(a))
-	}
-
-	/// Is every stop wholly opaque?
-	pub fn is_opaque(&self) -> bool {
-		self.grad.stops().iter().all(|s| s.colour.alpha() == 255)
 	}
 }
 
