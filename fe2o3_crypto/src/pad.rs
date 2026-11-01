@@ -4,7 +4,8 @@
 //! Encrypted Files and Communication with PURBs" (PoPETs 2019, arXiv 1806.03160, §4.4). A padded
 //! length keeps no more significant bits in its mantissa than its exponent holds, so the lengths
 //! up to M fall into O(log log M) buckets, and the overhead is below 2^(E−S)/L ≈ 1/(2 log₂ L):
-//! at most +11.1% (9 bytes to 10), and falling as L grows.
+//! under 12% everywhere and falling as L grows. The paper quotes +11.11% (9 bytes to 10) as the
+//! maximum, but its Algorithm 1 pads 129 bytes to 144, +11.63%, the true maximum.
 //!
 //! [`PadRule`] frames a body as `u32 big-endian length ‖ body ‖ zeros` and pads the whole frame
 //! by the rule a [`PadConfig`] names, never below its floor; [`unpad`] needs no rule, so a

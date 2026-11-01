@@ -80,8 +80,9 @@ fn framed_length_matches_the_shared_vectors() -> Outcome<()> {
 
 #[test]
 fn padme_overhead_is_within_the_paper_bound() -> Outcome<()> {
-    // Equation 1: the overhead is below 2^(E-S) / L, at most 1/9 (9 bytes padded to 10), and so
-    // under 12% everywhere, measured here rather than assumed.
+    // Equation 1: the added bytes are below 2^(E-S), and the overhead under 12% everywhere. The
+    // paper's text quotes +11.11% (9 bytes to 10) as the maximum, but its own Algorithm 1 pads 129
+    // bytes to 144 (+11.63%), so the ceiling asserted is its "always less than 12%".
     let mut worst = 0.0f64;
     let mut l: u64 = 2;
     while l < (1u64 << 22) {
@@ -89,11 +90,13 @@ fn padme_overhead_is_within_the_paper_bound() -> Outcome<()> {
         if p < l {
             return Err(err!("padme_len({}) = {} shrinks.", l, p; Invalid));
         }
-        let over = (p - l) as f64 / l as f64;
-        if over > 1.0 / 9.0 + 1e-12 {
-            return Err(err!("padme_len({}) = {}, overhead {} over 1/9.", l, p, over; Invalid));
+        let e = 63 - l.leading_zeros() as u64;
+        let s = 64 - e.leading_zeros() as u64;
+        if p - l >= (1u64 << (e - s)).max(1) {
+            return Err(err!("padme_len({}) = {} adds 2^(E-S) or more.", l, p; Invalid));
         }
-        if l > 256 && over > 0.12 {
+        let over = (p - l) as f64 / l as f64;
+        if over >= 0.12 {
             return Err(err!("padme_len({}) = {}, overhead {} over 12%.", l, p, over; Invalid));
         }
         if l > 256 {
