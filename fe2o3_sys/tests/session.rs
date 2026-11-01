@@ -321,3 +321,16 @@ fn the_account_of_the_current_uid_names_its_home_and_shell() -> Outcome<()> {
     assert!(oxedyne_fe2o3_sys::session::Account::of_uid(4_000_000_017).is_err());
     Ok(())
 }
+
+#[test]
+fn the_account_of_a_name_is_the_account_of_its_uid() -> Outcome<()> {
+    let id = res!(Identity::current());
+    let by_uid = res!(oxedyne_fe2o3_sys::session::Account::of_uid(id.uid));
+    let by_name = res!(oxedyne_fe2o3_sys::session::Account::of_name(&by_uid.name));
+    assert_eq!(by_name, by_uid);
+    let root = res!(oxedyne_fe2o3_sys::session::Account::of_name("root"));
+    assert_eq!((root.uid, root.gid), (0, 0));
+    // A name no system gives out is refused, not answered with a default.
+    assert!(oxedyne_fe2o3_sys::session::Account::of_name("no-such-user-4000000017").is_err());
+    Ok(())
+}
