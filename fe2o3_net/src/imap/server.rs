@@ -25,6 +25,7 @@ use crate::mail::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_text::mime;
 
 use std::{
     collections::{
@@ -902,7 +903,7 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
         let indices = resolve_set(seq_set, &session.messages, by_uid);
         let needs_bytes = items.iter().any(|it| matches!(it,
             FetchItem::Body { .. } | FetchItem::Rfc822 | FetchItem::Rfc822Header |
-            FetchItem::Rfc822Text | FetchItem::Envelope));
+            FetchItem::Rfc822Text | FetchItem::Envelope | FetchItem::BodyStructure { .. }));
         // RFC 3501 §6.4.5: BODY[] without PEEK, RFC822 and RFC822.TEXT set \Seen.
         let marks_seen = !session.read_only && items.iter().any(|it| matches!(it,
             FetchItem::Body { peek: false, .. } | FetchItem::Rfc822 | FetchItem::Rfc822Text));
@@ -1023,14 +1024,31 @@ impl<M: MailStore, U: UserStore> ImapServer<M, U> {
                                     "ENVELOPE {}", build_envelope(bytes))));
                             }
                         }
-                        FetchItem::Body { section, .. } => {
-                            let bytes = match raw {
+                        FetchItem::BodyStructure { ext } => {
+                            if let Some(ref bytes) = raw {
+                                segments.push(FetchSegment::Text(fmt!("{} {}",
+                                    if *ext { "BODYSTRUCTURE" } else { "BODY" },
+                                    structure_of(&mime::entity(bytes), *ext))));
+                            }
+                        }
+                        FetchItem::Body { section, partial, .. } => {
+                            let mut bytes = match raw {
                                 Some(ref b) => extract_section(b, section),
                                 None => Vec::new(),
                             };
+                            // RFC 3501 §6.4.5: a partial fetch answers with its origin only.
+                            let origin = match partial {
+                                Some((from, count)) => {
+                                    let from = (*from as usize).min(bytes.len());
+                                    let to = from.saturating_add(*count as usize).min(bytes.len());
+                                    bytes = bytes[from..to].to_vec();
+                                    fmt!("<{}>", from)
+                                }
+                                None => String::new(),
+                            };
                             let label = section_label(section);
                             segments.push(FetchSegment::Literal {
-                                prefix: fmt!("BODY[{}] ", label),
+                                prefix: fmt!("BODY[{}]{} ", label, origin),
                                 payload: bytes,
                             });
                         }
@@ -1642,7 +1660,8 @@ enum FetchItem {
     Rfc822Size,
     InternalDate,
     Envelope,
-    Body { peek: bool, section: Section },
+    BodyStructure { ext: bool },    // `BODY` alone is the structure without extension data
+    Body { peek: bool, section: Section, partial: Option<(u32, u32)> },
     Rfc822,
     Rfc822Header,
     Rfc822Text,
@@ -1655,6 +1674,7 @@ enum Section {
     Text,
     HeaderFields(Vec<String>),
     HeaderFieldsNot(Vec<String>),
+    Part(Vec<u32>),     // `1.2`, a MIME part by number
 }
 
 fn parse_fetch_items(raw: &str) -> Vec<FetchItem> {
@@ -1696,6 +1716,19 @@ fn parse_fetch_items(raw: &str) -> Vec<FetchItem> {
             if i < bytes.len() && bytes[i] == b']' { i += 1; }
             name.push_str(&fmt!("[{}]", section_text));
         }
+        // `<origin.count>`, a partial fetch.
+        let mut partial = None;
+        if i < bytes.len() && bytes[i] == b'<' {
+            let s = i + 1;
+            while i < bytes.len() && bytes[i] != b'>' { i += 1; }
+            let spec = &inner[s..i.min(inner.len())];
+            if i < bytes.len() { i += 1; }
+            if let Some((a, b)) = spec.split_once('.') {
+                if let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                    partial = Some((a, b));
+                }
+            }
+        }
         let token_upper = name.to_uppercase();
         match token_upper.as_str() {
             "UID"           => out.push(FetchItem::Uid),
@@ -1703,6 +1736,9 @@ fn parse_fetch_items(raw: &str) -> Vec<FetchItem> {
             "RFC822.SIZE"   => out.push(FetchItem::Rfc822Size),
             "INTERNALDATE"  => out.push(FetchItem::InternalDate),
             "ENVELOPE"      => out.push(FetchItem::Envelope),
+            "BODYSTRUCTURE" => out.push(FetchItem::BodyStructure { ext: true }),
+            // Not `BODY[]`: bare `BODY` is the structure, and reading it sets no `\Seen`.
+            "BODY"          => out.push(FetchItem::BodyStructure { ext: false }),
             "RFC822"        => out.push(FetchItem::Rfc822),
             "RFC822.HEADER" => out.push(FetchItem::Rfc822Header),
             "RFC822.TEXT"   => out.push(FetchItem::Rfc822Text),
@@ -1712,9 +1748,7 @@ fn parse_fetch_items(raw: &str) -> Vec<FetchItem> {
                 {
                     let peek = token_upper.starts_with("BODY.PEEK[");
                     let section = parse_section(&section_text);
-                    out.push(FetchItem::Body { peek, section });
-                } else if token_upper == "BODY" {
-                    out.push(FetchItem::Body { peek: false, section: Section::Whole });
+                    out.push(FetchItem::Body { peek, section, partial });
                 }
             }
         }
@@ -1733,6 +1767,12 @@ fn parse_section(text: &str) -> Section {
     }
     if trimmed == "TEXT" {
         return Section::Text;
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        let path: Vec<u32> = trimmed.split('.').filter_map(|n| n.parse::<u32>().ok()).collect();
+        if !path.is_empty() && !path.contains(&0) {
+            return Section::Part(path);
+        }
     }
     if trimmed.starts_with("HEADER.FIELDS.NOT") {
         let rest = &text[text.find('(').map(|i| i + 1).unwrap_or(0)..];
@@ -1762,6 +1802,7 @@ fn section_label(section: &Section) -> String {
             "HEADER.FIELDS.NOT ({})",
             names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "),
         ),
+        Section::Part(path) => path.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("."),
     }
 }
 
@@ -1777,7 +1818,93 @@ fn extract_section(bytes: &[u8], section: &Section) -> Vec<u8> {
         Section::Text => body.to_vec(),
         Section::HeaderFields(names) => filter_headers(head, names, false),
         Section::HeaderFieldsNot(names) => filter_headers(head, names, true),
+        Section::Part(path) => part_body(bytes, path).map(|b| b.to_vec()).unwrap_or_default(),
     }
+}
+
+/// The body of part `path` (RFC 3501 §6.4.5): the parts of a multipart are numbered from one,
+/// a message that is not multipart has its body as part 1, and the parts of an encapsulated
+/// message are numbered beneath its own number, whose body is the whole encapsulated message.
+fn part_body<'a>(raw: &'a [u8], path: &[u32]) -> Option<&'a [u8]> {
+    let mut p = mime::entity(raw);
+    for &n in path {
+        // An encapsulated message's parts are those of the message inside it.
+        let inner = match p.structure {
+            mime::Structure::Message(m) => *m,
+            other => mime::Part { structure: other, ..p },
+        };
+        p = match inner.structure {
+            mime::Structure::Multipart(kids) => match kids.into_iter().nth((n as usize) - 1) {
+                Some(k) => k,
+                None    => return None,
+            },
+            other if n == 1 => mime::Part { structure: other, ..inner },
+            _ => return None,
+        };
+    }
+    Some(p.body)
+}
+
+/// One entity as `BODYSTRUCTURE` (with `ext`) or `BODY` gives it (RFC 3501 §7.4.2).
+fn structure_of(p: &mime::Part, ext: bool) -> String {
+    let media = p.media_type();
+    let (kind, sub) = media.split_once('/').unwrap_or(("text", "plain"));
+    let ps = mime::params(&p.ctype);
+    let plist = if ps.is_empty() {
+        "NIL".to_string()
+    } else {
+        fmt!("({})", ps.iter()
+            .map(|(k, v)| fmt!("\"{}\" \"{}\"", escape_quoted(&k.to_uppercase()), escape_quoted(v)))
+            .collect::<Vec<_>>().join(" "))
+    };
+    if let mime::Structure::Multipart(kids) = &p.structure {
+        if !kids.is_empty() {
+            let mut s = String::from("(");
+            for k in kids {
+                s.push_str(&structure_of(k, ext));
+            }
+            s.push_str(&fmt!(" \"{}\"", escape_quoted(&sub.to_uppercase())));
+            if ext {
+                s.push_str(&fmt!(" {} {} NIL", plist, disposition_of(p)));
+            }
+            s.push(')');
+            return s;
+        }
+    }
+    let enc = if p.encoding.is_empty() { "7BIT".to_string() } else { p.encoding.to_uppercase() };
+    let lines = p.body.iter().filter(|b| **b == b'\n').count();
+    let mut s = fmt!("(\"{}\" \"{}\" {} NIL NIL \"{}\" {}",
+        escape_quoted(&kind.to_uppercase()), escape_quoted(&sub.to_uppercase()), plist,
+        escape_quoted(&enc), p.body.len());
+    match &p.structure {
+        mime::Structure::Message(inner) => s.push_str(&fmt!(" {} {} {}",
+            build_envelope(p.body), structure_of(inner, ext), lines)),
+        _ if kind == "text" => s.push_str(&fmt!(" {}", lines)),
+        _ => (),
+    }
+    if ext {
+        s.push_str(&fmt!(" NIL {} NIL", disposition_of(p)));
+    }
+    s.push(')');
+    s
+}
+
+/// `("ATTACHMENT" ("FILENAME" "a.pdf"))`, or `NIL`.
+fn disposition_of(p: &mime::Part) -> String {
+    let d = p.disposition.trim();
+    let kind = d.split(';').next().unwrap_or("").trim();
+    if kind.is_empty() {
+        return "NIL".to_string();
+    }
+    let ps = mime::params(d);
+    let plist = if ps.is_empty() {
+        "NIL".to_string()
+    } else {
+        fmt!("({})", ps.iter()
+            .map(|(k, v)| fmt!("\"{}\" \"{}\"", escape_quoted(&k.to_uppercase()), escape_quoted(v)))
+            .collect::<Vec<_>>().join(" "))
+    };
+    fmt!("(\"{}\" {})", escape_quoted(&kind.to_uppercase()), plist)
 }
 
 fn split_msg(bytes: &[u8]) -> (&[u8], &[u8]) {

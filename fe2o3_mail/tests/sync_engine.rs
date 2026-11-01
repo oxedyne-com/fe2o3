@@ -156,7 +156,8 @@ impl Server {
         let head_end = m.raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
         let body = match what {
             FetchWhat::Flags | FetchWhat::Meta  => Vec::new(),
-            FetchWhat::Headers                  => m.raw[..head_end].to_vec(),
+            FetchWhat::Headers | FetchWhat::Summary | FetchWhat::Structure
+                                                => m.raw[..head_end].to_vec(),
             FetchWhat::Full                     => m.raw.clone(),
             FetchWhat::MessageId                => {
                 let t = String::from_utf8_lossy(&m.raw).to_string();
@@ -242,6 +243,24 @@ impl MailSession for Server {
             }
         }
         Ok(out)
+    }
+
+    async fn uid_fetch_section(&mut self, uid: u32, section: &str, max: u32)
+        -> Outcome<Option<FetchedMessage>>
+    {
+        self.log.push(fmt!("UID FETCH {} BODY.PEEK[{}]<0.{}>", uid, section, max));
+        let f = res!(self.cur());
+        Ok(f.msgs.iter().find(|m| m.uid == uid).map(|m| {
+            let mut fm = Server::fetched(m, FetchWhat::Full, false);
+            fm.body.truncate(max as usize);
+            fm
+        }))
+    }
+
+    async fn count(&mut self, mailbox: &str) -> Outcome<u32> {
+        self.log.push(fmt!("STATUS {} (MESSAGES)", mailbox));
+        Ok(res!(self.folders.get(mailbox)
+            .ok_or_else(|| err!("No mailbox {}.", mailbox; Missing))).msgs.len() as u32)
     }
 
     async fn uid_fetch_changed(&mut self, uids: &UidSet, what: FetchWhat, modseq: u64)
@@ -1105,5 +1124,39 @@ fn test_maildir_name_is_keyed_and_round_trips_00() -> Outcome<()> {
     let (k, f) = res!(parse_maildir_name(&n).ok_or_else(|| err!("unparsed"; Invalid)));
     req!(key, k);
     req!(vec!["\\Flagged".to_string(), "\\Seen".to_string()], f);
+    Ok(())
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ QUERIES                                                                   │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Gmail's shape: its roles under `[Gmail]/`, Sent localised, a plain label and a `\Noselect`
+/// parent, so a role is found only by its attribute.
+#[tokio::test]
+async fn test_folders_finds_all_mail_and_sent_by_role_on_gmail_00() -> Outcome<()> {
+    use oxedyne_fe2o3_mail::sync::query::{self, Limits, Role};
+    let mut s = Server::new("IMAP4rev1 CONDSTORE X-GM-EXT-1");
+    s.folder("[Gmail]", "\\Noselect \\HasChildren", 1);
+    s.folder("[Gmail]/All Mail", "\\All \\HasNoChildren", 2);
+    s.folder("[Gmail]/Gesendet", "\\Sent \\HasNoChildren", 3);
+    s.folder("[Gmail]/Drafts", "\\Drafts", 4);
+    s.folder("[Gmail]/Bin", "\\Trash", 5);
+    s.folder("Sent", "", 6); // a label a user named Sent, which is not the role
+    for i in 0..3 {
+        s.deliver("[Gmail]/All Mail", &fmt!("a{}", i));
+    }
+    s.deliver("[Gmail]/Gesendet", "s0");
+    let lim = Limits { max_rows: 10, max_read_bytes: 1000, max_folders: 100 };
+    let (roles, fs) = res!(query::folders(&mut s, &lim).await);
+    let role_of = |r: Role| fs.iter().find(|f| f.role == Some(r)).map(|f| (f.name.as_str(), f.count));
+    assert_eq!(role_of(Role::Use(SpecialUse::All)), Some(("[Gmail]/All Mail", Some(3))));
+    assert_eq!(role_of(Role::Use(SpecialUse::Sent)), Some(("[Gmail]/Gesendet", Some(1))));
+    assert_eq!(role_of(Role::Inbox), Some(("INBOX", Some(0))));
+    assert_eq!(fs.iter().find(|f| f.name == "Sent").map(|f| f.role), Some(None),
+        "a folder named Sent without the attribute was given the role");
+    assert!(!fs.iter().any(|f| f.name == "[Gmail]"), "a \\Noselect parent was listed");
+    assert_eq!(res!(query::resolve(&roles, &Target::Role(SpecialUse::Sent))), "[Gmail]/Gesendet");
     Ok(())
 }

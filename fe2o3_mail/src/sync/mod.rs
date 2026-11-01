@@ -28,6 +28,7 @@
 
 pub mod act;
 pub mod apply;
+pub mod query;
 #[cfg(feature = "server")]
 pub mod imap;
 #[cfg(feature = "jdat")]
@@ -62,6 +63,7 @@ use oxedyne_fe2o3_core::prelude::*;
 pub use oxedyne_fe2o3_net::imap::{
     types::{
         AppendUid,
+        BodyPart,
         CopyUid,
         FetchChanged,
         FetchWhat,
@@ -99,6 +101,12 @@ pub trait MailSession {
     async fn uid_fetch_changed(&mut self, uids: &UidSet, what: FetchWhat, modseq: u64)
         -> Outcome<FetchChanged>;
     async fn uid_search(&mut self, criteria: &str) -> Outcome<Vec<u32>>;
+    /// `BODY.PEEK[section]<0.max>`: `""` the whole message, `1.2` a part; `None` for a UID the
+    /// server does not hold.
+    async fn uid_fetch_section(&mut self, uid: u32, section: &str, max: u32)
+        -> Outcome<Option<FetchedMessage>>;
+    /// `STATUS (MESSAGES)`, without selecting the mailbox.
+    async fn count(&mut self, mailbox: &str) -> Outcome<u32>;
     /// `+FLAGS` and `-FLAGS` only; there is no absolute set.
     async fn uid_store_flags(&mut self, uids: &UidSet, add: &[&str], remove: &[&str]) -> Outcome<()>;
     async fn uid_copy(&mut self, uids: &UidSet, to: &str) -> Outcome<Option<CopyUid>>;

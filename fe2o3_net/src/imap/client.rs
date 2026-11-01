@@ -85,6 +85,7 @@ use crate::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_text::mime;
 
 use std::{
     collections::VecDeque,
@@ -201,6 +202,7 @@ impl ImapConfig {
 
 pub use crate::imap::types::{
     AppendUid,
+    BodyPart,
     CopyUid,
     FetchChanged,
     FetchWhat,
@@ -918,6 +920,27 @@ impl ImapClient {
             }
         }
         Ok(out)
+    }
+
+    /// One section of one message, `BODY.PEEK[section]<0.max>`, so neither `\Seen` is set nor
+    /// more than `max` bytes are read: `""` is the whole message, `1.2` a part (RFC 3501 §6.4.5).
+    /// `None` where the server does not hold the UID.
+    pub async fn uid_fetch_section(&mut self, uid: u32, section: &str, max: u32)
+        -> Outcome<Option<FetchedMessage>>
+    {
+        if !section.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            return Err(err!("The section {:?} is not a part number.", section; Invalid, Input));
+        }
+        let cmd = fmt!("UID FETCH {} (UID FLAGS RFC822.SIZE BODY.PEEK[{}]<0.{}>)", uid, section, max);
+        let resp = res!(self.read_command(&cmd).await);
+        for line in &resp.untagged {
+            if let Some(msg) = res!(parse_fetch_line(line)) {
+                if msg.uid == uid {
+                    return Ok(Some(msg));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// The fetch items for `what`: `MODSEQ` where asked or where the open mailbox keeps
@@ -1773,6 +1796,10 @@ fn parse_fetch_line(line: &RawLine) -> Outcome<Option<FetchedMessage>> {
             "X-GM-MSGID" => {
                 msg.gm_msgid = val.as_str().and_then(|s| s.parse::<u64>().ok());
             }
+            // `BODY` alone is the structure without its extension data.
+            "BODYSTRUCTURE" | "BODY" => {
+                msg.structure = body_structure(val, "");
+            }
             // Atoms, strings or literals, a label being any mailbox name.
             "X-GM-LABELS" => {
                 if let Tok::List(ls) = val {
@@ -1803,6 +1830,85 @@ fn parse_fetch_line(line: &RawLine) -> Outcome<Option<FetchedMessage>> {
             Invalid, Input, Missing));
     }
     Ok(Some(msg))
+}
+
+/// A `BODYSTRUCTURE` (or `BODY`) list as a [`BodyPart`] tree, numbering each part by its
+/// section; `None` for a malformed one, which leaves a reader to fall back on the whole message.
+fn body_structure(t: &Tok, section: &str) -> Option<BodyPart> {
+    let items = match t {
+        Tok::List(items) if !items.is_empty() => items,
+        _                                     => return None,
+    };
+    let text = |t: Option<&Tok>| t.map(|t| String::from_utf8_lossy(&t.as_bytes()).into_owned())
+        .unwrap_or_default();
+    let child = |n: usize| if section.is_empty() { fmt!("{}", n) } else { fmt!("{}.{}", section, n) };
+    let mut part = BodyPart { section: section.to_string(), ..Default::default() };
+    if let Tok::List(_) = items[0] {
+        // A multipart: its parts, then its subtype, then its extension data.
+        let mut i = 0;
+        while let Some(Tok::List(_)) = items.get(i) {
+            match body_structure(&items[i], &child(i + 1)) {
+                Some(p) => part.parts.push(p),
+                None    => return None, // a malformed part makes its whole tree `None`
+            }
+            i += 1;
+        }
+        part.media = fmt!("multipart/{}", text(items.get(i)).to_lowercase());
+        part.params = param_list(items.get(i + 1));
+        disposition_into(&mut part, items.get(i + 2));
+        return Some(part);
+    }
+    // A leaf: type, subtype, parameters, id, description, encoding, size, then by type. The
+    // body of a message that is not multipart is its part 1.
+    if part.section.is_empty() {
+        part.section = "1".to_string();
+    }
+    part.media = fmt!("{}/{}", text(items.first()), text(items.get(1))).to_lowercase();
+    part.params = param_list(items.get(2));
+    part.encoding = text(items.get(5)).to_lowercase();
+    part.size = text(items.get(6)).parse::<u32>().unwrap_or(0);
+    // Text adds its line count; an encapsulated message its envelope, structure and lines.
+    let ext = match part.media.as_str() {
+        m if m.starts_with("text/")         => 8,
+        "message/rfc822" | "message/global" => 10,
+        _                                   => 7,
+    };
+    // The md5, then the disposition.
+    disposition_into(&mut part, items.get(ext + 1));
+    if part.filename.is_none() {
+        part.filename = part.param("name").map(|n| n.to_string());
+    }
+    Some(part)
+}
+
+/// `("CHARSET" "utf-8" "NAME" "a.pdf")`, names lower case and values with their encoded words
+/// decoded; `NIL` is none.
+fn param_list(t: Option<&Tok>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(Tok::List(ps)) = t {
+        for kv in ps.chunks(2) {
+            if let [k, v] = kv {
+                let k = String::from_utf8_lossy(&k.as_bytes()).to_lowercase();
+                let v = mime::decode_words(&String::from_utf8_lossy(&v.as_bytes()));
+                out.push((k, v));
+            }
+        }
+    }
+    out
+}
+
+/// `("ATTACHMENT" ("FILENAME" "a.pdf"))`, or `NIL`.
+fn disposition_into(part: &mut BodyPart, t: Option<&Tok>) {
+    if let Some(Tok::List(d)) = t {
+        if let Some(kind) = d.first() {
+            let kind = String::from_utf8_lossy(&kind.as_bytes()).to_lowercase();
+            if !kind.is_empty() {
+                part.disposition = Some(kind);
+            }
+        }
+        let ps = param_list(d.get(1));
+        part.filename = ps.into_iter().find(|(k, _)| k == "filename").map(|(_, v)| v);
+    }
 }
 
 /// The text of the `[NAME ...]` response code in `text`, after the name; `Some("")` for a bare

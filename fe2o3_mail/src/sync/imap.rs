@@ -49,6 +49,16 @@ impl MailSession for ImapClient {
         ImapClient::uid_search(self, criteria).await
     }
 
+    async fn uid_fetch_section(&mut self, uid: u32, section: &str, max: u32)
+        -> Outcome<Option<FetchedMessage>>
+    {
+        ImapClient::uid_fetch_section(self, uid, section, max).await
+    }
+
+    async fn count(&mut self, mailbox: &str) -> Outcome<u32> {
+        Ok(res!(ImapClient::status(self, mailbox).await).messages)
+    }
+
     async fn uid_store_flags(&mut self, uids: &UidSet, add: &[&str], remove: &[&str]) -> Outcome<()> {
         ImapClient::uid_store_flags(self, uids, add, remove).await
     }

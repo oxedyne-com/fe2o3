@@ -121,6 +121,8 @@ pub enum FetchWhat {
     Headers,    // and the RFC 5322 header block
     Full,       // and the whole message
     MessageId,  // UID, size and the `Message-ID` field alone, to confirm a search's match
+    Summary,    // UID, flags, date, size and the fields a listing shows, decoded by the caller
+    Structure,  // UID, flags, date, size, `BODYSTRUCTURE` and the header block, to read by part
 }
 
 impl FetchWhat {
@@ -133,6 +135,9 @@ impl FetchWhat {
             Self::Headers   => "UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER]",
             Self::Full      => "UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[]",
             Self::MessageId => "UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]",
+            Self::Summary   => "UID FLAGS INTERNALDATE RFC822.SIZE \
+                BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC SUBJECT MESSAGE-ID)]",
+            Self::Structure => "UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER]",
         }
     }
 }
@@ -151,6 +156,51 @@ pub struct FetchedMessage {
     pub modseq:         Option<u64>,    // RFC 7162 `MODSEQ`, where the mailbox keeps them
     pub gm_msgid:       Option<u64>,    // Gmail's `X-GM-MSGID`, stable across its labels
     pub gm_labels:      Vec<String>,    // Gmail's `X-GM-LABELS`, e.g. `\Inbox`, `Important`
+    pub structure:      Option<BodyPart>,   // `BODYSTRUCTURE`, where asked for
+}
+
+/// One entity of a message's MIME structure as `BODYSTRUCTURE` gives it (RFC 3501 §7.4.2), so a
+/// reader can fetch its text parts by section and list its attachments without their bytes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BodyPart {
+    pub section:        String,                 // `1`, `1.2`; empty for the whole message
+    pub media:          String,                 // lower case, `text/plain`, `multipart/mixed`
+    pub params:         Vec<(String, String)>,  // lower-case names, e.g. `charset`, `name`
+    pub encoding:       String,                 // Content-Transfer-Encoding, lower case
+    pub size:           u32,                    // octets of the body in its transfer encoding
+    pub disposition:    Option<String>,         // lower case, `attachment` or `inline`
+    pub filename:       Option<String>,         // the disposition's, else the type's `name`
+    pub parts:          Vec<BodyPart>,          // a multipart's children, in order
+}
+
+impl BodyPart {
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.params.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+
+    /// Is this a text body to read, rather than an attachment to list?
+    pub fn is_text_body(&self) -> bool {
+        self.parts.is_empty()
+            && (self.media == "text/plain" || self.media == "text/html")
+            && self.disposition.as_deref() != Some("attachment")
+    }
+
+    /// Every leaf, in the order the message holds them.
+    pub fn leaves(&self) -> Vec<&BodyPart> {
+        let mut out = Vec::new();
+        self.walk(&mut out);
+        out
+    }
+
+    fn walk<'a>(&'a self, out: &mut Vec<&'a BodyPart>) {
+        if self.parts.is_empty() {
+            out.push(self);
+        } else {
+            for p in &self.parts {
+                p.walk(out);
+            }
+        }
+    }
 }
 
 /// Where `UID COPY` or `UID MOVE` put each message, from the `UIDPLUS` `COPYUID` response code.
