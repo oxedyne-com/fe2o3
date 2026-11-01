@@ -516,6 +516,66 @@ pub fn fill_from_template_map(map: &mut DaticleMap, tmpl: &DaticleMap, sections:
     Ok(())
 }
 
+/// Fill single keys an installed configuration leaves out from the release's template, for a
+/// section whose other keys stay required: each `(section, key)` the file's section lacks is
+/// taken from the template's, and nothing else is touched. A key the file sets is kept, and a
+/// section the file lacks is not made, so its required keys are still refused by name.
+///
+/// Every pair is checked before any is filled: a pair the template lacks is refused naming
+/// `section.key`, and an installed section that is no map naming the section, with the file
+/// unchanged.
+pub fn fill_keys_from_template(map: &mut DaticleMap, template: &str, keys: &[(&str, &str)])
+    -> Outcome<()>
+{
+    let tmpl = res!(template_map(template));
+    fill_keys_from_template_map(map, &tmpl, keys)
+}
+
+/// [`fill_keys_from_template`], for a template already decoded by [`template_map`].
+pub fn fill_keys_from_template_map(
+    map:    &mut DaticleMap,
+    tmpl:   &DaticleMap,
+    keys:   &[(&str, &str)],
+)
+    -> Outcome<()>
+{
+    let mut fill = Vec::new();
+    for (sec, key) in keys.iter() {
+        let skey = Dat::Str(fmt!("{}", sec));
+        let kkey = Dat::Str(fmt!("{}", key));
+        let shipped = match tmpl.get(&skey) {
+            Some(Dat::Map(m))   => m,
+            Some(other)         => return Err(err!(
+                "The configuration template's '{}' section is a {:?}, not a map.",
+                sec, other.kind(); Configuration, Invalid)),
+            None                => return Err(err!(
+                "The configuration template has no '{}' section, so '{}.{}' cannot be filled.",
+                sec, sec, key; Configuration, Missing)),
+        };
+        let value = match shipped.get(&kkey) {
+            Some(v) => v,
+            None    => return Err(err!(
+                "The configuration template has no '{}.{}' key.", sec, key;
+                Configuration, Missing)),
+        };
+        match map.get(&skey) {
+            Some(Dat::Map(got)) => if !got.contains_key(&kkey) {
+                fill.push((skey, kkey, value.clone()));
+            },
+            Some(other)         => return Err(err!(
+                "The configuration's '{}' section is a {:?}, not a map.", sec, other.kind();
+                Configuration, Invalid)),
+            None                => (),
+        }
+    }
+    for (skey, kkey, value) in fill {
+        if let Some(Dat::Map(got)) = map.get_mut(&skey) {
+            got.entry(kkey).or_insert(value);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
