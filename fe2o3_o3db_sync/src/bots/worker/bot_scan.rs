@@ -7,7 +7,6 @@ use crate::{
     },
     data::cache::supersedes,
     file::{
-        core::FileAccess,
         floc::{
             FileLocation,
             FileNum,
@@ -33,13 +32,13 @@ use std::{
     collections::{
         BTreeMap,
         HashMap,
-        btree_map::Entry,
     },
     fs::{
         self,
         File,
     },
     io::{
+        self,
         BufReader,
         Read,
         Seek,
@@ -54,10 +53,23 @@ const SCAN_COVERAGE_ATTEMPTS: usize = 3;
 
 const SCAN_COVERAGE_SETTLE: Duration = Duration::from_millis(20);
 
-type Live<const UIDL: usize, UID> = HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>, FileLocation)>;
+type Live<const UIDL: usize, UID> =
+    HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>, FileLocation, Tomb)>;
 
-// The data files of one pass, each opened before its index file is walked.
-type DataFiles = BTreeMap<FileNum, File>;
+// Whether a record is a delete's tombstone, judged while the walk holds its data file open.
+#[derive(Clone, Debug)]
+enum Tomb {
+    No,                         // Not of a tombstone's length, or not a tombstone.
+    Yes,                        // A delete's tombstone.
+    Unproven(Error<ErrTag>),    // Not readable from the generation its index named.
+}
+
+// The stored length of a tombstone's value, and of the checksum that ends every record.
+#[derive(Clone, Copy, Debug)]
+struct TombLen {
+    vlen:       u64,
+    csum_len:   usize,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ZoneFilePresence {
@@ -234,10 +246,9 @@ impl<
         for attempt in 0..SCAN_COVERAGE_ATTEMPTS {
             live.clear();
             stale = None;
-            let mut files = DataFiles::new();
-            short = res!(self.scan_pass(&mut live, &mut files));
+            short = res!(self.scan_pass(&mut live));
             if short.is_empty() {
-                match self.drop_deleted(&mut live, &mut files) {
+                match Self::drop_deleted(&mut live) {
                     Ok(())  => break,
                     Err(e)  => stale = Some(e),
                 }
@@ -277,7 +288,7 @@ impl<
 
         let mut out: Vec<(Dat, Dat, Meta<UIDL, UID>)> =
             Vec::with_capacity(live.len());
-        for (_kbyts, (kdat, meta, cind, _floc)) in live.into_iter() {
+        for (_kbyts, (kdat, meta, cind, _floc, _tomb)) in live.into_iter() {
             // A chunk-data record has a chunk index >= 1.  The default scan keeps the main user
             // keys (Complete, and the bunch key at index 0) and elides those; `chunk_data_only`
             // inverts it, keeping only the chunk-data keys.
@@ -308,23 +319,24 @@ impl<
     fn scan_pass(
         &mut self,
         live:   &mut Live<UIDL, UID>,
-        dfiles: &mut DataFiles,
     )
         -> Outcome<Vec<Shortfall>>
     {
         let files = res!(self.list_zone_files());
+        let tlen = res!(self.tomb_len());
         let mut short = Vec::new();
         for (fnum, present) in files {
             // Opened before its index, so that the offsets the index gives are into this
             // generation of the data file unless a whole collection, data rename then index
-            // rename, falls between the two opens; `drop_deleted` catches that one.
-            if present.dat {
-                if let Ok((_, f)) = self.zdir().open_ozone_file(
-                    fnum, &FileType::Data, &FileAccess::Reading)
-                {
-                    dfiles.insert(fnum, f);
-                }
-            }
+            // rename, falls between the two opens; the tombstone check catches that one.  It is
+            // held only while its own index is walked, so a pass holds one data file open at a
+            // time however many the zone has.  Holding every data file of the pass open until
+            // its end made a zone with more files than the process may hold open come up short
+            // (2026-11-01).
+            let mut dat = match present.dat {
+                true    => res!(self.open_if_present(fnum, &FileType::Data)),
+                false   => None,
+            };
             let before = self.data_file_len(fnum);
             // Every index file present is walked, including one whose data
             // file has gone: a collection that deletes a wholly superseded
@@ -332,10 +344,11 @@ impl<
             // has a newer copy in a higher-numbered file which overwrites it
             // here anyway.
             let covered = if present.ind {
-                res!(self.scan_walk_ind_file(fnum, live))
+                res!(self.scan_walk_ind_file(fnum, dat.as_mut(), tlen, live))
             } else {
                 0
             };
+            drop(dat.take());
             let after = self.data_file_len(fnum);
             // A data file absent on either side has been collected away, or
             // was never there: there is nothing for the index to be short of.
@@ -350,40 +363,15 @@ impl<
         Ok(short)
     }
 
-    /// Removes from `live` every key whose newest record is a tombstone.  The index gives the
-    /// length of a record's value but not the value, and a tombstone, written unencrypted by
-    /// every delete, always has one length, so only a Complete record of that length is read.
-    fn drop_deleted(
-        &self,
-        live:   &mut Live<UIDL, UID>,
-        dfiles: &mut DataFiles,
-    )
-        -> Outcome<()>
-    {
-        let tomb = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
-        let tomb_len = res!(tomb.as_bytes()).len();
-        let csummer = self.api().schemes().checksummer().clone();
-        let csum_len = res!(csummer.len());
+    /// Removes from `live` every key whose newest record is a tombstone.  A newest record whose
+    /// tombstone check could not be made means a collection replaced its file during the pass.
+    fn drop_deleted(live: &mut Live<UIDL, UID>) -> Outcome<()> {
         let mut gone: Vec<Vec<u8>> = Vec::new();
-        for (kbyts, (_, meta, cind, floc)) in live.iter() {
-            // A bunch key or chunk record is never a tombstone.
-            if cind.is_some() || floc.vlen != try_into!(u64, tomb_len + csum_len) {
-                continue;
-            }
-            let rec = res!(self.read_record(dfiles, floc));
-            let klen = try_into!(usize, floc.klen);
-            if !res!(StoredKey::<UIDL, UID>::holds(&rec[..klen], kbyts, meta, csum_len)) {
-                return Err(err!(
-                    "{}: The record at {} in data file {} is not the one its index named, \
-                    stamped {:?}.", self.ozid(), floc.start, floc.fnum, meta.time;
-                    Data, Mismatch));
-            }
-            res!(csummer.clone().verify(&rec[klen..]));
-            let (val, _) = res!(Dat::from_bytes(&rec[klen..rec.len() - csum_len]));
-            if let Dat::Usr(kind, _) = &val {
-                if *kind == id::usr_kind_id_deleted() {
-                    gone.push(kbyts.clone());
-                }
+        for (kbyts, (_, _, _, _, tomb)) in live.iter() {
+            match tomb {
+                Tomb::No            => (),
+                Tomb::Yes           => gone.push(kbyts.clone()),
+                Tomb::Unproven(e)   => return Err(e.clone()),
             }
         }
         for k in gone {
@@ -392,26 +380,86 @@ impl<
         Ok(())
     }
 
-    fn read_record(
+    /// The index gives the length of a record's value but not the value, and a tombstone, written
+    /// unencrypted by every delete, always has one length, so only that length need be read.
+    fn tomb_len(&self) -> Outcome<TombLen> {
+        let tomb = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
+        let tomb_len = res!(tomb.as_bytes()).len();
+        let csum_len = res!(self.api().schemes().checksummer().len());
+        Ok(TombLen {
+            vlen:       try_into!(u64, tomb_len + csum_len),
+            csum_len,
+        })
+    }
+
+    /// Judges whether the record at `floc` is a tombstone, reading it from `dat`, the
+    /// generation of the data file opened before its index.
+    fn tomb_of(
         &self,
-        dfiles: &mut DataFiles,
+        dat:    Option<&mut File>,
+        kbyts:  &[u8],
+        meta:   &Meta<UIDL, UID>,
+        cind:   Option<usize>,
         floc:   &FileLocation,
+        tlen:   TombLen,
     )
-        -> Outcome<Vec<u8>>
+        -> Tomb
     {
-        let file = match dfiles.entry(floc.fnum) {
-            Entry::Occupied(o)  => o.into_mut(),
-            Entry::Vacant(v)    => {
-                let (_, f) = res!(self.zdir().open_ozone_file(
-                    floc.fnum, &FileType::Data, &FileAccess::Reading));
-                v.insert(f)
-            },
-        };
+        // A bunch key or chunk record is never a tombstone.
+        if cind.is_some() || floc.vlen != tlen.vlen {
+            return Tomb::No;
+        }
+        match self.read_tomb(dat, kbyts, meta, floc, tlen.csum_len) {
+            Ok(true)    => Tomb::Yes,
+            Ok(false)   => Tomb::No,
+            Err(e)      => Tomb::Unproven(e),
+        }
+    }
+
+    fn read_tomb(
+        &self,
+        dat:        Option<&mut File>,
+        kbyts:      &[u8],
+        meta:       &Meta<UIDL, UID>,
+        floc:       &FileLocation,
+        csum_len:   usize,
+    )
+        -> Outcome<bool>
+    {
+        let file = res!(dat.ok_or_else(|| err!(
+            "{}: Data file {} has gone, so the record at {} its index names, stamped {:?}, \
+            cannot be read.", self.ozid(), floc.fnum, floc.start, meta.time;
+            Data, Missing)));
         let kv = floc.keyval();
         res!(file.seek(SeekFrom::Start(kv.start)));
-        let mut buf = vec![0u8; try_into!(usize, kv.len)];
-        res!(file.read_exact(&mut buf));
-        Ok(buf)
+        let mut rec = vec![0u8; try_into!(usize, kv.len)];
+        res!(file.read_exact(&mut rec));
+        let klen = try_into!(usize, floc.klen);
+        if !res!(StoredKey::<UIDL, UID>::holds(&rec[..klen], kbyts, meta, csum_len)) {
+            return Err(err!(
+                "{}: The record at {} in data file {} is not the one its index named, \
+                stamped {:?}.", self.ozid(), floc.start, floc.fnum, meta.time;
+                Data, Mismatch));
+        }
+        res!(self.api().schemes().checksummer().clone().verify(&rec[klen..]));
+        let (val, _) = res!(Dat::from_bytes(&rec[klen..rec.len() - csum_len]));
+        Ok(matches!(&val, Dat::Usr(kind, _) if *kind == id::usr_kind_id_deleted()))
+    }
+
+    /// Opens a zone file for reading, or gives `None` when it has gone, which is what a
+    /// collection that removed it looks like.  Any other failure, the process's limit on open
+    /// files among them, is an error: taken for a collection, it made the scan of a whole zone
+    /// come up short and blame its index files (2026-11-01).
+    fn open_if_present(&self, fnum: FileNum, typ: &FileType) -> Outcome<Option<File>> {
+        let path = self.zdir().ozone_file_path(fnum, typ);
+        match File::open(&path) {
+            Ok(f)                                           => Ok(Some(f)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound   => Ok(None),
+            Err(e)                                          => Err(err!(e,
+                "{}: While opening {:?} file {} at {:?} for a scan.",
+                self.ozid(), typ, fnum, path;
+                IO, File, Read)),
+        }
     }
 
     fn data_file_len(&self, fnum: FileNum) -> Option<u64> {
@@ -449,18 +497,16 @@ impl<
 
     fn scan_walk_ind_file(
         &mut self,
-        fnum: FileNum,
-        live: &mut Live<UIDL, UID>,
+        fnum:       FileNum,
+        mut dat:    Option<&mut File>,
+        tlen:       TombLen,
+        live:       &mut Live<UIDL, UID>,
     )
         -> Outcome<u64>
     {
-        let file = match self.zdir().open_ozone_file(
-            fnum,
-            &FileType::Index,
-            &FileAccess::Reading,
-        ) {
-            Ok((_, file)) => file,
-            Err(_) => {
+        let file = match res!(self.open_if_present(fnum, &FileType::Index)) {
+            Some(file) => file,
+            None => {
                 trace!(sync_log::stream(),
                     "{}: Index file {} went away between listing and opening, \
                     which is what collecting an entirely superseded file looks \
@@ -542,9 +588,14 @@ impl<
             //    keeps, by `supersedes`.  Walk order is not stamp order: a zone's writers append
             //    to files of their own, so a tombstone can sit in a lower-numbered file than the
             //    record it retires, and walk order alone revived that record (2026-10-09).
+            //    Only a record that is kept is judged for a tombstone, from this generation of
+            //    its data file.
             match live.get(&kbyts) {
-                Some((_, held, _, hloc)) if !supersedes(&meta.time, &floc, &held.time, hloc) => (),
-                _ => { live.insert(kbyts, (kdat, meta, cind, floc)); },
+                Some((_, held, _, hloc, _)) if !supersedes(&meta.time, &floc, &held.time, hloc) => (),
+                _ => {
+                    let tomb = self.tomb_of(dat.as_deref_mut(), &kbyts, &meta, cind, &floc, tlen);
+                    live.insert(kbyts, (kdat, meta, cind, floc, tomb));
+                },
             }
         }
         Ok(covered)
