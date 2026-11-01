@@ -282,7 +282,7 @@ pub fn stage_file<F>(
     where F: FnOnce(&mut File) -> Outcome<()>
 {
     let name = res!(file_name_of(path));
-    let tmp = res!(write_tmp(path, &name, Some(tag), mode, write));
+    let tmp = res!(write_tmp(path, &name, Some(tag), mode, true, write));
     Ok(Staged { tmp: Some(tmp), path: path.to_path_buf() })
 }
 
@@ -309,6 +309,128 @@ pub fn stage_link(path: &Path, target: &Path, tag: &OsStr) -> Outcome<Staged> {
         "All {} fresh temporary names tried for the link {:?} were already taken.",
         TMP_TRIES, path;
         File, IO, Create, Exists))
+}
+
+/// Many files and links placed whole together, at the cost of one durable write
+/// for the lot rather than one for each.
+///
+/// Each is written to its own tagged temporary as [`stage_file`] and
+/// [`stage_link`] make one, but not fsynced as it is written. [`Landing::land`]
+/// then fsyncs every temporary at once, across threads, so that the filesystem
+/// can commit them together (ext4 joins concurrent fsyncs into one journal
+/// commit), renames each over its path, and fsyncs each distinct directory once.
+/// A crash or a kill at any instant leaves each path holding its old entry or its
+/// new one, whole: nothing is renamed before every temporary is durable. Dropped
+/// unlanded, or failing part way, every temporary not yet renamed is removed.
+#[must_use = "a landing is removed, unlanded, when it is dropped"]
+#[derive(Debug, Default)]
+pub struct Landing {
+    files:  Vec<Staged>,    // written, not yet fsynced
+    links:  Vec<Staged>,    // which have no bytes to fsync
+}
+
+impl Landing {
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many files and links wait to land.
+    pub fn len(&self) -> usize {
+        self.files.len() + self.links.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Writes `path`'s new bytes by `write` into its own temporary tagged `tag`,
+    /// in the mode `mode` says, without the fsync [`Landing::land`] makes for all.
+    pub fn file<F>(&mut self, path: &Path, mode: SaveMode, tag: &OsStr, write: F)
+        -> Outcome<()>
+        where F: FnOnce(&mut File) -> Outcome<()>
+    {
+        let name = res!(file_name_of(path));
+        let tmp = res!(write_tmp(path, &name, Some(tag), mode, false, write));
+        self.files.push(Staged { tmp: Some(tmp), path: path.to_path_buf() });
+        Ok(())
+    }
+
+    /// Makes the link to `target` that is to stand at `path`, as [`stage_link`] does.
+    #[cfg(unix)]
+    pub fn link(&mut self, path: &Path, target: &Path, tag: &OsStr)
+        -> Outcome<()>
+    {
+        self.links.push(res!(stage_link(path, target, tag)));
+        Ok(())
+    }
+
+    /// Fsyncs every temporary, renames each over its path in the order it was
+    /// staged, then fsyncs each directory a path stands in, once.
+    pub fn land(mut self) -> Outcome<()> {
+        res!(Self::in_parallel(&self.files, |staged| match staged.temporary() {
+            Some(tmp) => sync_file_at(tmp),
+            None      => Ok(()),
+        }));
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+        let all: Vec<Staged> = self.files.drain(..).chain(self.links.drain(..)).collect();
+        for staged in all {
+            let dir = parent_dir(&staged.path).to_path_buf();
+            res!(staged.land());
+            if seen.insert(dir.clone()) {
+                dirs.push(dir);
+            }
+        }
+        Self::in_parallel(&dirs, |dir| sync_dir(dir))
+    }
+
+    /// Runs `each` over `items` on as many threads as the machine offers, and
+    /// says the first failure.
+    fn in_parallel<T, F>(items: &[T], each: F)
+        -> Outcome<()>
+        where T: Sync, F: Fn(&T) -> Outcome<()> + Sync
+    {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let chunk = (items.len() + threads - 1) / threads;
+        let each = &each;
+        let outcomes: Vec<Outcome<()>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = items.chunks(chunk).map(|part| scope.spawn(move || {
+                for item in part {
+                    res!(each(item));
+                }
+                Ok(())
+            })).collect();
+            handles.into_iter().map(|h| match h.join() {
+                Ok(outcome) => outcome,
+                Err(_)      => Err(err!("A thread syncing staged files panicked."; Bug, Thread)),
+            }).collect()
+        });
+        for outcome in outcomes {
+            res!(outcome);
+        }
+        Ok(())
+    }
+}
+
+/// Fsyncs the file at `path`, through a fresh descriptor: an fsync makes the
+/// inode's data durable whichever descriptor asks.
+fn sync_file_at(path: &Path) -> Outcome<()> {
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => return Err(err!(e,
+            "Could not open the temporary file {:?} to fsync it.", path;
+            File, IO, Read)),
+    };
+    if let Err(e) = f.sync_all() {
+        return Err(err!(e,
+            "Could not fsync the temporary file {:?}.", path;
+            File, IO, Write));
+    }
+    Ok(())
 }
 
 /// The file a temporary of [`stage_file`] or [`stage_link`] made with `tag` was
@@ -359,6 +481,7 @@ fn write_tmp<F>(
     name:   &OsStr,
     tag:    Option<&OsStr>,
     mode:   SaveMode,
+    sync:   bool,   // false leaves the fsync to a caller syncing many at once
     write:  F,
 )
     -> Outcome<PathBuf>
@@ -391,11 +514,13 @@ fn write_tmp<F>(
             "Could not write the temporary file {:?}.", tmp;
             File, IO, Write));
     }
-    if let Err(e) = f.sync_all() {
-        let _ = fs::remove_file(&tmp);
-        return Err(err!(e,
-            "Could not fsync the temporary file {:?}.", tmp;
-            File, IO, Write));
+    if sync {
+        if let Err(e) = f.sync_all() {
+            let _ = fs::remove_file(&tmp);
+            return Err(err!(e,
+                "Could not fsync the temporary file {:?}.", tmp;
+                File, IO, Write));
+        }
     }
     // Closed before the rename, which off unix cannot move a file still open.
     drop(f);
@@ -417,7 +542,7 @@ fn replace_file<F>(
     where F: FnOnce(&mut File) -> Outcome<()>
 {
     let name = res!(file_name_of(path));
-    let tmp = res!(write_tmp(path, &name, None, mode, write));
+    let tmp = res!(write_tmp(path, &name, None, mode, true, write));
     if let Err(e) = fs::rename(&tmp, path) {
         if e.kind() == std::io::ErrorKind::NotFound {
             // No other writer makes this name, so it is gone because another
@@ -756,6 +881,28 @@ pub fn sync_parent_dir(path: &Path) -> Outcome<()> {
 /// A no-op off unix, where a directory cannot be opened to fsync it.
 #[cfg(not(unix))]
 pub fn sync_parent_dir(_path: &Path) -> Outcome<()> {
+    Ok(())
+}
+
+/// Fsyncs the directory `dir` itself.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> Outcome<()> {
+    let d = match File::open(dir) {
+        Ok(d) => d,
+        Err(e) => return Err(err!(e,
+            "Could not open the directory {:?} to fsync it.", dir;
+            File, IO, Write)),
+    };
+    if let Err(e) = d.sync_all() {
+        return Err(err!(e,
+            "Could not fsync the directory {:?}.", dir;
+            File, IO, Write));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> Outcome<()> {
     Ok(())
 }
 
@@ -2414,6 +2561,59 @@ mod tests {
                 return Err(err!("The link reads {:?}, beside {:?}.", read, res!(names(&dir)); Test, Mismatch));
             }
             res!(sync_parent_dir(&at));
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(&dir);
+        outcome
+    }
+
+    #[test]
+    fn test_a_landing_places_every_file_whole_only_when_landed() -> Outcome<()> {
+        let dir = scratch_path("landing");
+        res!(fs::create_dir(&dir));
+        let outcome = (|| -> Outcome<()> {
+            use std::io::Write;
+            let tag = OsStr::new("ore-tmp");
+            let mut paths = Vec::new();
+            for d in ["a", "b", "c"] {
+                res!(fs::create_dir(dir.join(d)));
+                for n in 0..40 {
+                    let at = dir.join(d).join(fmt!("f{}", n));
+                    res!(fs::write(&at, b"old"));
+                    paths.push(at);
+                }
+            }
+            let count = |d: &Path| -> Outcome<usize> { Ok(res!(fs::read_dir(d)).count()) };
+            let mut landing = Landing::new();
+            for at in &paths {
+                res!(landing.file(at, SaveMode::Keep, tag, |f| { res!(f.write_all(b"new")); Ok(()) }));
+            }
+            res!(landing.link(&dir.join("a").join("link"), Path::new("f0"), tag));
+            if landing.len() != paths.len() + 1 {
+                return Err(err!("The landing holds {}, not {}.", landing.len(), paths.len() + 1; Test, Mismatch));
+            }
+            for at in &paths {
+                if res!(fs::read(at)) != b"old" {
+                    return Err(err!("{:?} changed before the landing landed.", at; Test, Mismatch));
+                }
+            }
+            res!(landing.land());
+            for at in &paths {
+                if res!(fs::read(at)) != b"new" {
+                    return Err(err!("{:?} was not landed.", at; Test, Mismatch));
+                }
+            }
+            if res!(fs::read_link(dir.join("a").join("link"))) != Path::new("f0")
+                || res!(count(&dir.join("a"))) != 41 || res!(count(&dir.join("b"))) != 40
+            {
+                return Err(err!("The link is wrong, or a temporary was left beside the files."; Test, Mismatch));
+            }
+            let mut dropped = Landing::new();
+            res!(dropped.file(&paths[0], SaveMode::Keep, tag, |f| { res!(f.write_all(b"no")); Ok(()) }));
+            drop(dropped);
+            if res!(fs::read(&paths[0])) != b"new" || res!(count(&dir.join("a"))) != 41 {
+                return Err(err!("A dropped landing changed a file or left its temporary."; Test, Mismatch));
+            }
             Ok(())
         })();
         let _ = fs::remove_dir_all(&dir);
