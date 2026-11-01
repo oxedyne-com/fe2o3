@@ -308,3 +308,15 @@ fn root_drop_that_misses_its_identity_is_refused() -> Outcome<()> {
     }
     run_as_child("root_drop_that_misses_its_identity_is_refused")
 }
+
+#[test]
+fn the_account_of_the_current_uid_names_its_home_and_shell() -> Outcome<()> {
+    let id = res!(Identity::current());
+    let a = res!(oxedyne_fe2o3_sys::session::Account::of_uid(id.uid));
+    assert_eq!(a.uid, id.uid);
+    assert!(!a.name.is_empty());
+    assert!(a.home.is_absolute(), "home {:?}", a.home);
+    // A uid no system gives out is refused, not answered with a default.
+    assert!(oxedyne_fe2o3_sys::session::Account::of_uid(4_000_000_017).is_err());
+    Ok(())
+}

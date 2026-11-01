@@ -84,6 +84,32 @@ impl Identity {
     }
 }
 
+/// A user's entry in the password database, found by uid through NSS (`getpwuid_r`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Account {
+    pub name:   String,
+    pub uid:    u32,
+    pub gid:    u32,
+    pub home:   PathBuf,
+    pub shell:  PathBuf,    // the login shell, empty when the entry names none
+}
+
+impl Account {
+    pub fn of_uid(uid: u32) -> Outcome<Self> {
+        match User::from_uid(Uid::from_raw(uid)) {
+            Ok(Some(u)) => Ok(Self {
+                name:   u.name,
+                uid:    u.uid.as_raw(),
+                gid:    u.gid.as_raw(),
+                home:   u.dir,
+                shell:  u.shell,
+            }),
+            Ok(None)    => Err(err!("No user with uid {} in the password database.", uid; Missing, Input)),
+            Err(e)      => Err(err!("Looking up uid {}: {}.", uid, e; IO, System)),
+        }
+    }
+}
+
 /// Drops the calling process to `id` and checks that the drop held. Needs root, or `CAP_SETUID`
 /// and `CAP_SETGID`. Every thread must be dropped, so call it before any thread is started.
 pub fn drop_to(id: &Identity) -> Outcome<()> {
