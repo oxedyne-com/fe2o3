@@ -93,3 +93,82 @@ fn an_installed_section_that_is_no_map_is_refused_by_name() -> Outcome<()> {
     }
     Ok(())
 }
+
+// `cfg::fill_keys_from_template`, the key-level fill: only the named keys are read from the
+// template, for a section whose other keys stay required (Kimberlite's `owner`, 1 Nov 2026).
+
+const KEYED: &str = r#"{
+    "owner": {
+        "home":     "~/",
+        "agent":    "~/.local/state/app/agent",
+    },
+}"#;
+
+#[test]
+fn a_named_key_the_file_lacks_reads_the_template() -> Outcome<()> {
+    let mut map = res!(map_of(r#"{ "owner": { "home": "/srv" } }"#));
+    res!(cfg::fill_keys_from_template(&mut map, KEYED, &[("owner", "agent")]));
+    assert_eq!(get(&map, "owner", "agent"), Some(&Dat::Str(fmt!("~/.local/state/app/agent"))));
+    assert_eq!(get(&map, "owner", "home"),  Some(&Dat::Str(fmt!("/srv"))));
+    Ok(())
+}
+
+#[test]
+fn a_named_key_the_file_sets_is_kept() -> Outcome<()> {
+    let mut map = res!(map_of(r#"{ "owner": { "home": "/srv", "agent": "/run/agent" } }"#));
+    res!(cfg::fill_keys_from_template(&mut map, KEYED, &[("owner", "agent")]));
+    assert_eq!(get(&map, "owner", "agent"), Some(&Dat::Str(fmt!("/run/agent"))));
+    Ok(())
+}
+
+#[test]
+fn an_unnamed_key_in_the_section_stays_required() -> Outcome<()> {
+    let mut map = res!(map_of(r#"{ "owner": {} }"#));
+    res!(cfg::fill_keys_from_template(&mut map, KEYED, &[("owner", "agent")]));
+    assert!(get(&map, "owner", "home").is_none(), "only the named key is filled");
+    assert!(get(&map, "owner", "agent").is_some());
+    Ok(())
+}
+
+#[test]
+fn a_named_key_the_template_lacks_is_refused_by_name() -> Outcome<()> {
+    let mut map = res!(map_of(r#"{ "owner": {} }"#));
+    match cfg::fill_keys_from_template(&mut map, KEYED, &[("owner", "socket")]) {
+        Err(e)  => assert!(fmt!("{}", e).contains("'owner.socket'"), "{}", e),
+        Ok(())  => panic!("a key the template lacks was accepted"),
+    }
+    match cfg::fill_keys_from_template(&mut map, KEYED, &[("net", "agent")]) {
+        Err(e)  => assert!(fmt!("{}", e).contains("'net'"), "{}", e),
+        Ok(())  => panic!("a section the template lacks was accepted"),
+    }
+    assert_eq!(map, res!(map_of(r#"{ "owner": {} }"#)), "a refused fill changes nothing");
+    Ok(())
+}
+
+#[test]
+fn a_refused_key_leaves_the_earlier_ones_unfilled() -> Outcome<()> {
+    let mut map = res!(map_of(r#"{ "owner": {} }"#));
+    let r = cfg::fill_keys_from_template(&mut map, KEYED, &[("owner", "agent"), ("owner", "x")]);
+    assert!(r.is_err());
+    assert!(get(&map, "owner", "agent").is_none(), "every key is checked before any is filled");
+    Ok(())
+}
+
+#[test]
+fn an_installed_section_that_is_no_map_is_refused_for_a_key() -> Outcome<()> {
+    let mut map = res!(map_of(r#"{ "owner": 5 }"#));
+    match cfg::fill_keys_from_template(&mut map, KEYED, &[("owner", "agent")]) {
+        Err(e)  => assert!(fmt!("{}", e).contains("'owner'"), "{}", e),
+        Ok(())  => panic!("a section that is no map was accepted"),
+    }
+    Ok(())
+}
+
+#[test]
+fn an_absent_section_is_left_absent() -> Outcome<()> {
+    let mut map = res!(map_of(r#"{ "run": {} }"#));
+    res!(cfg::fill_keys_from_template(&mut map, KEYED, &[("owner", "agent")]));
+    assert!(map.get(&Dat::Str(fmt!("owner"))).is_none(),
+        "a section the file lacks is not made, so its required keys are still reported missing");
+    Ok(())
+}
