@@ -46,8 +46,10 @@ impl MboxEmailIterator {
         }
     }
 
-    async fn read_until_next_from(&mut self) -> Outcome<Option<Vec<u8>>> {
-        let mut email_content = Vec::new();
+    /// Reads the next message's lines, without its "From " separator line or the blank
+    /// line mbox puts before the next one.
+    async fn read_until_next_from(&mut self) -> Outcome<Option<Vec<Vec<u8>>>> {
+        let mut lines = Vec::new();
         let mut line_num: usize = 0;
         loop {
             match self.read_line().await {
@@ -55,24 +57,47 @@ impl MboxEmailIterator {
                     debug!("{:05} line={}", line_num, String::from_utf8_lossy(&line));
                     line_num += 1;
                     if line.starts_with(b"From ") {
-                        if !email_content.is_empty() {
-                            break;
+                        if lines.is_empty() {
+                            continue; // This message's own separator.
                         }
+                        break; // The next message's separator.
                     }
-                    email_content.extend_from_slice(&line);
-                    email_content.extend_from_slice(&[b'\n']);
+                    lines.push(line);
                 }
-                Ok(None) => {
-                    if email_content.is_empty() {
-                        return Ok(None);
-                    } else {
-                        break;
-                    }
-                }
+                Ok(None) => break,
                 Err(e) => return Err(e),
             }
         }
-        Ok(Some(email_content))
+        if lines.last().map_or(false, |l| l.is_empty()) {
+            lines.pop();
+        }
+        if lines.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(lines))
+        }
+    }
+
+    /// Renders mbox lines as an SMTP DATA body, which `EmailMessage::read` parses: the
+    /// mboxrd quoting of a "From " line is undone (one '>' off a `>+From ` line), each
+    /// line ends CRLF, a leading '.' is doubled (RFC 5321 4.5.2) and ".\r\n" ends it.
+    fn to_wire(lines: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut wire = Vec::new();
+        for line in lines {
+            let quotes = line.iter().take_while(|b| **b == b'>').count();
+            let line = if quotes > 0 && line[quotes..].starts_with(b"From ") {
+                &line[1..]
+            } else {
+                &line[..]
+            };
+            if line.starts_with(b".") {
+                wire.push(b'.');
+            }
+            wire.extend_from_slice(line);
+            wire.extend_from_slice(b"\r\n");
+        }
+        wire.extend_from_slice(b".\r\n");
+        wire
     }
 }
 
@@ -87,8 +112,8 @@ impl Iterator for MboxEmailIterator {
 
         runtime.block_on(async {
             match self.read_until_next_from().await {
-                Ok(Some(content)) => {
-                    let cursor = std::io::Cursor::new(content);
+                Ok(Some(lines)) => {
+                    let cursor = std::io::Cursor::new(Self::to_wire(lines));
                     let mut reader = tokio::io::BufReader::new(cursor);
                     match EmailMessage::read(&mut reader).await {
                         Ok(email) => Some(Ok(email)),

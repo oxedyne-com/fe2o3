@@ -81,12 +81,15 @@ impl EmailMessage {
                 }
             }
     
-            let line = String::from_utf8_lossy(&line);
+            // Undo the sender's dot-stuffing (RFC 5321 4.5.2).
+            let line = if line.first() == Some(&b'.') { &line[1..] } else { &line[..] };
+            let line = String::from_utf8_lossy(line);
             debug!("### line={}", line);
             let line = line.trim_end();
     
             if line.is_empty() && in_headers {
                 in_headers = false;
+                res!(Self::take_header(&mut email, &mut header_line));
                 continue;
             }
     
@@ -96,16 +99,7 @@ impl EmailMessage {
                     header_line.push(' ');
                     header_line.push_str(line.trim_start());
                 } else {
-                    if !header_line.is_empty() {
-                        match res!(EmailHeader::from_str(&header_line)) {
-                            EmailHeader::From(value) => email.from = value,
-                            EmailHeader::To(value) => email.to.push(value),
-                            EmailHeader::Subject(value) => email.subject = value,
-                            header => {
-                                email.headers.push(header);
-                            }
-                        }
-                    }
+                    res!(Self::take_header(&mut email, &mut header_line));
                     header_line = line.to_string();
                 }
             } else {
@@ -115,7 +109,24 @@ impl EmailMessage {
             }
         }
     
+        // A message with no body ends in its headers.
+        res!(Self::take_header(&mut email, &mut header_line));
         Ok(email)
+    }
+
+    /// Files the header gathered so far, if any, and empties the buffer.
+    fn take_header(email: &mut Self, header_line: &mut String) -> Outcome<()> {
+        if header_line.is_empty() {
+            return Ok(());
+        }
+        match res!(EmailHeader::from_str(header_line)) {
+            EmailHeader::From(value)    => email.from = value,
+            EmailHeader::To(value)      => email.to.push(value),
+            EmailHeader::Subject(value) => email.subject = value,
+            header                      => email.headers.push(header),
+        }
+        header_line.clear();
+        Ok(())
     }
 
 }
