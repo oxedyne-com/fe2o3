@@ -322,11 +322,16 @@ pub fn stage_link(path: &Path, target: &Path, tag: &OsStr) -> Outcome<Staged> {
 /// A crash or a kill at any instant leaves each path holding its old entry or its
 /// new one, whole: nothing is renamed before every temporary is durable. Dropped
 /// unlanded, or failing part way, every temporary not yet renamed is removed.
+///
+/// A caller that changed other entries for the same write, by its own renames,
+/// removals or new directories, names each directory it changed with
+/// [`Landing::touched`], and that directory is fsynced in the same pass.
 #[must_use = "a landing is removed, unlanded, when it is dropped"]
 #[derive(Debug, Default)]
 pub struct Landing {
     files:  Vec<Staged>,    // written, not yet fsynced
     links:  Vec<Staged>,    // which have no bytes to fsync
+    dirs:   std::collections::BTreeSet<PathBuf>,    // changed by the caller, fsynced on landing
 }
 
 impl Landing {
@@ -365,15 +370,23 @@ impl Landing {
         Ok(())
     }
 
+    /// Notes a directory whose entries the caller changed by other means, to be
+    /// fsynced once with the rest when this lands. It must still stand then.
+    pub fn touched(&mut self, dir: &Path) {
+        self.dirs.insert(dir.to_path_buf());
+    }
+
     /// Fsyncs every temporary, renames each over its path in the order it was
-    /// staged, then fsyncs each directory a path stands in, once.
+    /// staged, then fsyncs each directory a path stands in, and each one
+    /// [`Landing::touched`] names, once.
     pub fn land(mut self) -> Outcome<()> {
         res!(Self::in_parallel(&self.files, |staged| match staged.temporary() {
             Some(tmp) => sync_file_at(tmp),
             None      => Ok(()),
         }));
         let mut dirs: Vec<PathBuf> = Vec::new();
-        let mut seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+        let mut seen = std::mem::take(&mut self.dirs);
+        dirs.extend(seen.iter().cloned());
         let all: Vec<Staged> = self.files.drain(..).chain(self.links.drain(..)).collect();
         for staged in all {
             let dir = parent_dir(&staged.path).to_path_buf();
