@@ -110,6 +110,12 @@ impl Account {
     }
 }
 
+/// The calling process's real, effective and saved uids, in that order.
+pub fn uids() -> Outcome<[u32; 3]> {
+    let u = res!(getresuid().map_err(|e| err!("getresuid: {}.", e; IO, System)));
+    Ok([u.real.as_raw(), u.effective.as_raw(), u.saved.as_raw()])
+}
+
 /// Drops the calling process to `id` and checks that the drop held. Needs root, or `CAP_SETUID`
 /// and `CAP_SETGID`. Every thread must be dropped, so call it before any thread is started.
 pub fn drop_to(id: &Identity) -> Outcome<()> {

@@ -314,6 +314,7 @@ fn the_account_of_the_current_uid_names_its_home_and_shell() -> Outcome<()> {
     let id = res!(Identity::current());
     let a = res!(oxedyne_fe2o3_sys::session::Account::of_uid(id.uid));
     assert_eq!(a.uid, id.uid);
+    assert_eq!(res!(oxedyne_fe2o3_sys::session::uids())[0], id.uid);
     assert!(!a.name.is_empty());
     assert!(a.home.is_absolute(), "home {:?}", a.home);
     // A uid no system gives out is refused, not answered with a default.
