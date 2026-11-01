@@ -27,6 +27,11 @@ supervise = ["signal"]
 # session: drops a root process to a user's uid, gid and groups and checks the drop held, starts a
 # new session, and tests that a path and its ancestors are root-owned and not group- or other-writable.
 session = ["dep:nix", "nix/user", "nix/process"]
+# notify: a fanotify group with filesystem marks and the kernel's bounded queue, the host-path
+# resolver by mount id and the writer's mountinfo, and a Follower that tracks files across renames
+# through held O_PATH descriptors. Needs rustix for statx, which nix does not carry.
+notify = ["dep:nix", "nix/fanotify", "nix/inotify", "nix/poll", "nix/fs", "dep:rustix"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"], optional = true }

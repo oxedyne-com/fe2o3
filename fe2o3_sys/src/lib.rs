@@ -32,6 +32,8 @@ pub mod inotify;
 pub mod load;
 pub mod mem;
 pub mod net;
+#[cfg(all(target_os = "linux", feature = "notify"))]
+pub mod notify;
 pub mod parse;
 pub mod proc_self;
 pub mod resident;
