@@ -27,6 +27,47 @@ pub struct Mount {
     pub point:  String, // Where it is mounted, in the reading process's view.
     pub fstype: String,
     pub source: String,
+    pub rw:     bool,   // Writable both as mounted and as a superblock.
+}
+
+/// What a mount's filesystem is, for a caller that must not hold a descriptor on a disk he may
+/// pull, or a network or FUSE filesystem whose server may hang.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FsClass {
+    Local,      // A fixed local disk, tmpfs, overlay, btrfs and the like.
+    Removable,  // A block device whose disk sysfs marks `removable`.
+    Fuse,
+    Network,
+    Pseudo,     // proc, sysfs, cgroup and the other kernel views: no files of anyone's.
+}
+
+// fixed: kernel and mount(8) filesystem type names.
+const PSEUDO: &[&str] = &["proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue", "debugfs", "tracefs",
+    "securityfs", "pstore", "bpf", "configfs", "fusectl", "efivarfs", "binfmt_misc", "autofs", "hugetlbfs",
+    "nsfs", "rpc_pipefs", "selinuxfs", "ramfs"];
+const NETWORK: &[&str] = &["nfs", "nfs4", "cifs", "smb3", "smbfs", "9p", "ceph", "afs", "glusterfs",
+    "lustre", "ocfs2", "gfs2", "ncpfs", "coda", "virtiofs"];
+
+impl Mount {
+    pub fn class(&self) -> FsClass {
+        let t = self.fstype.as_str();
+        if t == "fuse" || t == "fuseblk" || t.starts_with("fuse.") {
+            return FsClass::Fuse;
+        }
+        if NETWORK.contains(&t) {
+            return FsClass::Network;
+        }
+        if PSEUDO.contains(&t) {
+            return FsClass::Pseudo;
+        }
+        // A partition's flag is its disk's, one directory up.
+        let dir = format!("/sys/dev/block/{}", self.dev);
+        let flag = |d: &str| fs::read_to_string(format!("{}/removable", d)).ok().map(|s| s.trim() == "1");
+        match flag(&dir).or_else(|| flag(&format!("{}/..", dir))) {
+            Some(true)  => FsClass::Removable,
+            _           => FsClass::Local,
+        }
+    }
 }
 
 /// The mounts one process sees, by mount id.
@@ -56,6 +97,7 @@ impl MountTable {
                 point:  unescape(f[4]),
                 fstype: f[dash + 1].to_string(),
                 source: unescape(f[dash + 2]),
+                rw:     has_rw(f[5]) && f.get(dash + 3).map_or(true, |o| has_rw(o)),
             });
         }
         Ok(Self { mounts })
@@ -84,6 +126,10 @@ impl MountTable {
     pub fn added_since(&self, before: &MountTable) -> Vec<Mount> {
         self.mounts.values().filter(|m| !before.mounts.contains_key(&m.id)).cloned().collect()
     }
+}
+
+fn has_rw(opts: &str) -> bool {
+    opts.split(',').any(|o| o == "rw")
 }
 
 /// Undoes the octal escapes mountinfo writes for space, tab, newline and backslash.

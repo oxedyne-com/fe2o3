@@ -25,6 +25,7 @@ use oxedyne_fe2o3_sys::notify::{
         mount_id,
         resolve,
         unescape,
+        FsClass,
         HostPath,
         MountTable,
         Unresolved,
@@ -145,6 +146,25 @@ fn mountinfo_escapes_are_undone_and_parsed() -> Outcome<()> {
     let m = res!(t.get(7).ok_or_else(|| err!("Mount 7 missing."; Test)));
     if m.root != "/my dir" || m.point != "/mnt/my point" || m.fstype != "ext4" || m.source != "/dev/sda1" {
         return Err(err!("Parsed {:?}.", m; Test));
+    }
+    Ok(())
+}
+
+#[test]
+fn writability_and_class_are_read_from_the_line() -> Outcome<()> {
+    let t = res!(MountTable::parse("\
+1 0 0:1 / /a rw - fuse.sshfs h:/ rw
+2 0 0:2 / /b ro,relatime - ext4 /dev/sda1 rw
+3 0 0:3 / /c rw - ext4 /dev/sda1 ro
+4 0 0:4 / /d rw - nfs4 h:/ rw
+5 0 0:5 / /proc rw - proc proc rw
+6 0 0:6 / /tmp rw,nosuid - tmpfs tmpfs rw,size=1k
+"));
+    let got: Vec<(bool, FsClass)> = t.mounts.values().map(|m| (m.rw, m.class())).collect();
+    let want = vec![(true, FsClass::Fuse), (false, FsClass::Local), (false, FsClass::Local),
+        (true, FsClass::Network), (true, FsClass::Pseudo), (true, FsClass::Local)];
+    if got != want {
+        return Err(err!("Mounts read as {:?}, not {:?}.", got, want; Test));
     }
     Ok(())
 }
