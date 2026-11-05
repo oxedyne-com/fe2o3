@@ -3,6 +3,7 @@
 
 use oxedyne_fe2o3_sys::fanotify::{
     parse_events,
+    Access,
     Change,
     Entries,
     Gate,
@@ -169,7 +170,7 @@ fn test_fanotify_gate_holds_first_access_as_root() {
     let writer = std::thread::spawn(move || std::fs::write(&p2, b"after!"));
     let held = loop {
         let mut v = g.next(Some(Duration::from_secs(5))).expect("next");
-        if let Some(h) = v.pop() {
+        if let Some(Access::Held(h)) = v.pop() {
             break h;
         }
     };
@@ -181,7 +182,7 @@ fn test_fanotify_gate_holds_first_access_as_root() {
     copy.read_to_string(&mut s).expect("read");
     assert_eq!(s, "before");
     g.release(&f).expect("release");
-    g.answer(held, true).expect("allow");
+    held.answer(true).expect("allow");
     writer.join().expect("join").expect("write after allow");
     assert_eq!(std::fs::read_to_string(&p).expect("read"), "after!");
     // Released: the next access is not held.

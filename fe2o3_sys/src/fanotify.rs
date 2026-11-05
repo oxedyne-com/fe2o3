@@ -14,9 +14,19 @@
 //! holder that must see a file before any change copies it on the first open or access of any
 //! kind. The open event is needed because `open(O_TRUNC)` truncates without a pre-access event
 //! (the VM round of 06 Nov 2026 saw a held file emptied by `printf x > f` before its write was
-//! held). A descriptor opened before the filesystem had any pre-content mark is never asked
-//! about its accesses: the kernel decides that at open. The accessing process waits until
-//! [`Gate::answer`] allows it.
+//! held). The kernel decides at open whether a file's accesses are asked about at all: only
+//! when the inode, or the folder it is in, has a pre-content mark then. So a descriptor opened,
+//! or a mapping made, before [`Gate::hold`] of its inode writes it with no event (QA, 06 Nov
+//! 2026). [`Gate::guard`] marks a folder for its files (`FAN_EVENT_ON_CHILD`): a file of it opened
+//! after the mark is gated (proven in the VM, 06 Nov 2026), so a folder guarded before anything
+//! can open its files leaves no such descriptor. The accessing process waits until
+//! [`Held::answer`] allows it.
+//!
+//! A gate fails closed. Its queue is unlimited (`FAN_UNLIMITED_QUEUE`): a bounded one drops a
+//! permission event it cannot fit and the kernel lets that access through. A [`Held`] dropped
+//! unanswered denies its access. Closing a group allows every access it still holds, so
+//! [`Gate::close`] (and Drop) removes every mark and denies what is queued first, and the group
+//! closes only when the last `Held` has gone.
 //!
 //! Both need `CAP_SYS_ADMIN`. The system calls come from `nix`, which owns the `unsafe` this
 //! crate forbids; the info records nix does not parse are read here from the event bytes.
@@ -33,6 +43,7 @@ use std::{
         unix::ffi::OsStringExt,
     },
     path::Path,
+    sync::Arc,
     time::Duration,
 };
 
@@ -301,76 +312,150 @@ fn fid_of(r: &[u8]) -> Outcome<(Fid, OsString)> {
     Ok((Fid { fsid, kind, handle }, OsString::from_vec(name)))
 }
 
-/// A pre-content group: each marked file's next access waits for [`Gate::answer`].
+/// A pre-content group: each marked file's next access waits for [`Held::answer`].
 #[derive(Debug)]
 pub struct Gate {
-    fan: Fanotify,
+    fan:    Arc<Fanotify>,
+    closed: bool,
 }
 
-/// One access held at the gate.  The descriptor reads the file without raising an event.
+/// What [`Gate::next`] read.
+#[derive(Debug)]
+pub enum Access {
+    Held(Held),
+    /// An event with no descriptor (or an overflow): an access the gate cannot answer or name,
+    /// so any hold may have been passed.
+    Lost,
+}
+
+/// One access held at the gate.  The descriptor reads the file without raising an event.  Dropped
+/// unanswered, it denies the access.
 #[derive(Debug)]
 pub struct Held {
-    ev: FanotifyEvent,
+    ev:     Option<FanotifyEvent>,
+    fan:    Arc<Fanotify>,
 }
 
 impl Held {
     pub fn fd(&self) -> Option<BorrowedFd<'_>> {
-        self.ev.fd()
+        self.ev.as_ref().and_then(|e| e.fd())
     }
 
     /// The accessing process.
     pub fn pid(&self) -> i32 {
-        self.ev.pid()
+        self.ev.as_ref().map(|e| e.pid()).unwrap_or(0)
     }
+
+    /// Lets the held access go on (`allow`) or fails it with `EPERM`.
+    pub fn answer(mut self, allow: bool) -> Outcome<()> {
+        let ev = res!(self.ev.take().ok_or_else(|| err!(
+            "A held access was already answered."; Missing, Input)));
+        respond(&self.fan, &ev, allow)
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(ev) = self.ev.take() {
+            let _ = respond(&self.fan, &ev, false);
+        }
+    }
+}
+
+fn respond(fan: &Fanotify, ev: &FanotifyEvent, allow: bool) -> Outcome<()> {
+    let fd = res!(ev.fd().ok_or_else(|| err!(
+        "A held access has no descriptor to answer."; Missing, Input)));
+    let r = if allow { Response::FAN_ALLOW } else { Response::FAN_DENY };
+    res!(fan.write_response(FanotifyResponse::new(fd, r)).map_err(|e| err!(e,
+        "Answering a held access failed."; IO, System)));
+    Ok(())
 }
 
 impl Gate {
     pub fn new() -> Outcome<Self> {
-        let flags = InitFlags::FAN_CLASS_PRE_CONTENT | InitFlags::FAN_CLOEXEC | InitFlags::FAN_NONBLOCK;
+        let flags = InitFlags::FAN_CLASS_PRE_CONTENT | InitFlags::FAN_CLOEXEC | InitFlags::FAN_NONBLOCK
+            | InitFlags::FAN_UNLIMITED_QUEUE;
         let fan = res!(Fanotify::init(flags, EventFFlags::O_RDONLY | EventFFlags::O_LARGEFILE
             | EventFFlags::O_CLOEXEC).map_err(|e| err!(e,
             "fanotify_init for a pre-content gate failed (it needs CAP_SYS_ADMIN)."; IO, System)));
-        Ok(Self { fan })
+        Ok(Self { fan: Arc::new(fan), closed: false })
     }
 
-    /// Holds the next access of the open file `file` (its inode, whatever names it).
+    /// Holds the next access of the open file `file` (its inode, whatever names it).  A
+    /// descriptor already open on it is not asked about: see the module note.
     pub fn hold(&self, file: impl AsFd) -> Outcome<()> {
-        self.mark(MarkFlags::FAN_MARK_ADD, file)
+        self.mark(MarkFlags::FAN_MARK_ADD, 0, file)
     }
 
     /// Stops holding `file`'s accesses.
     pub fn release(&self, file: impl AsFd) -> Outcome<()> {
-        self.mark(MarkFlags::FAN_MARK_REMOVE, file)
+        self.mark(MarkFlags::FAN_MARK_REMOVE, 0, file)
     }
 
-    fn mark(&self, how: MarkFlags, file: impl AsFd) -> Outcome<()> {
-        let mask = MaskFlags::from_bits_retain(FAN_PRE_ACCESS | FAN_OPEN_PERM);
+    /// Holds every access of a file in the open folder `dir` opened after this call.
+    pub fn guard(&self, dir: impl AsFd) -> Outcome<()> {
+        self.mark(MarkFlags::FAN_MARK_ADD, MaskFlags::FAN_EVENT_ON_CHILD.bits(), dir)
+    }
+
+    /// Stops guarding the folder `dir`.
+    pub fn unguard(&self, dir: impl AsFd) -> Outcome<()> {
+        self.mark(MarkFlags::FAN_MARK_REMOVE, MaskFlags::FAN_EVENT_ON_CHILD.bits(), dir)
+    }
+
+    fn mark(&self, how: MarkFlags, more: u64, file: impl AsFd) -> Outcome<()> {
+        let mask = MaskFlags::from_bits_retain(FAN_PRE_ACCESS | FAN_OPEN_PERM | more);
         res!(self.fan.mark(how | MarkFlags::FAN_MARK_INODE, mask, file, None::<&Path>).map_err(|e| err!(e,
-            "fanotify_mark ({:?}) of a held file's inode failed (pre-content needs Linux 6.14 and a \
+            "fanotify_mark ({:?}) of a held inode failed (pre-content needs Linux 6.14 and a \
             filesystem that allows it).", how; IO, System)));
         Ok(())
     }
 
     /// Waits up to `wait` (`None`: for ever) and returns the accesses now held.
-    pub fn next(&self, wait: Option<Duration>) -> Outcome<Vec<Held>> {
+    pub fn next(&self, wait: Option<Duration>) -> Outcome<Vec<Access>> {
         if !res!(readable(self.fan.as_fd(), wait)) {
             return Ok(Vec::new());
         }
         match self.fan.read_events() {
-            Ok(v) => Ok(v.into_iter().map(|ev| Held { ev }).collect()),
+            Ok(v) => Ok(v.into_iter().map(|ev| {
+                // nix's mask() keeps FAN_Q_OVERFLOW (a bit it knows); never read FAN_PRE_ACCESS through it.
+                if ev.fd().is_none() || ev.mask().contains(MaskFlags::FAN_Q_OVERFLOW) {
+                    Access::Lost
+                } else {
+                    Access::Held(Held { ev: Some(ev), fan: self.fan.clone() })
+                }
+            }).collect()),
             Err(Errno::EAGAIN) | Err(Errno::EINTR) => Ok(Vec::new()),
             Err(e) => Err(err!(e, "Reading the pre-content gate failed."; IO, System)),
         }
     }
 
-    /// Lets the held access go on (`allow`) or fails it with `EPERM`.
-    pub fn answer(&self, held: Held, allow: bool) -> Outcome<()> {
-        let fd = res!(held.ev.fd().ok_or_else(|| err!(
-            "A held access has no descriptor to answer."; Missing, Input)));
-        let r = if allow { Response::FAN_ALLOW } else { Response::FAN_DENY };
-        res!(self.fan.write_response(FanotifyResponse::new(fd, r)).map_err(|e| err!(e,
-            "Answering a held access failed."; IO, System)));
+    /// Removes every mark, then denies each access still queued, so nothing the gate held goes
+    /// through when the group closes.  The group closes once the last [`Held`] has gone.
+    pub fn close(&mut self) -> Outcome<()> {
+        if self.closed {
+            return Ok(());
+        }
+        self.closed = true;
+        res!(self.fan.mark(MarkFlags::FAN_MARK_FLUSH, MaskFlags::empty(), nix::fcntl::AT_FDCWD,
+            None::<&Path>).map_err(|e| err!(e, "Flushing the gate's marks failed."; IO, System)));
+        loop {
+            match self.fan.read_events() {
+                Ok(v) if v.is_empty()   => break,
+                Ok(v)                   => for ev in v {
+                    let _ = respond(&self.fan, &ev, false); // no fd: nothing to answer
+                },
+                Err(Errno::EINTR)       => continue,
+                Err(Errno::EAGAIN)      => break,
+                Err(e) => return Err(err!(e, "Draining the gate at its close failed."; IO, System)),
+            }
+        }
         Ok(())
+    }
+}
+
+impl Drop for Gate {
+    fn drop(&mut self) {
+        let _ = self.close();
     }
 }
 

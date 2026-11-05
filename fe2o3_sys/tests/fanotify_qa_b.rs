@@ -6,6 +6,7 @@ use oxedyne_fe2o3_sys::fanotify::{
     parse_events,
     Change,
     Entries,
+    Access,
     Gate,
     Op,
 };
@@ -37,6 +38,13 @@ fn rec(kind: u8, ino: u32, name: &str) -> Vec<u8> {
     let n = b.len() as u16;
     b[2..4].copy_from_slice(&n.to_ne_bytes());
     b
+}
+
+/// Answers an access if it is one the gate can answer.
+fn ans(a: Access, allow: bool) {
+    if let Access::Held(h) = a {
+        let _ = h.answer(allow);
+    }
 }
 
 fn event(vers: u8, mask: u64, recs: &[Vec<u8>]) -> Vec<u8> {
@@ -266,7 +274,7 @@ fn qa_b_fd_opened_before_hold_bypasses_as_root() {
     for _ in 0..10 {
         let v = g.next(Some(Duration::from_millis(100))).expect("next");
         seen += v.len();
-        for h in v { let _ = g.answer(h, true); }
+        for h in v { let _ = ans(h, true); }
     }
     let wr = w.join().expect("join");
     g.release(&f).expect("release");
@@ -295,7 +303,7 @@ fn qa_b_path_truncate_is_held_as_root() {
         for h in v {
             seen += 1;
             if len_at_hold.is_none() { len_at_hold = std::fs::metadata(&p).ok().map(|m| m.len()); }
-            let _ = g.answer(h, false);
+            let _ = ans(h, false);
         }
     }
     let ok = w.join().expect("join");
@@ -337,8 +345,8 @@ fn qa_b_gate_overflow_fails_open_as_root() {
     for _ in 0..50 {
         let v = g.next(Some(Duration::from_millis(50))).expect("next");
         for h in v {
-            if h.fd().is_none() { nofd += 1; }
-            let _ = g.answer(h, false);
+            if matches!(h, Access::Lost) { nofd += 1; }
+            let _ = ans(h, false);
         }
         if hs.iter().all(|h| h.is_finished()) { break; }
     }
@@ -402,7 +410,7 @@ while not os.path.exists('{g}'): time.sleep(0.01)\nm[0:6]=b'HOSTIL'; m.flush()\n
     for _ in 0..20 {
         let v = g.next(Some(Duration::from_millis(100))).expect("next");
         seen += v.len();
-        for h in v { let _ = g.answer(h, true); }
+        for h in v { let _ = ans(h, true); }
         if let Ok(Some(_)) = child.try_wait() { break; }
     }
     let st = child.wait().expect("wait");
