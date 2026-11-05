@@ -31,8 +31,9 @@ supervise = ["signal"]
 fanotify = ["dep:nix", "nix/fanotify"]
 confine = ["nolink", "nix/sched", "nix/mount", "nix/socket", "nix/process"]
 # nolink: an open that follows no symbolic link in any component (openat2
-# RESOLVE_NO_SYMLINKS), for a root process acting on a path a user can shape. Over nix.
-nolink = ["dep:nix", "nix/fs"]
+# RESOLVE_NO_SYMLINKS), for a root process acting on a path a user can shape, and a folder
+# found or made by descriptor, owned by a given uid. Over nix.
+nolink = ["dep:nix", "nix/fs", "nix/user"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }
