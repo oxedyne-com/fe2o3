@@ -150,11 +150,6 @@ impl Entries {
         Ok(Self { fan })
     }
 
-    /// The group's descriptor, for a caller's own poll.
-    pub fn fd(&self) -> BorrowedFd<'_> {
-        self.fan.as_fd()
-    }
-
     /// Waits up to `wait` for events (`None` waits for ever) and returns all that are queued.
     pub fn next(&self, wait: Option<Duration>) -> Outcome<Vec<Change>> {
         if !res!(readable(self.fan.as_fd(), wait)) {
@@ -301,10 +296,6 @@ impl Gate {
         Ok(())
     }
 
-    pub fn fd(&self) -> BorrowedFd<'_> {
-        self.fan.as_fd()
-    }
-
     /// Waits up to `wait` (`None`: for ever) and returns the accesses now held.
     pub fn next(&self, wait: Option<Duration>) -> Outcome<Vec<Held>> {
         if !res!(readable(self.fan.as_fd(), wait)) {
@@ -325,6 +316,19 @@ impl Gate {
         res!(self.fan.write_response(FanotifyResponse::new(fd, r)).map_err(|e| err!(e,
             "Answering a held access failed."; IO, System)));
         Ok(())
+    }
+}
+
+/// The group's descriptor, for a caller's own poll.
+impl AsFd for Entries {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fan.as_fd()
+    }
+}
+
+impl AsFd for Gate {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fan.as_fd()
     }
 }
 
