@@ -75,7 +75,12 @@ fn qa_b_handle_length_wrap() {
     let mut r = rec(2, 1, "x");
     r[12..16].copy_from_slice(&u32::MAX.to_ne_bytes());
     let b = event(3, 0x100, &[r]);
-    let res = std::panic::catch_unwind(|| parse_events(&b, &mut Vec::new()).is_err());
+    // Refused as an unreadable event (B6: it becomes Lost and parsing goes on).
+    let res = std::panic::catch_unwind(|| {
+        let mut out = Vec::new();
+        let r = parse_events(&b, &mut out);
+        r.is_ok() && out == vec![Change::Lost]
+    });
     assert_eq!(res.ok(), Some(true));
 }
 
@@ -189,7 +194,9 @@ fn qa_b_merge_order_hardlink_as_root() {
     println!("events for a: {:?}; a exists: {}", ops, d.join("a").exists());
     let _ = std::fs::remove_dir_all(&d);
     // Safe: the last thing reported for "a" agrees with the disk (it exists).
-    assert_eq!(ops.last(), Some(&Op::Create), "the watch reports a as removed while it exists: {:?}", ops);
+    // (A merged event reports Recheck: the caller stats the name and finds it.)
+    assert!(matches!(ops.last(), Some(&Op::Create) | Some(&Op::Recheck)),
+        "the watch reports a as removed while it exists: {:?}", ops);
 }
 
 // ---- Surface 1, root: next() under a hostile flood of entries ----

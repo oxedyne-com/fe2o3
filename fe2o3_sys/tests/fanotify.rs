@@ -57,11 +57,11 @@ fn test_fanotify_parses_entry_rename_and_overflow() {
     let mut bytes = event(0x4000_0100, &[rec(2, 11, "new"), rec(1, 12, "")]);
     bytes.extend(event(0x1000_0000, &[rec(10, 11, "HEAD.lock"), rec(12, 13, "HEAD"), rec(1, 14, "")]));
     bytes.extend(event(0x4000, &[]));
-    // Made then removed, merged by the kernel into one event: both, in that order.
+    // Made and removed, merged by the kernel into one event of no known order: Recheck.
     bytes.extend(event(0x0000_0300, &[rec(2, 11, "tmp"), rec(1, 15, "")]));
     let mut out = Vec::new();
     parse_events(&bytes, &mut out).expect("parse");
-    assert_eq!(out.len(), 5);
+    assert_eq!(out.len(), 4);
     match &out[0] {
         Change::Entry { op, dir, name, to, target, dir_entry } => {
             assert_eq!((*op, dir.ino(), name.clone(), to.is_none(), *dir_entry),
@@ -83,7 +83,7 @@ fn test_fanotify_parses_entry_rename_and_overflow() {
         Change::Entry { op, target, .. } => (*op, target.as_ref().and_then(|t| t.ino())),
         c => panic!("{:?}", c),
     }).collect();
-    assert_eq!(ops, vec![(Op::Create, Some(15)), (Op::Delete, Some(15))]);
+    assert_eq!(ops, vec![(Op::Recheck, Some(15))]);
     // A length past the buffer is refused, not read past.
     let mut bad = event(0x100, &[rec(2, 1, "x")]);
     bad[0] = 200;

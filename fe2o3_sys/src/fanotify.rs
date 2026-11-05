@@ -67,6 +67,7 @@ const FAN_RENAME:           u64 = 0x1000_0000;
 const FAN_ONDIR:            u64 = 0x4000_0000;
 // fixed: fanotify_event_metadata and the info record header, kernel ABI.
 const META_LEN:             usize = 24;
+const META_VERSION:         u8 = 3;
 const INFO_FID:             u8 = 1;
 const INFO_DFID_NAME:       u8 = 2;
 const INFO_OLD_DFID_NAME:   u8 = 10;
@@ -112,6 +113,7 @@ pub enum Op {
     Create,
     Delete,
     Rename,
+    Recheck,    // made and removed in an order the kernel does not keep: stat the name
 }
 
 /// One event of an [`Entries`] group.
@@ -186,35 +188,51 @@ impl Entries {
                 Err(Errno::EINTR)   => continue,
                 Err(e) => return Err(err!(e, "Reading the filesystem watch failed."; IO, System)),
             };
-            res!(parse_events(&buf[..n], &mut out));
+            // A framing error has already pushed `Lost`; the next read starts at a whole event.
+            let _ = parse_events(&buf[..n], &mut out);
         }
         Ok(out)
     }
 }
 
-/// Parses whole fanotify events with FID info records into `out`.
+/// Parses whole fanotify events with FID info records into `out`.  An event that cannot be read
+/// is pushed as [`Change::Lost`] and parsing goes on.  A buffer whose framing cannot be trusted
+/// (a length that does not fit, a short tail, another metadata version) keeps what was parsed,
+/// pushes `Lost` and returns the error.
 pub fn parse_events(mut b: &[u8], out: &mut Vec<Change>) -> Outcome<()> {
-    while b.len() >= META_LEN {
+    while !b.is_empty() {
+        if b.len() < META_LEN {
+            out.push(Change::Lost);
+            return Err(err!("{} bytes after the last whole fanotify event are not an event.", b.len();
+                Invalid, Input));
+        }
         let len = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        let vers = b[4];
         let meta = u16::from_ne_bytes([b[6], b[7]]) as usize;
+        if vers != META_VERSION {
+            out.push(Change::Lost);
+            return Err(err!("A fanotify event's metadata version is {}, not {}.", vers, META_VERSION;
+                Invalid, Input));
+        }
         if len < META_LEN || len > b.len() || meta < META_LEN || meta > len {
+            out.push(Change::Lost);
             return Err(err!("A fanotify event's length {} (metadata {}) does not fit the {} bytes read.",
                 len, meta, b.len(); Invalid, Input));
         }
         let mask = u64::from_ne_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
-        if mask & FAN_Q_OVERFLOW != 0 {
+        if mask & FAN_Q_OVERFLOW != 0 || parse_one(mask, &b[meta..len], out).is_err() {
+            // An overflow, or an event the kernel could not fully encode (no handle record).
             out.push(Change::Lost);
-        } else {
-            res!(parse_one(mask, &b[meta..len], out));
         }
         b = &b[len..];
     }
     Ok(())
 }
 
-/// One entry event.  The kernel merges a queued event with the next of the same folder, name and
-/// entry, so `FAN_CREATE | FAN_DELETE` is one entry made and then removed (a new entry at the
-/// name has a new handle and is never merged with it), and is reported as both, in that order.
+/// One entry event, pushed only when the whole of it was read.  The kernel merges a queued event
+/// with the next of the same folder, name and entry, and a merged `FAN_CREATE | FAN_DELETE` keeps no
+/// order: `unlink a; link f a` merges into one event while `a` exists (QA, 06 Nov 2026).  It is
+/// reported as [`Op::Recheck`], and the caller looks the name up to learn what is there now.
 /// A rename is asked for only as `FAN_RENAME`, which carries both names and is never merged with
 /// a create or a delete; `FAN_MOVED_FROM` and `FAN_MOVED_TO` are not asked for, since each merges
 /// with a create or delete of the same name and would hide it.
@@ -249,13 +267,12 @@ fn parse_one(mask: u64, mut r: &[u8], out: &mut Vec<Change>) -> Outcome<()> {
         return Err(err!("A fanotify event's mask {:#x} is not one this watch asked for.", mask;
             Unexpected, Input));
     }
-    if mask & FAN_CREATE != 0 {
-        out.push(Change::Entry { op: Op::Create, dir: dir.clone(), name: name.clone(), to: None,
-            target: target.clone(), dir_entry });
-    }
-    if mask & FAN_DELETE != 0 {
-        out.push(Change::Entry { op: Op::Delete, dir, name, to: None, target, dir_entry });
-    }
+    let op = match (mask & FAN_CREATE != 0, mask & FAN_DELETE != 0) {
+        (true, true)    => Op::Recheck,
+        (true, false)   => Op::Create,
+        _               => Op::Delete,
+    };
+    out.push(Change::Entry { op, dir, name, to: None, target, dir_entry });
     Ok(())
 }
 
@@ -270,11 +287,13 @@ fn fid_of(r: &[u8]) -> Outcome<(Fid, OsString)> {
     let fsid = [i32::from_ne_bytes(w(0)), i32::from_ne_bytes(w(4))];
     let n = u32::from_ne_bytes(w(8)) as usize;
     let kind = i32::from_ne_bytes(w(12));
-    if 16 + n > r.len() {
-        return Err(err!("A fanotify file handle of {} bytes runs past its record.", n; Invalid, Input));
-    }
-    let handle = r[16..16 + n].to_vec();
-    let tail = &r[16 + n..];
+    let end = match 16usize.checked_add(n) {
+        Some(e) if e <= r.len() => e,
+        _ => return Err(err!("A fanotify file handle of {} bytes runs past its record.", n;
+            Invalid, Input)),
+    };
+    let handle = r[16..end].to_vec();
+    let tail = &r[end..];
     let name = match tail.iter().position(|c| *c == 0) {
         Some(end) => tail[..end].to_vec(),
         None => tail.to_vec(),
