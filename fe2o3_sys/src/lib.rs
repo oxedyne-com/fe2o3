@@ -35,6 +35,8 @@ pub mod fanotify;
 pub mod inotify;
 pub mod load;
 pub mod mem;
+#[cfg(target_os = "linux")]
+pub mod mounts;
 pub mod net;
 #[cfg(all(target_os = "linux", feature = "nolink"))]
 pub mod nolink;

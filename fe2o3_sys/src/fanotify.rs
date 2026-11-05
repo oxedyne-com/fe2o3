@@ -141,16 +141,33 @@ impl Entries {
     /// Marks the whole filesystem `on` lies on.  The queue's bound is the kernel's
     /// `fs.fanotify.max_queued_events` at this call.
     pub fn filesystem(on: &Path) -> Outcome<Self> {
+        let en = res!(Self::group());
+        res!(en.fan.mark(MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_FILESYSTEM, Self::mask(),
+            nix::fcntl::AT_FDCWD, Some(on)).map_err(|e| err!(e,
+            "fanotify_mark of the filesystem under {} failed.", on.display(); IO, System)));
+        Ok(en)
+    }
+
+    /// Marks the whole filesystem the open file `on` lies on, by descriptor, so no path is
+    /// resolved again (open it with [`crate::nolink`] where a user can shape the path).
+    pub fn filesystem_of(on: BorrowedFd) -> Outcome<Self> {
+        let en = res!(Self::group());
+        res!(en.fan.mark(MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_FILESYSTEM, Self::mask(),
+            on, None::<&Path>).map_err(|e| err!(e,
+            "fanotify_mark of the filesystem of an open file failed."; IO, System)));
+        Ok(en)
+    }
+
+    fn group() -> Outcome<Self> {
         let flags = InitFlags::FAN_CLASS_NOTIF | InitFlags::FAN_CLOEXEC | InitFlags::FAN_NONBLOCK
             | InitFlags::from_bits_retain(FAN_REPORT_DFID_NAME_TARGET);
         let fan = res!(Fanotify::init(flags, EventFFlags::O_RDONLY).map_err(|e| err!(e,
             "fanotify_init for a filesystem watch failed (it needs CAP_SYS_ADMIN)."; IO, System)));
-        let mask = MaskFlags::from_bits_retain(
-            FAN_CREATE | FAN_DELETE | FAN_RENAME | FAN_ONDIR);
-        res!(fan.mark(MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_FILESYSTEM, mask,
-            nix::fcntl::AT_FDCWD, Some(on)).map_err(|e| err!(e,
-            "fanotify_mark of the filesystem under {} failed.", on.display(); IO, System)));
         Ok(Self { fan })
+    }
+
+    fn mask() -> MaskFlags {
+        MaskFlags::from_bits_retain(FAN_CREATE | FAN_DELETE | FAN_RENAME | FAN_ONDIR)
     }
 
     /// Waits up to `wait` for events (`None` waits for ever) and returns all that are queued.
