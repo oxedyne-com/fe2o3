@@ -149,7 +149,8 @@ impl Entries {
     }
 
     /// Marks the whole filesystem the open file `on` lies on, by descriptor, so no path is
-    /// resolved again (open it with [`crate::nolink`] where a user can shape the path).
+    /// resolved again (open it with [`crate::nolink`] where a user can shape the path).  The
+    /// kernel refuses an `O_PATH` descriptor here (EBADF): open a folder for reading.
     pub fn filesystem_of(on: BorrowedFd) -> Outcome<Self> {
         let en = res!(Self::group());
         res!(en.fan.mark(MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_FILESYSTEM, Self::mask(),

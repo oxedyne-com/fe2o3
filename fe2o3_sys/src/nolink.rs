@@ -19,6 +19,7 @@ use std::{
 };
 
 use nix::{
+    errno::Errno,
     fcntl::{
         openat2,
         OFlag,
@@ -34,12 +35,34 @@ use nix::{
 pub enum Want {
     Dir,    // A folder, read-only (`O_DIRECTORY`).
     File,   // Anything but a folder is refused by the caller's own check; read-only.
-    Path,   // A handle only (`O_PATH`), to mount on or to stat, of either kind.
+    Path,   // A handle only (`O_PATH`), to mount on or to stat; fdget-based calls refuse it.
+}
+
+/// What [`try_open`] found.
+#[derive(Debug)]
+pub enum Got {
+    Fd(OwnedFd),
+    Absent, // no entry at some component (ENOENT)
+    Linked, // a symbolic link at some component (ELOOP)
 }
 
 /// Opens `path`, relative to `at` where given, through no symbolic link in any component.
 /// Every open is close-on-exec and never blocks on a FIFO.
 pub fn open(at: Option<BorrowedFd>, path: &Path, want: Want) -> Outcome<OwnedFd> {
+    raw(at, path, want).map_err(|e| err!(e, "Opening {:?} through no symbolic link ({:?}).", path, want; IO, File))
+}
+
+/// As [`open`], telling an absent path and a linked one from any other failure.
+pub fn try_open(at: Option<BorrowedFd>, path: &Path, want: Want) -> Outcome<Got> {
+    match raw(at, path, want) {
+        Ok(fd)              => Ok(Got::Fd(fd)),
+        Err(Errno::ENOENT)  => Ok(Got::Absent),
+        Err(Errno::ELOOP)   => Ok(Got::Linked),
+        Err(e) => Err(err!(e, "Opening {:?} through no symbolic link ({:?}).", path, want; IO, File)),
+    }
+}
+
+fn raw(at: Option<BorrowedFd>, path: &Path, want: Want) -> nix::Result<OwnedFd> {
     // No O_NOFOLLOW: with O_PATH it would open a trailing link itself, where the resolve
     // flags alone refuse it.
     let fl = OFlag::O_CLOEXEC | match want {
@@ -51,9 +74,8 @@ pub fn open(at: Option<BorrowedFd>, path: &Path, want: Want) -> Outcome<OwnedFd>
         .flags(fl)
         .mode(Mode::empty())
         .resolve(ResolveFlag::RESOLVE_NO_SYMLINKS | ResolveFlag::RESOLVE_NO_MAGICLINKS);
-    let r = match at {
+    match at {
         Some(d) => openat2(d, path, how),
         None    => openat2(AT_FDCWD, path, how),
-    };
-    r.map_err(|e| err!(e, "Opening {:?} through no symbolic link ({:?}).", path, want; IO, File))
+    }
 }

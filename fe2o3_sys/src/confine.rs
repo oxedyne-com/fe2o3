@@ -17,9 +17,22 @@
 //! 06 Nov 2026 (KIMB-USERMGR): written for Kimberlite's parent, whose network namespace gets one
 //! veth pair to the host and whose mount namespace hides the owner's session.
 
+use crate::nolink::{
+    self,
+    Got,
+    Want,
+};
 use oxedyne_fe2o3_core::prelude::*;
 
 use nix::errno::Errno;
+use nix::sys::stat::{
+    fstat,
+    SFlag,
+};
+use nix::sys::statvfs::{
+    fstatvfs,
+    FsFlags,
+};
 use nix::mount::{
     mount,
     MsFlags,
@@ -121,14 +134,147 @@ pub enum Step {
     Link        { target: PathBuf, at: PathBuf },
     /// A file written with `text`, mode 0644.
     File        { at: PathBuf, text: String },
+    /// Hides what `at` holds where `at` may lie in a tree a less trusted user shapes: a folder
+    /// under an empty read-only tmpfs, a regular file under a read-only bind of `blank` (an
+    /// empty root file the plan made).  `at` is opened through no symbolic link and never made,
+    /// and the mount lands on that open file, so a link of his cannot move it elsewhere.  An
+    /// absent or linked `at` is skipped and named by [`apply_noting`].
+    Hide        { at: PathBuf, blank: PathBuf },
+    /// Makes `at`, and every mount under it, read-only in place: a recursive bind onto itself,
+    /// then a read-only remount, by open file as `Hide` is.
+    ReadOnly    { at: PathBuf },
 }
 
-/// Applies a mount plan step by step.  The first refusal ends it, naming the step.
+/// Why a [`Step::Hide`] or [`Step::ReadOnly`] was skipped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Skip {
+    Absent, // nothing at the path (yet)
+    Linked, // a symbolic link at some component: not followed, so not covered
+}
+
+/// Applies a mount plan step by step.  The first refusal ends it, naming the step.  A skipped
+/// `Hide` or `ReadOnly` is not a refusal; see [`apply_noting`] for which were.
 pub fn apply(steps: &[Step]) -> Outcome<()> {
+    apply_noting(steps).map(|_| ())
+}
+
+/// As [`apply`], and names each `Hide` or `ReadOnly` skipped, so its caller can apply it when
+/// the path appears.
+pub fn apply_noting(steps: &[Step]) -> Outcome<Vec<(PathBuf, Skip)>> {
+    let mut skipped = Vec::new();
     for s in steps {
-        res!(apply_one(s));
+        match s {
+            Step::Hide { at, .. } | Step::ReadOnly { at } => {
+                if let Some(k) = res!(apply_held(s)) {
+                    skipped.push((at.clone(), k));
+                }
+            },
+            _ => res!(apply_one(s)),
+        }
+    }
+    Ok(skipped)
+}
+
+/// The descriptor's path in `/proc/self/fd`, where `mount` reaches the open file itself.
+fn fd_path(fd: &OwnedFd) -> String {
+    fmt!("/proc/self/fd/{}", fd.as_raw_fd())
+}
+
+/// Opens `at` through no link for a step, or names why it is skipped.
+fn open_held(at: &Path, s: &Step) -> Outcome<std::result::Result<OwnedFd, Skip>> {
+    match res!(nolink::try_open(None, at, Want::Path).map_err(|e| err!(e,
+        "The mount step {:?} could not open {}.", s, at.display(); IO, File)))
+    {
+        Got::Fd(fd) => Ok(Ok(fd)),
+        Got::Absent => Ok(Err(Skip::Absent)),
+        Got::Linked => Ok(Err(Skip::Linked)),
+    }
+}
+
+fn ident(fd: &OwnedFd, s: &Step) -> Outcome<(u64, u64, SFlag)> {
+    let st = res!(fstat(fd).map_err(|e| err!(e, "The mount step {:?} could not stat.", s; IO, File)));
+    Ok((st.st_dev as u64, st.st_ino as u64, SFlag::from_bits_truncate(st.st_mode) & SFlag::S_IFMT))
+}
+
+/// Remounts the mount now at `at` read-only, once `at` opens (through no link) to the inode
+/// `want`, the top of the mount just made; then checks the kernel says it is read-only.
+fn seal(at: &Path, want: (u64, u64), s: &Step) -> Outcome<()> {
+    let fd = match res!(open_held(at, s)) {
+        Ok(fd) => fd,
+        Err(k) => return Err(err!("The mount step {:?} lost {} ({:?}) while mounting.", s, at.display(), k;
+            Security, Mismatch)),
+    };
+    let (d, i, _) = res!(ident(&fd, s));
+    if (d, i) != want {
+        return Err(err!("The mount step {:?} found {} changed while mounting.", s, at.display(); Security, Mismatch));
+    }
+    let f = MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY | MsFlags::MS_NOSUID | MsFlags::MS_NODEV;
+    res!(mnt(None, Path::new(&fd_path(&fd)), None, f, None, s));
+    let fd = match res!(open_held(at, s)) {
+        Ok(fd) => fd,
+        Err(k) => return Err(err!("The mount step {:?} lost {} ({:?}) after sealing.", s, at.display(), k;
+            Security, Mismatch)),
+    };
+    let v = res!(fstatvfs(&fd).map_err(|e| err!(e, "The mount step {:?} could not statvfs.", s; IO, File)));
+    if !v.flags().contains(FsFlags::ST_RDONLY) {
+        return Err(err!("The mount step {:?} left {} writable.", s, at.display(); Security, Unexpected));
     }
     Ok(())
+}
+
+fn apply_held(s: &Step) -> Outcome<Option<Skip>> {
+    match s {
+        Step::Hide { at, blank } => {
+            let fd = match res!(open_held(at, s)) {
+                Ok(fd) => fd,
+                Err(k) => return Ok(Some(k)),
+            };
+            let (_, _, kind) = res!(ident(&fd, s));
+            if kind == SFlag::S_IFDIR {
+                // fixed: an empty folder of root's, read-only from its making.
+                res!(mnt(Some("tmpfs"), Path::new(&fd_path(&fd)), Some("tmpfs"),
+                    MsFlags::MS_RDONLY | MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+                    Some("mode=555,size=4k"), s));
+                let after = match res!(open_held(at, s)) {
+                    Ok(fd) => fd,
+                    Err(k) => return Err(err!("The mount step {:?} lost {} ({:?}).", s, at.display(), k;
+                        Security, Mismatch)),
+                };
+                let v = res!(fstatvfs(&after).map_err(|e| err!(e,
+                    "The mount step {:?} could not statvfs.", s; IO, File)));
+                if !v.flags().contains(FsFlags::ST_RDONLY) {
+                    return Err(err!("The mount step {:?} left {} writable.", s, at.display(); Security, Unexpected));
+                }
+                Ok(None)
+            } else if kind == SFlag::S_IFREG {
+                let b = res!(nolink::open(None, blank, Want::Path).map_err(|e| err!(e,
+                    "The mount step {:?} found no blank {}.", s, blank.display(); IO, File)));
+                let (bd, bi, bk) = res!(ident(&b, s));
+                if bk != SFlag::S_IFREG {
+                    return Err(err!("The mount step {:?}: blank {} is no regular file.", s, blank.display();
+                        Invalid, Input));
+                }
+                res!(mnt(Some(&fd_path(&b)), Path::new(&fd_path(&fd)), None, MsFlags::MS_BIND, None, s));
+                res!(seal(at, (bd, bi), s));
+                Ok(None)
+            } else {
+                Err(err!("The mount step {:?} found {} neither a folder nor a regular file.", s, at.display();
+                    Invalid, Input))
+            }
+        },
+        Step::ReadOnly { at } => {
+            let fd = match res!(open_held(at, s)) {
+                Ok(fd) => fd,
+                Err(k) => return Ok(Some(k)),
+            };
+            let (d, i, _) = res!(ident(&fd, s));
+            let p = fd_path(&fd);
+            res!(mnt(Some(&p), Path::new(&p), None, MsFlags::MS_BIND | MsFlags::MS_REC, None, s));
+            res!(seal(at, (d, i), s));
+            Ok(None)
+        },
+        _ => apply_one(s).map(|_| None),
+    }
 }
 
 fn mnt(src: Option<&str>, at: &Path, fs: Option<&str>, flags: MsFlags, data: Option<&str>, s: &Step)
@@ -188,6 +334,7 @@ fn apply_one(s: &Step) -> Outcome<()> {
         Step::Dir { at, mode } => make_dir(at, *mode, s),
         Step::Link { target, at } => symlink(target, at).map_err(|e| err!(e,
             "The mount step {:?} could not link.", s; IO, File)),
+        Step::Hide { .. } | Step::ReadOnly { .. } => apply_held(s).map(|_| ()),
         Step::File { at, text } => {
             res!(fs::write(at, text).map_err(|e| err!(e,
                 "The mount step {:?} could not write.", s; IO, File)));
