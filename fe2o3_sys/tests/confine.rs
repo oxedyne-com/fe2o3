@@ -87,7 +87,7 @@ fn test_confine_veth_pair_made_as_root() {
         Err(e)  => panic!("the host socket: {}", e),
     };
     let _ = host.del_link("fe2o3t0");
-    let made = std::thread::spawn(move || -> Result<(), String> {
+    let made = std::thread::spawn(move || -> Result<Rtnl, String> {
         unshare(&[Ns::Net]).map_err(|e| format!("{}", e))?;
         let ns = std::fs::File::open("/proc/thread-self/ns/net").map_err(|e| format!("{}", e))?;
         let mut inner = Rtnl::open().map_err(|e| format!("{}", e))?;
