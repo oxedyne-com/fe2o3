@@ -24,6 +24,12 @@ use nix::mount::{
     mount,
     MsFlags,
 };
+use nix::poll::{
+    poll,
+    PollFd,
+    PollFlags,
+    PollTimeout,
+};
 use nix::sched::CloneFlags;
 use nix::sys::socket::{
     bind,
@@ -219,21 +225,31 @@ pub fn reap_until(child: u32) -> Outcome<i32> {
     }
 }
 
-/// Starts a thread that ends the whole process with `code` once every writer of `fd` has gone.
-/// A pid 1 holding the read end of a pipe whose write end its starter keeps ends with its
-/// starter, which a parent-death signal alone does not promise (it follows the thread).
-pub fn exit_on_hangup(fd: OwnedFd, code: i32) {
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 64];
+/// Starts a thread that ends the whole process with `code` once the far side of the pipe `fd`
+/// has gone: every writer, for a read end, or every reader, for a write end.  A pid 1 holding one
+/// end of a pipe whose other end its starter keeps ends with its starter, which a parent-death
+/// signal alone does not promise (it follows the thread that started the child, not the process).
+pub fn exit_on_hangup(fd: OwnedFd, code: i32) -> Outcome<()> {
+    let spawned = std::thread::Builder::new().name("hangup".to_string()).spawn(move || {
         loop {
-            match nix::unistd::read(fd.as_fd(), &mut buf) {
-                Ok(0)               => std::process::exit(code),
-                Ok(_)               => continue,
+            // No events asked for: the kernel reports POLLHUP and POLLERR whatever is asked.
+            let mut fds = [PollFd::new(fd.as_fd(), PollFlags::empty())];
+            match poll(&mut fds, PollTimeout::NONE) {
+                Ok(_)               => {
+                    let gone = PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL;
+                    if fds[0].revents().is_some_and(|r| r.intersects(gone)) {
+                        std::process::exit(code);
+                    }
+                },
                 Err(Errno::EINTR)   => continue,
                 Err(_)              => std::process::exit(code),
             }
         }
     });
+    match spawned {
+        Ok(_)   => Ok(()),
+        Err(e)  => Err(err!(e, "The hang-up watch could not start."; System, Init)),
+    }
 }
 
 // ┌───────────────────────────────────────────────────────────────┐
