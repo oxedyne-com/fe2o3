@@ -217,3 +217,58 @@ fn test_fanotify_gate_holds_first_access_as_root() {
     assert!(g.next(Some(Duration::from_millis(200))).expect("next").is_empty());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Whether a write of `path` is held by `g` within `wait`.  Every access held is answered allowed
+/// (an open and then the write's pre-access, each its own event) until the writer has ended.
+fn write_held(g: &Gate, path: &std::path::Path, wait: Duration) -> bool {
+    let p = path.to_path_buf();
+    let writer = std::thread::spawn(move || std::fs::write(&p, b"run wrote"));
+    let mut held = 0;
+    let end = std::time::Instant::now() + wait;
+    while !writer.is_finished() {
+        for a in g.next(Some(Duration::from_millis(100))).expect("next") {
+            if let Access::Held(h) = a {
+                held += 1;
+                h.answer(true).expect("allow");
+            }
+        }
+        assert!(std::time::Instant::now() < end + Duration::from_secs(5), "the writer never ended");
+    }
+    writer.join().expect("join").expect("the write");
+    held > 0
+}
+
+/// B-F3 (b): a mount mark gates a file the run makes in a NEW subfolder after the mark, on its
+/// first write; a folder mark (`guard`, FAN_EVENT_ON_CHILD) on the same folder does not, which is
+/// why the run's folder is bound onto itself and its mount marked.
+#[test]
+#[ignore]
+fn test_fanotify_gate_guard_mount_holds_a_new_subfolders_file_as_root() {
+    let d = scratch("mnt");
+    let st = std::process::Command::new("mount").args(["--bind"]).arg(&d).arg(&d).status().expect("mount");
+    assert!(st.success(), "bind {} onto itself", d.display());
+    let root = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).custom_flags(nix::fcntl::OFlag::O_PATH.bits()).open(&d).expect("open O_PATH")
+    };
+    // The folder mark: a file in a subfolder made after it is not held.
+    let g = Gate::new().expect("gate");
+    g.guard(&root).expect("guard");
+    std::fs::create_dir_all(d.join("a/b")).expect("mkdir a/b");
+    let by_folder = write_held(&g, &d.join("a/b/f.txt"), Duration::from_millis(500));
+    g.unguard(&root).expect("unguard");
+    // The mount mark: one in a subfolder made after it is held on its first write.
+    g.guard_mount(&root).expect("guard_mount");
+    std::fs::create_dir_all(d.join("c/d")).expect("mkdir c/d");
+    let by_mount = write_held(&g, &d.join("c/d/f.txt"), Duration::from_secs(5));
+    g.unguard_mount(&root).expect("unguard_mount");
+    let after = write_held(&g, &d.join("c/d/f.txt"), Duration::from_millis(300));
+    println!("BF3b mount: held by folder mark {} by mount mark {} after unguard {}", by_folder, by_mount, after);
+    drop(g);
+    drop(root);
+    let _ = std::process::Command::new("umount").arg(&d).status();
+    let _ = std::fs::remove_dir_all(&d);
+    assert!(!by_folder, "a folder mark held a new subfolder's file: the mount mark is not what proves it");
+    assert!(by_mount, "the mount mark did not hold a new subfolder's file on its first write");
+    assert!(!after, "held after unguard_mount");
+}

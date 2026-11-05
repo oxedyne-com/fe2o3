@@ -23,7 +23,9 @@
 //! or a mapping made, before [`Gate::hold`] of its inode writes it with no event (QA, 06 Nov
 //! 2026). [`Gate::guard`] marks a folder for its files (`FAN_EVENT_ON_CHILD`): a file of it opened
 //! after the mark is gated (proven in the VM, 06 Nov 2026), so a folder guarded before anything
-//! can open its files leaves no such descriptor. The accessing process waits until
+//! can open its files leaves no such descriptor; it does not reach a file in a subfolder.
+//! [`Gate::guard_mount`] marks a whole mount (`FAN_MARK_MOUNT`): every file opened through it, at
+//! any depth, is gated. The accessing process waits until
 //! [`Held::answer`] allows it.
 //!
 //! A gate fails closed. Its queue is unlimited (`FAN_UNLIMITED_QUEUE`): a bounded one drops a
@@ -453,15 +455,30 @@ impl Gate {
         self.mark(MarkFlags::FAN_MARK_REMOVE, MaskFlags::FAN_EVENT_ON_CHILD.bits(), dir)
     }
 
+    /// Holds every access of a file opened through the mount `root` is on (its descriptor, an
+    /// `O_PATH` one will do), at any depth and made at any time, from the mark on: the kernel's
+    /// open-time check counts mount marks, where [`Gate::guard`]'s folder mark covers only the
+    /// folder's own entries.  For a run's folder bound onto itself in the run's own mount
+    /// namespace (KIMB-USERMGR B-F3), so nothing of his outside the run is touched.  A mount mark
+    /// needs `CAP_SYS_ADMIN` in the initial user namespace.
+    pub fn guard_mount(&self, root: impl AsFd) -> Outcome<()> {
+        self.mark(MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_MOUNT, 0, root)
+    }
+
+    /// Stops guarding the mount `root` is on.
+    pub fn unguard_mount(&self, root: impl AsFd) -> Outcome<()> {
+        self.mark(MarkFlags::FAN_MARK_REMOVE | MarkFlags::FAN_MARK_MOUNT, 0, root)
+    }
+
     /// Through the descriptor's magic link, so an `O_PATH` one will do (fanotify_mark refuses
     /// one as its own target): the caller never has to open a file it means to hold, and an open
     /// would raise this very gate's event and wait on its own answer (QA watch A-F1).
     fn mark(&self, how: MarkFlags, more: u64, file: impl AsFd) -> Outcome<()> {
         let mask = MaskFlags::from_bits_retain(FAN_PRE_ACCESS | FAN_OPEN_PERM | more);
         let at = fmt!("/proc/self/fd/{}", file.as_fd().as_raw_fd());
-        res!(self.fan.mark(how | MarkFlags::FAN_MARK_INODE, mask, nix::fcntl::AT_FDCWD, Some(Path::new(&at)))
+        res!(self.fan.mark(how, mask, nix::fcntl::AT_FDCWD, Some(Path::new(&at)))
             .map_err(|e| err!(e,
-            "fanotify_mark ({:?}) of a held inode failed (pre-content needs Linux 6.14 and a \
+            "fanotify_mark ({:?}) of a held inode or mount failed (pre-content needs Linux 6.14 and a \
             filesystem that allows it).", how; IO, System)));
         Ok(())
     }
