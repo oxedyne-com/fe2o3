@@ -119,3 +119,60 @@ fn test_confine_veth_pair_made_as_root() {
         "the global ip_forward is untouched");
     assert!(matches!(gone, Ok(true)), "the host end was there to delete: {:?}", gone.map_err(|e| format!("{}", e)));
 }
+
+/// The floor steps (KIMB-USERMGR UM3b), in a mount namespace of a thread of its own: a folder
+/// and a file hidden, a folder made read-only, and a link anywhere in a path left alone, so a
+/// `~/.bashrc -> /etc/hostname` never puts root's mount on /etc/hostname.  Run with TMPDIR on
+/// a real filesystem (his home in the VM).
+#[test]
+#[ignore]
+fn test_confine_floor_steps_by_open_file_as_root() {
+    use oxedyne_fe2o3_sys::confine::{apply_noting, unshare, Ns, Skip, Step};
+    use std::{fs, os::unix::fs::symlink, path::PathBuf};
+    let d = std::env::temp_dir().join(format!("fe2o3_floor_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(d.join("cfg")).expect("cfg");
+    fs::write(d.join("cfg/unit"), b"u").expect("unit");
+    fs::write(d.join("bashrc"), b"b").expect("bashrc");
+    fs::create_dir_all(d.join("ro/sub")).expect("ro");
+    fs::write(d.join("ro/sub/f"), b"r").expect("ro file");
+    fs::write(d.join("blank"), b"").expect("blank");
+    symlink("/etc/hostname", d.join("link")).expect("link");
+    symlink(&d, d.join("via")).expect("via");
+    let mounts = || fs::read_to_string("/proc/thread-self/mountinfo").unwrap_or_default();
+    let on_hostname = |m: &str| m.lines().filter(|l| l.split(' ').nth(4) == Some("/etc/hostname")).count();
+    let host_before = on_hostname(&mounts());
+    let dd = d.clone();
+    let r = std::thread::spawn(move || -> Result<(), String> {
+        let d = dd;
+        unshare(&[Ns::Mount]).map_err(|e| format!("{}", e))?;
+        let blank = d.join("blank");
+        let h = |p: &str| Step::Hide { at: d.join(p), blank: blank.clone() };
+        let steps = vec![
+            Step::Slave { at: PathBuf::from("/") },
+            h("cfg"), h("bashrc"), Step::ReadOnly { at: d.join("ro") },
+            h("link"), h("absent"), h("via/bashrc"), Step::ReadOnly { at: d.join("via/ro") },
+        ];
+        let skipped = apply_noting(&steps).map_err(|e| format!("{}", e))?;
+        let want = vec![(d.join("link"), Skip::Linked), (d.join("absent"), Skip::Absent),
+            (d.join("via/bashrc"), Skip::Linked), (d.join("via/ro"), Skip::Linked)];
+        if skipped != want { return Err(format!("skipped {:?}", skipped)); }
+        if fs::read_dir(d.join("cfg")).map(|r| r.count()).unwrap_or(9) != 0 { return Err("cfg not hidden".into()); }
+        if fs::write(d.join("cfg/new"), b"x").is_ok() { return Err("cfg writable".into()); }
+        if fs::read(d.join("bashrc")).map_err(|e| format!("{}", e))? != b"" { return Err("bashrc not hidden".into()); }
+        if fs::write(d.join("bashrc"), b"x").is_ok() { return Err("bashrc writable".into()); }
+        if fs::read(d.join("ro/sub/f")).map_err(|e| format!("{}", e))? != b"r" { return Err("ro unreadable".into()); }
+        if fs::write(d.join("ro/sub/f"), b"x").is_ok() { return Err("ro writable".into()); }
+        if fs::create_dir(d.join("ro/new")).is_ok() { return Err("ro takes a folder".into()); }
+        if on_hostname(&mounts()) != host_before { return Err("a mount landed on /etc/hostname".into()); }
+        Ok(())
+    }).join();
+    let host_ok = fs::read(d.join("bashrc")).ok() == Some(b"b".to_vec()) && fs::write(d.join("cfg/host"), b"h").is_ok();
+    let _ = fs::remove_dir_all(&d);
+    match r {
+        Ok(Ok(()))  => (),
+        Ok(Err(e))  => panic!("{}", e),
+        Err(_)      => panic!("the namespace thread panicked"),
+    }
+    assert!(host_ok, "the host's view is untouched");
+}

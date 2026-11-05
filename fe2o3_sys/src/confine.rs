@@ -140,8 +140,8 @@ pub enum Step {
     /// and the mount lands on that open file, so a link of his cannot move it elsewhere.  An
     /// absent or linked `at` is skipped and named by [`apply_noting`].
     Hide        { at: PathBuf, blank: PathBuf },
-    /// Makes `at`, and every mount under it, read-only in place: a recursive bind onto itself,
-    /// then a read-only remount, by open file as `Hide` is.
+    /// Makes `at` read-only in place: a recursive bind onto itself, then a read-only remount
+    /// of its top, by open file as `Hide` is.  A mount already under `at` keeps its own flags.
     ReadOnly    { at: PathBuf },
 }
 
