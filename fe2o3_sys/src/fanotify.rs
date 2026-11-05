@@ -8,11 +8,15 @@
 //! the handle where the filesystem's handle format is known. A queue that overflowed comes
 //! back as [`Change::Lost`], which means that anything may have changed.
 //!
-//! [`Gate`] is a pre-content group (`FAN_CLASS_PRE_CONTENT`, `FAN_PRE_ACCESS`, Linux 6.14+) on
-//! single inodes. The kernel raises one pre-access event for a read, a write, an `mmap` or a
-//! truncate alike, and the event's range does not say which, so a holder that must see a file
-//! before any change copies it on the first access of any kind. The accessing process waits
-//! until [`Gate::answer`] allows it.
+//! [`Gate`] is a pre-content group (`FAN_CLASS_PRE_CONTENT`, Linux 6.14+) on single inodes,
+//! marked for `FAN_OPEN_PERM` and `FAN_PRE_ACCESS`. The kernel raises one pre-access event for a
+//! read, a write, an `mmap` or a truncate alike, and the event's range does not say which, so a
+//! holder that must see a file before any change copies it on the first open or access of any
+//! kind. The open event is needed because `open(O_TRUNC)` truncates without a pre-access event
+//! (the VM round of 06 Nov 2026 saw a held file emptied by `printf x > f` before its write was
+//! held). A descriptor opened before the filesystem had any pre-content mark is never asked
+//! about its accesses: the kernel decides that at open. The accessing process waits until
+//! [`Gate::answer`] allows it.
 //!
 //! Both need `CAP_SYS_ADMIN`. The system calls come from `nix`, which owns the `unsafe` this
 //! crate forbids; the info records nix does not parse are read here from the event bytes.
@@ -58,8 +62,7 @@ const FAN_REPORT_DFID_NAME_TARGET: u32 = 0x0000_1e00; // DIR_FID | NAME | FID | 
 const FAN_Q_OVERFLOW:       u64 = 0x0000_4000;
 const FAN_CREATE:           u64 = 0x0000_0100;
 const FAN_DELETE:           u64 = 0x0000_0200;
-const FAN_MOVED_FROM:       u64 = 0x0000_0040;
-const FAN_MOVED_TO:         u64 = 0x0000_0080;
+const FAN_OPEN_PERM:        u64 = 0x0001_0000;
 const FAN_RENAME:           u64 = 0x1000_0000;
 const FAN_ONDIR:            u64 = 0x4000_0000;
 // fixed: fanotify_event_metadata and the info record header, kernel ABI.
@@ -143,7 +146,7 @@ impl Entries {
         let fan = res!(Fanotify::init(flags, EventFFlags::O_RDONLY).map_err(|e| err!(e,
             "fanotify_init for a filesystem watch failed (it needs CAP_SYS_ADMIN)."; IO, System)));
         let mask = MaskFlags::from_bits_retain(
-            FAN_CREATE | FAN_DELETE | FAN_RENAME | FAN_MOVED_FROM | FAN_MOVED_TO | FAN_ONDIR);
+            FAN_CREATE | FAN_DELETE | FAN_RENAME | FAN_ONDIR);
         res!(fan.mark(MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_FILESYSTEM, mask,
             nix::fcntl::AT_FDCWD, Some(on)).map_err(|e| err!(e,
             "fanotify_mark of the filesystem under {} failed.", on.display(); IO, System)));
@@ -184,14 +187,20 @@ pub fn parse_events(mut b: &[u8], out: &mut Vec<Change>) -> Outcome<()> {
         if mask & FAN_Q_OVERFLOW != 0 {
             out.push(Change::Lost);
         } else {
-            out.push(res!(parse_one(mask, &b[meta..len])));
+            res!(parse_one(mask, &b[meta..len], out));
         }
         b = &b[len..];
     }
     Ok(())
 }
 
-fn parse_one(mask: u64, mut r: &[u8]) -> Outcome<Change> {
+/// One entry event.  The kernel merges a queued event with the next of the same folder, name and
+/// entry, so `FAN_CREATE | FAN_DELETE` is one entry made and then removed (a new entry at the
+/// name has a new handle and is never merged with it), and is reported as both, in that order.
+/// A rename is asked for only as `FAN_RENAME`, which carries both names and is never merged with
+/// a create or a delete; `FAN_MOVED_FROM` and `FAN_MOVED_TO` are not asked for, since each merges
+/// with a create or delete of the same name and would hide it.
+fn parse_one(mask: u64, mut r: &[u8], out: &mut Vec<Change>) -> Outcome<()> {
     let mut from: Option<(Fid, OsString)> = None;
     let mut to: Option<(Fid, OsString)> = None;
     let mut target = None;
@@ -213,14 +222,23 @@ fn parse_one(mask: u64, mut r: &[u8]) -> Outcome<Change> {
     }
     let (dir, name) = res!(from.ok_or_else(|| err!(
         "A fanotify entry event (mask {:#x}) carries no directory and name.", mask; Missing, Input)));
-    let op = if mask & (FAN_RENAME | FAN_MOVED_FROM | FAN_MOVED_TO) != 0 { Op::Rename }
-        else if mask & FAN_CREATE != 0 { Op::Create }
-        else if mask & FAN_DELETE != 0 { Op::Delete }
-        else {
-            return Err(err!("A fanotify event's mask {:#x} is not one this watch asked for.", mask;
-                Unexpected, Input));
-        };
-    Ok(Change::Entry { op, dir, name, to, target, dir_entry: mask & FAN_ONDIR != 0 })
+    let dir_entry = mask & FAN_ONDIR != 0;
+    if mask & FAN_RENAME != 0 {
+        out.push(Change::Entry { op: Op::Rename, dir, name, to, target, dir_entry });
+        return Ok(());
+    }
+    if mask & (FAN_CREATE | FAN_DELETE) == 0 {
+        return Err(err!("A fanotify event's mask {:#x} is not one this watch asked for.", mask;
+            Unexpected, Input));
+    }
+    if mask & FAN_CREATE != 0 {
+        out.push(Change::Entry { op: Op::Create, dir: dir.clone(), name: name.clone(), to: None,
+            target: target.clone(), dir_entry });
+    }
+    if mask & FAN_DELETE != 0 {
+        out.push(Change::Entry { op: Op::Delete, dir, name, to: None, target, dir_entry });
+    }
+    Ok(())
 }
 
 /// One `fanotify_event_info_fid` body after its header: fsid, handle, then a NUL-ended name
@@ -289,8 +307,8 @@ impl Gate {
     }
 
     fn mark(&self, how: MarkFlags, file: impl AsFd) -> Outcome<()> {
-        res!(self.fan.mark(how | MarkFlags::FAN_MARK_INODE, MaskFlags::from_bits_retain(FAN_PRE_ACCESS),
-            file, None::<&Path>).map_err(|e| err!(e,
+        let mask = MaskFlags::from_bits_retain(FAN_PRE_ACCESS | FAN_OPEN_PERM);
+        res!(self.fan.mark(how | MarkFlags::FAN_MARK_INODE, mask, file, None::<&Path>).map_err(|e| err!(e,
             "fanotify_mark ({:?}) of a held file's inode failed (pre-content needs Linux 6.14 and a \
             filesystem that allows it).", how; IO, System)));
         Ok(())
