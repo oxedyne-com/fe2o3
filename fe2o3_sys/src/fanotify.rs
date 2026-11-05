@@ -432,8 +432,8 @@ impl Gate {
         Ok(Self { fan: Arc::new(fan), closed: false })
     }
 
-    /// Holds the next access of the open file `file` (its inode, whatever names it).  A
-    /// descriptor already open on it is not asked about: see the module note.
+    /// Holds the next access of the open file `file` (its inode, whatever names it; an `O_PATH`
+    /// descriptor will do).  A descriptor already open on it is not asked about: see the module note.
     pub fn hold(&self, file: impl AsFd) -> Outcome<()> {
         self.mark(MarkFlags::FAN_MARK_ADD, 0, file)
     }
@@ -453,9 +453,14 @@ impl Gate {
         self.mark(MarkFlags::FAN_MARK_REMOVE, MaskFlags::FAN_EVENT_ON_CHILD.bits(), dir)
     }
 
+    /// Through the descriptor's magic link, so an `O_PATH` one will do (fanotify_mark refuses
+    /// one as its own target): the caller never has to open a file it means to hold, and an open
+    /// would raise this very gate's event and wait on its own answer (QA watch A-F1).
     fn mark(&self, how: MarkFlags, more: u64, file: impl AsFd) -> Outcome<()> {
         let mask = MaskFlags::from_bits_retain(FAN_PRE_ACCESS | FAN_OPEN_PERM | more);
-        res!(self.fan.mark(how | MarkFlags::FAN_MARK_INODE, mask, file, None::<&Path>).map_err(|e| err!(e,
+        let at = fmt!("/proc/self/fd/{}", file.as_fd().as_raw_fd());
+        res!(self.fan.mark(how | MarkFlags::FAN_MARK_INODE, mask, nix::fcntl::AT_FDCWD, Some(Path::new(&at)))
+            .map_err(|e| err!(e,
             "fanotify_mark ({:?}) of a held inode failed (pre-content needs Linux 6.14 and a \
             filesystem that allows it).", how; IO, System)));
         Ok(())

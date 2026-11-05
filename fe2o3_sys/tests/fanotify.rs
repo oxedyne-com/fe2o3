@@ -187,7 +187,11 @@ fn test_fanotify_gate_holds_first_access_as_root() {
     let p = d.join("held.txt");
     std::fs::write(&p, b"before").expect("write");
     let g = Gate::new().expect("gate");
-    let f = std::fs::File::open(&p).expect("open");
+    // An O_PATH descriptor: the holder never opens the file it holds (QA watch A-F1).
+    let f = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).custom_flags(nix::fcntl::OFlag::O_PATH.bits()).open(&p).expect("open O_PATH")
+    };
     g.hold(&f).expect("hold");
     let p2 = p.clone();
     let writer = std::thread::spawn(move || std::fs::write(&p2, b"after!"));
