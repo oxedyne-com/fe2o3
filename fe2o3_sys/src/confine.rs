@@ -270,6 +270,9 @@ const NLM_F_CREATE:     u16 = 0x400;
 const IFLA_IFNAME:      u16 = 3;
 const IFLA_LINKINFO:    u16 = 18;
 const IFLA_NET_NS_FD:   u16 = 28;
+const IFLA_AF_SPEC:     u16 = 26;
+const IFLA_INET_CONF:   u16 = 1;
+const IPV4_DEVCONF_FORWARDING: u16 = 1;
 const IFLA_INFO_KIND:   u16 = 1;
 const IFLA_INFO_DATA:   u16 = 2;
 const VETH_INFO_PEER:   u16 = 1;
@@ -397,6 +400,21 @@ pub fn default4_msg(seq: u32, gw: Ipv4Addr) -> Vec<u8> {
 /// `RTM_NEWLINK` setting `IFF_UP` on the interface `index`.
 pub fn up_msg(seq: u32, index: i32) -> Vec<u8> {
     Msg::new(RTM_NEWLINK, NLM_F_ACK, seq).ifinfo(index, IFF_UP, IFF_UP).done()
+}
+
+/// `RTM_NEWLINK` setting the IPv4 `forwarding` flag of the interface `index` alone
+/// (`net.ipv4.conf.<if>.forwarding`), through `IFLA_AF_SPEC`, so a process already in another
+/// network namespace can set it on a link of the socket's, which `/proc/sys/net` cannot.
+pub fn forwarding4_msg(seq: u32, index: i32, on: bool) -> Vec<u8> {
+    let mut m = Msg::new(RTM_NEWLINK, NLM_F_ACK, seq).ifinfo(index, 0, 0);
+    m.open(IFLA_AF_SPEC);
+    m.open(AF_INET as u16);
+    m.open(IFLA_INET_CONF);
+    m.attr(IPV4_DEVCONF_FORWARDING, &(on as u32).to_ne_bytes());
+    m.close();
+    m.close();
+    m.close();
+    m.done()
 }
 
 /// `RTM_DELLINK` of the interface called `name`.
@@ -534,6 +552,13 @@ impl Rtnl {
         let i = res!(self.index(name));
         let seq = self.next();
         self.must(&up_msg(seq, i), &fmt!("bringing '{}' up", name))
+    }
+
+    /// Sets IPv4 forwarding on the interface `name` alone; the global `ip_forward` is untouched.
+    pub fn forwarding4(&mut self, name: &str, on: bool) -> Outcome<()> {
+        let i = res!(self.index(name));
+        let seq = self.next();
+        self.must(&forwarding4_msg(seq, i, on), &fmt!("forwarding {} on '{}'", on, name))
     }
 
     pub fn default_route4(&mut self, gw: Ipv4Addr) -> Outcome<()> {

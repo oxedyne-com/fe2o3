@@ -5,6 +5,7 @@
 use oxedyne_fe2o3_sys::confine::{
     addr4_msg,
     default4_msg,
+    forwarding4_msg,
     up_msg,
     veth_msg,
 };
@@ -65,6 +66,16 @@ fn test_confine_up_msg_is_ips() {
     assert_eq!(up_msg(SEQ, 1), want);
 }
 
+/// No `ip` verb sets it, so this is the layout of linux/if_link.h's `IFLA_AF_SPEC` nest by hand:
+/// `AF_INET`, then `IFLA_INET_CONF`, then `IPV4_DEVCONF_FORWARDING` as a u32.
+#[test]
+fn test_confine_forwarding4_msg_layout() {
+    let want = hex(&format!("{} {} {}", head(52, 16, "0500"),
+        "00000000 07000000 00000000 00000000",
+        "1400 1a00 1000 0200 0c00 0100 0800 0100 01000000"));
+    assert_eq!(forwarding4_msg(SEQ, 7, true), want);
+}
+
 /// Root only (the VM arm): a pair across two namespaces, addressed, up and routed, then deleted.
 #[test]
 #[ignore]
@@ -87,18 +98,24 @@ fn test_confine_veth_pair_made_as_root() {
         inner.add_addr4("fe2o3t1", Ipv4Addr::new(10, 251, 0, 2), 30).map_err(|e| format!("{}", e))?;
         inner.up("fe2o3t1").map_err(|e| format!("{}", e))?;
         inner.default_route4(Ipv4Addr::new(10, 251, 0, 1)).map_err(|e| format!("{}", e))?;
+        // From inside the new namespace: /proc/sys/net there is this namespace's, so only
+        // rtnetlink on the host's socket reaches the host end's flag.
+        host.forwarding4("fe2o3t0", true).map_err(|e| format!("{}", e))?;
         if host.index("fe2o3t1").is_ok() {
             return Err("the peer is visible in the host namespace".into());
         }
-        let gone = host.del_link("fe2o3t0").map_err(|e| format!("{}", e))?;
-        if !gone {
-            return Err("the host end was not there to delete".into());
-        }
-        Ok(())
+        Ok(host)
     }).join();
-    match made {
-        Ok(Ok(()))  => (),
+    let glob = std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").unwrap_or_default();
+    let mut host = match made {
+        Ok(Ok(h))   => h,
         Ok(Err(e))  => panic!("{}", e),
         Err(_)      => panic!("the namespace thread panicked"),
-    }
+    };
+    let fwd = std::fs::read_to_string("/proc/sys/net/ipv4/conf/fe2o3t0/forwarding").unwrap_or_default();
+    let gone = host.del_link("fe2o3t0");
+    assert_eq!(fwd.trim(), "1", "the host end forwards");
+    assert_eq!(std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward").unwrap_or_default(), glob,
+        "the global ip_forward is untouched");
+    assert!(matches!(gone, Ok(true)), "the host end was there to delete: {:?}", gone.map_err(|e| format!("{}", e)));
 }
