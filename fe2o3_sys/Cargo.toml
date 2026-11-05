@@ -29,7 +29,10 @@ supervise = ["signal"]
 # fanotify: a root watch of a filesystem's directory entries by file handle and name, and a
 # pre-content gate that holds a file's first access. Over nix.
 fanotify = ["dep:nix", "nix/fanotify"]
-confine = ["dep:nix", "nix/sched", "nix/mount", "nix/socket", "nix/process"]
+confine = ["nolink", "nix/sched", "nix/mount", "nix/socket", "nix/process"]
+# nolink: an open that follows no symbolic link in any component (openat2
+# RESOLVE_NO_SYMLINKS), for a root process acting on a path a user can shape. Over nix.
+nolink = ["dep:nix", "nix/fs"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }
