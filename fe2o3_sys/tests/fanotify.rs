@@ -5,8 +5,11 @@ use oxedyne_fe2o3_sys::fanotify::{
     parse_events,
     Access,
     Change,
+    fdinfo_handle,
     Entries,
+    Fid,
     Gate,
+    Handle,
     Op,
 };
 
@@ -17,10 +20,16 @@ use std::{
         Seek,
         SeekFrom,
     },
-    os::unix::fs::MetadataExt,
+    os::fd::AsFd,
     path::PathBuf,
     time::Duration,
 };
+
+/// The test records' own handle layout (type 1, inode then generation): the parser keeps it opaque.
+fn ino(f: &Fid) -> Option<u64> {
+    let b = &f.handle.bytes;
+    if b.len() >= 4 { Some(u32::from_ne_bytes([b[0], b[1], b[2], b[3]]) as u64) } else { None }
+}
 
 fn rec(kind: u8, ino: u32, name: &str) -> Vec<u8> {
     let mut b = vec![kind, 0, 0, 0];
@@ -54,6 +63,19 @@ fn event(mask: u64, recs: &[Vec<u8>]) -> Vec<u8> {
 }
 
 #[test]
+fn test_fanotify_fdinfo_handle_is_read_from_its_mark_line() {
+    let info = "pos:\t0\nflags:\t02004000\nfanotify flags:1e00 event-flags:8000\n\
+        fanotify ino:80d93 sdev:800001 mflags:0 mask:0 ignored_mask:20 fhandle-bytes:8 fhandle-type:1 f_handle:930d080001000000\n";
+    let h = fdinfo_handle(info, 0x80d93, 0x800001).expect("handle");
+    assert_eq!((h.kind, h.bytes), (1, vec![0x93, 0x0d, 0x08, 0, 1, 0, 0, 0]));
+    // The same inode number on another device is not it.
+    assert!(fdinfo_handle(info, 0x80d93, 0x800002).is_err());
+    // A filesystem without handles lists none.
+    assert!(fdinfo_handle("fanotify ino:5 sdev:1a mflags:0 mask:0 ignored_mask:20 fhandle-bytes:0 \
+        fhandle-type:ff f_handle:\n", 5, 0x1a).is_err());
+}
+
+#[test]
 fn test_fanotify_parses_entry_rename_and_overflow() {
     let mut bytes = event(0x4000_0100, &[rec(2, 11, "new"), rec(1, 12, "")]);
     bytes.extend(event(0x1000_0000, &[rec(10, 11, "HEAD.lock"), rec(12, 13, "HEAD"), rec(1, 14, "")]));
@@ -65,23 +87,23 @@ fn test_fanotify_parses_entry_rename_and_overflow() {
     assert_eq!(out.len(), 4);
     match &out[0] {
         Change::Entry { op, dir, name, to, target, dir_entry } => {
-            assert_eq!((*op, dir.ino(), name.clone(), to.is_none(), *dir_entry),
+            assert_eq!((*op, ino(dir), name.clone(), to.is_none(), *dir_entry),
                 (Op::Create, Some(11), OsString::from("new"), true, true));
-            assert_eq!(target.as_ref().and_then(|t| t.ino()), Some(12));
+            assert_eq!(target.as_ref().and_then(ino), Some(12));
             assert_eq!(dir.fsid, [7, 9]);
         },
         c => panic!("{:?}", c),
     }
     match &out[1] {
         Change::Entry { op, name, to: Some((tdir, tname)), dir_entry: false, .. } => {
-            assert_eq!((*op, name.clone(), tdir.ino(), tname.clone()),
+            assert_eq!((*op, name.clone(), ino(tdir), tname.clone()),
                 (Op::Rename, OsString::from("HEAD.lock"), Some(13), OsString::from("HEAD")));
         },
         c => panic!("{:?}", c),
     }
     assert_eq!(out[2], Change::Lost);
     let ops: Vec<(Op, Option<u64>)> = out[3..].iter().map(|c| match c {
-        Change::Entry { op, target, .. } => (*op, target.as_ref().and_then(|t| t.ino())),
+        Change::Entry { op, target, .. } => (*op, target.as_ref().and_then(ino)),
         c => panic!("{:?}", c),
     }).collect();
     assert_eq!(ops, vec![(Op::Recheck, Some(15))]);
@@ -113,29 +135,30 @@ fn drain(e: &Entries, want: usize) -> Vec<Change> {
 #[ignore]
 fn test_fanotify_entries_as_root() {
     let d = scratch("ent");
-    let ino = std::fs::metadata(&d).expect("meta").ino();
     let e = Entries::filesystem(&d).expect("watch");
+    let dh = e.handle_of(std::fs::File::open(&d).expect("open").as_fd()).expect("handle of d");
     std::fs::create_dir(d.join("a")).expect("mkdir");
-    let a_ino = std::fs::metadata(d.join("a")).expect("meta").ino();
+    let a = std::fs::File::open(d.join("a")).expect("open a");
+    let ah = e.handle_of(a.as_fd()).expect("handle of a");
     std::fs::rename(d.join("a"), d.join("b")).expect("rename");
     std::fs::write(d.join("HEAD.lock"), b"ref").expect("write");
     std::fs::rename(d.join("HEAD.lock"), d.join("HEAD")).expect("rename");
     std::fs::remove_dir(d.join("b")).expect("rmdir");
     let v: Vec<Change> = drain(&e, 5).into_iter().filter(|c| match c {
-        Change::Entry { dir, .. } => dir.ino() == Some(ino),
+        Change::Entry { dir, .. } => dir.handle == dh,
         Change::Lost => true,
     }).collect();
-    let seen: Vec<(Op, String, Option<String>, bool, Option<u64>)> = v.iter().map(|c| match c {
+    let seen: Vec<(Op, String, Option<String>, bool, Option<Handle>)> = v.iter().map(|c| match c {
         Change::Entry { op, name, to, dir_entry, target, .. } => (*op, name.to_string_lossy().to_string(),
             to.as_ref().map(|t| t.1.to_string_lossy().to_string()), *dir_entry,
-            target.as_ref().and_then(|t| t.ino())),
+            target.as_ref().map(|t| t.handle.clone())),
         Change::Lost => panic!("lost"),
     }).collect();
-    assert!(seen.contains(&(Op::Create, "a".into(), None, true, Some(a_ino))), "{:?}", seen);
-    assert!(seen.contains(&(Op::Rename, "a".into(), Some("b".into()), true, Some(a_ino))), "{:?}", seen);
+    assert!(seen.contains(&(Op::Create, "a".into(), None, true, Some(ah.clone()))), "{:?}", seen);
+    assert!(seen.contains(&(Op::Rename, "a".into(), Some("b".into()), true, Some(ah.clone()))), "{:?}", seen);
     assert!(seen.iter().any(|s| s.0 == Op::Rename && s.1 == "HEAD.lock" && s.2.as_deref() == Some("HEAD")
         && !s.3), "{:?}", seen);
-    assert!(seen.contains(&(Op::Delete, "b".into(), None, true, Some(a_ino))), "{:?}", seen);
+    assert!(seen.contains(&(Op::Delete, "b".into(), None, true, Some(ah.clone()))), "{:?}", seen);
     let _ = std::fs::remove_dir_all(&d);
 }
 

@@ -136,13 +136,15 @@ fn sh(c: &str) -> bool {
     std::process::Command::new("sh").arg("-c").arg(c).status().map(|s| s.success()).unwrap_or(false)
 }
 
-// ---- Surface 1, root: Fid::ino against stat, per filesystem ----
+// ---- Surface 1, root: the handle a folder is keyed by (Entries::handle_of) is the one its events
+// carry, per filesystem (Fid::ino, which read an inode number out of the handle, is retired) ----
 
 fn ino_matches_stat(d: &Path) -> (Vec<String>, bool) {
+    use std::os::fd::AsFd;
     let e = Entries::filesystem(d).expect("watch");
-    let dino = std::fs::metadata(d).expect("meta").ino();
+    let dh = e.handle_of(std::fs::File::open(d).expect("open").as_fd()).expect("handle_of dir");
     std::fs::create_dir(d.join("sub")).expect("mkdir");
-    let sino = std::fs::metadata(d.join("sub")).expect("meta").ino();
+    let sh = e.handle_of(std::fs::File::open(d.join("sub")).expect("open").as_fd()).expect("handle_of sub");
     let v = drain(&e, 10);
     let mut lines = Vec::new();
     let mut good = false;
@@ -150,9 +152,9 @@ fn ino_matches_stat(d: &Path) -> (Vec<String>, bool) {
         if let Change::Entry { op: Op::Create, dir, name, target, .. } = c {
             if name == "sub" {
                 let t = target.as_ref().expect("target");
-                lines.push(format!("dir kind={:#x} handle={:02x?} ino()={:?} stat={}", dir.kind, dir.handle, dir.ino(), dino));
-                lines.push(format!("sub kind={:#x} handle={:02x?} ino()={:?} stat={}", t.kind, t.handle, t.ino(), sino));
-                good = dir.ino() == Some(dino) && t.ino() == Some(sino);
+                lines.push(format!("dir event {:02x?} handle_of {:02x?}", dir.handle, dh));
+                lines.push(format!("sub event {:02x?} handle_of {:02x?}", t.handle, sh));
+                good = dir.handle == dh && t.handle == sh;
             }
         }
     }
@@ -169,7 +171,7 @@ fn qa_b_fid_ino_on_tmpfs_as_root() {
     let _ = sh(&format!("umount {}", d.display()));
     let _ = std::fs::remove_dir_all(&d);
     assert!(!lines.is_empty(), "no create event seen");
-    assert!(good, "Fid::ino is not the inode number on tmpfs");
+    assert!(good, "handle_of is not the handle the events carry on tmpfs");
 }
 
 #[test]
@@ -179,7 +181,7 @@ fn qa_b_fid_ino_on_home_fs_as_root() {
     let (lines, good) = ino_matches_stat(&d);
     for l in &lines { println!("{}", l); }
     let _ = std::fs::remove_dir_all(&d);
-    assert!(good, "Fid::ino is not the inode number on the home filesystem");
+    assert!(good, "handle_of is not the handle the events carry on the home filesystem");
 }
 
 // ---- Surface 1, root: a merged DELETE|CREATE of one inode (hard link) is reported in the wrong order ----
@@ -529,8 +531,8 @@ fn fdinfo_handle_matches_event(d: &Path) -> String {
         Change::Entry { dir, .. } => Some(dir.clone()),
         _ => None,
     }).expect("an entry event");
-    let ev_hex: String = ev.handle.iter().map(|b| format!("{:02x}", b)).collect();
-    let ev_kind = format!("{:x}", ev.kind);
+    let ev_hex: String = ev.handle.bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let ev_kind = format!("{:x}", ev.handle.kind);
     let same = kind == ev_kind && hex == ev_hex;
     format!("{} fdinfo type {} handle {} | event type {} handle {} | same {} | line {:?}",
         d.display(), kind, hex, ev_kind, ev_hex, same, line)

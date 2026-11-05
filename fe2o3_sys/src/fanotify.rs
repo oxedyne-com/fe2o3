@@ -4,9 +4,13 @@
 //! [`Entries`] is a notification group marked on a filesystem (`FAN_MARK_FILESYSTEM`) that
 //! reports each event by file handle and name (`FAN_REPORT_DFID_NAME_TARGET`): the directory
 //! an entry is in, the entry's name and the entry itself, never a path. A path is the
-//! caller's to keep, from the inode numbers it already holds: [`Fid::ino`] reads them out of
-//! the handle where the filesystem's handle format is known. A queue that overflowed comes
-//! back as [`Change::Lost`], which means that anything may have changed.
+//! caller's to keep, keyed by the whole [`Handle`]: its layout is the filesystem's own (tmpfs
+//! puts the generation first under the same type ext4 uses for inode then generation, QA 06 Nov
+//! 2026), so no inode number is read out of it. [`Entries::handle_of`] gives an open file's handle
+//! with no `name_to_handle_at`: an ignore-only inode mark makes the group's
+//! `/proc/self/fdinfo` list it, the same bytes the entry events carry (proven on ext4 and tmpfs,
+//! VM 06 Nov 2026). A queue that overflowed comes back as [`Change::Lost`], which means that
+//! anything may have changed.
 //!
 //! [`Gate`] is a pre-content group (`FAN_CLASS_PRE_CONTENT`, Linux 6.14+) on single inodes,
 //! marked for `FAN_OPEN_PERM` and `FAN_PRE_ACCESS`. The kernel raises one pre-access event for a
@@ -38,9 +42,13 @@ use std::{
     os::{
         fd::{
             AsFd,
+            AsRawFd,
             BorrowedFd,
         },
-        unix::ffi::OsStringExt,
+        unix::{
+            ffi::OsStringExt,
+            fs::MetadataExt,
+        },
     },
     path::Path,
     sync::Arc,
@@ -83,39 +91,22 @@ const INFO_FID:             u8 = 1;
 const INFO_DFID_NAME:       u8 = 2;
 const INFO_OLD_DFID_NAME:   u8 = 10;
 const INFO_NEW_DFID_NAME:   u8 = 12;
-// fixed: <linux/exportfs.h> handle types whose first word is the inode number.
-const FILEID_INO32_GEN:         i32 = 1;
-const FILEID_INO32_GEN_PARENT:  i32 = 2;
-const FILEID_INO64_GEN:         i32 = 0x81;
-const FILEID_INO64_GEN_PARENT:  i32 = 0x82;
-const FILEID_BTRFS_WITHOUT_PARENT:  i32 = 0x4d;
-const FILEID_BTRFS_WITH_PARENT:     i32 = 0x4e;
-const FILEID_BTRFS_WITH_PARENT_ROOT: i32 = 0x4f;
 
 const READ_BUF: usize = 64 * 1024; // whole events only, the kernel never splits one
 
-/// A file handle as fanotify reports it: the filesystem's id, the handle's type and bytes.
+/// A file handle within one filesystem: its exportfs type and bytes, opaque.  It names one inode
+/// for that inode's life (the bytes carry its generation), so it is never another's after reuse.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Handle {
+    pub kind:   i32,
+    pub bytes:  Vec<u8>,
+}
+
+/// A file handle as fanotify reports it: the filesystem's id and the handle.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Fid {
     pub fsid:   [i32; 2],
-    pub kind:   i32,        // the exportfs handle type
-    pub handle: Vec<u8>,
-}
-
-impl Fid {
-    /// The inode number the handle carries, where its type is one whose layout is known.
-    pub fn ino(&self) -> Option<u64> {
-        let h = &self.handle;
-        match self.kind {
-            FILEID_INO32_GEN | FILEID_INO32_GEN_PARENT if h.len() >= 4 =>
-                Some(u32::from_ne_bytes([h[0], h[1], h[2], h[3]]) as u64),
-            FILEID_INO64_GEN | FILEID_INO64_GEN_PARENT
-            | FILEID_BTRFS_WITHOUT_PARENT | FILEID_BTRFS_WITH_PARENT
-            | FILEID_BTRFS_WITH_PARENT_ROOT if h.len() >= 8 =>
-                Some(u64::from_ne_bytes([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]])),
-            _ => None,
-        }
-    }
+    pub handle: Handle,
 }
 
 /// What happened to one directory entry.
@@ -182,6 +173,25 @@ impl Entries {
 
     fn mask() -> MaskFlags {
         MaskFlags::from_bits_retain(FAN_CREATE | FAN_DELETE | FAN_RENAME | FAN_ONDIR)
+    }
+
+    /// The handle of the open file `fd` (an `O_PATH` one will do), the one this group's events
+    /// carry for it.  An ignore-only inode mark, made and removed here, raises no event.
+    pub fn handle_of(&self, fd: BorrowedFd) -> Outcome<Handle> {
+        // The descriptor's own magic link: the lookup lands on its inode, by no name.
+        let at = fmt!("/proc/self/fd/{}", fd.as_raw_fd());
+        let m = res!(std::fs::metadata(&at).map_err(|e| err!(e,
+            "stat of an open file to find its handle failed."; IO, File)));
+        let how = MarkFlags::FAN_MARK_INODE | MarkFlags::FAN_MARK_IGNORED_MASK
+            | MarkFlags::FAN_MARK_IGNORED_SURV_MODIFY;
+        res!(self.fan.mark(MarkFlags::FAN_MARK_ADD | how, MaskFlags::FAN_OPEN, nix::fcntl::AT_FDCWD,
+            Some(Path::new(&at))).map_err(|e| err!(e,
+            "The ignore-only mark that lists an open file's handle failed."; IO, System)));
+        let info = std::fs::read_to_string(fmt!("/proc/self/fdinfo/{}", self.fan.as_fd().as_raw_fd()));
+        let _ = self.fan.mark(MarkFlags::FAN_MARK_REMOVE | how, MaskFlags::FAN_OPEN,
+            nix::fcntl::AT_FDCWD, Some(Path::new(&at)));
+        let info = res!(info.map_err(|e| err!(e, "Reading the watch group's fdinfo failed."; IO, System)));
+        fdinfo_handle(&info, m.ino(), kernel_dev(m.dev()))
     }
 
     /// Waits up to `wait` for events (`None` waits for ever) and returns all that are queued.
@@ -303,13 +313,54 @@ fn fid_of(r: &[u8]) -> Outcome<(Fid, OsString)> {
         _ => return Err(err!("A fanotify file handle of {} bytes runs past its record.", n;
             Invalid, Input)),
     };
-    let handle = r[16..end].to_vec();
+    let bytes = r[16..end].to_vec();
     let tail = &r[end..];
     let name = match tail.iter().position(|c| *c == 0) {
         Some(end) => tail[..end].to_vec(),
         None => tail.to_vec(),
     };
-    Ok((Fid { fsid, kind, handle }, OsString::from_vec(name)))
+    Ok((Fid { fsid, handle: Handle { kind, bytes } }, OsString::from_vec(name)))
+}
+
+/// The handle of inode `ino` on device `sdev` (the kernel's encoding) in a group's fdinfo, from
+/// its mark line: `fanotify ino:<hex> sdev:<hex> ... fhandle-bytes:<hex> fhandle-type:<hex>
+/// f_handle:<hex>`.
+pub fn fdinfo_handle(info: &str, ino: u64, sdev: u64) -> Outcome<Handle> {
+    let head = fmt!("fanotify ino:{:x} sdev:{:x} ", ino, sdev);
+    let line = res!(info.lines().find(|l| l.starts_with(&head)).ok_or_else(|| err!(
+        "The watch group's fdinfo lists no mark for inode {} (device {:#x}).", ino, sdev; Missing, System)));
+    let field = |k: &str| line.split(' ').find_map(|w| w.strip_prefix(k)).ok_or_else(|| err!(
+        "The fdinfo mark line for inode {} has no {} field.", ino, k; Missing, System));
+    let hexnum = |k: &str| -> Outcome<u32> {
+        let v = res!(field(k));
+        u32::from_str_radix(v, 16).map_err(|e| err!(e, "The fdinfo field {}{} is not hex.", k, v; Invalid, Input))
+    };
+    let n = res!(hexnum("fhandle-bytes:")) as usize;
+    let kind = res!(hexnum("fhandle-type:")) as i32;
+    let hex = res!(field("f_handle:")).as_bytes();
+    if n == 0 || hex.len() != 2 * n {
+        return Err(err!("The fdinfo handle of inode {} is {} hex digits for {} bytes (a filesystem \
+            without handles?).", ino, hex.len(), n; Invalid, Input));
+    }
+    let mut bytes = Vec::with_capacity(n);
+    for p in hex.chunks(2) {
+        let d = |c: u8| (c as char).to_digit(16);
+        match (d(p[0]), d(p[1])) {
+            (Some(h), Some(l))  => bytes.push((h * 16 + l) as u8),
+            _                   => return Err(err!("The fdinfo handle of inode {} is not hex.", ino;
+                Invalid, Input)),
+        }
+    }
+    Ok(Handle { kind, bytes })
+}
+
+/// A device number as user space has it (glibc's `makedev`) in the kernel's own encoding, which
+/// fdinfo prints.
+fn kernel_dev(dev: u64) -> u64 {
+    // fixed: <sys/sysmacros.h> and the kernel's MKDEV (major << 20 | minor).
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
+    let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
+    (major << 20) | minor
 }
 
 /// A pre-content group: each marked file's next access waits for [`Held::answer`].
