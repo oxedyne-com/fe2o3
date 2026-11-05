@@ -127,6 +127,33 @@ pub fn test_glob(filter: &'static str) -> Outcome<()> {
         Ok(())
     }));
 
+    res!(test_it(filter, &["A covered folder covers its contents, negations holding 000", "all", "glob", "ignore"], || {
+        // Every shape git gives a folder: a trailing slash, a bare name, and `/**`.
+        for list in [&b"gateway/src/store/\n"[..], b"gateway/src/store\n", b"gateway/src/store/**\n"] {
+            let f = IgnoreFile::parse(list);
+            assert!(f.covers(b"gateway/src/store/x.rs", false), "{:?}", String::from_utf8_lossy(list));
+            assert!(f.covers(b"gateway/src/store/deep/y.rs", false));
+            assert!(!f.covers(b"gateway/src/storex.rs", false));
+            assert!(!f.covers(b"gateway/src/lib.rs", false));
+        }
+        let f = IgnoreFile::parse(b"kimberlite/src/errands\n");
+        assert!(f.covers(b"kimberlite/src/errands/settle.rs", false));
+        assert!(!f.ignores(b"kimberlite/src/errands/settle.rs", false), "the path alone is not named");
+        // A later negation re-includes, as excludes would not.
+        let f = IgnoreFile::parse(b"dir/\n!dir/keep.rs\n");
+        assert!(f.covers(b"dir/x.rs", false));
+        assert!(!f.covers(b"dir/keep.rs", false), "the negation is later");
+        assert!(f.excludes(b"dir/keep.rs", false), "where excludes swallows it");
+        let f = IgnoreFile::parse(b"src/**\n!src/words.rs\n!src/gen/\n");
+        assert!(f.covers(b"src/lib.rs", false));
+        assert!(!f.covers(b"src/words.rs", false));
+        assert!(!f.covers(b"src/gen/a.rs", false), "a negated folder uncovers its contents");
+        // And an earlier negation is overruled by a later cover.
+        let f = IgnoreFile::parse(b"!dir/keep.rs\ndir\n");
+        assert!(f.covers(b"dir/keep.rs", false), "order is everything");
+        Ok(())
+    }));
+
     res!(test_it(filter, &["Comments, blanks and spaces read as git reads them 000", "all", "glob", "ignore"], || {
         let f = IgnoreFile::parse(b"# a comment\n\n\r\n*.tmp   \n\\#hash\nspaced\\ \n");
         assert!(f.ignores(b"a.tmp", false), "trailing spaces are trimmed");

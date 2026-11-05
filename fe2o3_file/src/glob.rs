@@ -397,6 +397,33 @@ impl IgnoreFile {
         self.ignores(path, is_dir)
     }
 
+    /// Reports whether the rules cover a path, a rule speaking for it when it matches the path
+    /// itself or any folder above it, and the last rule that speaks deciding.
+    ///
+    /// Unlike [`IgnoreFile::excludes`], a later `!` line still re-includes a path inside a
+    /// covered folder: `dir/` then `!dir/keep.rs` covers `dir/x.rs` and not `dir/keep.rs`.  So
+    /// a protected-path list may name a folder as `dir`, `dir/` or `dir/**` alike, and carve
+    /// files out of it.  This is the question a list of paths that *are* something (rather
+    /// than paths a walk must not enter) asks.
+    pub fn covers(&self, path: &[u8], is_dir: bool) -> bool {
+        let mut decision = false;
+        for rule in &self.rules {
+            let mut hit = rule.matches(path, is_dir);
+            for (i, b) in path.iter().enumerate() {
+                if hit {
+                    break;
+                }
+                if *b == b'/' {
+                    hit = rule.matches(&path[..i], true);
+                }
+            }
+            if hit {
+                decision = !rule.negated;
+            }
+        }
+        decision
+    }
+
     /// Strips trailing spaces that are not escaped with a backslash.
     ///
     /// An even number of backslashes before a space leaves the space bare, so
