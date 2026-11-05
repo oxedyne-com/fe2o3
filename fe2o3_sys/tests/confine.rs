@@ -176,3 +176,46 @@ fn test_confine_floor_steps_by_open_file_as_root() {
     }
     assert!(host_ok, "the host's view is untouched");
 }
+
+/// Pin then Seal (KIMB-USERMGR B-F4, a run's floor rows read-only from its first tainted turn):
+/// a pinned file stays writable until sealed, a seal is refused while a writer holds the pin's
+/// mount, and refused on a path never pinned (which would seal the mount below), and a sealed
+/// file is read-only in this namespace alone.  Run with TMPDIR on a real filesystem.
+#[test]
+#[ignore]
+fn test_confine_pin_then_seal_as_root() {
+    use oxedyne_fe2o3_sys::confine::{apply, unshare, Ns, Step};
+    use std::{fs, io::Write, path::PathBuf};
+    let d = std::env::temp_dir().join(format!("fe2o3_pin_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).expect("dir");
+    fs::write(d.join("bashrc"), b"b").expect("bashrc");
+    fs::write(d.join("other"), b"o").expect("other");
+    let dd = d.clone();
+    let r = std::thread::spawn(move || -> Result<(), String> {
+        let d = dd;
+        unshare(&[Ns::Mount]).map_err(|e| format!("{}", e))?;
+        apply(&[Step::Slave { at: PathBuf::from("/") }, Step::Pin { at: d.join("bashrc") }])
+            .map_err(|e| format!("{}", e))?;
+        fs::write(d.join("bashrc"), b"clean").map_err(|e| format!("pinned not writable: {}", e))?;
+        if apply(&[Step::Seal { at: d.join("other") }]).is_ok() { return Err("sealed an unpinned path".into()); }
+        if fs::write(d.join("other"), b"o2").is_err() { return Err("an unpinned seal touched the mount below".into()); }
+        let mut w = fs::OpenOptions::new().write(true).open(d.join("bashrc")).map_err(|e| format!("{}", e))?;
+        if apply(&[Step::Seal { at: d.join("bashrc") }]).is_ok() { return Err("sealed past an open writer".into()); }
+        let _ = w.write_all(b"");
+        drop(w);
+        apply(&[Step::Seal { at: d.join("bashrc") }]).map_err(|e| format!("seal: {}", e))?;
+        if fs::write(d.join("bashrc"), b"tainted").is_ok() { return Err("sealed bashrc writable".into()); }
+        Ok(())
+    }).join();
+    let host = fs::read(d.join("bashrc")).ok();
+    let host_ok = fs::write(d.join("bashrc"), b"host").is_ok();
+    let _ = fs::remove_dir_all(&d);
+    match r {
+        Ok(Ok(()))  => (),
+        Ok(Err(e))  => panic!("{}", e),
+        Err(_)      => panic!("the namespace thread panicked"),
+    }
+    assert_eq!(host, Some(b"clean".to_vec()), "the clean write went through to his file");
+    assert!(host_ok, "the host's view is untouched");
+}

@@ -143,6 +143,15 @@ pub enum Step {
     /// Makes `at` read-only in place: a recursive bind onto itself, then a read-only remount
     /// of its top, by open file as `Hide` is.  A mount already under `at` keeps its own flags.
     ReadOnly    { at: PathBuf },
+    /// The first half of `ReadOnly`: a recursive bind of `at` onto itself, by open file, left
+    /// writable, so every later open of `at` in this namespace goes through a mount of its own
+    /// that [`Step::Seal`] can make read-only.  A descriptor opened before the pin is on the
+    /// mount below and keeps writing: pin before anything can open `at`.
+    Pin         { at: PathBuf },
+    /// The second half: the mount at the top of `at` (a `Pin`'s) remounted read-only, by open
+    /// file.  The kernel refuses (`EBUSY`) while a file on that mount is open for writing, so a
+    /// seal never leaves a writer behind.
+    Seal        { at: PathBuf },
 }
 
 /// Why a [`Step::Hide`] or [`Step::ReadOnly`] was skipped.
@@ -164,7 +173,7 @@ pub fn apply_noting(steps: &[Step]) -> Outcome<Vec<(PathBuf, Skip)>> {
     let mut skipped = Vec::new();
     for s in steps {
         match s {
-            Step::Hide { at, .. } | Step::ReadOnly { at } => {
+            Step::Hide { at, .. } | Step::ReadOnly { at } | Step::Pin { at } | Step::Seal { at } => {
                 if let Some(k) = res!(apply_held(s)) {
                     skipped.push((at.clone(), k));
                 }
@@ -273,8 +282,52 @@ fn apply_held(s: &Step) -> Outcome<Option<Skip>> {
             res!(seal(at, (d, i), s));
             Ok(None)
         },
+        Step::Pin { at } => {
+            let fd = match res!(open_held(at, s)) {
+                Ok(fd) => fd,
+                Err(k) => return Ok(Some(k)),
+            };
+            let p = fd_path(&fd);
+            res!(mnt(Some(&p), Path::new(&p), None, MsFlags::MS_BIND | MsFlags::MS_REC, None, s));
+            Ok(None)
+        },
+        Step::Seal { at } => {
+            let fd = match res!(open_held(at, s)) {
+                Ok(fd) => fd,
+                Err(k) => return Ok(Some(k)),
+            };
+            // Only a mount of its own: sealing a path that was never pinned would make the
+            // whole mount it lies on read-only.
+            let up = res!(at.parent().ok_or_else(|| err!("The mount step {:?} has no folder above it.", s;
+                Invalid, Input)));
+            let above = match res!(open_held(up, s)) {
+                Ok(fd) => fd,
+                Err(k) => return Ok(Some(k)),
+            };
+            if res!(mount_id(&fd, s)) == res!(mount_id(&above, s)) {
+                return Err(err!("The mount step {:?}: {} is not a mount of its own (pin it first).", s,
+                    at.display(); Invalid, Input));
+            }
+            let (d, i, _) = res!(ident(&fd, s));
+            res!(seal(at, (d, i), s));
+            Ok(None)
+        },
         _ => apply_one(s).map(|_| None),
     }
+}
+
+/// The id of the mount the open file `fd` lies on, from `/proc/self/fdinfo` (proc(5) `mnt_id`).
+fn mount_id(fd: &OwnedFd, s: &Step) -> Outcome<u64> {
+    let at = fmt!("/proc/self/fdinfo/{}", fd.as_raw_fd()); // fixed: kernel ABI path
+    let text = res!(fs::read_to_string(&at).map_err(|e| err!(e,
+        "The mount step {:?} could not read {}.", s, at; IO, File)));
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("mnt_id:") {
+            return v.trim().parse::<u64>().map_err(|e| err!(e,
+                "The mount step {:?} read no mount id in {}.", s, at; Invalid, Input));
+        }
+    }
+    Err(err!("The mount step {:?} found no mnt_id in {}.", s, at; Missing, Input))
 }
 
 fn mnt(src: Option<&str>, at: &Path, fs: Option<&str>, flags: MsFlags, data: Option<&str>, s: &Step)
@@ -334,7 +387,8 @@ fn apply_one(s: &Step) -> Outcome<()> {
         Step::Dir { at, mode } => make_dir(at, *mode, s),
         Step::Link { target, at } => symlink(target, at).map_err(|e| err!(e,
             "The mount step {:?} could not link.", s; IO, File)),
-        Step::Hide { .. } | Step::ReadOnly { .. } => apply_held(s).map(|_| ()),
+        Step::Hide { .. } | Step::ReadOnly { .. } | Step::Pin { .. } | Step::Seal { .. } =>
+            apply_held(s).map(|_| ()),
         Step::File { at, text } => {
             res!(fs::write(at, text).map_err(|e| err!(e,
                 "The mount step {:?} could not write.", s; IO, File)));
