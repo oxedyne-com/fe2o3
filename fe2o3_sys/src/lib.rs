@@ -8,7 +8,8 @@
 //!
 //! The optional `inotify` feature adds a watcher for directory trees on Linux, built on
 //! `nix`, the optional `clock` feature the boot clock and a check for the machine
-//! having slept, and the optional `signal` feature signals to a process group; without
+//! having slept, the optional `signal` feature signals to a process group, and the optional
+//! `room` feature the free room on a filesystem by `statvfs`; without
 //! them the crate has no third-party dependency at all.
 //!
 //! Intended consumers include admin dashboards, long-running
@@ -37,6 +38,8 @@ pub mod notify;
 pub mod parse;
 pub mod proc_self;
 pub mod resident;
+#[cfg(all(target_os = "linux", feature = "room"))]
+pub mod room;
 #[cfg(all(target_os = "linux", feature = "session"))]
 pub mod session;
 #[cfg(all(target_os = "linux", feature = "signal"))]

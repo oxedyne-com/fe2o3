@@ -31,6 +31,9 @@ session = ["dep:nix", "nix/user", "nix/process"]
 # resolver by mount id and the writer's mountinfo, and a Follower that tracks files across renames
 # through held O_PATH descriptors. Needs rustix for statx, which nix does not carry.
 notify = ["dep:nix", "nix/fanotify", "nix/inotify", "nix/poll", "nix/fs", "dep:rustix"]
+# room: the free room on a filesystem (statvfs) and the bytes a directory tree takes, for a
+# service that must keep room for a copy of its own store. Off by default for the same reason.
+room = ["dep:nix", "nix/fs"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }
