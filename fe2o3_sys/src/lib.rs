@@ -25,6 +25,8 @@
 
 #[cfg(all(target_os = "linux", feature = "clock"))]
 pub mod clock;
+#[cfg(all(target_os = "linux", feature = "confine"))]
+pub mod confine;
 pub mod cpu;
 pub mod disk;
 #[cfg(all(target_os = "linux", feature = "inotify"))]

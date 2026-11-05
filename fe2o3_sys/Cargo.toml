@@ -24,6 +24,9 @@ signal = ["dep:nix", "nix/signal", "nix/process"]
 # address-space rlimit where there is none, arms a child's death with its parent's, and keeps a
 # restart budget. Builds on signal.
 supervise = ["signal"]
+# confine: what a root starter needs to narrow a child's view before it drops privilege: new
+# namespaces, a mount plan, a pid-1 reaper and an rtnetlink writer for a veth pair. Over nix.
+confine = ["dep:nix", "nix/sched", "nix/mount", "nix/socket", "nix/process"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }
