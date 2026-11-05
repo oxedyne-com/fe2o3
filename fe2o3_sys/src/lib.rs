@@ -29,6 +29,8 @@ pub mod clock;
 pub mod confine;
 pub mod cpu;
 pub mod disk;
+#[cfg(all(target_os = "linux", feature = "fanotify"))]
+pub mod fanotify;
 #[cfg(all(target_os = "linux", feature = "inotify"))]
 pub mod inotify;
 pub mod load;
