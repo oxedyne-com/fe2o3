@@ -37,7 +37,3 @@ nolink = ["dep:nix", "nix/fs", "nix/user"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }
-
-# The nolink race arm swaps a folder and a link with renameat2 (RENAME_EXCHANGE).
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-nix = { version = "0.31", default-features = false, features = ["fs"] }

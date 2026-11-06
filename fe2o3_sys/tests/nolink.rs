@@ -98,6 +98,7 @@ fn test_held_dir_judges_the_folder_and_every_folder_above() {
 /// second look met the folder (QA umrig fcA N2: these were a bare ENOTDIR).
 #[test]
 fn test_own_dir_refusals_under_a_swap_race_name_the_link() {
+    // nix is the nolink feature's own dependency (its fs feature carries renameat2), so the arm adds none.
     use nix::fcntl::{renameat2, RenameFlags, AT_FDCWD};
     use oxedyne_fe2o3_sys::nolink::own_dir;
     use std::{
