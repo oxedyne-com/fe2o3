@@ -29,7 +29,6 @@ use nix::{
     fcntl::{
         openat2,
         OFlag,
-        openat,
         OpenHow,
         ResolveFlag,
         AT_FDCWD,
@@ -171,9 +170,12 @@ pub fn held_dir(path: &Path, uid: u32, mode: u32) -> Outcome<OwnedFd> {
 
 /// In the folder `at`, opens the folder `name`, making it first when it is absent, and refuses
 /// it unless it is a real folder owned by `uid` with exactly `mode`.  A folder this call makes is
-/// one `mkdirat` on `at`, then `fchown` and `fchmod` on its own descriptor, opened with
-/// `O_NOFOLLOW | O_DIRECTORY`; one found is judged, never changed.  `at` must be writable by no
-/// account but the caller and `uid`, as [`held_dir`] proves of a base.
+/// one `mkdirat` on `at`, then `fchown` and `fchmod` on its own descriptor, opened with `openat2`
+/// through no link and no mount crossing (`RESOLVE_NO_XDEV`); one found is judged, never changed.
+/// A mount on `name` is refused as one, since a mount stands in for the folder whatever lies
+/// beneath it; a link is refused as a link even when it is swapped for a folder between the open
+/// and the look that names it.  `at` must be writable by no account but the caller and `uid`, as
+/// [`held_dir`] proves of a base.
 ///
 /// # Arguments
 /// * `at` - The folder it lies in, open.
@@ -196,18 +198,43 @@ pub fn own_dir(
     if name.is_empty() || name == "." || name == ".." || name.contains('/') {
         return Err(err!("'{}' is not one folder name.", name; Invalid, Input, Path));
     }
-    let fl = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK;
+    // No O_NOFOLLOW: the resolve flags refuse a trailing link (ELOOP) and a mount on the name
+    // (EXDEV), where O_NOFOLLOW with O_DIRECTORY gives a bare ENOTDIR for a link.
+    let how = OpenHow::new()
+        .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)
+        .mode(Mode::empty())
+        .resolve(ResolveFlag::RESOLVE_NO_SYMLINKS | ResolveFlag::RESOLVE_NO_MAGICLINKS
+            | ResolveFlag::RESOLVE_NO_XDEV);
     let refuse = |e: Errno| -> Error<ErrTag> {
+        if e == Errno::EXDEV {
+            return err!(e, "'{}' is a mount point; it must be a folder of uid {}, mode {:o}, on the \
+                filesystem of '{}', since a mount stands in for whatever lies beneath it.",
+                shown.display(), uid, mode, at_path.display(); Invalid, Security, Path);
+        }
+        // The second look judges what is there now; a refusal the open met and the look did not
+        // see was swapped in between, and is named as what the open met.
+        let met = match e {
+            Errno::ELOOP    => Some("a link"),
+            Errno::ENOTDIR  => Some("not a folder"),
+            _               => None,
+        };
+        let swapped = |found: &str| match met {
+            Some(m) => err!(e, "'{}' was {} when it was opened and {} when looked at again: it was \
+                swapped in between; it must be a folder of uid {}, mode {:o}.", shown.display(), m,
+                found, uid, mode; Invalid, Security, Path),
+            None    => err!(e, "Could not open the folder '{}'.", shown.display(); IO, File),
+        };
         match fstatat(at, name, nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW) {
             Ok(st) => match judge(&st, &shown, uid, mode) {
                 Err(j) => j,
-                Ok(()) => err!(e, "Could not open the folder '{}'.", shown.display(); IO, File),
+                Ok(()) => swapped("a folder"),
             },
-            Err(_) => err!(e, "Could not open the folder '{}'.", shown.display(); IO, File),
+            Err(Errno::ENOENT) => swapped("absent"),
+            Err(_) => swapped("not to be looked at"),
         }
     };
     let mut made = false;
-    let fd = match openat(at, name, fl, Mode::empty()) {
+    let fd = match openat2(at, name, how) {
         Ok(fd) => fd,
         Err(Errno::ENOENT) => {
             match mkdirat(at, name, Mode::from_bits_truncate(mode)) {
@@ -216,7 +243,7 @@ pub fn own_dir(
                 Err(e) => return Err(err!(e, "Could not make the folder '{}' for uid {} (as uid {}).",
                     shown.display(), uid, geteuid().as_raw(); IO, File, Path)),
             }
-            res!(openat(at, name, fl, Mode::empty()).map_err(refuse))
+            res!(openat2(at, name, how).map_err(refuse))
         },
         Err(e) => return Err(refuse(e)),
     };
