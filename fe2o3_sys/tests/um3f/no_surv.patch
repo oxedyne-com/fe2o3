@@ -1,0 +1,11 @@
+--- a/fe2o3_sys/src/fanotify.rs
++++ b/fe2o3_sys/src/fanotify.rs
+@@ -456,7 +456,7 @@
+     pub fn pass(&self, h: Held) -> Outcome<()> {
+         if let Some(fd) = h.fd() {
+             res!(self.mark(MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_IGNORE
+-                | MarkFlags::FAN_MARK_EVICTABLE | MarkFlags::FAN_MARK_IGNORED_SURV_MODIFY, 0, fd));
++                | MarkFlags::FAN_MARK_EVICTABLE, 0, fd));
+         }
+         h.answer(true)
+     }
