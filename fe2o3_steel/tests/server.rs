@@ -122,6 +122,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 admin_dashboard:        true,
                 db_sync_on_write:       false,
                 response_headers:       Vec::new(),
+                path_headers:           Vec::new(),
             };
 
             let web_handler: AppWebHandler<HashMap<String, OsPath>> = AppWebHandler::new(
@@ -158,6 +159,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 tiles:          None,
                 access_log:     vhost_cfg.access_log,
                 response_headers: Vec::new(),
+                path_headers:   Vec::new(),
             });
 
             let mut vhosts = HashMap::new();

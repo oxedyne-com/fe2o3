@@ -1115,6 +1115,72 @@ pub struct VhostConfig {
     // no-referrer`, `X-Robots-Tag: noindex`, its own CSP) says so here, once. Empty by default,
     // which is what every config written before the field existed says.
     pub response_headers:       Vec<(String, String)>,
+    // Headers for the responses to some request paths only, applied after `response_headers` and
+    // replacing a field of the same name, in list order. A document that must run under a policy
+    // of its own (a sandboxed frame's shell beside a strict page) is named here. Empty by default.
+    pub path_headers:           Vec<PathHeaders>,
+}
+
+/// Response headers for the request paths one entry of [`VhostConfig::path_headers`] names.
+///
+/// `path` is matched against the request path as the static router reads it (`//a`, `/./a` and
+/// `/x/../a` are all `/a`), never the file it resolves to, so `/` is not `/index.html`. A path
+/// ending in `/` names that directory and everything under it, whole segments only; any other
+/// names exactly one path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PathHeaders {
+    pub path:       String,
+    pub headers:    Vec<(String, String)>,  // names lower-case, as `response_headers`
+}
+
+impl PathHeaders {
+    /// Does this entry cover the request path `req`?
+    pub fn matches(&self, req: &str) -> bool {
+        let want = Self::rel(&self.path);
+        let got = Self::rel(req);
+        if self.path.ends_with('/') {
+            got.starts_with(&want)
+        } else {
+            got == want
+        }
+    }
+
+    fn rel(path: &str) -> PathBuf {
+        Path::new(path.strip_prefix('/').unwrap_or(path)).normalise().remove_relative().as_pathbuf()
+    }
+
+    pub fn from_dat(d: &Dat) -> Outcome<Self> {
+        let m = match d {
+            Dat::Map(m) => m,
+            _ => return Err(err!(
+                "VhostConfig: each 'path_headers' entry must be a map with 'path' and 'headers'.";
+                Invalid, Input, Mismatch)),
+        };
+        let path = match m.get(&dat!("path")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "VhostConfig: a 'path_headers' entry needs a 'path' string.";
+                Invalid, Input, Missing)),
+        };
+        // A path written other than as the router reads it would never match.
+        let mut norm = fmt!("/{}", Self::rel(&path).to_string_lossy());
+        if path.ends_with('/') && norm != "/" {
+            norm.push('/');
+        }
+        if norm != path {
+            return Err(err!(
+                "VhostConfig: 'path_headers' path '{}' must be absolute and normal, as '{}'.",
+                path, norm;
+                Invalid, Input));
+        }
+        let headers = match m.get(&dat!("headers")) {
+            Some(h) => res!(VhostConfig::header_map(h, "path_headers")),
+            None => return Err(err!(
+                "VhostConfig: 'path_headers' entry '{}' needs a 'headers' map.", path;
+                Invalid, Input, Missing)),
+        };
+        Ok(Self { path, headers })
+    }
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -1165,6 +1231,7 @@ impl Default for VhostConfig {
             admin_dashboard:        true,
             db_sync_on_write:       false,
             response_headers:       Vec::new(),
+            path_headers:           Vec::new(),
         }
     }
 }
@@ -1535,23 +1602,20 @@ impl VhostConfig {
                 Invalid, Input, Mismatch)),
         };
         let response_headers = match m.get(&dat!("response_headers")) {
-            Some(Dat::Map(sub)) => {
+            Some(h) => res!(Self::header_map(h, "response_headers")),
+            None    => Vec::new(),
+        };
+        let path_headers = match m.get(&dat!("path_headers")) {
+            Some(Dat::List(l)) => {
                 let mut out = Vec::new();
-                for (k, v) in sub.iter() {
-                    let (name, val) = match (k, v) {
-                        (Dat::Str(k), Dat::Str(v))  => (k.to_lowercase(), v.clone()),
-                        _ => return Err(err!(
-                            "VhostConfig: 'response_headers' maps header names to strings.";
-                            Invalid, Input, Mismatch)),
-                    };
-                    res!(Self::check_response_header(&name, &val));
-                    out.push((name, val));
+                for d in l {
+                    out.push(res!(PathHeaders::from_dat(d)));
                 }
                 out
             }
             None => Vec::new(),
             _ => return Err(err!(
-                "VhostConfig: 'response_headers' must be a map.";
+                "VhostConfig: 'path_headers' must be a list of maps.";
                 Invalid, Input, Mismatch)),
         };
         // A tile request names where its viewer looked, so a vhost serving tiles may not keep
@@ -1586,7 +1650,30 @@ impl VhostConfig {
             admin_dashboard,
             db_sync_on_write,
             response_headers,
+            path_headers,
         })
+    }
+
+    /// A map of header names to values, as `key` holds it, each checked as a vhost may set it.
+    fn header_map(d: &Dat, key: &str) -> Outcome<Vec<(String, String)>> {
+        let sub = match d {
+            Dat::Map(sub) => sub,
+            _ => return Err(err!(
+                "VhostConfig: '{}' must be a map.", key;
+                Invalid, Input, Mismatch)),
+        };
+        let mut out = Vec::new();
+        for (k, v) in sub.iter() {
+            let (name, val) = match (k, v) {
+                (Dat::Str(k), Dat::Str(v))  => (k.to_lowercase(), v.clone()),
+                _ => return Err(err!(
+                    "VhostConfig: '{}' maps header names to strings.", key;
+                    Invalid, Input, Mismatch)),
+            };
+            res!(Self::check_response_header(&name, &val));
+            out.push((name, val));
+        }
+        Ok(out)
     }
 
     /// Can `name: val` be set on every response? The name must be an RFC 9110 token, the value

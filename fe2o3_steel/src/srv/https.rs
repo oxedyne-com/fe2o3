@@ -909,6 +909,14 @@ impl<
                                 msg.header.fields.insert(
                                     nam.clone(), HeaderFieldValue::Generic(val.clone()), None);
                             }
+                            for ph in vhost.path_headers.iter().filter(|ph| ph.matches(&rec_path)) {
+                                for (nam, val) in &ph.headers {
+                                    let nam = HeaderName::from(nam.as_str());
+                                    msg.header.fields.remove(&nam);
+                                    msg.header.fields.insert(
+                                        nam, HeaderFieldValue::Generic(val.clone()), None);
+                                }
+                            }
                             // Pull the status code out for the
                             // traffic record before the message is
                             // consumed by write_all. HttpStatus is

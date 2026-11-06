@@ -222,6 +222,7 @@ async fn drive() -> Outcome<()> {
         tiles:          None,
         access_log:     false,
         response_headers: Vec::new(),
+        path_headers:   Vec::new(),
     });
     let mut vhosts = HashMap::new();
     vhosts.insert(HOST.to_string(), runtime);

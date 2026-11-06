@@ -4,6 +4,7 @@ use crate::srv::{
         traffic::TrafficRecorder,
     },
     cfg::{
+        PathHeaders,
         ProxyRoute,
         RedirectRule,
         ServerConfig,
@@ -95,6 +96,7 @@ pub struct VhostRuntime<
     pub tiles:          Option<Arc<TileService<TileSource>>>,
     pub access_log:     bool,   // `false` keeps this vhost's requests out of the log and the recorder
     pub response_headers: Vec<(HeaderName, String)>, // set on every response, replacing that name
+    pub path_headers:   Vec<PathHeaders>, // after `response_headers`, for the paths each names
 }
 
 impl<

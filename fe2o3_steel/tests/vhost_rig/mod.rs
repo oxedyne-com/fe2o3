@@ -22,6 +22,7 @@ use oxedyne_fe2o3_steel::{
         api::ApiHandlerRegistry,
         cfg::{
             ApiRoute,
+            PathHeaders,
             ServerConfig,
             WebhookRoute,
         },
@@ -163,6 +164,7 @@ pub struct Site {
     pub webhook_routes:     Vec<WebhookRoute>,
     pub admin_dashboard:    bool,
     pub response_headers:   Vec<(String, String)>,
+    pub path_headers:       Vec<PathHeaders>,
     pub handlers:           ApiHandlerRegistry,     // in-process handlers its `api_routes` name
 }
 
@@ -175,6 +177,7 @@ impl Site {
             webhook_routes:     Vec::new(),
             admin_dashboard:    true,
             response_headers:   Vec::new(),
+            path_headers:       Vec::new(),
             handlers:           ApiHandlerRegistry::new(),
         }
     }
@@ -286,6 +289,7 @@ impl Rig {
                 response_headers: site.response_headers.iter()
                     .map(|(k, v)| (oxedyne_fe2o3_net::http::fields::HeaderName::from(k.as_str()), v.clone()))
                     .collect(),
+                path_headers:   site.path_headers.clone(),
             });
             vhosts.insert(site.host.to_lowercase(), runtime);
         }
