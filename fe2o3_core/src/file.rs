@@ -1104,6 +1104,155 @@ pub fn secure_secret_file(_path: &Path) -> Outcome<()> {
     Ok(())
 }
 
+/// A folder held open, so an act on a name in it lands in THAT folder whatever is swapped into
+/// its path after it was checked.  On Linux a name is reached through the descriptor
+/// (`/proc/self/fd/<n>/<leaf>`), so neither a renamed folder nor a link put in its place can carry
+/// the act elsewhere; on other platforms through the real path, and the window between the check
+/// and the act remains.
+#[derive(Debug)]
+pub struct HeldDir {
+    real:   PathBuf,    // where the folder really was when it was opened
+    #[cfg(target_os = "linux")]
+    dir:    File,
+}
+
+impl HeldDir {
+    /// Opens the folder `path`, links on the way followed.
+    pub fn open(path: &Path) -> Outcome<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            let dir = res!(File::open(path).map_err(|e| err!(e,
+                "The folder {:?} could not be opened to be held.", path; IO, File)));
+            Self::held(dir, path)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let real = res!(fs::canonicalize(path).map_err(|e| err!(e,
+                "The folder {:?} could not be found to be held.", path; IO, File)));
+            if !real.is_dir() {
+                return Err(err!("{:?} is not a folder, so it cannot be held.", path;
+                    Invalid, Input, File));
+            }
+            Ok(Self { real })
+        }
+    }
+
+    /// Holds `dir`, a folder the caller opened its own way (a descent through held folders);
+    /// `path` names it in messages.  Its real place is read from the descriptor itself, so it is
+    /// where the folder was when it was opened, not where `path` leads now.
+    #[cfg(target_os = "linux")]
+    pub fn held(dir: File, path: &Path) -> Outcome<Self> {
+        use std::os::unix::io::AsRawFd;
+        let meta = res!(dir.metadata().map_err(|e| err!(e,
+            "The folder {:?} could not be examined to be held.", path; IO, File)));
+        if !meta.is_dir() {
+            return Err(err!("{:?} is not a folder, so it cannot be held.", path;
+                Invalid, Input, File));
+        }
+        let fd = PathBuf::from(fmt!("/proc/self/fd/{}", dir.as_raw_fd()));
+        // Fail closed where the descriptor table is not there: acting on the path instead would be
+        // the race this exists to close.
+        let real = res!(fs::read_link(&fd).map_err(|e| err!(e,
+            "/proc/self/fd is not available, so the folder {:?} cannot be held.", path;
+            IO, File, Missing)));
+        Ok(Self { real, dir })
+    }
+
+    /// Where the folder really was when it was opened.
+    pub fn real(&self) -> &Path { &self.real }
+
+    /// The path that reaches `leaf` inside the held folder, for an act that does not follow a
+    /// final link (`unlink`, `rename`, `symlink`, `symlink_metadata`).
+    pub fn at(&self, leaf: &OsStr) -> PathBuf {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let mut p = PathBuf::from(fmt!("/proc/self/fd/{}", self.dir.as_raw_fd()));
+            p.push(leaf);
+            p
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.real.join(leaf)
+        }
+    }
+}
+
+/// Makes a symbolic link named `leaf` in the held folder `dir`, holding `target`, a link's bytes
+/// as the OS keeps them (not necessarily text).  Refused where anything stands at `leaf`, and for
+/// a `leaf` that is not one plain name.
+#[cfg(unix)]
+pub fn make_link(dir: &HeldDir, leaf: &OsStr, target: &[u8]) -> Outcome<()> {
+    use std::os::unix::ffi::OsStrExt;
+    res!(one_name(leaf));
+    if target.is_empty() {
+        return Err(err!("A link to nothing cannot be made at {:?} in {:?}.", leaf, dir.real();
+            Invalid, Input, File));
+    }
+    res!(std::os::unix::fs::symlink(OsStr::from_bytes(target), dir.at(leaf)).map_err(|e| err!(e,
+        "The link {:?} could not be made in {:?}.", leaf, dir.real(); IO, File, Write)));
+    Ok(())
+}
+
+/// Links cannot be made here.
+#[cfg(not(unix))]
+pub fn make_link(dir: &HeldDir, leaf: &OsStr, _target: &[u8]) -> Outcome<()> {
+    Err(err!("The link {:?} in {:?} cannot be made on this platform.", leaf, dir.real();
+        Unimplemented, File))
+}
+
+/// The bytes a symbolic link at `path` holds, its leaf not followed; `None` where `path` is
+/// anything else or nothing stands there.
+#[cfg(unix)]
+pub fn read_link_bytes(path: &Path) -> Outcome<Option<Vec<u8>>> {
+    use std::os::unix::ffi::OsStringExt;
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {},
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(err!(e, "{:?} could not be examined.", path; IO, File, Read)),
+    }
+    let to = res!(fs::read_link(path).map_err(|e| err!(e,
+        "The link {:?} could not be read.", path; IO, File, Read)));
+    Ok(Some(to.into_os_string().into_vec()))
+}
+
+/// No links are read here: nothing is one.
+#[cfg(not(unix))]
+pub fn read_link_bytes(_path: &Path) -> Outcome<Option<Vec<u8>>> {
+    Ok(None)
+}
+
+/// Copies the symbolic link at `from` to the new name `to`: the same target, never what it
+/// points at.  Refused where `from` is not a link or anything stands at `to`.
+#[cfg(unix)]
+pub fn copy_link(from: &Path, to: &Path) -> Outcome<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let target = match res!(read_link_bytes(from)) {
+        Some(t) => t,
+        None    => return Err(err!("{:?} is not a link, so it cannot be copied as one.", from;
+            Invalid, Input, File)),
+    };
+    res!(std::os::unix::fs::symlink(OsStr::from_bytes(&target), to).map_err(|e| err!(e,
+        "The link {:?} could not be copied to {:?}.", from, to; IO, File, Write)));
+    Ok(())
+}
+
+/// Links cannot be copied here.
+#[cfg(not(unix))]
+pub fn copy_link(from: &Path, _to: &Path) -> Outcome<()> {
+    Err(err!("The link {:?} cannot be copied on this platform.", from; Unimplemented, File))
+}
+
+/// `Err` unless `leaf` is one plain name: no folder, no `..`, not empty.
+fn one_name(leaf: &OsStr) -> Outcome<()> {
+    let mut parts = Path::new(leaf).components();
+    match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(_)), None) => Ok(()),
+        _ => Err(err!("{:?} is not one plain name.", leaf; Invalid, Input, Path)),
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
