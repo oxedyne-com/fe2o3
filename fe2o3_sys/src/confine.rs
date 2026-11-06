@@ -121,6 +121,8 @@ pub fn unshare(kinds: &[Ns]) -> Outcome<()> {
 pub enum Step {
     /// Makes every mount under `at` a slave, so nothing done here propagates back to the host.
     Slave       { at: PathBuf },
+    /// Makes every mount under `at` private: nothing propagates in from the host or out to it.
+    Private     { at: PathBuf },
     /// A fresh tmpfs, read-only once made when `ro`.
     Tmpfs       { at: PathBuf, mode: u32, ro: bool },
     /// A new devpts instance whose `ptmx` serves it alone.
@@ -340,7 +342,8 @@ fn apply_one(s: &Step) -> Outcome<()> {
     let ro_remount = MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY
         | MsFlags::MS_NOSUID | MsFlags::MS_NODEV;
     match s {
-        Step::Slave { at } => mnt(None, at, None, MsFlags::MS_REC | MsFlags::MS_SLAVE, None, s),
+        Step::Slave { at }      => mnt(None, at, None, MsFlags::MS_REC | MsFlags::MS_SLAVE, None, s),
+        Step::Private { at }    => mnt(None, at, None, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None, s),
         Step::Tmpfs { at, mode, ro } => {
             let data = fmt!("mode={:o}", mode);
             res!(mnt(Some("tmpfs"), at, Some("tmpfs"), MsFlags::MS_NOSUID, Some(&data), s));

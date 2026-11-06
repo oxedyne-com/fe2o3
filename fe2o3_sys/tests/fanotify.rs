@@ -22,6 +22,11 @@ use std::{
     },
     os::fd::AsFd,
     path::PathBuf,
+    sync::atomic::{
+        AtomicBool,
+        AtomicUsize,
+        Ordering::SeqCst,
+    },
     time::Duration,
 };
 
@@ -271,4 +276,158 @@ fn test_fanotify_gate_guard_mount_holds_a_new_subfolders_file_as_root() {
     assert!(!by_folder, "a folder mark held a new subfolder's file: the mount mark is not what proves it");
     assert!(by_mount, "the mount mark did not hold a new subfolder's file on its first write");
     assert!(!after, "held after unguard_mount");
+}
+
+fn opath(p: &std::path::Path) -> std::fs::File {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().read(true).custom_flags(nix::fcntl::OFlag::O_PATH.bits()).open(p).expect("open O_PATH")
+}
+
+/// A scratch folder bound onto itself, so a mount mark covers only it.
+fn bound(tag: &str) -> PathBuf {
+    let d = scratch(tag);
+    let st = std::process::Command::new("mount").args(["--bind"]).arg(&d).arg(&d).status().expect("mount");
+    assert!(st.success(), "bind {} onto itself", d.display());
+    d
+}
+
+fn unbind(d: &std::path::Path) {
+    let _ = std::process::Command::new("umount").arg(d).status();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+fn drop_caches() {
+    let st = std::process::Command::new("sh").args(["-c", "sync && echo 3 > /proc/sys/vm/drop_caches"])
+        .status().expect("sh");
+    assert!(st.success(), "drop_caches");
+}
+
+/// Passes every access held by `g` until `stop`, as Kimberlite's watch service does for a file
+/// nobody holds, counting them.
+fn pass_all(g: &Gate, n: &AtomicUsize, stop: &AtomicBool) {
+    while !stop.load(SeqCst) {
+        for a in g.next(Some(Duration::from_millis(20))).expect("next") {
+            if let Access::Held(h) = a {
+                n.fetch_add(1, SeqCst);
+                g.pass(h).expect("pass");
+            }
+        }
+    }
+}
+
+/// The gate's inode marks in its fdinfo: (all, evictable).
+fn marks(g: &Gate) -> (usize, usize) {
+    use std::os::fd::AsRawFd;
+    let s = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", g.as_fd().as_raw_fd())).expect("fdinfo");
+    let mut v = (0, 0);
+    for l in s.lines().filter(|l| l.starts_with("fanotify ino:")) {
+        v.0 += 1;
+        let f = l.split(' ').find_map(|w| w.strip_prefix("mflags:")).expect("mflags");
+        if u32::from_str_radix(f, 16).expect("hex") & 0x200 != 0 { // fixed: FAN_MARK_EVICTABLE
+            v.1 += 1;
+        }
+    }
+    v
+}
+
+/// A passed file's later writes go through in the kernel, as its reads do: the ignore mark
+/// survives a modify (QA um3 B F1: without it every write was a round trip).
+#[test]
+#[ignore]
+fn test_fanotify_gate_pass_lets_later_writes_through_as_root() {
+    use std::os::unix::fs::FileExt;
+    let d = bound("surv");
+    let f = d.join("f");
+    std::fs::write(&f, vec![0u8; 4096]).expect("seed");
+    let g = Gate::new().expect("gate");
+    g.guard_mount(opath(&d)).expect("guard_mount");
+    let (n, stop) = (AtomicUsize::new(0), AtomicBool::new(false));
+    let mut after = 0;
+    std::thread::scope(|sc| {
+        sc.spawn(|| pass_all(&g, &n, &stop));
+        let h = std::fs::OpenOptions::new().write(true).open(&f).expect("open");
+        h.write_at(&[1u8; 4096], 0).expect("first write");
+        let before = n.load(SeqCst);
+        for _ in 0..4000 {
+            h.write_at(&[7u8; 4096], 0).expect("write");
+        }
+        after = n.load(SeqCst) - before;
+        stop.store(true, SeqCst);
+    });
+    drop(g);
+    unbind(&d);
+    assert!(after <= 4, "4000 writes of a passed file were asked {} times", after);
+}
+
+/// The ignore marks pass leaves are evictable, so the inode cache bounds them.
+#[test]
+#[ignore]
+fn test_fanotify_gate_pass_marks_are_evicted_as_root() {
+    let d = bound("evict");
+    let n = 5000;
+    for i in 0..n {
+        std::fs::write(d.join(format!("f{}", i)), b"x").expect("seed");
+    }
+    drop_caches();
+    let g = Gate::new().expect("gate");
+    g.guard_mount(opath(&d)).expect("guard_mount");
+    let (asked, stop) = (AtomicUsize::new(0), AtomicBool::new(false));
+    let (mut m1, mut m2) = ((0, 0), (0, 0));
+    std::thread::scope(|sc| {
+        sc.spawn(|| pass_all(&g, &asked, &stop));
+        for i in 0..n {
+            std::fs::read(d.join(format!("f{}", i))).expect("read");
+        }
+        m1 = marks(&g);
+        drop_caches();
+        m2 = marks(&g);
+        stop.store(true, SeqCst);
+    });
+    drop(g);
+    unbind(&d);
+    assert!(m1.0 >= n * 9 / 10 && m1.1 == m1.0, "pass marks after reads {:?}: not all evictable", m1);
+    assert!(m2.0 <= n / 10, "{} pass marks stood after the inode cache was dropped", m2.0);
+}
+
+/// An access queued before a hold and answered after it by pass: the kernel refuses the ignore
+/// mark on the held inode (an evictable mark never joins a non-evictable one), so the access is
+/// denied and the next read is asked.
+#[test]
+#[ignore]
+fn test_fanotify_gate_pass_on_a_held_inode_is_refused_as_root() {
+    let d = bound("held");
+    let f = d.join("f");
+    std::fs::write(&f, b"before").expect("seed");
+    let g = Gate::new().expect("gate");
+    g.guard_mount(opath(&d)).expect("guard_mount");
+    let p = f.clone();
+    let r1 = std::thread::spawn(move || std::fs::read(&p));
+    let h = loop {
+        if let Some(Access::Held(h)) = g.next(Some(Duration::from_secs(5))).expect("next").pop() {
+            break h;
+        }
+    };
+    let fo = opath(&f);
+    g.unpass(&fo).expect("unpass");
+    g.hold(&fo).expect("hold");
+    let pr = g.pass(h);
+    let first = r1.join().expect("join");
+    let p = f.clone();
+    let r2 = std::thread::spawn(move || std::fs::read(&p));
+    let mut asked = 0;
+    let end = std::time::Instant::now() + Duration::from_secs(5);
+    while !r2.is_finished() && std::time::Instant::now() < end {
+        for a in g.next(Some(Duration::from_millis(100))).expect("next") {
+            if let Access::Held(h) = a {
+                asked += 1;
+                h.answer(true).expect("allow");
+            }
+        }
+    }
+    let _ = r2.join();
+    drop(g);
+    unbind(&d);
+    assert!(pr.is_err(), "pass on a held inode left an ignore mark");
+    assert!(first.is_err(), "the access queued before the hold went through unkept");
+    assert!(asked > 0, "a read of a held inode was not asked");
 }

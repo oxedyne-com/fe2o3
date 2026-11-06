@@ -31,7 +31,9 @@
 //! A mount mark asks about every read of every file through the mount, a round trip to the
 //! holder each (12x a small-file read unguarded, VM 06 Nov 2026). [`Gate::pass`] allows an access
 //! and adds an evictable ignore mark for its inode, so later accesses of a file nobody holds are
-//! let through in the kernel. A modify drops the mark (no `FAN_MARK_IGNORED_SURV_MODIFY`), and the
+//! let through in the kernel. The mark survives a modify (`FAN_MARK_IGNORED_SURV_MODIFY`): a hold
+//! re-asks through [`Gate::unpass`] on the inode, never by a write dropping it, so a passed file's
+//! writes cost no round trip either (each was one, 25-38x on small writes, VM 06 Nov 2026). The
 //! inode cache bounds the marks (`FAN_MARK_EVICTABLE`, Linux 5.19+). The ignore mark lets accesses
 //! through whatever else is marked, so a holder calls [`Gate::unpass`] before [`Gate::hold`].
 //!
@@ -448,13 +450,13 @@ impl Gate {
         self.mark(MarkFlags::FAN_MARK_ADD, 0, file)
     }
 
-    /// Lets the held access `h` go on, and its file's later accesses until it is modified, held
-    /// again through [`Gate::unpass`], or its inode leaves the cache.  Where the ignore mark
+    /// Lets the held access `h` go on, and its file's later accesses, writes included, until
+    /// [`Gate::unpass`] or its inode leaves the cache.  Where the ignore mark
     /// cannot be added the access is denied.
     pub fn pass(&self, h: Held) -> Outcome<()> {
         if let Some(fd) = h.fd() {
             res!(self.mark(MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_IGNORE
-                | MarkFlags::FAN_MARK_EVICTABLE, 0, fd));
+                | MarkFlags::FAN_MARK_EVICTABLE | MarkFlags::FAN_MARK_IGNORED_SURV_MODIFY, 0, fd));
         }
         h.answer(true)
     }
