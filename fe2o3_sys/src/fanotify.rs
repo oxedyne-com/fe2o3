@@ -28,6 +28,13 @@
 //! any depth, is gated. The accessing process waits until
 //! [`Held::answer`] allows it.
 //!
+//! A mount mark asks about every read of every file through the mount, a round trip to the
+//! holder each (12x a small-file read unguarded, VM 06 Nov 2026). [`Gate::pass`] allows an access
+//! and adds an evictable ignore mark for its inode, so later accesses of a file nobody holds are
+//! let through in the kernel. A modify drops the mark (no `FAN_MARK_IGNORED_SURV_MODIFY`), and the
+//! inode cache bounds the marks (`FAN_MARK_EVICTABLE`, Linux 5.19+). The ignore mark lets accesses
+//! through whatever else is marked, so a holder calls [`Gate::unpass`] before [`Gate::hold`].
+//!
 //! A gate fails closed. Its queue is unlimited (`FAN_UNLIMITED_QUEUE`): a bounded one drops a
 //! permission event it cannot fit and the kernel lets that access through. A [`Held`] dropped
 //! unanswered denies its access. Closing a group allows every access it still holds, so
@@ -427,7 +434,7 @@ fn respond(fan: &Fanotify, ev: &FanotifyEvent, allow: bool) -> Outcome<()> {
 impl Gate {
     pub fn new() -> Outcome<Self> {
         let flags = InitFlags::FAN_CLASS_PRE_CONTENT | InitFlags::FAN_CLOEXEC | InitFlags::FAN_NONBLOCK
-            | InitFlags::FAN_UNLIMITED_QUEUE;
+            | InitFlags::FAN_UNLIMITED_QUEUE | InitFlags::FAN_UNLIMITED_MARKS;
         let fan = res!(Fanotify::init(flags, EventFFlags::O_RDONLY | EventFFlags::O_LARGEFILE
             | EventFFlags::O_CLOEXEC).map_err(|e| err!(e,
             "fanotify_init for a pre-content gate failed (it needs CAP_SYS_ADMIN)."; IO, System)));
@@ -436,8 +443,32 @@ impl Gate {
 
     /// Holds the next access of the open file `file` (its inode, whatever names it; an `O_PATH`
     /// descriptor will do).  A descriptor already open on it is not asked about: see the module note.
+    /// A file [`Gate::pass`] let through stays let through until [`Gate::unpass`].
     pub fn hold(&self, file: impl AsFd) -> Outcome<()> {
         self.mark(MarkFlags::FAN_MARK_ADD, 0, file)
+    }
+
+    /// Lets the held access `h` go on, and its file's later accesses until it is modified, held
+    /// again through [`Gate::unpass`], or its inode leaves the cache.  Where the ignore mark
+    /// cannot be added the access is denied.
+    pub fn pass(&self, h: Held) -> Outcome<()> {
+        if let Some(fd) = h.fd() {
+            res!(self.mark(MarkFlags::FAN_MARK_ADD | MarkFlags::FAN_MARK_IGNORE
+                | MarkFlags::FAN_MARK_EVICTABLE, 0, fd));
+        }
+        h.answer(true)
+    }
+
+    /// Removes the ignore mark [`Gate::pass`] left on `file`, if any.
+    pub fn unpass(&self, file: impl AsFd) -> Outcome<()> {
+        let mask = MaskFlags::from_bits_retain(FAN_PRE_ACCESS | FAN_OPEN_PERM);
+        let at = fmt!("/proc/self/fd/{}", file.as_fd().as_raw_fd());
+        match self.fan.mark(MarkFlags::FAN_MARK_REMOVE | MarkFlags::FAN_MARK_IGNORE, mask,
+            nix::fcntl::AT_FDCWD, Some(Path::new(&at)))
+        {
+            Ok(()) | Err(Errno::ENOENT) => Ok(()), // ENOENT: the inode has no mark of this group
+            Err(e) => Err(err!(e, "Removing a passed file's ignore mark failed."; IO, System)),
+        }
     }
 
     /// Stops holding `file`'s accesses.
