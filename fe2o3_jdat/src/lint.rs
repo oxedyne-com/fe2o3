@@ -123,6 +123,9 @@ fn key_from_dat(dat: &Dat) -> Outcome<Key> {
     })
 }
 
+/// The release's rule table, so an installer can write it where a daimon cannot reach.
+pub const HEMATITE_RULES: &str = include_str!("../../hematite_rules.jdat");
+
 /// Reads a Hematite rule table. Unlike a baseline, an absent table is an error: a gate with no
 /// rules would pass everything.
 ///
@@ -139,11 +142,15 @@ pub fn load_rules(path: &Path) -> Outcome<Rules> {
         Err(e)  => return Err(err!(e, "While reading the Hematite rule table {}.", path.display();
             IO, File, Read)),
     };
-    let dat = res!(Dat::decode_string(s));
-    match rules_from_dat(&dat) {
+    match parse_rules(&s) {
         Ok(r)   => Ok(r),
         Err(e)  => Err(err!(e, "In the Hematite rule table {}.", path.display(); Invalid, Input)),
     }
+}
+
+pub fn parse_rules(text: &str) -> Outcome<Rules> {
+    let dat = res!(Dat::decode_string(text));
+    rules_from_dat(&dat)
 }
 
 pub fn rules_from_dat(dat: &Dat) -> Outcome<Rules> {

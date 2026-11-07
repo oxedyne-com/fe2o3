@@ -215,3 +215,16 @@ fn test_hematite_unknown_check_is_refused_and_seq_rule_needs_no_code() -> Outcom
     assert_eq!(hits(&rep), vec![(fmt!("Q1"), 2)]);
     Ok(())
 }
+
+#[test]
+fn test_hematite_built_in_table_is_the_file() -> Outcome<()> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("hematite_rules.jdat");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(s)   => s,
+        Err(e)  => return Err(err!(e, "While reading {}.", path.display(); IO, File, Read)),
+    };
+    assert_eq!(lint::HEMATITE_RULES, text);
+    let rules = res!(lint::parse_rules(lint::HEMATITE_RULES));
+    assert_eq!(rules.rules.len(), res!(lint::load_rules(&path)).rules.len());
+    Ok(())
+}

@@ -1,7 +1,8 @@
 //! `lint_hematite --rules <file> [--repo <dir>] (--staged | --base <rev> [--head <rev>])`: the
 //! Hematite gate on the lines a change adds, the staged change or `<base>...<head>`. Prints one
 //! `<file>:<line>: <rule> -- <fix>` line per breach and one line per `allowlist hematite`, and
-//! exits 1 on a breach, 2 when it cannot run.
+//! exits 1 on a breach, 2 when it cannot run. `lint_hematite --print-rules` prints the table built
+//! in, for an installer to write outside the tree.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::lint;
@@ -50,6 +51,10 @@ fn run() -> Outcome<bool> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--print-rules" => {
+                print!("{}", lint::HEMATITE_RULES);
+                return Ok(true);
+            }
             "--rules"   => rules = args.next().map(PathBuf::from),
             "--repo"    => repo = res!(args.next().map(PathBuf::from)
                 .ok_or_else(|| err!("--repo needs a directory."; Missing, Input))),
@@ -59,7 +64,7 @@ fn run() -> Outcome<bool> {
                 .ok_or_else(|| err!("--head needs a revision."; Missing, Input))),
             _           => return Err(err!(
                 "Unknown argument '{}'; usage: lint_hematite --rules <file> [--repo <dir>] \
-                (--staged | --base <rev> [--head <rev>]).", a; Invalid, Input)),
+                (--staged | --base <rev> [--head <rev>]) | --print-rules.", a; Invalid, Input)),
         }
     }
     let rules = res!(lint::load_rules(&res!(rules
