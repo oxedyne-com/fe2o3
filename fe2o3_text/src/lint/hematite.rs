@@ -1,0 +1,686 @@
+//! The Hematite gate (D-20261107-02): the mechanical rules of `~/usr/CLAUDE.md`, checked only on
+//! the lines a change adds, so that new code meets the spec and existing code is left alone.
+//!
+//! The rules are a table (`Rules`, read from `.jdat` by `fe2o3_jdat::lint::load_rules`). Each rule
+//! names one of the `Check`s below, so a rule made of a token sequence or a word list is added to
+//! the table without code. This is a token scanner, not a parser. What it does not count:
+//!
+//! - strings, chars and comments, which are tokens or trivia from `fmt::lex` (bar `CommentWords`,
+//!   which reads only comments, and outside backticks there),
+//! - a `?` that does not follow an expression (`?Sized`, `<?>`), and any `?` or raw lock call in
+//!   a `macro_rules!` body, where `?` is a repetition and the lock macros themselves are defined,
+//! - `.lock()` on `stdin()`, `stdout()` or `stderr()`, which are not data locks,
+//! - `pub use` in import order, since a re-export is placed for the reader of the module,
+//! - test code (a `tests` directory, a `tests.rs` or `_tests.rs` file, a `#[test]` or
+//!   `#[cfg(test)]` item) for a rule whose `in_tests` is false,
+//! - a line marked `// fixed: <why>` for a rule whose `fixed_ok` is true,
+//! - any line carrying `allowlist hematite`, which is reported in `Report::allows` so that the
+//!   escape is shown, not silent.
+
+use crate::{
+    fmt::{
+        cst::{
+            Token,
+            TokenKind,
+        },
+        lex::{
+            lex,
+            rust_tokens,
+        },
+    },
+    lint::mutable::{
+        self,
+        fixed_lines,
+        group_end,
+        is_ident,
+        is_keyword,
+        is_punct,
+        item_end,
+        Lang,
+        LineIndex,
+    },
+    secret,
+};
+
+use oxedyne_fe2o3_core::prelude::*;
+
+use std::{
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
+    fmt,
+};
+
+
+/// What a rule looks for.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Check {
+    Seq(Vec<String>),           // consecutive code tokens with these texts
+    Question,                   // the `?` operator after an expression
+    OkArgs,                     // `ok!` given more than one argument
+    RawLock,                    // `.read()`, `.write()` or `.lock()` with no argument
+    DocMember,                  // `///` on an enum variant, struct field or constant
+    DocHeading(Vec<String>),    // a `# <word>` heading in a doc comment
+    ImportOrder,                // local, local libraries, std, third party; one `use` a line
+    Credential,                 // a credential shape, in a file of any kind
+    Mutable,                    // a literal of mutable data, as `lint::mutable` finds it
+    CommentWords(Vec<String>),  // a comment word starting with one of these, case aside
+}
+
+impl Check {
+    /// The check named `name`; `list` is the `seq` or `words` of the checks that take one.
+    pub fn of(name: &str, list: Vec<String>) -> Outcome<Self> {
+        let takes_list = matches!(name, "seq" | "doc_heading" | "comment_words");
+        if takes_list && list.is_empty() {
+            return Err(err!("The Hematite check '{}' needs a non-empty list.", name;
+                Invalid, Input, Missing));
+        }
+        if !takes_list && !list.is_empty() {
+            return Err(err!("The Hematite check '{}' takes no list.", name; Invalid, Input));
+        }
+        Ok(match name {
+            "seq"           => Self::Seq(list),
+            "question"      => Self::Question,
+            "ok_args"       => Self::OkArgs,
+            "raw_lock"      => Self::RawLock,
+            "doc_member"    => Self::DocMember,
+            "doc_heading"   => Self::DocHeading(list),
+            "import_order"  => Self::ImportOrder,
+            "credential"    => Self::Credential,
+            "mutable"       => Self::Mutable,
+            "comment_words" => Self::CommentWords(list),
+            _               => return Err(err!("Unknown Hematite check '{}'.", name;
+                Invalid, Input)),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Rule {
+    pub id:         String,
+    pub on:         bool,
+    pub in_tests:   bool,   // applies in test code too
+    pub fixed_ok:   bool,   // a `// fixed: <why>` marker exempts the line
+    pub msg:        String, // told to the author after `<file>:<line>: `
+    pub check:      Check,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Rules {
+    pub local_crates:   Vec<String>, // name prefixes of the local libraries, the second import group
+    pub rules:          Vec<Rule>,
+}
+
+/// A file as a change leaves it, with the lines the change adds (1-based).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Added {
+    pub file:   String,
+    pub src:    String,
+    pub lines:  BTreeSet<usize>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Breach {
+    pub file:   String,
+    pub line:   usize,
+    pub rule:   String,
+    pub msg:    String,
+}
+
+impl fmt::Display for Breach {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}:{}: {}", self.file, self.line, self.msg)
+    }
+}
+
+/// An added line carrying `allowlist hematite`.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Allowed {
+    pub file:   String,
+    pub line:   usize,
+    pub text:   String,
+}
+
+impl fmt::Display for Allowed {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}:{}: allowlist hematite: {}", self.file, self.line, self.text.trim())
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Report {
+    pub breaches:   Vec<Breach>,
+    pub allows:     Vec<Allowed>,
+}
+
+impl Report {
+    pub fn is_clean(&self) -> bool {
+        self.breaches.is_empty()
+    }
+}
+
+/// The lines each file gains in a unified diff, by the file's new path. Run git with
+/// `--src-prefix=a/ --dst-prefix=b/` so that the new path reads `b/<path>`.
+pub fn added_lines(diff: &str) -> BTreeMap<String, BTreeSet<usize>> {
+    let mut out: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    let mut file: Option<String> = None;
+    let mut old_left = 0usize;
+    let mut new_left = 0usize;
+    let mut at = 0usize;
+    for l in diff.lines() {
+        if old_left > 0 || new_left > 0 {
+            match l.as_bytes().first() {
+                Some(b'+') if new_left > 0 => {
+                    if let Some(f) = &file {
+                        out.entry(f.clone()).or_default().insert(at);
+                    }
+                    at += 1;
+                    new_left -= 1;
+                    continue;
+                }
+                Some(b'-') if old_left > 0 => {
+                    old_left -= 1;
+                    continue;
+                }
+                Some(b' ') => {
+                    old_left = old_left.saturating_sub(1);
+                    new_left = new_left.saturating_sub(1);
+                    at += 1;
+                    continue;
+                }
+                Some(b'\\') => continue,
+                _ => {
+                    old_left = 0;
+                    new_left = 0;
+                }
+            }
+        }
+        if let Some(p) = l.strip_prefix("+++ ") {
+            file = match p {
+                "/dev/null" => None,
+                _           => Some(p.strip_prefix("b/").unwrap_or(p).to_string()),
+            };
+        } else if let Some(h) = l.strip_prefix("@@ ") {
+            let mut parts = h.split_whitespace();
+            let old = parts.next().and_then(|p| p.strip_prefix('-')).map(span_of);
+            let new = parts.next().and_then(|p| p.strip_prefix('+')).map(span_of);
+            if let (Some((_, o)), Some((s, n))) = (old, new) {
+                old_left = o;
+                new_left = n;
+                at = s;
+            }
+        }
+    }
+    out
+}
+
+/// `start[,count]` of a hunk header, the count 1 when absent.
+fn span_of(s: &str) -> (usize, usize) {
+    let mut it = s.splitn(2, ',');
+    let start = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let count = it.next().map(|v| v.parse().unwrap_or(0)).unwrap_or(1);
+    (start, count)
+}
+
+/// Checks the added lines of each file against the rules that are on.
+pub fn check(added: &[Added], rules: &Rules) -> Outcome<Report> {
+    let mut rep = Report::default();
+    for a in added {
+        res!(check_one(a, rules, &mut rep));
+    }
+    rep.breaches.sort_by(|x, y| (&x.file, x.line, &x.rule).cmp(&(&y.file, y.line, &y.rule)));
+    rep.breaches.dedup();
+    Ok(rep)
+}
+
+fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
+    if a.lines.is_empty() {
+        return Ok(());
+    }
+    let text: Vec<&str> = a.src.split('\n').collect();
+    let mut allowed = BTreeSet::new();
+    for n in &a.lines {
+        if let Some(l) = text.get(n.wrapping_sub(1)) {
+            if allow_marked(l) {
+                allowed.insert(*n);
+                rep.allows.push(Allowed { file: a.file.clone(), line: *n, text: l.to_string() });
+            }
+        }
+    }
+    let rust = match a.file.ends_with(".rs") {
+        true    => Some(res!(RustSrc::new(&a.src, &a.file))),
+        false   => None,
+    };
+    let test_file = is_test_path(&a.file);
+    for r in rules.rules.iter().filter(|r| r.on) {
+        let lines = match (&r.check, &rust) {
+            (Check::Credential, _) => match secret::skip_path(a.file.as_bytes()) {
+                true    => Vec::new(),
+                false   => secret::scan(a.src.as_bytes()).iter().map(|f| f.line).collect(),
+            },
+            (_, Some(rs))   => res!(rs.find(&r.check, rules, &a.lines)),
+            (_, None)       => Vec::new(),
+        };
+        for line in lines {
+            if !a.lines.contains(&line) || allowed.contains(&line) {
+                continue;
+            }
+            let in_test = test_file || rust.as_ref().map(|rs| rs.tests.contains(&line)).unwrap_or(false);
+            if in_test && !r.in_tests {
+                continue;
+            }
+            if r.fixed_ok && rust.as_ref().map(|rs| rs.fixed.contains(&line)).unwrap_or(false) {
+                continue;
+            }
+            rep.breaches.push(Breach {
+                file:   a.file.clone(),
+                line,
+                rule:   r.id.clone(),
+                msg:    r.msg.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Does the line carry `allowlist hematite`, with a space, `_` or `-` between, in any case?
+fn allow_marked(line: &str) -> bool {
+    line.to_lowercase().replace(['_', '-'], " ").contains("allowlist hematite")
+}
+
+fn is_test_path(file: &str) -> bool {
+    let mut parts = file.split('/').peekable();
+    while let Some(p) = parts.next() {
+        if parts.peek().is_none() {
+            return p == "tests.rs" || p.ends_with("_tests.rs");
+        }
+        if p == "tests" {
+            return true;
+        }
+    }
+    false
+}
+
+/// One Rust source, lexed once for every rule.
+struct RustSrc<'a> {
+    src:    &'a str,
+    toks:   Vec<Token>,
+    lines:  LineIndex,
+    code:   Vec<usize>,         // indices of the tokens that are code, not docs or attributes
+    macros: Vec<bool>,          // inside a `macro_rules!` body
+    tests:  BTreeSet<usize>,    // lines inside a test item
+    fixed:  BTreeSet<usize>,    // lines covered by a `// fixed:` marker
+}
+
+impl<'a> RustSrc<'a> {
+    fn new(src: &'a str, file: &str) -> Outcome<Self> {
+        let toks = res!(lex(src, &rust_tokens()));
+        let lines = LineIndex::new(src);
+        let code = (0..toks.len()).filter(|i| !matches!(toks[*i].kind,
+            TokenKind::DocComment(_) | TokenKind::Attribute | TokenKind::Eof)).collect();
+        let mut thin = Vec::new();
+        let fixed = fixed_lines(src, &toks, &lines, file, &mut thin);
+        let mut macros = vec![false; toks.len()];
+        let mut tests = BTreeSet::new();
+        let mut i = 0;
+        while i < toks.len() {
+            let t = &toks[i];
+            if is_ident(t, "macro_rules") && i + 3 < toks.len() && is_punct(&toks[i + 1], '!') {
+                let end = group_end(&toks, i + 3);
+                for m in macros.iter_mut().take(end).skip(i) {
+                    *m = true;
+                }
+                i = end.max(i + 1);
+                continue;
+            }
+            if t.kind == TokenKind::Attribute {
+                let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
+                if a == "#[test]" || a.starts_with("#[cfg(test") || a.contains("::test]")
+                    || a.starts_with("#[cfg(all(test") || a.starts_with("#[cfg(any(test")
+                {
+                    let end = item_end(&toks, i + 1).min(toks.len());
+                    if end > i {
+                        let first = lines.line_of(t.span.start);
+                        let last = lines.line_of(toks[end - 1].span.end.saturating_sub(1));
+                        tests.extend(first..=last);
+                    }
+                    i = end.max(i + 1);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        Ok(Self { src, toks, lines, code, macros, tests, fixed })
+    }
+
+    fn line(&self, i: usize) -> usize {
+        self.lines.line_of(self.toks[i].span.start)
+    }
+
+    /// The lines where `check` is breached; `added` lets a multi-line breach name its added line.
+    fn find(&self, check: &Check, rules: &Rules, added: &BTreeSet<usize>) -> Outcome<Vec<usize>> {
+        Ok(match check {
+            Check::Seq(seq)             => self.seq(seq),
+            Check::Question             => self.question(),
+            Check::OkArgs               => self.ok_args(),
+            Check::RawLock              => self.raw_lock(),
+            Check::DocMember            => self.doc_member(added),
+            Check::DocHeading(words)    => self.doc_heading(words),
+            Check::ImportOrder          => self.import_order(&rules.local_crates, added),
+            Check::CommentWords(words)  => self.comment_words(words),
+            Check::Mutable              => {
+                let scan = res!(mutable::scan(self.src, Lang::Rust, ""));
+                scan.hits.iter().map(|h| h.line)
+                    .chain(scan.bad_fixed.iter().map(|m| m.line)).collect()
+            }
+            Check::Credential           => Vec::new(),
+        })
+    }
+
+    fn seq(&self, seq: &[String]) -> Vec<usize> {
+        let mut out = Vec::new();
+        if seq.len() > self.code.len() {
+            return out;
+        }
+        for w in self.code.windows(seq.len()) {
+            if w.iter().zip(seq).all(|(i, s)| self.toks[*i].text == *s) {
+                out.push(self.line(w[0]));
+            }
+        }
+        out
+    }
+
+    fn question(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (k, i) in self.code.iter().enumerate() {
+            if !is_punct(&self.toks[*i], '?') || self.macros[*i] || k == 0 {
+                continue;
+            }
+            let prev = &self.toks[self.code[k - 1]];
+            let after_expr = match &prev.kind {
+                TokenKind::Punct(')') | TokenKind::Punct(']') | TokenKind::Punct('}') => true,
+                TokenKind::Ident                                                     => true,
+                TokenKind::Keyword(w)   => w == "await" || w == "self",
+                _                       => false,
+            };
+            let bound = self.code.get(k + 1)
+                .map(|n| self.toks[*n].kind == TokenKind::Ident).unwrap_or(false);
+            if after_expr && !bound {
+                out.push(self.line(*i));
+            }
+        }
+        out
+    }
+
+    fn ok_args(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (k, i) in self.code.iter().enumerate() {
+            if !is_ident(&self.toks[*i], "ok") || k + 2 >= self.code.len()
+                || !is_punct(&self.toks[self.code[k + 1]], '!')
+            {
+                continue;
+            }
+            let mut depth = 0isize;
+            for (n, j) in self.code[k + 2..].iter().enumerate() {
+                match self.toks[*j].kind {
+                    TokenKind::Punct('(') | TokenKind::Punct('[') | TokenKind::Punct('{') => depth += 1,
+                    TokenKind::Punct(')') | TokenKind::Punct(']') | TokenKind::Punct('}') => depth -= 1,
+                    TokenKind::Punct(',') if depth == 1 => {
+                        // A trailing comma is still one argument.
+                        let next = self.code.get(k + 3 + n).map(|x| &self.toks[*x].kind);
+                        if !matches!(next, Some(TokenKind::Punct(')')) | Some(TokenKind::Punct(']'))
+                            | Some(TokenKind::Punct('}')))
+                        {
+                            out.push(self.line(*i));
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                if depth <= 0 {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn raw_lock(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (k, i) in self.code.iter().enumerate() {
+            let t = &self.toks[*i];
+            if self.macros[*i] || k == 0 || k + 2 >= self.code.len()
+                || !(is_ident(t, "read") || is_ident(t, "write") || is_ident(t, "lock"))
+                || !is_punct(&self.toks[self.code[k - 1]], '.')
+                || !is_punct(&self.toks[self.code[k + 1]], '(')
+                || !is_punct(&self.toks[self.code[k + 2]], ')')
+            {
+                continue;
+            }
+            let io = k >= 4
+                && is_punct(&self.toks[self.code[k - 2]], ')')
+                && is_punct(&self.toks[self.code[k - 3]], '(')
+                && ["stdin", "stdout", "stderr"].iter()
+                    .any(|n| is_ident(&self.toks[self.code[k - 4]], n));
+            if !io {
+                out.push(self.line(*i));
+            }
+        }
+        out
+    }
+
+    /// The first added line of each `///` run on a field, variant or constant.
+    fn doc_member(&self, added: &BTreeSet<usize>) -> Vec<usize> {
+        let toks = &self.toks;
+        // The braces that open a struct, union or enum body, or an enum variant's fields.
+        let mut members = BTreeSet::new();
+        let mut enums = BTreeSet::new();
+        let mut i = 0;
+        while i < toks.len() {
+            let t = &toks[i];
+            let is_enum = is_keyword(t, "enum");
+            if (is_enum || is_keyword(t, "struct") || is_ident(t, "union"))
+                && toks.get(i + 1).map(|n| n.kind == TokenKind::Ident).unwrap_or(false)
+            {
+                let mut j = i + 2;
+                while j < toks.len() && !matches!(toks[j].kind,
+                    TokenKind::Punct('{') | TokenKind::Punct(';') | TokenKind::Punct('('))
+                {
+                    j += 1;
+                }
+                if j < toks.len() && is_punct(&toks[j], '{') {
+                    members.insert(j);
+                    if is_enum {
+                        enums.insert(j);
+                    }
+                }
+            }
+            i += 1;
+        }
+        let mut out = Vec::new();
+        let mut stack: Vec<usize> = Vec::new();
+        let mut i = 0;
+        while i < toks.len() {
+            match &toks[i].kind {
+                TokenKind::Punct('{') => {
+                    if stack.last().map(|o| enums.contains(o)).unwrap_or(false)
+                        && i > 0 && toks[i - 1].kind == TokenKind::Ident
+                    {
+                        members.insert(i);
+                    }
+                    stack.push(i);
+                }
+                TokenKind::Punct('}') => {
+                    stack.pop();
+                }
+                TokenKind::DocComment(d) if d.starts_with("///") => {
+                    let mut end = i;
+                    while end < toks.len() && matches!(&toks[end].kind,
+                        TokenKind::DocComment(d) if d.starts_with("///"))
+                    {
+                        end += 1;
+                    }
+                    let in_members = stack.last().map(|o| members.contains(o)).unwrap_or(false);
+                    if in_members || self.const_at(end) {
+                        if let Some(l) = (i..end).map(|n| self.line(n)).find(|l| added.contains(l)) {
+                            out.push(l);
+                        }
+                    }
+                    i = end;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Does a `const` item, not a `const fn`, start at `i`, past attributes and visibility?
+    fn const_at(&self, mut i: usize) -> bool {
+        let toks = &self.toks;
+        while i < toks.len() && toks[i].kind == TokenKind::Attribute {
+            i += 1;
+        }
+        if i < toks.len() && is_keyword(&toks[i], "pub") {
+            i += 1;
+            if i < toks.len() && is_punct(&toks[i], '(') {
+                i = group_end(toks, i);
+            }
+        }
+        i + 1 < toks.len() && is_keyword(&toks[i], "const")
+            && !matches!(&toks[i + 1].kind, TokenKind::Keyword(k)
+                if k == "fn" || k == "unsafe" || k == "async" || k == "extern")
+    }
+
+    fn doc_heading(&self, words: &[String]) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (i, t) in self.toks.iter().enumerate() {
+            if let TokenKind::DocComment(d) = &t.kind {
+                let body = d.get(3..).unwrap_or("").trim_start();
+                if let Some(h) = body.strip_prefix('#') {
+                    let word = h.trim_start_matches('#').split_whitespace().next().unwrap_or("");
+                    if words.iter().any(|w| w == word) {
+                        out.push(self.line(i));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn import_order(&self, local: &[String], added: &BTreeSet<usize>) -> Vec<usize> {
+        let toks = &self.toks;
+        let mut out = Vec::new();
+        // (class, line) of the highest group in the block so far, and where the block continues.
+        let mut top: Option<(u8, usize)> = None;
+        let mut next_use: Option<usize> = None;
+        let mut last_line = 0usize;
+        for (k, i) in self.code.iter().enumerate() {
+            if !is_keyword(&toks[*i], "use") {
+                continue;
+            }
+            let prev = match k {
+                0 => None,
+                _ => Some(&toks[self.code[k - 1]]),
+            };
+            if prev.map(|p| is_keyword(p, "pub") || is_punct(p, ')')).unwrap_or(false) {
+                continue;
+            }
+            let line = self.line(*i);
+            if next_use != Some(*i) {
+                top = None;
+            } else if line == last_line {
+                out.push(line);
+            }
+            let class = self.use_class(*i, local);
+            match top {
+                Some((c, l)) if class < c => {
+                    if added.contains(&line) {
+                        out.push(line);
+                    } else if added.contains(&l) {
+                        out.push(l);
+                    }
+                }
+                Some((c, _)) if class == c => {}
+                _ => top = Some((class, line)),
+            }
+            let mut j = item_end(toks, *i);
+            while j < toks.len() && matches!(toks[j].kind,
+                TokenKind::Attribute | TokenKind::DocComment(_))
+            {
+                j += 1;
+            }
+            next_use = Some(j);
+            last_line = self.lines.line_of(toks[j.min(toks.len()) - 1].span.start);
+        }
+        out
+    }
+
+    /// 0 local, 1 local library, 2 std, 3 third party, by the first segment of a `use` path.
+    fn use_class(&self, i: usize, local: &[String]) -> u8 {
+        let mut j = i + 1;
+        while j < self.toks.len() && self.toks[j].kind == TokenKind::Operator(fmt!("::")) {
+            j += 1;
+        }
+        let first = match self.toks.get(j) {
+            Some(t) => t.text.as_str(),
+            None    => "",
+        };
+        match first {
+            "crate" | "self" | "super"                          => 0,
+            _ if local.iter().any(|p| first.starts_with(p.as_str())) => 1,
+            "std" | "core" | "alloc"                            => 2,
+            _                                                   => 3,
+        }
+    }
+
+    fn comment_words(&self, words: &[String]) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut from = 0usize;
+        for t in &self.toks {
+            let gap = self.src.get(from..t.span.start).unwrap_or("");
+            self.gap_comments(gap, from, words, &mut out);
+            if let TokenKind::DocComment(d) = &t.kind {
+                if has_word(d, words) {
+                    out.push(self.lines.line_of(t.span.start));
+                }
+            }
+            from = t.span.end.max(from);
+        }
+        out
+    }
+
+    /// The lines of comments in `gap` (whitespace and comments only, at byte `at`) holding a word.
+    fn gap_comments(&self, gap: &str, at: usize, words: &[String], out: &mut Vec<usize>) {
+        let mut rest = gap;
+        let mut pos = at;
+        while let Some(s) = rest.find('/') {
+            let after = &rest[s..];
+            let len = match (after.starts_with("//"), after.starts_with("/*")) {
+                (true, _)   => after.find('\n').unwrap_or(after.len()),
+                (_, true)   => after.find("*/").map(|e| e + 2).unwrap_or(after.len()),
+                _           => 1,
+            };
+            if len > 1 {
+                let mut line_at = pos + s;
+                for piece in after[..len].split('\n') {
+                    if has_word(piece, words) {
+                        out.push(self.lines.line_of(line_at));
+                    }
+                    line_at += piece.len() + 1;
+                }
+            }
+            pos += s + len;
+            rest = &after[len..];
+        }
+    }
+}
+
+/// Does `text`, outside backticks, hold a word starting with one of `words`, case aside?
+fn has_word(text: &str, words: &[String]) -> bool {
+    let plain: String = text.split('`').step_by(2).collect::<Vec<_>>().join(" ").to_lowercase();
+    plain.split(|c: char| !c.is_alphanumeric())
+        .any(|w| words.iter().any(|p| w.starts_with(p.to_lowercase().as_str())))
+}

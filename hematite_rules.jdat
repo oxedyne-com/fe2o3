@@ -1,0 +1,36 @@
+# The Hematite gate's rule table (fe2o3_text::lint::hematite, read by fe2o3_jdat::lint::load_rules).
+# Start set: mgr-qa-b's list G1-G13, ~/usr/code/ai/claude/briefs/hematite_rules_daimon_check.md part A.
+# A rule is added here without code: "check" is one of seq (consecutive code tokens), comment_words,
+# doc_heading (each with a list), question, ok_args, raw_lock, doc_member, import_order, credential,
+# mutable.  "in_tests" false exempts test code; "fixed_ok" true lets "// fixed: <why>" exempt a line.
+{
+	"local_crates": ["oxedyne_"],
+	"rules": [
+		{ "id": "G1", "check": "seq", "seq": [".", "unwrap", "(", ")"], "on": true, "in_tests": true, "fixed_ok": false,
+		  "msg": "unwrap() -- use res!(x) or res!(x.ok_or_else(|| err!(\"…\"; Missing)))" },
+		{ "id": "G2", "check": "seq", "seq": [".", "expect", "("], "on": true, "in_tests": true, "fixed_ok": false,
+		  "msg": "expect() -- same as unwrap: use res!/err!" },
+		{ "id": "G3", "check": "seq", "seq": ["unsafe"], "on": true, "in_tests": true, "fixed_ok": false,
+		  "msg": "unsafe -- not allowed in this codebase" },
+		{ "id": "G4", "check": "question", "on": true, "in_tests": true, "fixed_ok": false,
+		  "msg": "? operator -- use res!(expr) or ok!(expr)" },
+		{ "id": "G5", "check": "ok_args", "on": true, "in_tests": true, "fixed_ok": false,
+		  "msg": "ok!() takes one argument -- use res!(expr, \"message\") for context" },
+		{ "id": "G6", "check": "raw_lock", "on": true, "in_tests": true, "fixed_ok": false,
+		  "msg": "raw lock -- use res!(lock_read!(x)) / lock_write! / lock_mutex!" },
+		{ "id": "G7", "check": "doc_member", "on": true, "in_tests": false, "fixed_ok": false,
+		  "msg": "/// on a variant/field/constant -- use an aligned trailing // or a 1-3 word // banner" },
+		{ "id": "G8", "check": "doc_heading", "words": ["Returns", "Errors"], "on": true, "in_tests": false, "fixed_ok": false,
+		  "msg": "# Returns/# Errors -- remove; the err! message names the value, position and phase" },
+		{ "id": "G9", "check": "import_order", "on": true, "in_tests": false, "fixed_ok": false,
+		  "msg": "import order -- local, fe2o3, std, third party; one use per line" },
+		{ "id": "G10", "check": "credential", "on": true, "in_tests": true, "fixed_ok": false,
+		  "msg": "credential in source -- read it from the environment and fail loudly" },
+		{ "id": "G11", "check": "mutable", "on": true, "in_tests": false, "fixed_ok": false,
+		  "msg": "literal of mutable data -- take it from config, or add // fixed: <why> if a protocol, format or maths fixes it" },
+		{ "id": "G12", "check": "seq", "seq": ["dyn"], "on": true, "in_tests": false, "fixed_ok": true,
+		  "msg": "dyn Trait -- prefer generics or an enum; mark // fixed: <why> if truly needed" },
+		{ "id": "G13", "check": "comment_words", "words": ["behavior", "color", "initialize", "serialize", "optimize", "analyze", "center", "favor"], "on": true, "in_tests": false, "fixed_ok": false,
+		  "msg": "US spelling in a comment -- British: behaviour, colour, initialise…" },
+	],
+}

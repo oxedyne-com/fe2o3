@@ -418,12 +418,12 @@ pub fn scan(src: &str, lang: Lang, file: &str) -> Outcome<Scan> {
     Ok(out)
 }
 
-struct LineIndex {
+pub(crate) struct LineIndex {
     starts: Vec<usize>,
 }
 
 impl LineIndex {
-    fn new(src: &str) -> Self {
+    pub(crate) fn new(src: &str) -> Self {
         let mut starts = vec![0];
         for (i, b) in src.bytes().enumerate() {
             if b == b'\n' {
@@ -434,7 +434,7 @@ impl LineIndex {
     }
 
     /// The 1-based line holding byte `pos`.
-    fn line_of(&self, pos: usize) -> usize {
+    pub(crate) fn line_of(&self, pos: usize) -> usize {
         match self.starts.binary_search(&pos) {
             Ok(i)   => i + 1,
             Err(i)  => i,
@@ -444,7 +444,7 @@ impl LineIndex {
 
 /// The lines covered by a `// fixed:` marker, trailing on its line or as a banner over the lines
 /// that follow it up to the first blank line. Thin markers still cover, and are reported.
-fn fixed_lines(
+pub(crate) fn fixed_lines(
     src:    &str,
     toks:   &[Token],
     lines:  &LineIndex,
@@ -492,20 +492,20 @@ fn fixed_lines(
     covered
 }
 
-fn is_punct(t: &Token, c: char) -> bool {
+pub(crate) fn is_punct(t: &Token, c: char) -> bool {
     t.kind == TokenKind::Punct(c)
 }
 
-fn is_ident(t: &Token, s: &str) -> bool {
+pub(crate) fn is_ident(t: &Token, s: &str) -> bool {
     t.kind == TokenKind::Ident && t.text == s
 }
 
-fn is_keyword(t: &Token, s: &str) -> bool {
+pub(crate) fn is_keyword(t: &Token, s: &str) -> bool {
     matches!(&t.kind, TokenKind::Keyword(k) if k == s)
 }
 
 /// The index just past the group that opens at `open`, or the end of the tokens.
-fn group_end(toks: &[Token], open: usize) -> usize {
+pub(crate) fn group_end(toks: &[Token], open: usize) -> usize {
     let mut depth = 0isize;
     let mut i = open;
     while i < toks.len() {
@@ -526,7 +526,7 @@ fn group_end(toks: &[Token], open: usize) -> usize {
 
 /// The index just past the item that starts at `i`: its first depth-0 `;`, or the close of its
 /// first brace block.
-fn item_end(toks: &[Token], mut i: usize) -> usize {
+pub(crate) fn item_end(toks: &[Token], mut i: usize) -> usize {
     while i < toks.len() && toks[i].kind == TokenKind::Attribute {
         i += 1;
     }

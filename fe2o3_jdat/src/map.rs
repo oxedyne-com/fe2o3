@@ -136,6 +136,17 @@ impl Dat {
         }
     }
 
+    pub fn map_get_bool(&self, key: &Self) -> Outcome<bool> {
+        let val = res!(self.map_get_must(key));
+        match val {
+            Dat::Bool(b) => Ok(*b),
+            _ => Err(err!(
+                "The key {:?} maps to a value of kind {:?}, \
+                expected a bool.", key, val.kind();
+            Input, Mismatch)),
+        }
+    }
+
     pub fn map_get_i64(&self, key: &Self) -> Outcome<i64> {
         let val = res!(self.map_get_must(key));
         match val.get_i64() {
