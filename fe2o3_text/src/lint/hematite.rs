@@ -140,11 +140,13 @@ pub struct Allowed {
     pub file:   String,
     pub line:   usize,
     pub text:   String,
+    pub rules:  Vec<String>,    // ids of the rules the line would otherwise break
 }
 
 impl fmt::Display for Allowed {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}:{}: allowlist hematite: {}", self.file, self.line, self.text.trim())
+        write!(f, "{}:{}: allowlist hematite ({}): {}", self.file, self.line, self.rules.join(","),
+            self.text.trim())
     }
 }
 
@@ -239,12 +241,12 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
         return Ok(());
     }
     let text: Vec<&str> = a.src.split('\n').collect();
-    let mut allowed = BTreeSet::new();
+    let mut allowed: BTreeMap<usize, Allowed> = BTreeMap::new();
     for n in &a.lines {
         if let Some(l) = text.get(n.wrapping_sub(1)) {
             if allow_marked(l) {
-                allowed.insert(*n);
-                rep.allows.push(Allowed { file: a.file.clone(), line: *n, text: l.to_string() });
+                allowed.insert(*n, Allowed { file: a.file.clone(), line: *n, text: l.to_string(),
+                    rules: Vec::new() });
             }
         }
     }
@@ -263,7 +265,7 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
             (_, None)       => Vec::new(),
         };
         for line in lines {
-            if !a.lines.contains(&line) || allowed.contains(&line) {
+            if !a.lines.contains(&line) {
                 continue;
             }
             let in_test = test_file || rust.as_ref().map(|rs| rs.tests.contains(&line)).unwrap_or(false);
@@ -271,6 +273,12 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
                 continue;
             }
             if r.fixed_ok && rust.as_ref().map(|rs| rs.fixed.contains(&line)).unwrap_or(false) {
+                continue;
+            }
+            if let Some(al) = allowed.get_mut(&line) {
+                if !al.rules.contains(&r.id) {
+                    al.rules.push(r.id.clone());
+                }
                 continue;
             }
             rep.breaches.push(Breach {
@@ -281,6 +289,7 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
             });
         }
     }
+    rep.allows.extend(allowed.into_values());
     Ok(())
 }
 

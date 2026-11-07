@@ -185,7 +185,8 @@ fn test_hematite_allowlist_passes_and_is_reported() -> Outcome<()> {
     let src = "fn f(x: &str) -> Outcome<u8> {\n    let v = parse(x)?; // allowlist hematite: a seeded case\n    Ok(v)\n}\n";
     let rep = res!(gate(&rules, "src/a.rs", src));
     assert!(rep.is_clean(), "{:?}", rep);
-    assert_eq!(rep.allows.iter().map(|a| a.line).collect::<Vec<_>>(), vec![2]);
+    assert_eq!(rep.allows.iter().map(|a| (a.line, a.rules.clone())).collect::<Vec<_>>(),
+        vec![(2, vec![fmt!("G4")])]);
     Ok(())
 }
 
