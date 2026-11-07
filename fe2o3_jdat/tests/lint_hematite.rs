@@ -21,13 +21,16 @@ use std::{
 };
 
 
-// HEMATITE_RULES names another table, so that the red script can switch a rule off in a copy.
+// Mutant switches for the red script: HEMATITE_M<n> set switches rule G<n> off.
 fn rules() -> Outcome<Rules> {
-    let path = match std::env::var("HEMATITE_RULES") {
-        Ok(p)   => PathBuf::from(p),
-        Err(_)  => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("hematite_rules.jdat"),
-    };
-    lint::load_rules(&path)
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("hematite_rules.jdat");
+    let mut rules = res!(lint::load_rules(&path));
+    for r in rules.rules.iter_mut() {
+        if std::env::var(fmt!("HEMATITE_M{}", r.id.trim_start_matches('G'))).is_ok() {
+            r.on = false;
+        }
+    }
+    Ok(rules)
 }
 
 fn gate_lines(rules: &Rules, file: &str, src: &str, lines: &[usize]) -> Outcome<Report> {
