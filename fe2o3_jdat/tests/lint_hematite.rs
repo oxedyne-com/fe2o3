@@ -74,6 +74,10 @@ fn seeds() -> Vec<(&'static str, &'static str, String, usize)> {
         ("G11", "src/a.rs", fmt!("fn f() {{\n    let p = \"/var/lib/app/state\";\n}}\n"), 2),
         ("G12", "src/a.rs", fmt!("fn f(x: Box<dyn Fn()>) {{}}\n"), 1),
         ("G13", "src/a.rs", fmt!("// The behavior of it.\nfn f() {{}}\n"), 1),
+        ("G14", "src/a.rs", fmt!("#[path = \"imp.txt\"]\nmod imp;\n"), 1),
+        ("G14", "src/a.rs", fmt!("#[cfg_attr(unix, path = \"unix.in\")]\nmod imp;\n"), 1),
+        ("G14", "src/a.rs", fmt!("fn f() {{\n    include!(\"gen.in\");\n}}\n"), 2),
+        ("G14", "src/a.rs", fmt!("fn f() {{\n    std::include!(concat!(\"gen\", \".in\"));\n}}\n"), 2),
     ]
 }
 
@@ -116,6 +120,13 @@ pub const fn g<T: ?Sized>(_t: &T) -> u8 { 0 }
 macro_rules! m { ($($x:expr),*$(,)?) => { $x.read() } }
 
 fn h(x: Box<dyn Fn()>) {} // fixed: a closure chosen at run time, the caller's
+
+#[path = \"imp_unix.rs\"]
+mod imp;
+
+const T: &str = include_str!(\"table.jdat\");
+
+fn k() { include!(\"gen.rs\"); }
 ";
     let rep = res!(gate(&rules, "src/a.rs", src));
     assert_eq!(hits(&rep), Vec::<(String, usize)>::new());

@@ -9,7 +9,7 @@ trap 'rm -rf "${dir:?}"' EXIT
 cargo test -q -p oxedyne_fe2o3_jdat --test lint_hematite --no-run > /dev/null 2>&1 || { echo "build failed"; exit 2; }
 run() { env "$@" cargo test -q -p oxedyne_fe2o3_jdat --test lint_hematite -- --exact test_hematite_each_rule_refused_by_name_and_line 2>&1; }
 if run > "$dir/out" ; then echo "arm seeds table=committed: want pass, got pass"; else echo "arm seeds table=committed: want pass, got fail"; fails=$((fails + 1)); fi
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
 	id=G$i
 	if run "HEMATITE_M$i=1" > "$dir/out"; then got=pass; else got=fail; fi
 	named=no; grep -q "seed for $id:" "$dir/out" && named=yes

@@ -11,6 +11,8 @@
 //!   a `macro_rules!` body, where `?` is a repetition and the lock macros themselves are defined,
 //! - `.lock()` on `stdin()`, `stdout()` or `stderr()`, which are not data locks,
 //! - `pub use` in import order, since a re-export is placed for the reader of the module,
+//! - `include_str!` and `include_bytes!`, which read data, not code (G14 refuses only `include!`
+//!   and `#[path]` of a file not ending `.rs`, which the gate would not read),
 //! - test code (a `tests` directory, a `tests.rs` or `_tests.rs` file, a `#[test]` or
 //!   `#[cfg(test)]` item) for a rule whose `in_tests` is false,
 //! - a line marked `// fixed: <why>` for a rule whose `fixed_ok` is true,
@@ -66,6 +68,7 @@ pub enum Check {
     Credential,                 // a credential shape, in a file of any kind
     Mutable,                    // a literal of mutable data, as `lint::mutable` finds it
     CommentWords(Vec<String>),  // a comment word starting with one of these, case aside
+    Placement,                  // `#[path]` or `include!` of a file not ending `.rs`
 }
 
 impl Check {
@@ -90,6 +93,7 @@ impl Check {
             "credential"    => Self::Credential,
             "mutable"       => Self::Mutable,
             "comment_words" => Self::CommentWords(list),
+            "placement"     => Self::Placement,
             _               => return Err(err!("Unknown Hematite check '{}'.", name;
                 Invalid, Input)),
         })
@@ -422,6 +426,7 @@ impl<'a> RustSrc<'a> {
             Check::DocHeading(words)    => self.doc_heading(words),
             Check::ImportOrder          => self.import_order(&rules.local_crates, added),
             Check::CommentWords(words)  => self.comment_words(words),
+            Check::Placement            => self.placement(),
             Check::Mutable              => {
                 let scan = res!(mutable::scan(self.src, Lang::Rust, ""));
                 scan.hits.iter().map(|h| h.line)
@@ -460,6 +465,49 @@ impl<'a> RustSrc<'a> {
             let bound = self.code.get(k + 1)
                 .map(|n| self.toks[*n].kind == TokenKind::Ident).unwrap_or(false);
             if after_expr && !bound {
+                out.push(self.line(*i));
+            }
+        }
+        out
+    }
+
+    /// Rust the gate would not read: a `path` attribute or an `include!` naming anything but a
+    /// literal ending `.rs`.  A literal the lexer cannot close counts as not `.rs`.
+    fn placement(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (i, t) in self.toks.iter().enumerate() {
+            if t.kind != TokenKind::Attribute {
+                continue;
+            }
+            let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
+            let hidden = a.match_indices("path=").any(|(at, _)| {
+                let lead = a[..at].chars().last();
+                matches!(lead, Some('[') | Some('(') | Some(','))
+                    && !a[at + 5..].strip_prefix('"')
+                        .and_then(|r| r.split_once('"'))
+                        .map(|(name, _)| name.ends_with(".rs"))
+                        .unwrap_or(false)
+            });
+            if hidden {
+                out.push(self.line(i));
+            }
+        }
+        for (k, i) in self.code.iter().enumerate() {
+            if !is_ident(&self.toks[*i], "include")
+                || !self.code.get(k + 1).map(|n| is_punct(&self.toks[*n], '!')).unwrap_or(false)
+            {
+                continue;
+            }
+            let rs = match (self.code.get(k + 3).map(|n| &self.toks[*n]),
+                self.code.get(k + 4).map(|n| &self.toks[*n]))
+            {
+                (Some(lit), Some(close)) => lit.kind == TokenKind::StringLit
+                    && lit.text.starts_with('"') && lit.text.ends_with(".rs\"")
+                    && matches!(close.kind, TokenKind::Punct(')') | TokenKind::Punct(']')
+                        | TokenKind::Punct('}') | TokenKind::Punct(',')),
+                _ => false,
+            };
+            if !rs {
                 out.push(self.line(*i));
             }
         }
