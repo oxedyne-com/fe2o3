@@ -9,15 +9,23 @@
 //! }
 //! ```
 
-use crate::prelude::*;
+use crate::{
+    bdat::DecodeLimits,
+    prelude::*,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_text::{
     lint::{
         hematite::{
+            self,
+            Cargo,
             Check,
+            Package,
             Rule,
             Rules,
+            Target,
+            TargetKind,
         },
         mutable::{
             self,
@@ -31,6 +39,10 @@ use oxedyne_fe2o3_text::{
 };
 
 use std::{
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     fs,
     path::Path,
 };
@@ -211,4 +223,151 @@ fn rule_from_dat(dat: &Dat) -> Outcome<Rule> {
         msg,
         id,
     })
+}
+
+const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index"; // fixed: Cargo's id of the crates.io registry
+
+/// The packages Cargo builds from a tree, worked out in `dir`, an empty directory the caller then
+/// removes. `listing` is the tree as `git ls-tree -r -z` or `git ls-files -s -z` gives it and
+/// `read(path)` a file's content. Each `Cargo.toml` and `Cargo.lock` is written with its content
+/// and every other `.rs` file empty, for Cargo to find the targets; nothing else, so no `.cargo`
+/// config or toolchain file of the tree is read. `metadata(manifest, full)` runs `cargo metadata
+/// --format-version 1 --offline --manifest-path <manifest>`, with `--no-deps` when not `full`,
+/// and returns what it prints. The manifest each file of `changed` lies under most closely, and a
+/// changed manifest, must be read; any other that Cargo cannot read is passed over, since Cargo
+/// cannot build it either.
+pub fn cargo_of(
+    dir:            &Path,
+    listing:        &str,
+    changed:        &[String],
+    mut read:       impl FnMut(&str) -> Outcome<String>,
+    mut metadata:   impl FnMut(&Path, bool) -> Outcome<String>,
+)
+    -> Outcome<Cargo>
+{
+    let dir = res!(fs::canonicalize(dir).map_err(|e| err!(e, "While finding the Cargo scratch directory {}.", dir.display(); IO, File)));
+    let mut manifests = Vec::new();
+    for (mode, path) in hematite::tree_paths(listing) {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let manifest = name == "Cargo.toml"; // fixed: Cargo's manifest name
+        let body = match (manifest || name == "Cargo.lock", mode) { // fixed: Cargo's lock file name
+            (true, "120000")                                    => return Err(err!( // fixed: git's mode of a symbolic link
+                "The Cargo file {} is a symlink, which the Hematite gate does not follow.", path;
+                Invalid, Input)),
+            (true, m) if m.starts_with("100")                   => res!(read(path)), // fixed: git's modes of a file
+            (false, m) if m.starts_with("100") && name.ends_with(".rs") => String::new(),
+            _                                                   => continue,
+        };
+        let at = dir.join(path);
+        if let Some(d) = at.parent() {
+            res!(fs::create_dir_all(d).map_err(|e| err!(e, "While making {}.", d.display(); IO, File, Write)));
+        }
+        res!(fs::write(&at, body).map_err(|e| err!(e, "While writing {}.", at.display(); IO, File, Write)));
+        if manifest {
+            manifests.push(path.to_string());
+        }
+    }
+    let root_of = |m: &str| m.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+    let mut need = BTreeSet::new();
+    for c in changed {
+        let near = manifests.iter().filter(|m| {
+            let r = root_of(m);
+            *m == c || r.is_empty() || c.strip_prefix(r.as_str()).map(|t| t.starts_with('/')).unwrap_or(false)
+        }).max_by_key(|m| if *m == c { usize::MAX } else { m.len() });
+        if let Some(m) = near {
+            need.insert(m.clone());
+        }
+    }
+    // Roots first, so that one call reads a whole workspace.
+    manifests.sort_by_key(|m| (m.matches('/').count(), m.clone()));
+    let mut cargo = Cargo::default();
+    for m in &manifests {
+        if cargo.packages.iter().any(|p| p.root == root_of(m)) {
+            continue;
+        }
+        let at = dir.join(m);
+        let mut got = metadata(&at, true).and_then(|o| packages_of(&o, &dir, true));
+        if got.is_err() {
+            got = metadata(&at, false).and_then(|o| packages_of(&o, &dir, false));
+        }
+        match got {
+            Ok(ps)                      => cargo.packages.extend(ps.into_iter()
+                .filter(|p| !cargo.packages.iter().any(|q| q.root == p.root)).collect::<Vec<_>>()),
+            Err(e) if need.contains(m)  => return Err(err!(e,
+                "Cargo could not read the manifest {}, so the Hematite gate cannot tell test code \
+                from product.", m; Invalid, Input)),
+            Err(_)                      => {}
+        }
+    }
+    Ok(cargo)
+}
+
+/// The workspace members of `cargo metadata` output, their paths relative to `dir`, with what
+/// each extern name resolves to when `full`.
+fn packages_of(out: &str, dir: &Path, full: bool) -> Outcome<Vec<Package>> {
+    let dat = res!(Dat::decode_json_strict(out, &DecodeLimits::default()));
+    let rel = |abs: String| -> Outcome<String> {
+        match Path::new(&abs).strip_prefix(dir).map(|p| p.to_str().map(|s| s.to_string())) {
+            Ok(Some(r)) => Ok(r),
+            _           => Err(err!("Cargo names {}, outside the tree.", abs; Invalid, Input)),
+        }
+    };
+    let str_of = |d: &Dat, k: &str| match d.map_get(&dat!(k)) {
+        Ok(Some(Dat::Str(s)))   => Some(s.clone()),
+        _                       => None,
+    };
+    let members: BTreeSet<String> = res!(dat.map_get_list(&dat!("workspace_members"))).iter()
+        .filter_map(|m| match m { Dat::Str(s) => Some(s.clone()), _ => None }).collect();
+    let all = res!(dat.map_get_list(&dat!("packages")));
+    // By package id: is it the crates.io crate of the extern name `_` for `-`?
+    let ids: BTreeMap<String, (String, bool)> = all.iter()
+        .filter_map(|p| match (str_of(p, "id"), str_of(p, "name")) {
+            (Some(id), Some(n)) => Some((id, (n.replace('-', "_"),
+                str_of(p, "source").as_deref() == Some(CRATES_IO)))),
+            _                   => None,
+        })
+        .collect();
+    let nodes = match full {
+        true    => res!(res!(dat.map_get_map(&dat!("resolve"))).map_get_list(&dat!("nodes"))).clone(),
+        false   => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for p in all {
+        let id = res!(p.map_get_string(&dat!("id")));
+        if !members.contains(&id) {
+            continue;
+        }
+        let manifest = res!(rel(res!(p.map_get_string(&dat!("manifest_path")))));
+        let root = manifest.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        let mut targets = Vec::new();
+        for t in res!(p.map_get_list(&dat!("targets"))) {
+            let kinds: Vec<String> = res!(t.map_get_list(&dat!("kind"))).iter()
+                .filter_map(|k| match k { Dat::Str(s) => Some(s.clone()), _ => None }).collect();
+            let kind = match kinds.first().map(|k| k.as_str()) {
+                Some("test")            => TargetKind::Test,
+                Some("custom-build")    => TargetKind::Build,
+                _                       => TargetKind::Product,
+            };
+            targets.push(Target { kind, src: res!(rel(res!(t.map_get_string(&dat!("src_path"))))) });
+        }
+        let crates = match full {
+            true    => {
+                let node = res!(nodes.iter().find(|n| str_of(n, "id").as_deref() == Some(id.as_str()))
+                    .ok_or_else(|| err!("Cargo resolved no node for {}.", id; Missing, Input)));
+                let mut m: BTreeMap<String, bool> = BTreeMap::new();
+                for d in res!(node.map_get_list(&dat!("deps"))) {
+                    let name = res!(d.map_get_string(&dat!("name")));
+                    let ok = str_of(d, "pkg").and_then(|k| ids.get(&k))
+                        .map(|(n, crates_io)| *crates_io && *n == name).unwrap_or(false);
+                    // One name taken by two packages, as a normal and a dev dependency, is
+                    // crates.io's only if both are.
+                    *m.entry(name).or_insert(true) &= ok;
+                }
+                Some(m)
+            }
+            false   => None,
+        };
+        out.push(Package { root, targets, crates });
+    }
+    Ok(out)
 }

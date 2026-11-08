@@ -9,7 +9,11 @@ use oxedyne_fe2o3_jdat::lint;
 use oxedyne_fe2o3_text::lint::hematite;
 
 use std::{
-    path::PathBuf,
+    collections::BTreeSet,
+    path::{
+        Path,
+        PathBuf,
+    },
     process::Command,
 };
 
@@ -68,19 +72,20 @@ fn run() -> Outcome<bool> {
     let rules = res!(lint::load_rules(&res!(rules
         .ok_or_else(|| err!("Missing --rules <file>."; Missing, Input)))));
     let range;
-    let (revs, prefix, old_prefix, names) = match (staged, &base) {
+    let (revs, prefix, old_prefix, now_list, was_list) = match (staged, &base) {
         (true, None)        => (vec!["--cached"], String::from(":"), String::from("HEAD:"),
-            res!(git(&repo, &["ls-files", "-z"]))),
+            res!(git(&repo, &["ls-files", "-s", "-z"])), res!(git(&repo, &["ls-tree", "-r", "-z", "HEAD"]))),
         (false, Some(b))    => {
             range = fmt!("{}...{}", b, head);
             let mb = res!(git(&repo, &["merge-base", b.as_str(), head.as_str()]));
-            (vec![range.as_str()], fmt!("{}:", head), fmt!("{}:", mb.trim()),
-                res!(git(&repo, &["ls-tree", "-r", "--name-only", "-z", &head])))
+            let mb = mb.trim();
+            (vec![range.as_str()], fmt!("{}:", head), fmt!("{}:", mb),
+                res!(git(&repo, &["ls-tree", "-r", "-z", &head])), res!(git(&repo, &["ls-tree", "-r", "-z", mb])))
         }
         _                   => return Err(err!("Give exactly one of --staged and --base <rev>.";
             Invalid, Input)),
     };
-    let mut attrs = hematite::attributes_in(&names);
+    let mut attrs = hematite::attributes_in(&now_list);
     let info = PathBuf::from(res!(git(&repo, &["rev-parse", "--path-format=absolute", "--git-path",
         hematite::INFO_ATTRIBUTES])).trim());
     if info.exists() {
@@ -92,16 +97,28 @@ fn run() -> Outcome<bool> {
             Invalid, Input));
     }
     let diff = res!(git(&repo, &hematite::diff_args(&revs)));
+    let diffs = hematite::file_diffs(&diff);
+    let changed: Vec<String> = diffs.keys().cloned().collect();
+    let scratch = PathBuf::from(res!(git(&repo, &["rev-parse", "--path-format=absolute", "--git-path",
+        &fmt!("hematite-cargo-{}", std::process::id())])).trim());
+    let now = res!(cargo_of(&repo, &scratch.join("now"), &now_list, &changed, &prefix));
+    let was = res!(cargo_of(&repo, &scratch.join("was"), &was_list, &changed, &old_prefix));
+    let _ = std::fs::remove_dir_all(&scratch);
+    // A file new to the tree is read whole, so only one the base holds can be turned.
+    let was_files: BTreeSet<&str> = hematite::tree_paths(&was_list).into_iter().map(|(_, p)| p).collect();
+    let files: Vec<String> = hematite::tree_paths(&now_list).into_iter()
+        .filter(|(_, p)| p.ends_with(".rs") && was_files.contains(p)).map(|(_, p)| p.to_string()).collect();
+    let turned = now.turned(&was, &files, &rules.test_attrs);
     let mut added = Vec::new();
-    for (file, d) in hematite::file_diffs(&diff) {
+    for (file, d) in diffs {
         let src = res!(git(&repo, &["cat-file", "blob", &fmt!("{}{}", prefix, file)]));
         let old = match d.old {
             true    => Some(res!(git(&repo, &["cat-file", "blob", &fmt!("{}{}", old_prefix, file)]))),
             false   => None,
         };
-        added.push(res!(hematite::added(file, d, src, old.as_deref(), &rules)));
+        added.push(res!(hematite::added(file, d, src, old.as_deref(), &rules, &now, &was)));
     }
-    let rep = res!(hematite::check(&added, &rules));
+    let rep = res!(hematite::check(&added, &turned, &rules));
     for b in &rep.breaches {
         println!("{}", b);
     }
@@ -109,4 +126,37 @@ fn run() -> Outcome<bool> {
         println!("{}", a);
     }
     Ok(rep.is_clean())
+}
+
+/// The packages of the tree `listing`, its files read as `<prefix><path>`, worked out in `dir`.
+fn cargo_of(repo: &PathBuf, dir: &Path, listing: &str, changed: &[String], prefix: &str)
+    -> Outcome<hematite::Cargo>
+{
+    let _ = std::fs::remove_dir_all(dir);
+    res!(std::fs::create_dir_all(dir).map_err(|e| err!(e, "While making {}.", dir.display(); IO, File, Write)));
+    let got = lint::cargo_of(dir, listing, changed,
+        |p| git(repo, &["cat-file", "blob", &fmt!("{}{}", prefix, p)]),
+        |m, full| {
+            let mut c = Command::new("cargo"); // fixed: the program's name, found on PATH
+            c.env_clear();
+            for k in ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME"] {
+                if let Some(v) = std::env::var_os(k) {
+                    c.env(k, v);
+                }
+            }
+            c.env("CARGO_NET_OFFLINE", "true").current_dir(dir)
+                .args(["metadata", "--format-version", "1", "--offline"]); // fixed: Cargo's metadata format
+            if !full {
+                c.arg("--no-deps");
+            }
+            let out = res!(c.arg("--manifest-path").arg(m).output()
+                .map_err(|e| err!(e, "Could not run cargo metadata."; IO, Missing)));
+            match out.status.success() {
+                true    => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
+                false   => Err(err!("cargo metadata on {} failed: {}", m.display(),
+                    String::from_utf8_lossy(&out.stderr).trim(); IO, Invalid)),
+            }
+        });
+    let _ = std::fs::remove_dir_all(dir);
+    got
 }

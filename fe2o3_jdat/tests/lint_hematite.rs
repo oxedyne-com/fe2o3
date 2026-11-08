@@ -11,12 +11,17 @@ use oxedyne_fe2o3_jdat::{
 use oxedyne_fe2o3_text::lint::hematite::{
     self,
     Added,
+    Cargo,
+    Package,
     Report,
     Rules,
 };
 
 use std::{
-    collections::BTreeSet,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     path::PathBuf,
 };
 
@@ -33,10 +38,22 @@ fn rules() -> Outcome<Rules> {
     Ok(rules)
 }
 
-fn gate_lines(rules: &Rules, file: &str, src: &str, lines: &[usize]) -> Outcome<Report> {
+/// Packages at the top, `fe2o3_x`, and two rooted in a `tests` directory, each with crates.io's
+/// `tokio` unless `tokio` is false.
+fn cargo(tokio: bool) -> Cargo {
+    let crates = Some(BTreeMap::from([(fmt!("tokio"), tokio)]));
+    Cargo { packages: ["", "fe2o3_x", "helper/tests", "tests/x"].iter()
+        .map(|r| Package { root: r.to_string(), targets: Vec::new(), crates: crates.clone() }).collect() }
+}
+
+fn gate_in(rules: &Rules, c: &Cargo, file: &str, src: &str, lines: &[usize]) -> Outcome<Report> {
     let a = Added { file: file.to_string(), src: src.to_string(), lines: lines.iter().copied().collect(),
-        link: false };
-    hematite::check(&[a], rules)
+        test: c.is_test(file), test_attrs: c.test_attrs(file, &rules.test_attrs), ..Default::default() };
+    hematite::check(&[a], &[], rules)
+}
+
+fn gate_lines(rules: &Rules, file: &str, src: &str, lines: &[usize]) -> Outcome<Report> {
+    gate_in(rules, &cargo(true), file, src, lines)
 }
 
 /// Every line of `src` added, as in a new file.
@@ -111,10 +128,6 @@ fn seeds() -> Vec<(&'static str, &'static str, String, usize)> {
         ("G14", ".cargo/config.toml", fmt!("[build]\nrustflags = [\"-{}\", \"test\"]\n", "-cfg"), 2),
         ("G14", "tests/run.sh", fmt!("RUSTFLAGS='-{}=test' cargo build\n", "-cfg"), 1),
         ("G14", "src/a.rs", fmt!("fn f() {{\n    include!(\"../tests/imp.rs\");\n}}\n"), 2),
-        ("G14", "Cargo.toml", fmt!("[package]\nname = \"x\"\n\n[lib]\npath = \"tests/lib.rs\"\n"), 5),
-        ("G14", "x/Cargo.toml", fmt!("[package]\nbuild = 'tests/build.rs'\n"), 2),
-        ("G14", "Cargo.toml", fmt!("[dependencies]\nh = {{ version = \"1\", path = \"helper/tests\" }}\n"), 2),
-        ("G14", "Cargo.toml", fmt!("[lib]\nname = \"x\"\n\n[[test]]\npath = \"tests/t.rs\"\n[lib.x]\npath = \"tests/lib.rs\"\n"), 7),
     ]
 }
 
@@ -179,9 +192,7 @@ async fn q(m: &tokio::sync::RwLock<u8>) -> u8 { *m.read().await + *m.write().awa
     // A build script setting a cfg of its own, and one whose name only begins `test`.
     let src = "fn main() {\n    println!(\"cargo:rustc-cfg=SABER_SCHEME=\\\"SABER\\\"\");\n    println!(\"cargo:rustc-cfg=testing\");\n}\n";
     assert!(res!(gate(&rules, "build.rs", src)).is_clean());
-    // Cargo's own test layout, and a test module reading a file under `tests/`.
-    let toml = "[package]\ninclude = [\"src/**\", \"tests/**\"]\n\n[[test]]\nname = \"t\"\npath = \"tests/t.rs\"\n";
-    assert!(res!(gate(&rules, "Cargo.toml", toml)).is_clean());
+    // A test module reading a file under `tests/`.
     let src = "#[cfg(test)]\nmod t {\n    #[path = \"../tests/common.rs\"]\n    mod common;\n}\n";
     assert!(res!(gate(&rules, "src/a.rs", src)).is_clean());
     Ok(())
@@ -260,13 +271,13 @@ fn test_hematite_line_moved_from_test_to_product_is_added() -> Outcome<()> {
     let new = "pub fn a() {}\nmod t {\n    fn f(x: Box<dyn Fn()>) {}\n}\n";
     let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -2 +1,0 @@\n-#[cfg(test)]\n";
     let d = res!(hematite::file_diffs(diff).remove("src/a.rs").ok_or_else(|| err!("no diff"; Missing)));
-    let a = res!(hematite::added(fmt!("src/a.rs"), d, fmt!("{}", new), Some(old), &rules));
-    assert_eq!(hits(&res!(hematite::check(&[a], &rules))), vec![(fmt!("G12"), 3)]);
+    let a = res!(hematite::added(fmt!("src/a.rs"), d, fmt!("{}", new), Some(old), &rules, &cargo(true), &cargo(true)));
+    assert_eq!(hits(&res!(hematite::check(&[a], &[], &rules))), vec![(fmt!("G12"), 3)]);
     // A line added above a test module leaves the module test code.
     let new = "use crate::x;\npub fn a() {}\n#[cfg(test)]\nmod t {\n    fn f(x: Box<dyn Fn()>) {}\n}\n";
     let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -0,0 +1 @@\n+use crate::x;\n";
     let d = res!(hematite::file_diffs(diff).remove("src/a.rs").ok_or_else(|| err!("no diff"; Missing)));
-    let a = res!(hematite::added(fmt!("src/a.rs"), d, fmt!("{}", new), Some(old), &rules));
+    let a = res!(hematite::added(fmt!("src/a.rs"), d, fmt!("{}", new), Some(old), &rules, &cargo(true), &cargo(true)));
     let want: BTreeSet<usize> = [1].into_iter().collect();
     assert_eq!(a.lines, want);
     Ok(())
@@ -328,6 +339,10 @@ fn test_hematite_test_code_exempt_only_where_the_table_says() -> Outcome<()> {
         let src = fmt!("#[{}]\nasync fn t() {{\n    let p = \"/var/lib/app/state\";\n}}\n", attr);
         assert!(res!(gate(&rules, "src/a.rs", &src)).is_clean(), "{}", attr);
     }
+    // `tokio::test` only where Cargo resolves `tokio` to crates.io's (QA hgate5 H1).
+    let src = "#[tokio::test]\npub async fn serve() {\n    let p = \"/var/lib/app/state\";\n}\n";
+    assert_eq!(hits(&res!(gate_in(&rules, &cargo(false), "src/a.rs", src, &[1, 2, 3, 4]))),
+        vec![(fmt!("G11"), 3)]);
     // A crate placed under `tests/` is built as product (QA hgate4 C).
     for file in ["src/util_tests.rs", "src/tests.rs", "src/tests/mod.rs", "fe2o3_x/src/tests/a.rs",
         "helper/tests/src/lib.rs", "tests/x/src/a.rs"]

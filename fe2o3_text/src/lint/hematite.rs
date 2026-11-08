@@ -16,9 +16,11 @@
 //! - `pub use` in import order, since a re-export is placed for the reader of the module,
 //! - `include_str!` and `include_bytes!`, which read data, not code (G14 refuses only `include!`
 //!   and `#[path]` of a file not ending `.rs`, which the gate would not read),
-//! - test code (a `tests` directory with no `src` above it, an item under an attribute whose path
-//!   is exactly one of `Rules::test_attrs` or under a `cfg` that holds only under test, such as
-//!   `all(test, unix)`) for a rule whose `in_tests` is false,
+//! - test code (a file in its package's `tests` directory from which Cargo builds only tests, as
+//!   `cargo metadata` gives the packages in `Cargo`; an item under an attribute whose path is
+//!   exactly one of `Rules::test_attrs` that `Cargo::test_attrs` keeps for the file; or under a
+//!   `cfg` that holds only under test, such as `all(test, unix)`) for a rule whose `in_tests` is
+//!   false,
 //! - a line marked `// fixed: <why>` for a rule whose `fixed_ok` is true,
 //! - any line carrying `allowlist hematite`, which is reported in `Report::allows` so that the
 //!   escape is shown, not silent.
@@ -133,10 +135,115 @@ pub struct Rules {
 /// A file as a change leaves it, with the lines the change adds (1-based).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Added {
-    pub file:   String,
-    pub src:    String,             // a symlink's target
-    pub lines:  BTreeSet<usize>,
-    pub link:   bool,
+    pub file:       String,
+    pub src:        String,             // a symlink's target
+    pub lines:      BTreeSet<usize>,
+    pub link:       bool,
+    pub test:       bool,               // test code by where Cargo builds it, `Cargo::is_test`
+    pub test_attrs: Vec<String>,        // the attributes that mark a test here, `Cargo::test_attrs`
+    pub from_tests: bool,               // a manifest building product code from a tests directory
+}
+
+/// What Cargo builds a target as.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TargetKind {
+    Product,    // lib, bin, example, bench, proc-macro
+    Test,
+    Build,      // a build script
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Target {
+    pub kind:   TargetKind,
+    pub src:    String,     // its root file, relative to the tree
+}
+
+/// A package as `cargo metadata` gives it, its paths relative to the tree.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Package {
+    pub root:       String, // the manifest's directory, "" at the top
+    pub targets:    Vec<Target>,
+    // By extern name: is the crate the crates.io crate of that name?  None when Cargo could not
+    // resolve the dependencies.
+    pub crates:     Option<BTreeMap<String, bool>>,
+}
+
+/// The packages of a tree, so that what is test code is what Cargo builds as test, not what a
+/// path looks like.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Cargo {
+    pub packages: Vec<Package>,
+}
+
+impl Cargo {
+    fn package_of(&self, file: &str) -> Option<&Package> {
+        self.packages.iter().filter(|p| under(file, &p.root)).max_by_key(|p| p.root.len())
+    }
+
+    /// The `tests` directory of the package holding `file`, when `file` lies in it.
+    fn tests_dir_of(&self, file: &str) -> Option<String> {
+        let dir = match self.package_of(file) {
+            Some(p) if p.root.is_empty()    => String::from("tests"), // fixed: Cargo's directory of integration tests
+            Some(p)                         => fmt!("{}/tests", p.root),
+            None                            => return None,
+        };
+        match under(file, &dir) {
+            true    => Some(dir),
+            false   => None,
+        }
+    }
+
+    /// Does `file` lie in its package's `tests` directory, from which Cargo builds nothing but
+    /// tests?  A package rooted inside another's `tests` is a package, its code product.
+    pub fn is_test(&self, file: &str) -> bool {
+        match self.tests_dir_of(file) {
+            Some(dir)   => !self.packages.iter().flat_map(|p| &p.targets)
+                .any(|t| t.kind != TargetKind::Test && self.tests_dir_of(&t.src).as_ref() == Some(&dir)),
+            None        => false,
+        }
+    }
+
+    /// Does the manifest `file` build a target that is not a test from a `tests` directory?
+    pub fn from_tests(&self, file: &str) -> bool {
+        let root = file.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        self.packages.iter().filter(|p| p.root == root).flat_map(|p| &p.targets)
+            .any(|t| t.kind != TargetKind::Test && self.tests_dir_of(&t.src).is_some())
+    }
+
+    /// Those of `attrs` that mark a test in `file`: a one-segment path such as `test`, and `c::x`
+    /// only where the crate `c` of the file's package is the crates.io crate of that name, since a
+    /// renamed, path, git or patched `c` can be any macro.
+    pub fn test_attrs(&self, file: &str, attrs: &[String]) -> Vec<String> {
+        let crates = self.package_of(file).and_then(|p| p.crates.as_ref());
+        attrs.iter().filter(|a| match a.split_once("::") {
+            Some((c, _))    => crates.and_then(|m| m.get(c)).copied().unwrap_or(false),
+            None            => true,
+        }).cloned().collect()
+    }
+
+    /// The manifests by which this tree, against `was` (its base), turns code Cargo built as test
+    /// into product without a line of it changing: a package taking in test files, or a crate a
+    /// test attribute names no longer being crates.io's.  `files` are the tree's Rust files.
+    pub fn turned(&self, was: &Cargo, files: &[String], attrs: &[String]) -> Vec<String> {
+        let mut out = BTreeSet::new();
+        for f in files {
+            let lost = was.test_attrs(f, attrs).iter().any(|a| !self.test_attrs(f, attrs).contains(a));
+            if (was.is_test(f) && !self.is_test(f)) || lost {
+                if let Some(p) = self.package_of(f) {
+                    out.insert(match p.root.is_empty() {
+                        true    => String::from("Cargo.toml"), // fixed: Cargo's manifest name
+                        false   => fmt!("{}/Cargo.toml", p.root), // fixed: Cargo's manifest name
+                    });
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+}
+
+/// Is `file` inside the directory `dir`, "" being the top?
+fn under(file: &str, dir: &str) -> bool {
+    dir.is_empty() || file.strip_prefix(dir).map(|r| r.starts_with('/')).unwrap_or(false)
 }
 
 /// One file of a diff taken with [`diff_args`], by its new path.
@@ -232,13 +339,20 @@ pub fn diff_args(revs: &[&str]) -> Vec<String> {
     v
 }
 
-/// The `.gitattributes` files among `names` (as `git ls-tree -r --name-only -z` or
-/// `git ls-files -z` gives them), which the gate refuses: attributes decide whether git reads a
-/// file as text.
-pub fn attributes_in(names: &str) -> Vec<String> {
-    names.split(['\0', '\n'])
+/// The `.gitattributes` files of a tree listed as `git ls-tree -r -z` or `git ls-files -s -z`
+/// gives it, which the gate refuses: attributes decide whether git reads a file as text.
+pub fn attributes_in(listing: &str) -> Vec<String> {
+    tree_paths(listing).into_iter().map(|(_, p)| p)
         .filter(|n| *n == ".gitattributes" || n.ends_with("/.gitattributes")) // fixed: git's attributes file name
         .map(|n| n.to_string())
+        .collect()
+}
+
+/// Each entry of a tree listed as `git ls-tree -r -z` or `git ls-files -s -z` gives it, by its
+/// mode and path.
+pub fn tree_paths(listing: &str) -> Vec<(&str, &str)> {
+    listing.split('\0').filter_map(|e| e.split_once('\t'))
+        .map(|(meta, path)| (meta.split(' ').next().unwrap_or(""), path))
         .collect()
 }
 
@@ -328,17 +442,21 @@ fn span_of(s: &str) -> (usize, usize) {
 
 /// The file `file` as the change leaves it, `src`, with the lines the change adds: those of the
 /// diff `d`, and those it leaves in place that were test code in `old` (the file at the base) and
-/// are product code now, as when a `#[cfg(test)]` line is deleted.
-pub fn added(file: String, d: FileDiff, src: String, old: Option<&str>, rules: &Rules)
-    -> Outcome<Added>
+/// are product code now, as when a `#[cfg(test)]` line is deleted.  `now` and `was` are the
+/// packages of the tree and of its base.
+pub fn added(file: String, d: FileDiff, src: String, old: Option<&str>, rules: &Rules, now: &Cargo,
+    was: &Cargo) -> Outcome<Added>
 {
     let mut lines = d.lines;
-    let rust = d.old && !d.link && file.ends_with(".rs") && !is_test_path(&file);
+    let test = now.is_test(&file);
+    let test_attrs = now.test_attrs(&file, &rules.test_attrs);
+    let rust = d.old && !d.link && file.ends_with(".rs") && !test;
+    let was_attrs = was.test_attrs(&file, &rules.test_attrs);
     if let (Some(old), true) = (old, rust) {
-        let was = res!(RustSrc::new(old, &file, &rules.test_attrs)).tests;
-        let now = res!(RustSrc::new(&src, &file, &rules.test_attrs)).tests;
+        let was = res!(RustSrc::new(old, &file, &was_attrs)).tests;
+        let is = res!(RustSrc::new(&src, &file, &test_attrs)).tests;
         for n in 1..=src.split('\n').count() {
-            if lines.contains(&n) || now.contains(&n) {
+            if lines.contains(&n) || is.contains(&n) {
                 continue;
             }
             // An unchanged line moves by what each hunk above it removes less what it adds.
@@ -349,14 +467,20 @@ pub fn added(file: String, d: FileDiff, src: String, old: Option<&str>, rules: &
             }
         }
     }
-    Ok(Added { file, src, lines, link: d.link })
+    let from_tests = (file == "Cargo.toml" || file.ends_with("/Cargo.toml")) && now.from_tests(&file); // fixed: Cargo's manifest name
+    Ok(Added { file, src, lines, link: d.link, test, test_attrs, from_tests })
 }
 
-/// Checks the added lines of each file against the rules that are on.
-pub fn check(added: &[Added], rules: &Rules) -> Outcome<Report> {
+/// Checks the added lines of each file against the rules that are on, and refuses each manifest
+/// of `turned` ([`Cargo::turned`]) by the `test_path` rule.
+pub fn check(added: &[Added], turned: &[String], rules: &Rules) -> Outcome<Report> {
     let mut rep = Report::default();
     for a in added {
         res!(check_one(a, rules, &mut rep));
+    }
+    for r in rules.rules.iter().filter(|r| r.on && r.check == Check::TestPath) {
+        rep.breaches.extend(turned.iter().map(|m| Breach { file: m.clone(), line: 1, rule: r.id.clone(),
+            msg: fmt!("turns code Cargo built as test into product, unchanged -- {}", r.msg) }));
     }
     rep.breaches.sort_by(|x, y| (&x.file, x.line, &x.rule).cmp(&(&y.file, y.line, &y.rule)));
     rep.breaches.dedup();
@@ -378,10 +502,9 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
         }
     }
     let rust = match a.file.ends_with(".rs") && !a.link {
-        true    => Some(res!(RustSrc::new(&a.src, &a.file, &rules.test_attrs))),
+        true    => Some(res!(RustSrc::new(&a.src, &a.file, &a.test_attrs))),
         false   => None,
     };
-    let test_file = is_test_path(&a.file);
     for r in rules.rules.iter().filter(|r| r.on) {
         let lines = match (&r.check, &rust) {
             (Check::Credential, _) => match secret::skip_path(a.file.as_bytes()) {
@@ -393,10 +516,8 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
                 false   => Vec::new(),
             },
             (Check::CfgTest, _) => cfg_test_lines(&a.src),
-            (Check::TestPath, None) => match a.file == "Cargo.toml" || a.file.ends_with("/Cargo.toml") { // fixed: cargo's manifest name
-                true    => cargo_test_paths(&a.src),
-                false   => Vec::new(),
-            },
+            (Check::TestPath, None) => a.lines.iter().next().copied().filter(|_| a.from_tests)
+                .into_iter().collect(),
             (_, Some(rs))   => res!(rs.find(&r.check, rules, &a.lines)),
             (_, None)       => Vec::new(),
         };
@@ -404,7 +525,7 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
             if !a.lines.contains(&line) {
                 continue;
             }
-            let in_test = test_file || rust.as_ref().map(|rs| rs.tests.contains(&line)).unwrap_or(false);
+            let in_test = a.test || rust.as_ref().map(|rs| rs.tests.contains(&line)).unwrap_or(false);
             if in_test && !r.in_tests {
                 continue;
             }
@@ -433,14 +554,6 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
 /// Does the line carry `allowlist hematite`, with a space, `_` or `-` between, in any case?
 fn allow_marked(line: &str) -> bool {
     line.to_lowercase().replace(['_', '-'], " ").contains("allowlist hematite")
-}
-
-/// Is the file under a `tests` directory with no `src` above or below it?  A `src` below is a
-/// crate's, built as product wherever it is placed.
-fn is_test_path(file: &str) -> bool {
-    let mut dirs = file.split('/').collect::<Vec<_>>();
-    dirs.pop();
-    dirs.contains(&"tests") && !dirs.contains(&"src")
 }
 
 /// The lines that set the cfg `test` for a build: `rustc-cfg` (a build script's `cargo:` line)
@@ -519,37 +632,6 @@ fn str_value(lit: &str) -> Option<String> {
 /// Does a path name a `tests` directory?
 fn into_tests(path: &str) -> bool {
     path.split(['/', '\\']).any(|c| c == "tests")
-}
-
-/// The lines of a Cargo manifest whose `path` or `build` value leads into a `tests` directory,
-/// outside a `[[test]]` target, so building product code from test files.
-fn cargo_test_paths(src: &str) -> Vec<usize> {
-    let mut out = Vec::new();
-    let mut test_target = false;
-    for (n, l) in src.split('\n').enumerate() {
-        let t = l.trim();
-        if t.starts_with('[') {
-            test_target = t.replace(' ', "") == "[[test]]";
-            continue;
-        }
-        if test_target || t.starts_with('#') {
-            continue;
-        }
-        let hit = ["path", "build"].iter().any(|k| l.match_indices(k).any(|(at, _)| {
-            let lead = l[..at].chars().last();
-            let word = !matches!(lead, Some(c) if c.is_alphanumeric() || c == '_' || c == '-');
-            let rest = l[at + k.len()..].trim_start();
-            word && rest.strip_prefix('=').map(|v| {
-                let v = v.trim_start();
-                let q = v.chars().next().unwrap_or(' ');
-                matches!(q, '"' | '\'') && v[1..].split(q).next().map(into_tests).unwrap_or(false)
-            }).unwrap_or(false)
-        }));
-        if hit {
-            out.push(n + 1);
-        }
-    }
-    out
 }
 
 /// One Rust source, lexed once for every rule.

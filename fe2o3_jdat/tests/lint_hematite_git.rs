@@ -39,6 +39,7 @@ fn repo(name: &str) -> Outcome<PathBuf> {
     let _ = std::fs::remove_dir_all(&r);
     res!(std::fs::create_dir_all(&r).map_err(|e| err!(e, "mkdir {}", r.display(); IO)));
     res!(git(&r, &["init", "-q", "-b", "main", "."]));
+    res!(write(&r, "Cargo.toml", MANIFEST));
     res!(write(&r, "src/lib.rs", b"pub fn base() {}\n"));
     res!(write(&r, "tests/movable.rs", b"pub trait T {}\npub fn moved(x: Box<dyn T>) -> Box<dyn T> { x }\n"));
     res!(git(&r, &["add", "-A"]));
@@ -63,6 +64,8 @@ fn gate(r: &Path) -> Outcome<(i32, String)> {
         String::from_utf8_lossy(&out.stderr))))
 }
 
+const MANIFEST: &[u8] = b"[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+const DYN: &[u8] = b"pub trait T {}\npub fn f(x: Box<dyn T>) -> Box<dyn T> { x }\n";
 const UNWRAP: &[u8] = b"pub fn f(x: Option<u8>) -> u8 { x.unwrap() }\n";
 
 #[test]
@@ -126,13 +129,12 @@ fn test_hematite_git_symlink_refused() -> Outcome<()> {
 #[test]
 fn test_hematite_git_product_code_from_tests_refused() -> Outcome<()> {
     // Product code placed under `tests/`, where G7-G13 do not read (QA hgate4 C).
-    const DYN: &[u8] = b"pub trait T {}\npub fn f(x: Box<dyn T>) -> Box<dyn T> { x }\n";
     let cases: [(&str, &str, &[u8], &str); 4] = [
         ("path", "src/lib.rs", b"pub fn base() {}\n#[path = \"../tests/imp.rs\"]\npub mod imp;\n",
             "src/lib.rs:2: product code from a tests directory"),
         ("incl", "src/lib.rs", b"pub fn base() {}\ninclude!(\"../tests/imp.rs\");\n",
             "src/lib.rs:2: product code from a tests directory"),
-        ("cargo", "Cargo.toml", b"[package]\nname = \"x\"\n\n[lib]\npath = \"tests/imp.rs\"\n",
+        ("cargo", "Cargo.toml", b"[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"tests/imp.rs\"\n",
             "Cargo.toml:5: product code from a tests directory"),
         ("crate", "helper/tests/src/lib.rs", DYN, "helper/tests/src/lib.rs:2: dyn Trait"),
     ];
@@ -150,7 +152,6 @@ fn test_hematite_git_product_code_from_tests_refused() -> Outcome<()> {
 #[test]
 fn test_hematite_git_escaped_path_into_tests_refused() -> Outcome<()> {
     // rustc decodes the literal, so an escape cannot hide `tests` from the gate (QA hgate5 C1).
-    const DYN: &[u8] = b"pub trait T {}\npub fn f(x: Box<dyn T>) -> Box<dyn T> { x }\n";
     let cases: [(&str, &[u8]); 4] = [
         ("x", b"pub fn base() {}\n#[path = \"../t\\x65sts/imp.rs\"]\npub mod imp;\n"),
         ("u", b"pub fn base() {}\n#[path = \"../t\\u{65}sts/imp.rs\"]\npub mod imp;\n"),
@@ -166,6 +167,71 @@ fn test_hematite_git_escaped_path_into_tests_refused() -> Outcome<()> {
         assert!(rc == 1 && out.contains("src/lib.rs:2: product code from a tests directory"),
             "{}: rc {}: {}", name, rc, out);
     }
+    Ok(())
+}
+
+#[test]
+fn test_hematite_git_cargo_manifest_read_by_cargo() -> Outcome<()> {
+    // Cargo decodes the manifest, so no TOML spelling hides a lib built from tests (QA hgate5 C2).
+    let cases: [(&str, &str); 3] = [
+        ("unicode", "path = \"t\\u0065sts/imp.rs\""),
+        ("quoted", "\"path\" = \"tests/imp.rs\""),
+        ("literal", "path = '''tests/imp.rs'''"),
+    ];
+    for (name, line) in cases {
+        let r = res!(repo(&fmt!("c2_{}", name)));
+        res!(write(&r, "tests/imp.rs", DYN));
+        res!(write(&r, "Cargo.toml", fmt!("{}\n[lib]\n{}\n", String::from_utf8_lossy(MANIFEST), line)
+            .as_bytes()));
+        res!(commit(&r));
+        let (rc, out) = res!(gate(&r));
+        assert!(rc == 1 && out.contains("Cargo.toml:5: product code from a tests directory"),
+            "{}: rc {}: {}", name, rc, out);
+    }
+    Ok(())
+}
+
+#[test]
+fn test_hematite_git_package_in_tests_is_product() -> Outcome<()> {
+    // A package rooted in a tests directory is a package, its lib product (QA hgate5 C3).
+    for dir in ["h/tests", "tests/h"] {
+        let r = res!(repo(&fmt!("c3_{}", dir.replace('/', "_"))));
+        res!(write(&r, &fmt!("{}/Cargo.toml", dir),
+            b"[package]\nname = \"h\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"lib.rs\"\n"));
+        res!(write(&r, &fmt!("{}/lib.rs", dir), DYN));
+        res!(commit(&r));
+        let (rc, out) = res!(gate(&r));
+        assert!(rc == 1 && out.contains(&fmt!("{}/lib.rs:2: dyn Trait", dir)), "{}: rc {}: {}", dir, rc, out);
+    }
+    Ok(())
+}
+
+#[test]
+fn test_hematite_git_renamed_test_crate_not_a_test() -> Outcome<()> {
+    // `tokio` renamed to any crate makes `#[tokio::test]` any macro (QA hgate5 H1).
+    let r = res!(repo("h1"));
+    res!(write(&r, "Cargo.toml", fmt!("{}\n[dependencies]\ntokio = {{ package = \"y\", path = \"y\" }}\n",
+        String::from_utf8_lossy(MANIFEST)).as_bytes()));
+    res!(write(&r, "y/Cargo.toml", b"[package]\nname = \"y\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"));
+    res!(write(&r, "y/src/lib.rs", b"\n"));
+    res!(write(&r, "src/lib.rs",
+        b"pub fn base() {}\npub trait T {}\n#[tokio::test]\npub fn serve(x: Box<dyn T>) -> Box<dyn T> { x }\n"));
+    res!(commit(&r));
+    let (rc, out) = res!(gate(&r));
+    assert!(rc == 1 && out.contains("src/lib.rs:4: dyn Trait"), "rc {}: {}", rc, out);
+    Ok(())
+}
+
+#[test]
+fn test_hematite_git_test_code_turned_product_refused() -> Outcome<()> {
+    // A package taking in a test file leaves its lines unchanged but product.
+    let r = res!(repo("turned"));
+    res!(write(&r, "tests/Cargo.toml",
+        b"[package]\nname = \"m\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"movable.rs\"\n"));
+    res!(commit(&r));
+    let (rc, out) = res!(gate(&r));
+    assert!(rc == 1 && out.contains("tests/Cargo.toml:1: turns code Cargo built as test into product"),
+        "rc {}: {}", rc, out);
     Ok(())
 }
 
