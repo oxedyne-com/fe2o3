@@ -1,0 +1,19 @@
+diff --git a/fe2o3_file/src/overlay.rs b/fe2o3_file/src/overlay.rs
+index 2b49b692..14d5e34a 100644
+--- a/fe2o3_file/src/overlay.rs
++++ b/fe2o3_file/src/overlay.rs
+@@ -242,12 +242,12 @@ fn open_root(path: &Path) -> Outcome<OwnedFd> {
+ }
+ 
+ fn open_child(dir: &OwnedFd, name: &str, extra: OFlags, path: &Path) -> Outcome<OwnedFd> {
+-    sys(rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC
++    sys(rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::CLOEXEC
+         | OFlags::NONBLOCK | extra, Mode::empty()), "open, without following a link,", path)
+ }
+ 
+ fn lower_stat(low: &OwnedFd, name: &str, path: &Path) -> Outcome<Option<Stat>> {
+-    match rustix::fs::statat(low, name, AtFlags::SYMLINK_NOFOLLOW) {
++    match rustix::fs::statat(low, name, AtFlags::empty()) {
+         Ok(st) => Ok(Some(st)),
+         Err(rustix::io::Errno::NOENT) => Ok(None),
+         Err(e) => Err(err!("Overlay walk could not stat lower {:?}: {}.", path, e; IO)),
