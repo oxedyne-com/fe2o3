@@ -25,7 +25,7 @@ signal = ["dep:nix", "nix/signal", "nix/process"]
 # restart budget. Builds on signal.
 supervise = ["signal"]
 # ns: a user and mount namespace keeping the caller's own ids, and an overlay mounted in it, safe
-# over nix, and capabilities handed to a pid namespace's first process over rustix. Off by default
+# over nix, and CAP_SYS_ADMIN handed to a pid namespace's first process over rustix. Off by default
 # for the same reason.
 ns = ["dep:nix", "nix/sched", "nix/mount", "nix/user", "nix/fs", "nix/socket", "dep:rustix"]
 

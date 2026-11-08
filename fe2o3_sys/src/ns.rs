@@ -10,9 +10,9 @@
 //! `userns`, `capability sys_admin` and `mount` succeeds.
 //!
 //! The caller keeps its own uid, so it is not root in its namespace and an `exec` drops every
-//! capability it holds there: [`hand_down`] keeps `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` for the
-//! first process of its pid namespace, which alone can mount that namespace's `/proc`, and
-//! [`drop_capabilities`] takes them away again before that process runs anything else.
+//! capability it holds there: [`hand_down`] keeps `CAP_SYS_ADMIN` alone for the first process of
+//! its pid namespace, which alone can mount that namespace's `/proc`, and [`drop_capabilities`]
+//! takes it away again before that process runs anything else.
 //!
 //! The system calls come from `nix` and `rustix`, which own the `unsafe` this crate forbids.
 
@@ -51,9 +51,12 @@ use nix::unistd::{
 
 use rustix::thread::{
     capabilities,
+    capability_is_in_bounding_set,
     clear_ambient_capability_set,
     configure_capability_in_ambient_set,
+    remove_capability_from_bounding_set,
     set_capabilities,
+    set_no_new_privs,
     CapabilitySet,
     CapabilitySets,
 };
@@ -100,35 +103,33 @@ pub fn enter_own(pid: bool, net: bool) -> Outcome<()> {
     Ok(())
 }
 
-/// Puts `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` in the caller's inheritable and ambient sets, so the
-/// program it runs next keeps them across `exec` in the user namespace [`enter_own`] made.
+/// Puts `CAP_SYS_ADMIN` in the caller's inheritable and ambient sets, so the program it runs next
+/// keeps it across `exec` in the user namespace [`enter_own`] made, and empties the caller's
+/// bounding set, so neither that program nor anything it runs can gain another.  Emptying the
+/// bounding set needs `CAP_SETPCAP`, which the caller holds there and the program does not.
 pub fn hand_down() -> Outcome<()> {
-    let caps = CapabilitySet::SYS_ADMIN | CapabilitySet::NET_ADMIN;
     let mut sets = match capabilities(None) {
         Ok(s)   => s,
         Err(e)  => return Err(err!("The caller's capabilities could not be read: {}.", e;
             System, Security)),
     };
-    sets.inheritable |= caps;
+    sets.inheritable |= CapabilitySet::SYS_ADMIN;
     if let Err(e) = set_capabilities(None, sets) {
-        return Err(err!("The capabilities {:?} could not be made inheritable: {}.", caps, e;
-            System, Security));
+        return Err(err!("CAP_SYS_ADMIN could not be made inheritable: {}.", e; System, Security));
     }
-    for cap in caps.iter() {
-        if let Err(e) = configure_capability_in_ambient_set(cap, true) {
-            return Err(err!("The capability {:?} could not be made ambient: {}.", cap, e;
-                System, Security));
-        }
+    if let Err(e) = configure_capability_in_ambient_set(CapabilitySet::SYS_ADMIN, true) {
+        return Err(err!("CAP_SYS_ADMIN could not be made ambient: {}.", e; System, Security));
     }
-    Ok(())
+    empty_bounding()
 }
 
-/// Empties the caller's ambient, inheritable, permitted and effective capability sets, so nothing
-/// it runs from then on holds a capability by inheritance.
+/// Empties the caller's ambient, bounding, inheritable, permitted and effective capability sets
+/// and sets `no_new_privs`, so nothing it runs from then on holds or gains a capability.
 pub fn drop_capabilities() -> Outcome<()> {
     if let Err(e) = clear_ambient_capability_set() {
         return Err(err!("The ambient capabilities could not be cleared: {}.", e; System, Security));
     }
+    res!(empty_bounding());
     let none = CapabilitySets {
         effective:      CapabilitySet::empty(),
         permitted:      CapabilitySet::empty(),
@@ -136,6 +137,24 @@ pub fn drop_capabilities() -> Outcome<()> {
     };
     if let Err(e) = set_capabilities(None, none) {
         return Err(err!("The capabilities could not be dropped: {}.", e; System, Security));
+    }
+    if let Err(e) = set_no_new_privs(true) {
+        return Err(err!("no_new_privs could not be set: {}.", e; System, Security));
+    }
+    Ok(())
+}
+
+fn empty_bounding() -> Outcome<()> {
+    for cap in CapabilitySet::all().iter() {
+        match capability_is_in_bounding_set(cap) {
+            Ok(false)   => (),
+            Ok(true)    => if let Err(e) = remove_capability_from_bounding_set(cap) {
+                return Err(err!("The capability {:?} could not be dropped from the bounding set: {}.",
+                    cap, e; System, Security));
+            },
+            // The kernel does not know this capability, so no process can hold it.
+            Err(_)      => (),
+        }
     }
     Ok(())
 }

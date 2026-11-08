@@ -49,14 +49,12 @@ fn test_hand_down_without_the_capabilities_is_refused() {
 }
 
 #[test]
-fn test_drop_capabilities_leaves_none() {
-    if let Err(e) = ns::drop_capabilities() {
-        panic!("{}", e);
+fn test_drop_capabilities_without_setpcap_is_refused() {
+    if as_root() {
+        return;
     }
-    // fixed: kernel ABI path and fields; capabilities are per thread.
-    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap_or_default();
-    for key in ["CapInh:", "CapPrm:", "CapEff:", "CapAmb:"] {
-        let line = status.lines().find(|l| l.starts_with(key)).unwrap_or("");
-        assert!(line.ends_with("0000000000000000"), "{} not empty: {}", key, line);
+    match ns::drop_capabilities() {
+        Ok(())  => panic!("the bounding set was emptied without CAP_SETPCAP"),
+        Err(e)  => assert!(e.to_string().contains("bounding set"), "not the bounding set's refusal: {}", e),
     }
 }
