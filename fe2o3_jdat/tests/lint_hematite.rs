@@ -53,11 +53,21 @@ fn seeds() -> Vec<(&'static str, &'static str, String, usize)> {
     let key = fmt!("sk_li{}", "ve_9fK2mQ7xR4tL8wZ3nB6vY1cH5");
     vec![
         ("G1",  "src/a.rs", fmt!("fn f(x: Option<u8>) -> u8 {{\n    x.unwrap()\n}}\n"), 2),
+        ("G1",  "src/a.rs", fmt!("fn f(x: Option<u8>) -> u8 {{\n    Option::unwrap(x)\n}}\n"), 2),
+        ("G1",  "src/a.rs", fmt!("fn f(v: Vec<Option<u8>>) -> Vec<u8> {{\n    v.into_iter().map(Option::unwrap).collect()\n}}\n"), 2),
         ("G2",  "src/a.rs", fmt!("fn f(x: Option<u8>) -> u8 {{\n    x.expect(\"no\")\n}}\n"), 2),
+        ("G2",  "src/a.rs", fmt!("fn f(x: Option<u8>) -> u8 {{\n    Option::expect(x, \"no\")\n}}\n"), 2),
         ("G3",  "src/a.rs", fmt!("fn f() {{\n    unsafe {{ g() }}\n}}\n"), 2),
+        ("G3",  "src/a.rs", fmt!("fn f() {{}}\n#[unsafe(no_mangle)]\npub fn g() {{}}\n"), 2),
         ("G4",  "src/a.rs", fmt!("fn f(x: &str) -> Outcome<u8> {{\n    let v = parse(x)?;\n    Ok(v)\n}}\n"), 2),
+        ("G4",  "src/a.rs", fmt!("fn f(x: Outcome<u8>) -> Outcome<u8> {{\n    let v = x?;\n    Ok(v)\n}}\n"), 2),
+        ("G4",  "src/a.rs", fmt!("fn f(p: (Outcome<u8>,)) -> Outcome<u8> {{\n    Ok(p.0?)\n}}\n"), 2),
+        ("G4",  "src/a.rs", fmt!("macro_rules! q {{\n    ($e:expr) => {{ $e? }};\n}}\n"), 2),
         ("G5",  "src/a.rs", fmt!("fn f() -> Outcome<()> {{\n    ok!(g(), \"context\");\n    Ok(())\n}}\n"), 2),
         ("G6",  "src/a.rs", fmt!("fn f(m: &Data) {{\n    let g = m.read();\n}}\n"), 2),
+        ("G6",  "src/a.rs", fmt!("fn f(m: &RwLock<u8>) {{\n    let g = RwLock::read(m);\n}}\n"), 2),
+        ("G6",  "src/a.rs", fmt!("fn f(m: &RwLock<u8>) {{\n    let g = RwLock::write(m);\n}}\n"), 2),
+        ("G6",  "src/a.rs", fmt!("fn f(m: &Mutex<u8>) {{\n    let g = Mutex::lock(m);\n}}\n"), 2),
         ("G7",  "src/a.rs", fmt!("pub enum E {{\n    /// The first.\n    A,\n}}\n"), 2),
         ("G7",  "src/a.rs", fmt!("pub struct S {{\n    /// The size.\n    pub n: u8,\n}}\n"), 2),
         ("G7",  "src/a.rs", fmt!("/// The most.\npub const MOST: u8 = 3;\n"), 1),
@@ -67,7 +77,13 @@ fn seeds() -> Vec<(&'static str, &'static str, String, usize)> {
         ("G7",  "src/a.rs", fmt!("#[derive(Debug)]\npub struct S {{\n    /// The size.\n    #[optional]\n    #[serde(default)]\n    pub n: u8,\n}}\n"), 3),
         ("G7",  "src/a.rs", fmt!("pub enum E {{\n    A {{\n        /// The size.\n        #[optional]\n        n: u8,\n    }},\n}}\n"), 3),
         ("G7",  "src/a.rs", fmt!("impl S {{\n    /// The most.\n    #[optional]\n    pub(crate) const MOST: u8 = 3;\n}}\n"), 2),
+        ("G7",  "src/a.rs", fmt!("pub struct S<F: Fn(u8)> {{\n    /// The call.\n    pub f: F,\n}}\n"), 2),
+        ("G7",  "src/a.rs", fmt!("pub struct S<F> where F: Fn() {{\n    /// The call.\n    pub f: F,\n}}\n"), 2),
+        ("G7",  "src/a.rs", fmt!("pub enum E<T: Into<Vec<u8>>> {{\n    /// The value.\n    A(T),\n}}\n"), 2),
+        ("G7",  "src/a.rs", fmt!("pub struct S {{\n    /** The size. */\n    pub n: u8,\n}}\n"), 2),
+        ("G7",  "src/a.rs", fmt!("/** The most. */\npub const MOST: u8 = 3;\n"), 1),
         ("G8",  "src/a.rs", fmt!("/// Parses.\n///\n/// # Errors\nfn f() {{}}\n"), 3),
+        ("G8",  "src/a.rs", fmt!("/// Parses.\n///\n/// # Errors:\nfn f() {{}}\n"), 3),
         ("G9",  "src/a.rs", fmt!("use std::fmt;\nuse crate::x;\n"), 2),
         ("G9",  "src/a.rs", fmt!("use crate::a; use crate::b;\n"), 1),
         ("G10", "notes.txt", fmt!("one\nkey = {}\n", key), 2),
@@ -216,6 +232,14 @@ fn test_hematite_test_code_exempt_only_where_the_table_says() -> Outcome<()> {
     assert_eq!(hits(&rep), vec![(fmt!("G1"), 6)]);
     let rep = res!(gate(&rules, "tests/a.rs", "// The color.\nuse std::fmt;\nuse crate::x;\n"));
     assert!(rep.is_clean(), "{:?}", rep);
+    let rep = res!(gate(&rules, "fe2o3_x/tests/data/a.rs", "// The color.\n"));
+    assert!(rep.is_clean(), "{:?}", rep);
+    // Only `#[cfg(test)]` and a `tests` directory outside `src` are test code.
+    let src = "#[cfg(any(test, unix))]\nfn t() {\n    // The behavior.\n}\n";
+    assert_eq!(hits(&res!(gate(&rules, "src/a.rs", src))), vec![(fmt!("G13"), 3)]);
+    for file in ["src/util_tests.rs", "src/tests.rs", "src/tests/mod.rs", "fe2o3_x/src/tests/a.rs"] {
+        assert_eq!(hits(&res!(gate(&rules, file, "// The color.\n"))), vec![(fmt!("G13"), 1)], "{}", file);
+    }
     Ok(())
 }
 

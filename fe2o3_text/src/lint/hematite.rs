@@ -7,14 +7,14 @@
 //!
 //! - strings, chars and comments, which are tokens or trivia from `fmt::lex` (bar `CommentWords`,
 //!   which reads only comments, and outside backticks there),
-//! - a `?` that does not follow an expression (`?Sized`, `<?>`), and any `?` or raw lock call in
-//!   a `macro_rules!` body, where `?` is a repetition and the lock macros themselves are defined,
+//! - a `?` that does not follow an expression (`?Sized`, `<?>`), a `?` that closes a `$( … )`
+//!   repetition, and any raw lock call in a `macro_rules!` body, where the lock macros are defined,
 //! - `.lock()` on `stdin()`, `stdout()` or `stderr()`, which are not data locks,
 //! - `pub use` in import order, since a re-export is placed for the reader of the module,
 //! - `include_str!` and `include_bytes!`, which read data, not code (G14 refuses only `include!`
 //!   and `#[path]` of a file not ending `.rs`, which the gate would not read),
-//! - test code (a `tests` directory, a `tests.rs` or `_tests.rs` file, a `#[test]` or
-//!   `#[cfg(test)]` item) for a rule whose `in_tests` is false,
+//! - test code (a `tests` directory with no `src` above it, a `#[test]` or exactly `#[cfg(test)]`
+//!   item) for a rule whose `in_tests` is false,
 //! - a line marked `// fixed: <why>` for a rule whose `fixed_ok` is true,
 //! - any line carrying `allowlist hematite`, which is reported in `Report::allows` so that the
 //!   escape is shown, not silent.
@@ -24,6 +24,7 @@ use crate::{
         cst::{
             Token,
             TokenKind,
+            Trivia,
         },
         lex::{
             lex,
@@ -346,14 +347,15 @@ fn allow_marked(line: &str) -> bool {
     line.to_lowercase().replace(['_', '-'], " ").contains("allowlist hematite")
 }
 
+/// Is the file under a `tests` directory with no `src` above it?
 fn is_test_path(file: &str) -> bool {
-    let mut parts = file.split('/').peekable();
-    while let Some(p) = parts.next() {
-        if parts.peek().is_none() {
-            return p == "tests.rs" || p.ends_with("_tests.rs");
-        }
-        if p == "tests" {
-            return true;
+    let mut dirs = file.split('/').collect::<Vec<_>>();
+    dirs.pop();
+    for d in dirs {
+        match d {
+            "src"   => return false,
+            "tests" => return true,
+            _       => {}
         }
     }
     false
@@ -365,6 +367,7 @@ struct RustSrc<'a> {
     toks:   Vec<Token>,
     lines:  LineIndex,
     code:   Vec<usize>,         // indices of the tokens that are code, not docs or attributes
+    attrs:  Vec<(usize, Vec<Token>)>, // each attribute's inner tokens, by its byte offset
     macros: Vec<bool>,          // inside a `macro_rules!` body
     tests:  BTreeSet<usize>,    // lines inside a test item
     fixed:  BTreeSet<usize>,    // lines covered by a `// fixed:` marker
@@ -376,6 +379,12 @@ impl<'a> RustSrc<'a> {
         let lines = LineIndex::new(src);
         let code = (0..toks.len()).filter(|i| !matches!(toks[*i].kind,
             TokenKind::DocComment(_) | TokenKind::Attribute | TokenKind::Eof)).collect();
+        // An attribute the lexer cannot read on its own holds no code tokens to match.
+        let attrs = toks.iter().filter(|t| t.kind == TokenKind::Attribute)
+            .map(|t| (t.span.start + 2, lex(t.text.get(2..).unwrap_or(""), &rust_tokens())
+                .map(|v| v.into_iter().filter(|x| x.kind != TokenKind::Eof).collect())
+                .unwrap_or_default()))
+            .collect();
         let mut thin = Vec::new();
         let fixed = fixed_lines(src, &toks, &lines, file, &mut thin);
         let mut macros = vec![false; toks.len()];
@@ -393,9 +402,7 @@ impl<'a> RustSrc<'a> {
             }
             if t.kind == TokenKind::Attribute {
                 let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
-                if a == "#[test]" || a.starts_with("#[cfg(test") || a.contains("::test]")
-                    || a.starts_with("#[cfg(all(test") || a.starts_with("#[cfg(any(test")
-                {
+                if a == "#[test]" || a == "#[cfg(test)]" || a.ends_with("::test]") {
                     let end = item_end(&toks, i + 1).min(toks.len());
                     if end > i {
                         let first = lines.line_of(t.span.start);
@@ -408,7 +415,7 @@ impl<'a> RustSrc<'a> {
             }
             i += 1;
         }
-        Ok(Self { src, toks, lines, code, macros, tests, fixed })
+        Ok(Self { src, toks, lines, code, attrs, macros, tests, fixed })
     }
 
     fn line(&self, i: usize) -> usize {
@@ -446,19 +453,32 @@ impl<'a> RustSrc<'a> {
                 out.push(self.line(w[0]));
             }
         }
+        // An attribute can hold code: `#[unsafe(no_mangle)]`.
+        for (at, toks) in &self.attrs {
+            for w in toks.windows(seq.len()) {
+                if w.iter().zip(seq).all(|(t, s)| t.text == *s) {
+                    out.push(self.lines.line_of(at + w[0].span.start));
+                }
+            }
+        }
         out
     }
 
     fn question(&self) -> Vec<usize> {
         let mut out = Vec::new();
         for (k, i) in self.code.iter().enumerate() {
-            if !is_punct(&self.toks[*i], '?') || self.macros[*i] || k == 0 {
+            if !is_punct(&self.toks[*i], '?') || k == 0 {
                 continue;
             }
             let prev = &self.toks[self.code[k - 1]];
+            if self.macros[*i] && is_punct(prev, ')') && self.repetition(k - 1) {
+                continue;
+            }
             let after_expr = match &prev.kind {
                 TokenKind::Punct(')') | TokenKind::Punct(']') | TokenKind::Punct('}') => true,
                 TokenKind::Ident                                                     => true,
+                // A tuple field, `p.0?`.
+                TokenKind::Number       => k >= 2 && is_punct(&self.toks[self.code[k - 2]], '.'),
                 TokenKind::Keyword(w)   => w == "await" || w == "self",
                 _                       => false,
             };
@@ -512,6 +532,24 @@ impl<'a> RustSrc<'a> {
             }
         }
         out
+    }
+
+    /// Does the `)` at code index `close` end a `$( … )` macro repetition?
+    fn repetition(&self, close: usize) -> bool {
+        let mut depth = 0isize;
+        for k in (0..=close).rev() {
+            match self.toks[self.code[k]].kind {
+                TokenKind::Punct(')') | TokenKind::Punct(']') | TokenKind::Punct('}') => depth += 1,
+                TokenKind::Punct('(') | TokenKind::Punct('[') | TokenKind::Punct('{') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return k > 0 && is_punct(&self.toks[self.code[k - 1]], '$');
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn ok_args(&self) -> Vec<usize> {
@@ -585,9 +623,29 @@ impl<'a> RustSrc<'a> {
                 && toks.get(i + 1).map(|n| n.kind == TokenKind::Ident).unwrap_or(false)
             {
                 let mut j = i + 2;
-                while j < toks.len() && !matches!(toks[j].kind,
-                    TokenKind::Punct('{') | TokenKind::Punct(';') | TokenKind::Punct('('))
-                {
+                // Generics and a `where` clause may hold `Fn(..)`, which is not a tuple body.
+                if j < toks.len() && is_punct(&toks[j], '<') {
+                    let mut depth = 0isize;
+                    while j < toks.len() {
+                        depth += match &toks[j].kind {
+                            TokenKind::Punct('<')                   => 1,
+                            TokenKind::Punct('>')                   => -1,
+                            TokenKind::Operator(o) if o == "<<"     => 2,
+                            TokenKind::Operator(o) if o == ">>"     => -2,
+                            _                                       => 0,
+                        };
+                        j += 1;
+                        if depth <= 0 {
+                            break;
+                        }
+                    }
+                }
+                let body: fn(&Token) -> bool = match toks.get(j).map(|t| is_keyword(t, "where")).unwrap_or(false) {
+                    true    => |t: &Token| matches!(t.kind, TokenKind::Punct('{') | TokenKind::Punct(';')),
+                    false   => |t: &Token| matches!(t.kind,
+                        TokenKind::Punct('{') | TokenKind::Punct(';') | TokenKind::Punct('(')),
+                };
+                while j < toks.len() && !body(&toks[j]) {
                     j += 1;
                 }
                 if j < toks.len() && is_punct(&toks[j], '{') {
@@ -603,6 +661,12 @@ impl<'a> RustSrc<'a> {
         let mut stack: Vec<usize> = Vec::new();
         let mut i = 0;
         while i < toks.len() {
+            let in_members = stack.last().map(|o| members.contains(o)).unwrap_or(false);
+            if in_members || self.const_at(i) {
+                if let Some(l) = self.block_doc_lines(i).into_iter().find(|l| added.contains(l)) {
+                    out.push(l);
+                }
+            }
             match &toks[i].kind {
                 TokenKind::Punct('{') => {
                     if stack.last().map(|o| enums.contains(o)).unwrap_or(false)
@@ -638,6 +702,29 @@ impl<'a> RustSrc<'a> {
         out
     }
 
+    /// The lines of each `/** … */` doc comment in the trivia before token `i`, which the lexer
+    /// keeps as a block comment.
+    fn block_doc_lines(&self, i: usize) -> Vec<usize> {
+        let t = &self.toks[i];
+        let mut end = self.line(i);
+        let mut out = Vec::new();
+        for tr in t.leading_trivia.iter().rev() {
+            match tr {
+                Trivia::Newline         => end = end.saturating_sub(1),
+                Trivia::BlockComment(c) => {
+                    let start = end.saturating_sub(c.matches('\n').count());
+                    if c.starts_with("/**") && !c.starts_with("/***") && c != "/**/" {
+                        out.extend(start..=end);
+                    }
+                    end = start;
+                }
+                _ => {}
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// Does a `const` item, not a `const fn`, start at `i`, past attributes and visibility?
     fn const_at(&self, mut i: usize) -> bool {
         let toks = &self.toks;
@@ -661,7 +748,8 @@ impl<'a> RustSrc<'a> {
             if let TokenKind::DocComment(d) = &t.kind {
                 let body = d.get(3..).unwrap_or("").trim_start();
                 if let Some(h) = body.strip_prefix('#') {
-                    let word = h.trim_start_matches('#').split_whitespace().next().unwrap_or("");
+                    let word = h.trim_start_matches('#').split_whitespace().next().unwrap_or("")
+                        .trim_end_matches(|c: char| !c.is_alphanumeric());
                     if words.iter().any(|w| w == word) {
                         out.push(self.line(i));
                     }
