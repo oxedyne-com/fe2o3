@@ -5,7 +5,8 @@
 //!
 //! The kernel lets an unprivileged program make these only where its security module allows. Under
 //! AppArmor's `apparmor_restrict_unprivileged_userns`, an unconfined program's namespace is made but
-//! its id maps are refused, so [`enter_own`] fails with `EPERM`; a program a profile grants
+//! its id maps are refused, so [`enter_own`] fails (`EPERM`, or `EACCES` at the
+//! `setgroups` write on kernel 7.0); a program a profile grants
 //! `userns`, `capability sys_admin` and `mount` succeeds.
 //!
 //! The system calls come from `nix`, which owns the `unsafe` this crate forbids.
