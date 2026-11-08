@@ -79,7 +79,6 @@ pub enum Check {
     TestAlias,                  // a rename to a name that `Rules::test_attrs` begins with
     Link,                       // a symlink the change adds, whose target the gate does not read
     TestPath,                   // product code placed under `tests/`, where test code is exempt
-    CfgTest,                    // a build setting `test`, which makes `#[cfg(test)]` code product
 }
 
 impl Check {
@@ -108,7 +107,6 @@ impl Check {
             "test_alias"    => Self::TestAlias,
             "link"          => Self::Link,
             "test_path"     => Self::TestPath,
-            "cfg_test"      => Self::CfgTest,
             _               => return Err(err!("Unknown Hematite check '{}'.", name;
                 Invalid, Input)),
         })
@@ -142,6 +140,7 @@ pub struct Added {
     pub test:       bool,               // test code by where Cargo builds it, `Cargo::is_test`
     pub test_attrs: Vec<String>,        // the attributes that mark a test here, `Cargo::test_attrs`
     pub from_tests: bool,               // a manifest building product code from a tests directory
+    pub build:      bool,               // shapes a build script or Cargo's build, `Cargo::builds`
 }
 
 /// What Cargo builds a target as.
@@ -201,6 +200,26 @@ impl Cargo {
                 .any(|t| t.kind != TargetKind::Test && self.tests_dir_of(&t.src).as_ref() == Some(&dir)),
             None        => false,
         }
+    }
+
+    /// Does `file` shape what Cargo builds other than through the code the gate reads: a build
+    /// script's source, another Rust file of its package outside the directories of the package's
+    /// other targets (a module of the build script), that package's manifest, or a `.cargo/config`?
+    pub fn builds(&self, file: &str) -> bool {
+        let (dir, name) = file.rsplit_once('/').unwrap_or(("", file));
+        if (dir == ".cargo" || dir.ends_with("/.cargo")) && (name == "config" || name == "config.toml") { // fixed: Cargo's config file names
+            return true;
+        }
+        let at = |p: &Package, d: &str| match p.root.is_empty() {
+            true    => d.to_string(),
+            false   => fmt!("{}/{}", p.root, d),
+        };
+        self.packages.iter().filter(|p| p.targets.iter().any(|t| t.kind == TargetKind::Build)).any(|p| {
+            p.targets.iter().any(|t| t.kind == TargetKind::Build && t.src == file)
+                || file == at(p, "Cargo.toml") // fixed: Cargo's manifest name
+                || (file.ends_with(".rs") && self.package_of(file).map(|q| std::ptr::eq(p, q)).unwrap_or(false)
+                    && !["src", "tests", "benches", "examples"].iter().any(|d| under(file, &at(p, d)))) // fixed: Cargo's target directories
+        })
     }
 
     /// Does the manifest `file` build a target that is not a test from a `tests` directory?
@@ -298,6 +317,7 @@ impl fmt::Display for Allowed {
 pub struct Report {
     pub breaches:   Vec<Breach>,
     pub allows:     Vec<Allowed>,
+    pub builds:     Vec<String>,    // files the change adds to that shape a build ([`BUILD_CHANGED`])
 }
 
 impl Report {
@@ -316,6 +336,10 @@ pub const GIT_ENV: [(&str, &str); 4] = [
     ("GIT_NO_REPLACE_OBJECTS",  "1"),
     ("GIT_GRAFT_FILE",          "/dev/null"), // fixed: an empty graft file
 ];
+
+// The gate reads the lines a build script has, not what it prints to Cargo (a `cfg`, a flag), so
+// a change to one is put to him rather than refused.
+pub const BUILD_CHANGED: &str = "build script changed: the Hematite gate cannot check what it prints";
 
 pub const INFO_ATTRIBUTES: &str = "info/attributes"; // fixed: git's layout, under `git rev-parse --git-path`
 
@@ -476,11 +500,12 @@ pub fn added(file: String, d: FileDiff, src: String, old: Option<&str>, rules: &
         }
     }
     let from_tests = (file == "Cargo.toml" || file.ends_with("/Cargo.toml")) && now.from_tests(&file); // fixed: Cargo's manifest name
-    Ok(Added { file, src, lines, link: d.link, test, test_attrs, from_tests })
+    let build = now.builds(&file);
+    Ok(Added { file, src, lines, link: d.link, test, test_attrs, from_tests, build })
 }
 
-/// Checks the added lines of each file against the rules that are on, and refuses each manifest
-/// of `turned` ([`Cargo::turned`]) by the `test_path` rule.
+/// Checks the added lines of each file against the rules that are on, refuses each manifest of
+/// `turned` ([`Cargo::turned`]) by the `test_path` rule, and names each file that shapes a build.
 pub fn check(added: &[Added], turned: &[String], rules: &Rules) -> Outcome<Report> {
     let mut rep = Report::default();
     for a in added {
@@ -492,6 +517,7 @@ pub fn check(added: &[Added], turned: &[String], rules: &Rules) -> Outcome<Repor
     }
     rep.breaches.sort_by(|x, y| (&x.file, x.line, &x.rule).cmp(&(&y.file, y.line, &y.rule)));
     rep.breaches.dedup();
+    rep.builds = added.iter().filter(|a| a.build).map(|a| a.file.clone()).collect();
     Ok(rep)
 }
 
@@ -523,7 +549,6 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
                 true    => vec![1],
                 false   => Vec::new(),
             },
-            (Check::CfgTest, _) => cfg_test_lines(&a.src),
             (Check::TestPath, None) => a.lines.iter().next().copied().filter(|_| a.from_tests)
                 .into_iter().collect(),
             (_, Some(rs))   => res!(rs.find(&r.check, rules, &a.lines)),
@@ -562,23 +587,6 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
 /// Does the line carry `allowlist hematite`, with a space, `_` or `-` between, in any case?
 fn allow_marked(line: &str) -> bool {
     line.to_lowercase().replace(['_', '-'], " ").contains("allowlist hematite")
-}
-
-/// The lines that set the cfg `test` for a build: `rustc-cfg` (a build script's `cargo:` line)
-/// or `--cfg` followed by the word `test`, or a `rustc-cfg` whose value is formatted at run time.
-fn cfg_test_lines(src: &str) -> Vec<usize> {
-    let mut out = Vec::new();
-    for (n, l) in src.split('\n').enumerate() {
-        let words: Vec<&str> = l.split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | ':')))
-            .filter(|w| !w.is_empty()).collect();
-        let sets = words.windows(2).any(|w| (w[0].ends_with("rustc-cfg") || w[0] == "--cfg")
-            && w[1] == "test");
-        let formatted = l.match_indices("rustc-cfg").any(|(at, k)| l[at + k.len()..].starts_with("={"));
-        if sets || formatted {
-            out.push(n + 1);
-        }
-    }
-    out
 }
 
 /// The value of a Rust string literal, `"…"` or raw `r#"…"#`, with its escapes decoded, or `None`
@@ -725,7 +733,7 @@ impl<'a> RustSrc<'a> {
                 scan.hits.iter().map(|h| h.line)
                     .chain(scan.bad_fixed.iter().map(|m| m.line)).collect()
             }
-            Check::Credential | Check::Link | Check::CfgTest => Vec::new(),
+            Check::Credential | Check::Link => Vec::new(),
         })
     }
 

@@ -123,10 +123,6 @@ fn seeds() -> Vec<(&'static str, &'static str, String, usize)> {
         ("G14", "src/a.rs", fmt!("mod rt {{\n    pub use tokio::main as test;\n}}\n"), 2),
         ("G14", "src/a.rs", fmt!("extern crate tokio_x as tokio;\n"), 1),
         ("G14", "src/a.rs", fmt!("#[path = \"../tests/imp.rs\"]\nmod imp;\n"), 1),
-        ("G14", "build.rs", fmt!("fn main() {{\n    println!(\"cargo:{}-cfg=test\");\n}}\n", "rustc"), 2),
-        ("G14", "build.rs", fmt!("fn main() {{\n    println!(\"cargo::{}-cfg={{}}\", c);\n}}\n", "rustc"), 2),
-        ("G14", ".cargo/config.toml", fmt!("[build]\nrustflags = [\"-{}\", \"test\"]\n", "-cfg"), 2),
-        ("G14", "tests/run.sh", fmt!("RUSTFLAGS='-{}=test' cargo build\n", "-cfg"), 1),
         ("G14", "src/a.rs", fmt!("fn f() {{\n    include!(\"../tests/imp.rs\");\n}}\n"), 2),
     ]
 }
@@ -189,9 +185,6 @@ async fn q(m: &tokio::sync::RwLock<u8>) -> u8 { *m.read().await + *m.write().awa
 ";
     let rep = res!(gate(&rules, "src/a.rs", src));
     assert_eq!(hits(&rep), Vec::<(String, usize)>::new());
-    // A build script setting a cfg of its own, and one whose name only begins `test`.
-    let src = "fn main() {\n    println!(\"cargo:rustc-cfg=SABER_SCHEME=\\\"SABER\\\"\");\n    println!(\"cargo:rustc-cfg=testing\");\n}\n";
-    assert!(res!(gate(&rules, "build.rs", src)).is_clean());
     // A test module reading a file under `tests/`.
     let src = "#[cfg(test)]\nmod t {\n    #[path = \"../tests/common.rs\"]\n    mod common;\n}\n";
     assert!(res!(gate(&rules, "src/a.rs", src)).is_clean());

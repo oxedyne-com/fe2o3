@@ -120,6 +120,9 @@ fn run() -> Outcome<bool> {
     for a in &rep.allows {
         println!("{}", a);
     }
+    for b in &rep.builds {
+        println!("{}: {}", b, hematite::BUILD_CHANGED);
+    }
     Ok(rep.is_clean())
 }
 

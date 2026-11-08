@@ -3,6 +3,7 @@
 //! `tests/`) that a repository setting would hide, and the gate must still refuse it.
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_text::lint::hematite;
 
 use std::{
     path::{
@@ -232,6 +233,22 @@ fn test_hematite_git_test_code_turned_product_refused() -> Outcome<()> {
     let (rc, out) = res!(gate(&r));
     assert!(rc == 1 && out.contains("tests/Cargo.toml:1: turns code Cargo built as test into product"),
         "rc {}: {}", rc, out);
+    Ok(())
+}
+
+#[test]
+fn test_hematite_git_build_script_changed_flagged_not_refused() -> Outcome<()> {
+    // The gate cannot read what a build script prints to Cargo, so a change to one, or to Cargo's
+    // config, passes with a flag for his card (QA hgate5 D1); a source file is not flagged.
+    let r = res!(repo("build"));
+    res!(write(&r, "build.rs", fmt!("fn main() {{\n    println!(\"cargo:{}-cfg=test\");\n}}\n", "rustc").as_bytes()));
+    res!(write(&r, ".cargo/config.toml", fmt!("[build]\nrustflags = [\"-{}\", \"test\"]\n", "-cfg").as_bytes()));
+    res!(write(&r, "src/lib.rs", b"pub fn base() {}\npub fn more() {}\n"));
+    res!(commit(&r));
+    let (rc, out) = res!(gate(&r));
+    let flag = |f: &str| fmt!("{}: {}", f, hematite::BUILD_CHANGED);
+    assert!(rc == 0 && out.contains(&flag("build.rs")) && out.contains(&flag(".cargo/config.toml"))
+        && !out.contains(&flag("src/lib.rs")), "rc {}: {}", rc, out);
     Ok(())
 }
 
