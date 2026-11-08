@@ -100,8 +100,9 @@ fn run() -> Outcome<bool> {
     let changed: Vec<String> = diffs.keys().cloned().collect();
     let scratch = PathBuf::from(res!(git(&repo, &["rev-parse", "--path-format=absolute", "--git-path",
         &fmt!("hematite-cargo-{}", std::process::id())])).trim());
-    let now = res!(cargo_of(&repo, &scratch.join("now"), &now_list, &changed, &prefix));
-    let was = res!(cargo_of(&repo, &scratch.join("was"), &was_list, &changed, &old_prefix));
+    let top = PathBuf::from(res!(git(&repo, &["rev-parse", "--show-toplevel"])).trim());
+    let now = res!(cargo_of(&repo, &top, &scratch.join("now"), &now_list, &changed, &prefix));
+    let was = res!(cargo_of(&repo, &top, &scratch.join("was"), &was_list, &changed, &old_prefix));
     let _ = std::fs::remove_dir_all(&scratch);
     let turned = now.turned(&was, &hematite::kept_rust(&now_list, &was_list), &rules.test_attrs);
     let mut added = Vec::new();
@@ -126,13 +127,14 @@ fn run() -> Outcome<bool> {
     Ok(rep.is_clean())
 }
 
-/// The packages of the tree `listing`, its files read as `<prefix><path>`, worked out in `dir`.
-fn cargo_of(repo: &PathBuf, dir: &Path, listing: &str, changed: &[String], prefix: &str)
+/// The packages of the tree `listing`, its root `top` and its files read as `<prefix><path>`,
+/// worked out in `dir`.
+fn cargo_of(repo: &PathBuf, top: &Path, dir: &Path, listing: &str, changed: &[String], prefix: &str)
     -> Outcome<hematite::Cargo>
 {
     let _ = std::fs::remove_dir_all(dir);
     res!(std::fs::create_dir_all(dir).map_err(|e| err!(e, "While making {}.", dir.display(); IO, File, Write)));
-    let got = lint::cargo_of(dir, listing, changed,
+    let got = lint::cargo_of(dir, top, listing, changed,
         |p| git(repo, &["cat-file", "blob", &fmt!("{}{}", prefix, p)]),
         |m, full| {
             let mut c = Command::new("cargo"); // fixed: the program's name, found on PATH

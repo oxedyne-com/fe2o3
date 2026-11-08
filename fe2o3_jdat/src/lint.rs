@@ -45,7 +45,11 @@ use std::{
     },
     ffi::OsString,
     fs,
-    path::Path,
+    path::{
+        Component,
+        Path,
+        PathBuf,
+    },
 };
 
 
@@ -244,8 +248,10 @@ pub fn metadata_args(manifest: &Path, full: bool) -> Vec<OsString> {
 
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index"; // fixed: Cargo's id of the crates.io registry
 
-/// The packages Cargo builds from a tree, worked out in `dir`, an empty directory the caller then
-/// removes. `listing` is the tree as `git ls-tree -r -z` or `git ls-files -s -z` gives it and
+/// The packages Cargo builds from a tree whose root is `real` on this machine, worked out in `dir`,
+/// an empty directory the caller then removes. The tree is written at its own path under `dir`,
+/// beside links to its ancestors' other entries, so that a path dependency leaving the tree reaches
+/// what Cargo reaches from `real`. `listing` is the tree as `git ls-tree -r -z` or `git ls-files -s -z` gives it and
 /// `read(path)` a file's content. Each `Cargo.toml` and `Cargo.lock` is written with its content
 /// and every other `.rs` file empty, for Cargo to find the targets; nothing else, so no `.cargo`
 /// config or toolchain file of the tree is read. `metadata(manifest, full)` runs `cargo metadata
@@ -255,6 +261,7 @@ const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 /// cannot build it either.
 pub fn cargo_of(
     dir:            &Path,
+    real:           &Path,
     listing:        &str,
     changed:        &[String],
     mut read:       impl FnMut(&str) -> Outcome<String>,
@@ -262,7 +269,8 @@ pub fn cargo_of(
 )
     -> Outcome<Cargo>
 {
-    let dir = res!(fs::canonicalize(dir).map_err(|e| err!(e, "While finding the Cargo scratch directory {}.", dir.display(); IO, File)));
+    let base = res!(fs::canonicalize(dir).map_err(|e| err!(e, "While finding the Cargo scratch directory {}.", dir.display(); IO, File)));
+    let dir = res!(mirror(&base, real));
     let mut manifests = Vec::new();
     for (mode, path) in hematite::tree_paths(listing) {
         let name = path.rsplit('/').next().unwrap_or(path);
@@ -310,13 +318,70 @@ pub fn cargo_of(
         match got {
             Ok(ps)                      => cargo.packages.extend(ps.into_iter()
                 .filter(|p| !cargo.packages.iter().any(|q| q.root == p.root)).collect::<Vec<_>>()),
-            Err(e) if need.contains(m)  => return Err(err!(e,
-                "Cargo could not read the manifest {}, so the Hematite gate cannot tell test code \
-                from product.", m; Invalid, Input)),
+            Err(e) if need.contains(m)  => {
+                // Cargo names the first dependency it could not load and the manifest it looked
+                // for, under the scratch twin of this machine's root.
+                let text = fmt!("{}", e);
+                let quoted = |after: &str| text.rfind(after).and_then(|i| {
+                    let t = &text[i + after.len()..];
+                    t.find('`').map(|j| t[..j].to_string())
+                });
+                return Err(match (quoted("for dependency `"), quoted("failed to read `")) {
+                    (Some(name), Some(read))    => {
+                        let at = read.strip_suffix("/Cargo.toml").unwrap_or(&read);
+                        let at = match Path::new(at).strip_prefix(&base) {
+                            Ok(r)   => fmt!("/{}", r.display()),
+                            Err(_)  => at.to_string(),
+                        };
+                        err!(e, "Cargo could not read the manifest {}: its dependency {} is not at \
+                            {} on this machine. Check that dependency out at {} so the Hematite \
+                            gate can tell test code from product.", m, name, at, at; Invalid, Input)
+                    }
+                    _                           => err!(e, "Cargo could not read the manifest {}, \
+                        so the Hematite gate cannot tell test code from product.", m; Invalid, Input),
+                });
+            }
             Err(_)                      => {}
         }
     }
     Ok(cargo)
+}
+
+/// The directory under `dir` at which to write a tree whose root is `real`: each ancestor of `real`
+/// is a directory under `dir` holding links to the ancestor's other entries.
+fn mirror(dir: &Path, real: &Path) -> Outcome<PathBuf> {
+    let real = res!(fs::canonicalize(real).map_err(|e| err!(e, "While finding the tree's root {}.", real.display(); IO, File)));
+    let mut at = PathBuf::from("/"); // fixed: the root of a canonical path
+    let mut twin = dir.to_path_buf();
+    for c in real.components() {
+        let next = match c {
+            Component::Normal(n)    => n,
+            _                       => continue,
+        };
+        // An ancestor the user cannot list holds nothing Cargo could reach either.
+        if let Ok(rd) = fs::read_dir(&at) {
+            for e in rd.flatten() {
+                if e.file_name() != next {
+                    res!(link(&e.path(), &twin.join(e.file_name())));
+                }
+            }
+        }
+        at.push(next);
+        twin.push(next);
+        res!(fs::create_dir(&twin).map_err(|e| err!(e, "While making {}.", twin.display(); IO, File, Write)));
+    }
+    Ok(twin)
+}
+
+#[cfg(unix)]
+fn link(to: &Path, at: &Path) -> Outcome<()> {
+    std::os::unix::fs::symlink(to, at).map_err(|e| err!(e, "While linking {} to {}.", at.display(), to.display(); IO, File, Write))
+}
+
+#[cfg(not(unix))]
+fn link(to: &Path, at: &Path) -> Outcome<()> {
+    Err(err!("The Hematite gate links {} to {} for Cargo, which needs a Unix file system.",
+        at.display(), to.display(); Unimplemented))
 }
 
 /// The workspace members of `cargo metadata` output, their paths relative to `dir`, with what
