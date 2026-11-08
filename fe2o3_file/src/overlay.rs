@@ -2,22 +2,22 @@
 //!
 //! [`changes`] walks the upper beside the lower and names what applying it would do: [`Op::Create`]
 //! for a path the lower lacks, [`Op::Write`] for new contents, [`Op::Delete`] for a whiteout,
-//! [`Op::Opaque`] for a directory whose lower contents are hidden, and [`Op::Meta`] for a mode or
-//! time change alone. With `redirect_dir` off, overlayfs renames a file by copying it up and leaves
-//! a whiteout behind, and refuses a directory rename with `EXDEV`, so `mv` copies it; either way a
-//! rename reaches the list as a delete of the old path and a create of the new, and there is no
-//! rename op.
+//! [`Op::Opaque`] for a directory whose lower contents are hidden, [`Op::Meta`] for a change of
+//! mode, modification time or extended attributes alone, and [`Op::Refused`] for an entry this list
+//! cannot carry, with the reason. With `redirect_dir` not creating redirects, overlayfs renames a
+//! file by copying it up and leaves a whiteout behind, and refuses a directory rename with `EXDEV`,
+//! so `mv` copies it; either way a rename reaches the list as a delete of the old path and a create
+//! of the new, and there is no rename op.
 //!
 //! The upper may have been written by a hostile program, so the walk follows no symbolic link:
 //! both roots are opened with `RESOLVE_NO_SYMLINKS`, every child by name from its parent's
-//! descriptor with `O_NOFOLLOW`. It refuses, by `err!`, an upper directory standing over a lower
-//! symbolic link without the opaque mark overlayfs gives it (applying it would write through the
-//! link), more entries than the caller allows, a name that is not UTF-8 or holds a control
-//! character, a device, pipe or socket other than a whiteout, and the overlay attributes this list
-//! cannot express (`redirect`, `metacopy`, an `x` opaque mark, an attribute whiteout).
+//! descriptor with `O_NOFOLLOW`, and a directory is reopened for its turn only if it is still the
+//! inode first seen. The walk keeps a work list rather than recursing, so a deep upper costs heap,
+//! not stack. An odd entry is refused alone, as an op; the whole walk is refused only past the
+//! caller's entry cap.
 //!
-//! Both `trusted.overlay.` and `user.overlay.` (a mount with `userxattr`, as in an unprivileged
-//! user namespace) attributes are read.
+//! Only the mount's own overlay attributes ([`Namespace`]) are marks. Every other extended
+//! attribute is data, compared for [`Op::Meta`].
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -25,14 +25,22 @@
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
-    ffi::CStr,
+    collections::BTreeMap,
+    ffi::{
+        OsStr,
+        OsString,
+    },
     fs::File,
     io::Read,
-    os::fd::OwnedFd,
+    os::{
+        fd::OwnedFd,
+        unix::ffi::OsStrExt,
+    },
     path::{
         Path,
         PathBuf,
     },
+    rc::Rc,
 };
 
 use rustix::fs::{
@@ -52,6 +60,34 @@ pub enum Kind {
     Link,
 }
 
+/// The extended attribute namespace the mount keeps its marks in: `user` for a mount with
+/// `userxattr`, as in an unprivileged user namespace, `trusted` otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Namespace {
+    User,
+    Trusted,
+}
+
+impl Namespace {
+    fn prefix(&self) -> &'static str {
+        match self {
+            Self::User      => "user.overlay.",     // fixed: overlayfs names
+            Self::Trusted   => "trusted.overlay.",  // fixed: overlayfs names
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Why {
+    Name,               // Not UTF-8, or holds a control character.
+    Special,            // A pipe, socket or device other than a whiteout.
+    Unreadable(String), // Could not be opened, listed or read; the error.
+    Mark(String),       // Carries an overlay attribute no op expresses; its name.
+    LinkParent,         // A directory over a lower symbolic link without an opaque mark.
+    OverNonDir,         // A directory over a lower non-directory without an opaque mark.
+    Changed,            // Replaced while it was read.
+}
+
 /// One change, at a path relative to the roots.  The applier reads what to write from the upper.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -59,148 +95,109 @@ pub enum Op {
     Write(PathBuf, Kind),   // New file contents or a new link target.
     Delete(PathBuf),        // A whiteout over a lower entry.
     Opaque(PathBuf),        // Lower directory kept, its contents removed; creates beneath follow.
-    Meta(PathBuf, Kind),    // Same contents, new mode or modification time.
+    Meta(PathBuf, Kind),    // Same contents, new mode, modification time or attributes.
+    Refused(PathBuf, Why),  // Not applied, nor anything beneath it.
 }
 
-const XATTR_PREFIXES: [&str; 2] = ["trusted.overlay.", "user.overlay."]; // fixed: overlayfs names
+impl Op {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Create(p, _)
+            | Self::Write(p, _)
+            | Self::Delete(p)
+            | Self::Opaque(p)
+            | Self::Meta(p, _)
+            | Self::Refused(p, _) => p,
+        }
+    }
+}
+
 const BUF_LEN: usize = 64 * 1024; // fixed: a read size, not a limit
 
-/// Lists what `upper` changes over `lower`, refusing an upper with more than `max_entries` entries.
-pub fn changes(upper: &Path, lower: &Path, max_entries: usize) -> Outcome<Vec<Op>> {
-    let up = res!(open_root(upper));
-    let low = res!(open_root(lower));
-    let mut walk = Walker { ops: Vec::new(), seen: 0, max: max_entries };
-    res!(walk.dir(&up, Some(&low), PathBuf::new()));
+/// Lists what `upper` changes over `lower`, in path order, a directory's op before those beneath
+/// it.  Refuses the whole walk only for an unopenable root or more than `max_entries` entries.
+pub fn changes(upper: &Path, lower: &Path, ns: Namespace, max_entries: usize) -> Outcome<Vec<Op>> {
+    let up = Rc::new(res!(open_root(upper)));
+    let low = Rc::new(res!(open_root(lower)));
+    let mut walk = Walker { ops: Vec::new(), todo: Vec::new(), seen: 0, max: max_entries, ns };
+    res!(walk.dir(up, Some(low), PathBuf::new()));
+    while let Some(next) = walk.todo.pop() {
+        let up = match reopen(&next.up, &next.name, &next.up_st) {
+            Ok(fd) => fd,
+            Err(why) => {
+                walk.ops.push(Op::Refused(next.rel, why));
+                continue;
+            }
+        };
+        let low = match next.low {
+            Some((fd, st)) => match reopen(&fd, &next.name, &st) {
+                Ok(l) => Some(Rc::new(l)),
+                Err(why) => {
+                    walk.ops.push(Op::Refused(next.rel, why));
+                    continue;
+                }
+            },
+            None => None,
+        };
+        res!(walk.dir(Rc::new(up), low, next.rel));
+    }
+    // Stable, so two ops on one path keep their order: a delete before the create replacing it.
+    walk.ops.sort_by(|a, b| a.path().cmp(b.path()));
     Ok(walk.ops)
+}
+
+/// A directory owed a listing, held by its parents' descriptors and name so that a wide upper does
+/// not hold a descriptor per directory.
+struct Todo {
+    up:     Rc<OwnedFd>,
+    up_st:  Stat,
+    low:    Option<(Rc<OwnedFd>, Stat)>,  // Present when the lower directory shows through.
+    name:   OsString,
+    rel:    PathBuf,
 }
 
 struct Walker {
     ops:    Vec<Op>,
+    todo:   Vec<Todo>,
     seen:   usize,
     max:    usize,
+    ns:     Namespace,
 }
 
 impl Walker {
 
-    fn dir(&mut self, up: &OwnedFd, low: Option<&OwnedFd>, rel: PathBuf) -> Outcome<()> {
-        for name in res!(self.names(up, &rel)) {
+    fn dir(&mut self, up: Rc<OwnedFd>, low: Option<Rc<OwnedFd>>, rel: PathBuf) -> Outcome<()> {
+        let names = match self.names(&up, &rel) {
+            Ok(Ok(n)) => n,
+            Ok(Err(why)) => {
+                self.ops.push(Op::Refused(rel, why));
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        for name in names {
             let path = rel.join(&name);
-            let ust = res!(sys(rustix::fs::statat(up, name.as_str(), AtFlags::SYMLINK_NOFOLLOW),
-                "stat upper", &path));
-            let lst = match low {
-                Some(fd) => res!(lower_stat(fd, &name, &path)),
-                None => None,
-            };
-            let lkind = lst.as_ref().map(kind_of);
-            match FileType::from_raw_mode(ust.st_mode) {
-                FileType::CharacterDevice if is_whiteout(&ust) => {
-                    // A whiteout over nothing hides nothing: the lower entry is already gone.
-                    if lst.is_some() {
-                        self.ops.push(Op::Delete(path));
-                    }
-                }
-                FileType::Directory => {
-                    let fd = res!(open_child(up, &name, OFlags::DIRECTORY, &path));
-                    let opaque = res!(overlay_marks(&fd, &path));
-                    match lkind {
-                        None => {
-                            self.ops.push(Op::Create(path.clone(), Kind::Dir));
-                            res!(self.dir(&fd, None, path));
-                        }
-                        Some(Some(Kind::Dir)) => {
-                            let lfd = match low {
-                                Some(l) => res!(open_child(l, &name, OFlags::DIRECTORY, &path)),
-                                None => return Err(err!("Overlay walk lost the lower directory \
-                                    above {:?}.", path; Bug)),
-                            };
-                            if mode_of(&ust) != lst.as_ref().map(mode_of).unwrap_or(0) {
-                                self.ops.push(Op::Meta(path.clone(), Kind::Dir));
-                            }
-                            if opaque {
-                                self.ops.push(Op::Opaque(path.clone()));
-                                res!(self.dir(&fd, None, path));
-                            } else {
-                                res!(self.dir(&fd, Some(&lfd), path));
-                            }
-                        }
-                        Some(Some(Kind::Link)) if !opaque => return Err(err!(
-                            "Overlay upper directory {:?} stands over a lower symbolic link \
-                            without an opaque mark; applying it would write through the link \
-                            (symlinked parent).", path; Security, Path)),
-                        Some(_) if !opaque => return Err(err!(
-                            "Overlay upper directory {:?} stands over a lower non-directory \
-                            without an opaque mark, which overlayfs does not write.", path;
-                            Security, Path)),
-                        Some(_) => {
-                            self.ops.push(Op::Delete(path.clone()));
-                            self.ops.push(Op::Create(path.clone(), Kind::Dir));
-                            res!(self.dir(&fd, None, path));
-                        }
-                    }
-                }
-                FileType::RegularFile => {
-                    let fd = res!(open_child(up, &name, OFlags::empty(), &path));
-                    let fst = res!(sys(rustix::fs::fstat(&fd), "fstat upper", &path));
-                    if FileType::from_raw_mode(fst.st_mode) != FileType::RegularFile
-                        || fst.st_ino != ust.st_ino
-                    {
-                        return Err(err!("Overlay upper entry {:?} changed while it was read.",
-                            path; Security, Path));
-                    }
-                    if res!(overlay_marks(&fd, &path)) {
-                        return Err(err!("Overlay upper file {:?} carries an opaque mark, which \
-                            only a directory may.", path; Security, Invalid));
-                    }
-                    match (lkind, low) {
-                        (None, _) | (_, None) => self.ops.push(Op::Create(path, Kind::File)),
-                        (Some(Some(Kind::File)), Some(l)) => {
-                            let lfd = res!(open_child(l, &name, OFlags::empty(), &path));
-                            if !res!(same_bytes(fd, lfd, &path)) {
-                                self.ops.push(Op::Write(path, Kind::File));
-                            } else if lst.as_ref().map(|l| meta_differs(&ust, l)).unwrap_or(false) {
-                                self.ops.push(Op::Meta(path, Kind::File));
-                            }
-                        }
-                        (Some(_), Some(_)) => {
-                            self.ops.push(Op::Delete(path.clone()));
-                            self.ops.push(Op::Create(path, Kind::File));
-                        }
-                    }
-                }
-                FileType::Symlink => {
-                    match (lkind, low) {
-                        (None, _) | (_, None) => self.ops.push(Op::Create(path, Kind::Link)),
-                        (Some(Some(Kind::Link)), Some(l)) => {
-                            let ut = res!(sys(rustix::fs::readlinkat(up, name.as_str(), Vec::new()),
-                                "read upper link", &path));
-                            let lt = res!(sys(rustix::fs::readlinkat(l, name.as_str(), Vec::new()),
-                                "read lower link", &path));
-                            if ut != lt {
-                                self.ops.push(Op::Write(path, Kind::Link));
-                            }
-                        }
-                        (Some(_), Some(_)) => {
-                            self.ops.push(Op::Delete(path.clone()));
-                            self.ops.push(Op::Create(path, Kind::Link));
-                        }
-                    }
-                }
-                other => return Err(err!("Overlay upper entry {:?} is a {:?}, which is neither a \
-                    whiteout nor a file, directory or symbolic link.", path, other;
-                    Security, Invalid)),
+            if let Err(why) = self.entry(&up, low.as_ref(), &name, &path) {
+                self.ops.push(Op::Refused(path, why));
             }
         }
         Ok(())
     }
 
-    /// The entries of one upper directory, sorted, each counted against the limit.
-    fn names(&mut self, up: &OwnedFd, rel: &Path) -> Outcome<Vec<String>> {
-        let mut dir = res!(sys(rustix::fs::Dir::read_from(up), "list upper", rel));
+    /// The entries of one upper directory, each counted against the cap, which alone ends the walk.
+    fn names(&mut self, up: &OwnedFd, rel: &Path) -> Outcome<Result<Vec<OsString>, Why>> {
+        let mut dir = match rustix::fs::Dir::read_from(up) {
+            Ok(d) => d,
+            Err(e) => return Ok(Err(Why::Unreadable(e.to_string()))),
+        };
         let mut names = Vec::new();
         while let Some(entry) = dir.read() {
-            let entry = res!(sys(entry, "list upper", rel));
-            let raw = entry.file_name();
-            if raw == c"." || raw == c".." {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => return Ok(Err(Why::Unreadable(e.to_string()))),
+            };
+            let raw = entry.file_name().to_bytes();
+            if raw == b"." || raw == b".." {
                 continue;
             }
             self.seen += 1;
@@ -208,60 +205,182 @@ impl Walker {
                 return Err(err!("Overlay upper holds more than {} entries; refused at {:?}.",
                     self.max, rel; TooBig, Security));
             }
-            names.push(res!(name_of(raw, rel)));
+            names.push(OsStr::from_bytes(raw).to_os_string());
         }
-        names.sort();
-        Ok(names)
+        Ok(Ok(names))
+    }
+
+    fn entry(&mut self, up: &Rc<OwnedFd>, low: Option<&Rc<OwnedFd>>, name: &OsStr, path: &Path)
+        -> Result<(), Why>
+    {
+        match name.to_str() {
+            Some(s) if !s.chars().any(char::is_control) => {}
+            _ => return Err(Why::Name),
+        }
+        let ust = ok!(sys(rustix::fs::statat(up, name, AtFlags::SYMLINK_NOFOLLOW)));
+        let lower = match low {
+            Some(fd) => match rustix::fs::statat(fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(st) => Some((fd, st)),
+                Err(rustix::io::Errno::NOENT) => None,
+                Err(e) => return Err(Why::Unreadable(e.to_string())),
+            },
+            None => None,
+        };
+        let path = path.to_path_buf();
+        match FileType::from_raw_mode(ust.st_mode) {
+            FileType::CharacterDevice if is_whiteout(&ust) => {
+                // A whiteout over nothing hides nothing: the lower entry is already gone.
+                if lower.is_some() {
+                    self.ops.push(Op::Delete(path));
+                }
+            }
+            FileType::Directory => {
+                let fd = ok!(open_child(up, name, OFlags::DIRECTORY, &ust));
+                let (opaque, data) = ok!(self.attrs(&fd));
+                match lower {
+                    None => {
+                        self.ops.push(Op::Create(path.clone(), Kind::Dir));
+                        self.owe(up, ust, None, name, path);
+                    }
+                    Some((lfd, lst)) => match FileType::from_raw_mode(lst.st_mode) {
+                        FileType::Directory => {
+                            let ldir = ok!(open_child(lfd, name, OFlags::DIRECTORY, &lst));
+                            let (_, ldata) = ok!(self.attrs(&ldir));
+                            if mode_of(&ust) != mode_of(&lst) || data != ldata {
+                                self.ops.push(Op::Meta(path.clone(), Kind::Dir));
+                            }
+                            if opaque {
+                                self.ops.push(Op::Opaque(path.clone()));
+                                self.owe(up, ust, None, name, path);
+                            } else {
+                                self.owe(up, ust, Some((Rc::clone(lfd), lst)), name, path);
+                            }
+                        }
+                        FileType::Symlink if !opaque => return Err(Why::LinkParent),
+                        _ if !opaque => return Err(Why::OverNonDir),
+                        _ => {
+                            self.ops.push(Op::Delete(path.clone()));
+                            self.ops.push(Op::Create(path.clone(), Kind::Dir));
+                            self.owe(up, ust, None, name, path);
+                        }
+                    },
+                }
+            }
+            FileType::RegularFile => {
+                let fd = ok!(open_child(up, name, OFlags::empty(), &ust));
+                let (opaque, data) = ok!(self.attrs(&fd));
+                if opaque {
+                    return Err(Why::Mark(format!("{}opaque", self.ns.prefix())));
+                }
+                match lower {
+                    None => self.ops.push(Op::Create(path, Kind::File)),
+                    Some((lfd, lst)) if FileType::from_raw_mode(lst.st_mode)
+                        == FileType::RegularFile =>
+                    {
+                        let lfile = ok!(open_child(lfd, name, OFlags::empty(), &lst));
+                        let (_, ldata) = ok!(self.attrs(&lfile));
+                        if !ok!(same_bytes(fd, lfile, &ust, &lst)) {
+                            self.ops.push(Op::Write(path, Kind::File));
+                        } else if meta_differs(&ust, &lst) || data != ldata {
+                            self.ops.push(Op::Meta(path, Kind::File));
+                        }
+                    }
+                    Some(_) => {
+                        self.ops.push(Op::Delete(path.clone()));
+                        self.ops.push(Op::Create(path, Kind::File));
+                    }
+                }
+            }
+            FileType::Symlink => match lower {
+                None => self.ops.push(Op::Create(path, Kind::Link)),
+                Some((lfd, lst)) if FileType::from_raw_mode(lst.st_mode) == FileType::Symlink => {
+                    let ut = ok!(sys(rustix::fs::readlinkat(up, name, Vec::new())));
+                    let lt = ok!(sys(rustix::fs::readlinkat(lfd, name, Vec::new())));
+                    if ut != lt {
+                        self.ops.push(Op::Write(path, Kind::Link));
+                    }
+                }
+                Some(_) => {
+                    self.ops.push(Op::Delete(path.clone()));
+                    self.ops.push(Op::Create(path, Kind::Link));
+                }
+            },
+            _ => return Err(Why::Special),
+        }
+        Ok(())
+    }
+
+    fn owe(&mut self, up: &Rc<OwnedFd>, up_st: Stat, low: Option<(Rc<OwnedFd>, Stat)>,
+        name: &OsStr, rel: PathBuf)
+    {
+        self.todo.push(Todo { up: Rc::clone(up), up_st, low, name: name.to_os_string(), rel });
+    }
+
+    /// Is the entry marked opaque, and what are its data attributes?  Refuses a mark no op
+    /// expresses, including an attribute a program set through the mount, which overlayfs escapes
+    /// into the mark namespace.
+    fn attrs(&self, fd: &OwnedFd) -> Result<(bool, BTreeMap<Vec<u8>, Vec<u8>>), Why> {
+        let prefix = self.ns.prefix().as_bytes();
+        let mut opaque = false;
+        let mut data = BTreeMap::new();
+        for name in ok!(xattr_names(fd)) {
+            let val = ok!(xattr_value(fd, &name));
+            match name.strip_prefix(prefix) {
+                None => {
+                    data.insert(name, val);
+                }
+                Some(b"origin") | Some(b"impure") | Some(b"uuid") => {}
+                Some(b"opaque") if val == b"y" => opaque = true,
+                Some(_) => return Err(Why::Mark(String::from_utf8_lossy(&name).into_owned())),
+            }
+        }
+        Ok((opaque, data))
     }
 }
 
-fn name_of(raw: &CStr, rel: &Path) -> Outcome<String> {
-    let name = match raw.to_str() {
-        Ok(s) => s,
-        Err(_) => return Err(err!("Overlay upper name {:?} in {:?} is not UTF-8.",
-            raw, rel; Security, Name)),
-    };
-    if name.chars().any(char::is_control) {
-        return Err(err!("Overlay upper name {:?} in {:?} holds a control character.",
-            name, rel; Security, Name));
-    }
-    Ok(name.to_string())
-}
-
-fn sys<T>(r: rustix::io::Result<T>, what: &str, path: &Path) -> Outcome<T> {
-    match r {
-        Ok(v) => Ok(v),
-        Err(e) => Err(err!("Overlay walk could not {} {:?}: {}.", what, path, e; IO)),
-    }
+fn sys<T>(r: rustix::io::Result<T>) -> Result<T, Why> {
+    r.map_err(|e| Why::Unreadable(e.to_string()))
 }
 
 fn open_root(path: &Path) -> Outcome<OwnedFd> {
-    sys(rustix::fs::openat2(CWD, path, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(), ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS),
-        "open, through no symbolic link, the root", path)
-}
-
-fn open_child(dir: &OwnedFd, name: &str, extra: OFlags, path: &Path) -> Outcome<OwnedFd> {
-    sys(rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC
-        | OFlags::NONBLOCK | extra, Mode::empty()), "open, without following a link,", path)
-}
-
-fn lower_stat(low: &OwnedFd, name: &str, path: &Path) -> Outcome<Option<Stat>> {
-    match rustix::fs::statat(low, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(st) => Ok(Some(st)),
-        Err(rustix::io::Errno::NOENT) => Ok(None),
-        Err(e) => Err(err!("Overlay walk could not stat lower {:?}: {}.", path, e; IO)),
+    match rustix::fs::openat2(CWD, path, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(), ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS)
+    {
+        Ok(fd) => Ok(fd),
+        Err(e) => Err(err!("Overlay walk could not open, through no symbolic link, the root \
+            {:?}: {}.", path, e; IO, Path)),
     }
 }
 
-/// The lower's kind, or `None` for a kind no op names (a pipe, socket or device).
-fn kind_of(st: &Stat) -> Option<Kind> {
-    match FileType::from_raw_mode(st.st_mode) {
-        FileType::RegularFile   => Some(Kind::File),
-        FileType::Directory     => Some(Kind::Dir),
-        FileType::Symlink       => Some(Kind::Link),
-        _                       => None,
+/// Opens `name` without following a link, and only if it is still the inode `st` describes.
+fn open_child(dir: &OwnedFd, name: &OsStr, extra: OFlags, st: &Stat) -> Result<OwnedFd, Why> {
+    let fd = ok!(sys(rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::NOFOLLOW
+        | OFlags::CLOEXEC | OFlags::NONBLOCK | extra, Mode::empty())));
+    let now = ok!(sys(rustix::fs::fstat(&fd)));
+    if now.st_ino != st.st_ino || now.st_dev != st.st_dev {
+        return Err(Why::Changed);
     }
+    Ok(fd)
+}
+
+fn reopen(dir: &OwnedFd, name: &OsStr, st: &Stat) -> Result<OwnedFd, Why> {
+    open_child(dir, name, OFlags::DIRECTORY, st)
+}
+
+fn xattr_names(fd: &OwnedFd) -> Result<Vec<Vec<u8>>, Why> {
+    let len = ok!(sys(rustix::fs::flistxattr(fd, &mut [0u8; 0][..])));
+    let mut buf = vec![0u8; len];
+    let n = ok!(sys(rustix::fs::flistxattr(fd, &mut buf[..])));
+    Ok(buf[..n].split(|b| *b == 0).filter(|s| !s.is_empty()).map(<[u8]>::to_vec).collect())
+}
+
+fn xattr_value(fd: &OwnedFd, name: &[u8]) -> Result<Vec<u8>, Why> {
+    let name = OsStr::from_bytes(name);
+    let len = ok!(sys(rustix::fs::fgetxattr(fd, name, &mut [0u8; 0][..])));
+    let mut buf = vec![0u8; len];
+    let n = ok!(sys(rustix::fs::fgetxattr(fd, name, &mut buf[..])));
+    buf.truncate(n);
+    Ok(buf)
 }
 
 fn is_whiteout(st: &Stat) -> bool {
@@ -276,42 +395,7 @@ fn meta_differs(a: &Stat, b: &Stat) -> bool {
     mode_of(a) != mode_of(b) || a.st_mtime != b.st_mtime || a.st_mtime_nsec != b.st_mtime_nsec
 }
 
-/// Is the entry marked opaque?  Refuses every overlay attribute an op cannot express.
-fn overlay_marks(fd: &OwnedFd, path: &Path) -> Outcome<bool> {
-    let mut list = [0u8; 4096]; // fixed: XATTR_LIST_MAX is 64 KiB, an upper entry needs a few
-    let n = res!(sys(rustix::fs::flistxattr(fd, &mut list[..]), "list attributes of", path));
-    let mut opaque = false;
-    for raw in list[..n].split(|b| *b == 0).filter(|s| !s.is_empty()) {
-        let attr = String::from_utf8_lossy(raw);
-        let key = match XATTR_PREFIXES.iter().find_map(|p| attr.strip_prefix(p)) {
-            Some(k) => k,
-            None => continue,
-        };
-        match key {
-            "origin" | "impure" | "uuid" => {}
-            "opaque" => {
-                let mut val = [0u8; 8];
-                let n = res!(sys(rustix::fs::fgetxattr(fd, attr.as_ref(), &mut val[..]),
-                    "read the opaque mark of", path));
-                match &val[..n] {
-                    b"y"    => opaque = true,
-                    other   => return Err(err!("Overlay upper {:?} has opaque mark {:?}, not \
-                        \"y\".", path, String::from_utf8_lossy(other); Security, Invalid)),
-                }
-            }
-            _ => return Err(err!("Overlay upper {:?} carries {}, which this op list cannot \
-                express.", path, attr; Security, Invalid)),
-        }
-    }
-    Ok(opaque)
-}
-
-fn same_bytes(a: OwnedFd, b: OwnedFd, path: &Path) -> Outcome<bool> {
-    let ast = res!(sys(rustix::fs::fstat(&a), "fstat upper", path));
-    let bst = res!(sys(rustix::fs::fstat(&b), "fstat lower", path));
-    if FileType::from_raw_mode(bst.st_mode) != FileType::RegularFile {
-        return Err(err!("Overlay lower entry {:?} changed while it was read.", path; Path));
-    }
+fn same_bytes(a: OwnedFd, b: OwnedFd, ast: &Stat, bst: &Stat) -> Result<bool, Why> {
     if ast.st_size != bst.st_size {
         return Ok(false);
     }
@@ -320,8 +404,8 @@ fn same_bytes(a: OwnedFd, b: OwnedFd, path: &Path) -> Outcome<bool> {
     let mut ba = vec![0u8; BUF_LEN];
     let mut bb = vec![0u8; BUF_LEN];
     loop {
-        let n = res!(fill(&mut fa, &mut ba));
-        let m = res!(fill(&mut fb, &mut bb));
+        let n = ok!(fill(&mut fa, &mut ba));
+        let m = ok!(fill(&mut fb, &mut bb));
         if n != m || ba[..n] != bb[..m] {
             return Ok(false);
         }
@@ -332,10 +416,10 @@ fn same_bytes(a: OwnedFd, b: OwnedFd, path: &Path) -> Outcome<bool> {
 }
 
 /// Reads until the buffer is full or the file ends, so two files chunk alike.
-fn fill(f: &mut File, buf: &mut [u8]) -> Outcome<usize> {
+fn fill(f: &mut File, buf: &mut [u8]) -> Result<usize, Why> {
     let mut n = 0;
     while n < buf.len() {
-        let k = res!(f.read(&mut buf[n..]));
+        let k = ok!(f.read(&mut buf[n..]).map_err(|e| Why::Unreadable(e.to_string())));
         if k == 0 {
             break;
         }

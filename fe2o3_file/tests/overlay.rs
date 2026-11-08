@@ -9,7 +9,9 @@
 use oxedyne_fe2o3_file::overlay::{
     changes,
     Kind,
+    Namespace,
     Op,
+    Why,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -63,7 +65,7 @@ fn staged(name: &str, lower: impl Fn(&Path) -> Outcome<()>, script: &str) -> Out
         return Err(err!("bwrap overlay for {} failed: {}", name,
             String::from_utf8_lossy(&out.stderr); Test));
     }
-    changes(&dir.join("U"), &dir.join("L"), MAX)
+    changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX)
 }
 
 fn write(path: &Path, text: &str) -> Outcome<()> {
@@ -84,8 +86,15 @@ fn refused(r: Outcome<Vec<Op>>, says: &str) -> Outcome<()> {
     }
 }
 
+/// Compares op lists, an `Unreadable` reason by variant alone since its text is the system's.
 fn expect(got: Vec<Op>, want: Vec<Op>) -> Outcome<()> {
-    if got != want {
+    let plain = |ops: &[Op]| -> Vec<Op> {
+        ops.iter().map(|op| match op {
+            Op::Refused(p, Why::Unreadable(_)) => Op::Refused(p.clone(), Why::Unreadable(String::new())),
+            other => other.clone(),
+        }).collect()
+    };
+    if plain(&got) != plain(&want) {
         return Err(err!("Op list\n got: {:?}\nwant: {:?}", got, want; Test));
     }
     Ok(())
@@ -195,16 +204,18 @@ fn overlay_refuses_symlinked_parent() -> Outcome<()> {
     res!(symlink(&outside, dir.join("L/link")));
     res!(fs::create_dir(dir.join("U/link")));
     res!(write(&dir.join("U/link/evil"), "e\n"));
-    refused(changes(&dir.join("U"), &dir.join("L"), MAX), "symlinked parent")
+    expect(res!(changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX)), vec![
+        Op::Refused(p("link"),  Why::LinkParent),
+    ])
 }
 
 #[test]
 fn overlay_refuses_symlinked_root() -> Outcome<()> {
     let dir = res!(base("symroot"));
     res!(symlink(dir.join("U"), dir.join("UL")));
-    res!(refused(changes(&dir.join("UL"), &dir.join("L"), MAX), "through no symbolic link"));
+    res!(refused(changes(&dir.join("UL"), &dir.join("L"), Namespace::User, MAX), "through no symbolic link"));
     res!(symlink(dir.join("L"), dir.join("LL")));
-    refused(changes(&dir.join("U"), &dir.join("LL"), MAX), "through no symbolic link")
+    refused(changes(&dir.join("U"), &dir.join("LL"), Namespace::User, MAX), "through no symbolic link")
 }
 
 #[test]
@@ -214,7 +225,7 @@ fn overlay_upper_link_not_followed() -> Outcome<()> {
     res!(fs::create_dir(&outside));
     res!(write(&outside.join("secret"), "s\n"));
     res!(symlink(&outside, dir.join("U/out")));
-    expect(res!(changes(&dir.join("U"), &dir.join("L"), MAX)), vec![
+    expect(res!(changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX)), vec![
         Op::Create(p("out"),    Kind::Link),
     ])
 }
@@ -226,9 +237,9 @@ fn overlay_refuses_too_many_entries() -> Outcome<()> {
     for i in 0..MAX {
         res!(fs::File::create(up.join(format!("{:06}", i))));
     }
-    let at_cap = changes(&up, &dir.join("L"), MAX);
+    let at_cap = changes(&up, &dir.join("L"), Namespace::User, MAX);
     res!(fs::File::create(up.join("one-more")));
-    let over = changes(&up, &dir.join("L"), MAX);
+    let over = changes(&up, &dir.join("L"), Namespace::User, MAX);
     res!(fs::remove_dir_all(&dir));
     match at_cap {
         Ok(ops) if ops.len() == MAX => {}
@@ -242,11 +253,17 @@ fn overlay_refuses_too_many_entries() -> Outcome<()> {
 fn overlay_refuses_odd_names() -> Outcome<()> {
     let dir = res!(base("oddnl"));
     res!(write(&dir.join("U/a\nb"), "x"));
-    res!(refused(changes(&dir.join("U"), &dir.join("L"), MAX), "control character"));
+    res!(write(&dir.join("U/ok"), "x"));
+    res!(expect(res!(changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX)), vec![
+        Op::Refused(p("a\nb"), Why::Name),
+        Op::Create(p("ok"),     Kind::File),
+    ]));
     let dir = res!(base("oddutf"));
     let name = std::ffi::OsStr::from_bytes(b"bad\xff");
     res!(write(&dir.join("U").join(name), "x"));
-    refused(changes(&dir.join("U"), &dir.join("L"), MAX), "not UTF-8")
+    expect(res!(changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX)), vec![
+        Op::Refused(PathBuf::from(name), Why::Name),
+    ])
 }
 
 #[test]
@@ -254,24 +271,137 @@ fn overlay_refuses_odd_kinds_and_marks() -> Outcome<()> {
     let dir = res!(base("fifo"));
     res!(rustix::fs::mknodat(rustix::fs::CWD, dir.join("U/pipe"), rustix::fs::FileType::Fifo,
         rustix::fs::Mode::from_raw_mode(0o644), 0));
-    res!(refused(changes(&dir.join("U"), &dir.join("L"), MAX), "Fifo"));
+    res!(expect(res!(changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX)), vec![
+        Op::Refused(p("pipe"),  Why::Special),
+    ]));
 
     let dir = res!(base("redirect"));
     res!(fs::create_dir(dir.join("U/d")));
     res!(rustix::fs::setxattr(dir.join("U/d"), "user.overlay.redirect", b"/x",
         rustix::fs::XattrFlags::empty()));
-    res!(refused(changes(&dir.join("U"), &dir.join("L"), MAX), "user.overlay.redirect"));
+    res!(expect(res!(changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX)), vec![
+        Op::Refused(p("d"),     Why::Mark("user.overlay.redirect".to_string())),
+    ]));
 
     let dir = res!(base("metacopy"));
     res!(write(&dir.join("L/f"), "f"));
     res!(write(&dir.join("U/f"), ""));
     res!(rustix::fs::setxattr(dir.join("U/f"), "user.overlay.metacopy", b"",
         rustix::fs::XattrFlags::empty()));
-    res!(refused(changes(&dir.join("U"), &dir.join("L"), MAX), "user.overlay.metacopy"));
+    res!(expect(res!(changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX)), vec![
+        Op::Refused(p("f"),     Why::Mark("user.overlay.metacopy".to_string())),
+    ]));
 
     let dir = res!(base("opaquex"));
     res!(fs::create_dir(dir.join("U/d")));
     res!(rustix::fs::setxattr(dir.join("U/d"), "user.overlay.opaque", b"x",
         rustix::fs::XattrFlags::empty()));
-    refused(changes(&dir.join("U"), &dir.join("L"), MAX), "opaque mark \"x\"")
+    expect(res!(changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX)), vec![
+        Op::Refused(p("d"),     Why::Mark("user.overlay.opaque".to_string())),
+    ])
+}
+
+// QA SWT4 faults.
+
+/// Undoes a chain of `d` directories one level at a time, as `remove_dir_all` recurses.
+fn flatten(top: &Path) -> Outcome<()> {
+    let d = top.join("d");
+    while d.join("d").exists() {
+        res!(fs::rename(d.join("d"), top.join("x")));
+        res!(fs::remove_dir(&d));
+        res!(fs::rename(top.join("x"), &d));
+    }
+    if d.exists() {
+        res!(fs::remove_dir(&d));
+    }
+    Ok(())
+}
+
+const DEPTH: usize = 2_000;
+
+#[test]
+fn overlay_deep_upper_returns() -> Outcome<()> {
+    let old = Path::new(env!("CARGO_TARGET_TMPDIR")).join("overlay/deep/U");
+    if old.exists() {
+        res!(flatten(&old));
+    }
+    let dir = res!(base("deep"));
+    let mut fd = res!(rustix::fs::open(dir.join("U"), rustix::fs::OFlags::DIRECTORY,
+        rustix::fs::Mode::empty()));
+    for _ in 0..DEPTH {
+        res!(rustix::fs::mkdirat(&fd, "d", rustix::fs::Mode::from_raw_mode(0o755)));
+        fd = res!(rustix::fs::openat(&fd, "d", rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty()));
+    }
+    let (up, low) = (dir.join("U"), dir.join("L"));
+    // A 2 MiB stack, Rust's default for a spawned thread, which a recursive walk overflows.
+    let walk = res!(std::thread::Builder::new().stack_size(2 << 20)
+        .spawn(move || changes(&up, &low, Namespace::User, MAX)));
+    let ops = match walk.join() {
+        Ok(r) => res!(r),
+        Err(_) => return Err(err!("The deep walk panicked."; Test)),
+    };
+    res!(flatten(&dir.join("U")));
+    if ops.len() != DEPTH || ops.iter().any(|op| !matches!(op, Op::Create(_, Kind::Dir))) {
+        return Err(err!("Expected {} directory creates, got {} ops.", DEPTH, ops.len(); Test));
+    }
+    Ok(())
+}
+
+#[test]
+fn overlay_odd_entries_refused_alone() -> Outcome<()> {
+    let ops = res!(staged("oddalone", |l| write(&l.join("f"), "a\n"), concat!(
+        "echo w >> f; echo ok > ok; mkfifo pipe; ",
+        "python3 -c \"import socket; s=socket.socket(socket.AF_UNIX); s.bind('sock')\"; ",
+        "touch \"$(printf 'a\\nb')\"; echo z > zero; chmod 0 zero; mkdir zd; chmod 0 zd; ",
+        "mkdir od; python3 -c \"import os; os.setxattr('od', 'user.overlay.opaque', b'y')\"")));
+    expect(ops, vec![
+        Op::Refused(p("a\nb"), Why::Name),
+        Op::Write(p("f"),       Kind::File),
+        Op::Refused(p("od"),    Why::Mark("user.overlay.overlay.opaque".to_string())),
+        Op::Create(p("ok"),     Kind::File),
+        Op::Refused(p("pipe"),  Why::Special),
+        Op::Refused(p("sock"),  Why::Special),
+        Op::Refused(p("zd"),    Why::Unreadable(String::new())),
+        Op::Refused(p("zero"),  Why::Unreadable(String::new())),
+    ])
+}
+
+#[test]
+fn overlay_xattr_only_is_meta() -> Outcome<()> {
+    let ops = res!(staged("xattrmeta", |l| {
+        res!(write(&l.join("f"), "f\n"));
+        res!(write(&l.join("g"), "g\n"));
+        res!(write(&l.join("same"), "s\n"));
+        res!(fs::create_dir(l.join("d")));
+        res!(fs::set_permissions(l.join("d"), fs::Permissions::from_mode(0o755)));
+        res!(rustix::fs::setxattr(l.join("f"), "user.tag", b"1", rustix::fs::XattrFlags::empty()));
+        Ok(())
+    }, concat!("python3 -c \"import os; os.setxattr('f', 'user.tag', b'2'); ",
+        "os.setxattr('g', 'user.tag', b'1'); os.setxattr('d', 'user.k', b'v'); ",
+        "open('same', 'r+').close()\"")));
+    expect(ops, vec![
+        Op::Meta(p("d"),        Kind::Dir),
+        Op::Meta(p("f"),        Kind::File),
+        Op::Meta(p("g"),        Kind::File),
+    ])
+}
+
+#[test]
+fn overlay_marks_only_in_the_mounts_namespace() -> Outcome<()> {
+    let dir = res!(base("namespace"));
+    for side in ["L/d", "U/d"] {
+        res!(fs::create_dir(dir.join(side)));
+        res!(fs::set_permissions(dir.join(side), fs::Permissions::from_mode(0o755)));
+    }
+    res!(write(&dir.join("L/d/x"), "x\n"));
+    res!(rustix::fs::setxattr(dir.join("U/d"), "user.overlay.opaque", b"y",
+        rustix::fs::XattrFlags::empty()));
+    res!(expect(res!(changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX)), vec![
+        Op::Opaque(p("d")),
+    ]));
+    // Under a trusted mount a user attribute is data a program set, which the kernel ignores.
+    expect(res!(changes(&dir.join("U"), &dir.join("L"), Namespace::Trusted, MAX)), vec![
+        Op::Meta(p("d"),        Kind::Dir),
+    ])
 }

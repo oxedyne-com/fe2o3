@@ -1,19 +1,22 @@
 diff --git a/fe2o3_file/src/overlay.rs b/fe2o3_file/src/overlay.rs
-index 2b49b692..14d5e34a 100644
+index 6bd56b29..8db6188a 100644
 --- a/fe2o3_file/src/overlay.rs
 +++ b/fe2o3_file/src/overlay.rs
-@@ -242,12 +242,12 @@ fn open_root(path: &Path) -> Outcome<OwnedFd> {
- }
+@@ -219,7 +219,7 @@ impl Walker {
+         }
+         let ust = ok!(sys(rustix::fs::statat(up, name, AtFlags::SYMLINK_NOFOLLOW)));
+         let lower = match low {
+-            Some(fd) => match rustix::fs::statat(fd, name, AtFlags::SYMLINK_NOFOLLOW) {
++            Some(fd) => match rustix::fs::statat(fd, name, AtFlags::empty()) {
+                 Ok(st) => Some((fd, st)),
+                 Err(rustix::io::Errno::NOENT) => None,
+                 Err(e) => return Err(Why::Unreadable(e.to_string())),
+@@ -354,7 +354,7 @@ fn open_root(path: &Path) -> Outcome<OwnedFd> {
  
- fn open_child(dir: &OwnedFd, name: &str, extra: OFlags, path: &Path) -> Outcome<OwnedFd> {
--    sys(rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC
-+    sys(rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::CLOEXEC
-         | OFlags::NONBLOCK | extra, Mode::empty()), "open, without following a link,", path)
- }
- 
- fn lower_stat(low: &OwnedFd, name: &str, path: &Path) -> Outcome<Option<Stat>> {
--    match rustix::fs::statat(low, name, AtFlags::SYMLINK_NOFOLLOW) {
-+    match rustix::fs::statat(low, name, AtFlags::empty()) {
-         Ok(st) => Ok(Some(st)),
-         Err(rustix::io::Errno::NOENT) => Ok(None),
-         Err(e) => Err(err!("Overlay walk could not stat lower {:?}: {}.", path, e; IO)),
+ /// Opens `name` without following a link, and only if it is still the inode `st` describes.
+ fn open_child(dir: &OwnedFd, name: &OsStr, extra: OFlags, st: &Stat) -> Result<OwnedFd, Why> {
+-    let fd = ok!(sys(rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::NOFOLLOW
++    let fd = ok!(sys(rustix::fs::openat(dir, name, OFlags::RDONLY
+         | OFlags::CLOEXEC | OFlags::NONBLOCK | extra, Mode::empty())));
+     let now = ok!(sys(rustix::fs::fstat(&fd)));
+     if now.st_ino != st.st_ino || now.st_dev != st.st_dev {
