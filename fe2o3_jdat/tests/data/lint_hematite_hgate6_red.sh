@@ -32,8 +32,17 @@ for c in "${cases[@]}"; do
 	set -- $c
 	arm pass none "$2" "$3"
 done
-for p in "$here"/lint_hematite_hgate6_{c1,c2,c3,h1,t,d1}.patch; do
-	m=${p##*_}; m=${m%.patch}
+patches=(
+	lint_hematite_hgate6_c1.patch
+	lint_hematite_hgate6_c2.patch
+	lint_hematite_hgate6_c3.patch
+	lint_hematite_hgate6_h1.patch
+	lint_hematite_hgate6_t.patch
+	lint_hematite_hgate6_d1.patch
+)
+for f in "${patches[@]}"; do
+	p="$here/$f"
+	m=${f##*_}; m=${m%.patch}
 	git apply "$p" || { echo "patch $p did not apply"; exit 2; }
 	if build; then
 		for c in "${cases[@]}"; do
