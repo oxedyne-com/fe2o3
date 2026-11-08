@@ -22,7 +22,7 @@ fn fixture(name: &str) -> Scan {
         Err(e)  => panic!("Reading fixture {}: {}", name, e),
     };
     let lang = if name.ends_with(".js") { Lang::Js } else { Lang::Rust };
-    match mutable::scan(&src, lang, name) {
+    match mutable::scan(&src, lang, name, &[fmt!("test"), fmt!("tokio::test")]) {
         Ok(scan)    => scan,
         Err(e)      => panic!("Scanning fixture {}: {}", name, e),
     }

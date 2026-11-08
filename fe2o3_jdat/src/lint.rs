@@ -62,7 +62,7 @@ pub fn save_baseline(base: &Baseline, path: &Path) -> Outcome<()> {
 /// Scans the tree under `root` and checks it against the baseline file at `baseline_path`.
 pub fn check_tree(root: &Path, baseline_path: &Path) -> Outcome<Report> {
     let base = res!(load_baseline(baseline_path));
-    mutable::check_tree(root, &base)
+    mutable::check_tree(root, &base, &res!(parse_rules(HEMATITE_RULES)).test_attrs)
 }
 
 pub fn baseline_to_dat(base: &Baseline) -> Dat {
@@ -132,6 +132,7 @@ pub const HEMATITE_RULES: &str = include_str!("../hematite_rules.jdat");
 /// ```text
 /// {
 ///     "local_crates": ["oxedyne_"],
+///     "test_attrs": ["test", "tokio::test"],
 ///     "rules": [ { "id": "G1", "check": "seq", "seq": [".", "unwrap", "(", ")"], "on": true,
 ///                  "in_tests": true, "fixed_ok": false, "msg": "unwrap() -- use res!(x)" } ],
 /// }
@@ -159,6 +160,13 @@ pub fn rules_from_dat(dat: &Dat) -> Outcome<Rules> {
         match c {
             Dat::Str(s) => rules.local_crates.push(s.clone()),
             _           => return Err(err!("A 'local_crates' entry is a {:?}, expected a string.",
+                c.kind(); Invalid, Input)),
+        }
+    }
+    for c in res!(dat.map_get_list(&dat!("test_attrs"))) {
+        match c {
+            Dat::Str(s) => rules.test_attrs.push(s.clone()),
+            _           => return Err(err!("A 'test_attrs' entry is a {:?}, expected a string.",
                 c.kind(); Invalid, Input)),
         }
     }

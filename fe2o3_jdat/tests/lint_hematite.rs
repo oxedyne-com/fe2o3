@@ -96,6 +96,8 @@ fn seeds() -> Vec<(&'static str, &'static str, String, usize)> {
         ("G14", "src/a.rs", fmt!("#[cfg_attr(unix, path = \"unix.in\")]\nmod imp;\n"), 1),
         ("G14", "src/a.rs", fmt!("fn f() {{\n    include!(\"gen.in\");\n}}\n"), 2),
         ("G14", "src/a.rs", fmt!("fn f() {{\n    std::include!(concat!(\"gen\", \".in\"));\n}}\n"), 2),
+        ("G14", "src/a.rs", fmt!("mod rt {{\n    pub use tokio::main as test;\n}}\n"), 2),
+        ("G14", "src/a.rs", fmt!("extern crate tokio_x as tokio;\n"), 1),
     ]
 }
 
@@ -105,8 +107,9 @@ fn test_hematite_each_rule_refused_by_name_and_line() -> Outcome<()> {
     for (id, file, src, line) in seeds() {
         let rep = res!(gate(&rules, file, &src));
         assert_eq!(hits(&rep), vec![(id.to_string(), line)], "seed for {}:\n{}", id, src);
-        let msg = &rules.rules.iter().filter(|r| r.id == id).map(|r| r.msg.clone()).collect::<Vec<_>>()[0];
-        assert_eq!(fmt!("{}", rep.breaches[0]), fmt!("{}:{}: {}", file, line, msg));
+        let msgs: Vec<String> = rules.rules.iter().filter(|r| r.id == id)
+            .map(|r| fmt!("{}:{}: {}", file, line, r.msg)).collect();
+        assert!(msgs.contains(&fmt!("{}", rep.breaches[0])), "seed for {}: {}", id, rep.breaches[0]);
     }
     Ok(())
 }
@@ -257,6 +260,15 @@ fn test_hematite_test_code_exempt_only_where_the_table_says() -> Outcome<()> {
         let src = fmt!("#[cfg({})]\nfn t() {{\n    let p = \"/var/lib/app/state\";\n}}\n", cfg);
         assert_eq!(hits(&res!(gate(&rules, "src/a.rs", &src))), vec![(fmt!("G11"), 3)], "{}", cfg);
     }
+    // A test attribute by its exact path only, never an alias ending `::test` (QA hgate4 H).
+    for attr in ["rt::test", "self::test", "crate::rt::test", "tokio::testing", "tokio::test_x"] {
+        let src = fmt!("#[{}]\npub async fn serve() {{\n    let p = \"/var/lib/app/state\";\n}}\n", attr);
+        assert_eq!(hits(&res!(gate(&rules, "src/a.rs", &src))), vec![(fmt!("G11"), 3)], "{}", attr);
+    }
+    for attr in ["test", "tokio::test", "::tokio::test", "tokio::test(flavor = \"multi_thread\")"] {
+        let src = fmt!("#[{}]\nasync fn t() {{\n    let p = \"/var/lib/app/state\";\n}}\n", attr);
+        assert!(res!(gate(&rules, "src/a.rs", &src)).is_clean(), "{}", attr);
+    }
     for file in ["src/util_tests.rs", "src/tests.rs", "src/tests/mod.rs", "fe2o3_x/src/tests/a.rs"] {
         assert_eq!(hits(&res!(gate(&rules, file, "// The color.\n"))), vec![(fmt!("G13"), 1)], "{}", file);
     }
@@ -265,10 +277,10 @@ fn test_hematite_test_code_exempt_only_where_the_table_says() -> Outcome<()> {
 
 #[test]
 fn test_hematite_unknown_check_is_refused_and_seq_rule_needs_no_code() -> Outcome<()> {
-    let bad = res!(Dat::decode_string(fmt!("{{\"local_crates\": [], \"rules\": [{{\"id\": \"X\", \
+    let bad = res!(Dat::decode_string(fmt!("{{\"local_crates\": [], \"test_attrs\": [], \"rules\": [{{\"id\": \"X\", \
         \"check\": \"nosuch\", \"on\": true, \"in_tests\": true, \"fixed_ok\": false, \"msg\": \"m\"}}]}}")));
     assert!(lint::rules_from_dat(&bad).is_err());
-    let dat = res!(Dat::decode_string(fmt!("{{\"local_crates\": [], \"rules\": [{{\"id\": \"Q1\", \
+    let dat = res!(Dat::decode_string(fmt!("{{\"local_crates\": [], \"test_attrs\": [], \"rules\": [{{\"id\": \"Q1\", \
         \"check\": \"seq\", \"seq\": [\"panic\", \"!\"], \"on\": true, \"in_tests\": true, \
         \"fixed_ok\": false, \"msg\": \"panic! -- return an err!\"}}]}}")));
     let rules = res!(lint::rules_from_dat(&dat));

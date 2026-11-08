@@ -289,7 +289,7 @@ pub fn check(hits: &[Hit], bad_fixed: &[Marker], base: &Baseline) -> Report {
 
 /// Scans every `.rs` and `.js` source under `root`, skipping build output, version-control
 /// metadata and the `tests/`, `benches/` and `examples/` trees.
-pub fn scan_tree(root: &Path) -> Outcome<(Scan, usize)> {
+pub fn scan_tree(root: &Path, test_attrs: &[String]) -> Outcome<(Scan, usize)> {
     let mut files = Vec::new();
     res!(collect(root, root, &mut files));
     files.sort();
@@ -299,7 +299,7 @@ pub fn scan_tree(root: &Path) -> Outcome<(Scan, usize)> {
             Ok(s)   => s,
             Err(e)  => return Err(err!(e, "While reading source {}.", path.display(); IO, File, Read)),
         };
-        let scan = res!(scan(&src, *lang, rel));
+        let scan = res!(scan(&src, *lang, rel, test_attrs));
         all.hits.extend(scan.hits);
         all.bad_fixed.extend(scan.bad_fixed);
     }
@@ -307,8 +307,8 @@ pub fn scan_tree(root: &Path) -> Outcome<(Scan, usize)> {
 }
 
 /// Scans the tree under `root` and checks it against `base`.
-pub fn check_tree(root: &Path, base: &Baseline) -> Outcome<Report> {
-    let (scan, files) = res!(scan_tree(root));
+pub fn check_tree(root: &Path, base: &Baseline, test_attrs: &[String]) -> Outcome<Report> {
+    let (scan, files) = res!(scan_tree(root, test_attrs));
     let mut rep = check(&scan.hits, &scan.bad_fixed, base);
     rep.files = files;
     Ok(rep)
@@ -366,8 +366,9 @@ const PATTERN_CALLS: [&str; 8] = [
 // fixed: the console and error methods of the JavaScript standard library.
 const JS_MESSAGE_CALLS: [&str; 6] = ["log", "warn", "error", "info", "debug", "trace"];
 
-/// Scans one source. `file` is the name recorded in each hit.
-pub fn scan(src: &str, lang: Lang, file: &str) -> Outcome<Scan> {
+/// Scans one source. `file` is the name recorded in each hit; `test_attrs` are the attribute
+/// paths that mark a test item (`test`, `tokio::test`).
+pub fn scan(src: &str, lang: Lang, file: &str, test_attrs: &[String]) -> Outcome<Scan> {
     let toks = match lang {
         Lang::Rust  => res!(lex(src, &rust_tokens())),
         Lang::Js    => res!(lex(src, &js_tokens())),
@@ -375,7 +376,7 @@ pub fn scan(src: &str, lang: Lang, file: &str) -> Outcome<Scan> {
     let lines = LineIndex::new(src);
     let mut out = Scan::default();
     let fixed = fixed_lines(src, &toks, &lines, file, &mut out.bad_fixed);
-    let skip = skipped(&toks, lang);
+    let skip = skipped(&toks, lang, test_attrs);
     let waits = numeric_consts(&toks, lang, &lines, &fixed, &skip);
 
     let mut i = 0;
@@ -503,11 +504,18 @@ pub(crate) fn fixed_lines(
     covered
 }
 
-/// Does the attribute, whitespace removed, mark test code: `#[test]`, a `…::test` runner, or a
-/// `cfg` that can only hold under test (`any(test, unix)` also builds outside tests)?
-pub(crate) fn is_test_attr(a: &str) -> bool {
-    a == "#[test]" || a.ends_with("::test]")
-        || a.strip_prefix("#[cfg(").and_then(|r| r.strip_suffix(")]")).map(cfg_needs_test).unwrap_or(false)
+/// Does the attribute, whitespace removed, mark test code: one whose path is exactly one of
+/// `names`, never an alias ending `::test`, or a `cfg` that can only hold under test
+/// (`any(test, unix)` also builds outside tests)?
+pub(crate) fn is_test_attr(a: &str, names: &[String]) -> bool {
+    let inner = match a.strip_prefix("#[").and_then(|r| r.strip_suffix(']')) {
+        Some(i) => i,
+        None    => return false,
+    };
+    let path = inner.split(['(', '=']).next().unwrap_or("");
+    let path = path.strip_prefix("::").unwrap_or(path);
+    names.iter().any(|n| n == path)
+        || inner.strip_prefix("cfg(").and_then(|r| r.strip_suffix(')')).map(cfg_needs_test).unwrap_or(false)
 }
 
 /// Can the cfg predicate hold only when `test` does?
@@ -609,7 +617,7 @@ fn is_pattern(toks: &[Token], i: usize, end: usize) -> bool {
 
 /// Marks the tokens no rule looks at: test items, message macro arguments, and the `Default` of
 /// a config type.
-fn skipped(toks: &[Token], lang: Lang) -> Vec<bool> {
+fn skipped(toks: &[Token], lang: Lang, test_attrs: &[String]) -> Vec<bool> {
     let mut skip = vec![false; toks.len()];
     let configs = config_types(toks);
     let mut i = 0;
@@ -618,7 +626,7 @@ fn skipped(toks: &[Token], lang: Lang) -> Vec<bool> {
         let mut span: Option<(usize, usize)> = None;
         if t.kind == TokenKind::Attribute {
             let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
-            if is_test_attr(&a) {
+            if is_test_attr(&a, test_attrs) {
                 span = Some((i, item_end(toks, i + 1)));
             }
         } else if t.kind == TokenKind::Ident && i + 2 < toks.len() && is_punct(&toks[i + 1], '!')

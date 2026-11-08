@@ -16,8 +16,9 @@
 //! - `pub use` in import order, since a re-export is placed for the reader of the module,
 //! - `include_str!` and `include_bytes!`, which read data, not code (G14 refuses only `include!`
 //!   and `#[path]` of a file not ending `.rs`, which the gate would not read),
-//! - test code (a `tests` directory with no `src` above it, a `#[test]` item or one under a `cfg`
-//!   that holds only under test, such as `all(test, unix)`) for a rule whose `in_tests` is false,
+//! - test code (a `tests` directory with no `src` above it, an item under an attribute whose path
+//!   is exactly one of `Rules::test_attrs` or under a `cfg` that holds only under test, such as
+//!   `all(test, unix)`) for a rule whose `in_tests` is false,
 //! - a line marked `// fixed: <why>` for a rule whose `fixed_ok` is true,
 //! - any line carrying `allowlist hematite`, which is reported in `Report::allows` so that the
 //!   escape is shown, not silent.
@@ -73,6 +74,7 @@ pub enum Check {
     Mutable,                    // a literal of mutable data, as `lint::mutable` finds it
     CommentWords(Vec<String>),  // a comment word starting with one of these, case aside
     Placement,                  // `#[path]` or `include!` of a file not ending `.rs`
+    TestAlias,                  // a rename to a name that `Rules::test_attrs` begins with
 }
 
 impl Check {
@@ -98,6 +100,7 @@ impl Check {
             "mutable"       => Self::Mutable,
             "comment_words" => Self::CommentWords(list),
             "placement"     => Self::Placement,
+            "test_alias"    => Self::TestAlias,
             _               => return Err(err!("Unknown Hematite check '{}'.", name;
                 Invalid, Input)),
         })
@@ -117,6 +120,7 @@ pub struct Rule {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Rules {
     pub local_crates:   Vec<String>, // name prefixes of the local libraries, the second import group
+    pub test_attrs:     Vec<String>, // attribute paths that mark a test item, matched exactly
     pub rules:          Vec<Rule>,
 }
 
@@ -302,7 +306,7 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
         }
     }
     let rust = match a.file.ends_with(".rs") {
-        true    => Some(res!(RustSrc::new(&a.src, &a.file))),
+        true    => Some(res!(RustSrc::new(&a.src, &a.file, &rules.test_attrs))),
         false   => None,
     };
     let test_file = is_test_path(&a.file);
@@ -374,10 +378,11 @@ struct RustSrc<'a> {
     macros: Vec<bool>,          // inside a `macro_rules!` body
     tests:  BTreeSet<usize>,    // lines inside a test item
     fixed:  BTreeSet<usize>,    // lines covered by a `// fixed:` marker
+    test_attrs: &'a [String],   // `Rules::test_attrs`
 }
 
 impl<'a> RustSrc<'a> {
-    fn new(src: &'a str, file: &str) -> Outcome<Self> {
+    fn new(src: &'a str, file: &str, test_attrs: &'a [String]) -> Outcome<Self> {
         let toks = res!(lex(src, &rust_tokens()));
         let lines = LineIndex::new(src);
         let code = (0..toks.len()).filter(|i| !matches!(toks[*i].kind,
@@ -405,7 +410,7 @@ impl<'a> RustSrc<'a> {
             }
             if t.kind == TokenKind::Attribute {
                 let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
-                if mutable::is_test_attr(&a) {
+                if mutable::is_test_attr(&a, test_attrs) {
                     let end = item_end(&toks, i + 1).min(toks.len());
                     if end > i {
                         let first = lines.line_of(t.span.start);
@@ -418,7 +423,7 @@ impl<'a> RustSrc<'a> {
             }
             i += 1;
         }
-        Ok(Self { src, toks, lines, code, attrs, macros, tests, fixed })
+        Ok(Self { src, toks, lines, code, attrs, macros, tests, fixed, test_attrs })
     }
 
     fn line(&self, i: usize) -> usize {
@@ -437,8 +442,9 @@ impl<'a> RustSrc<'a> {
             Check::ImportOrder          => self.import_order(&rules.local_crates, added),
             Check::CommentWords(words)  => self.comment_words(words),
             Check::Placement            => self.placement(),
+            Check::TestAlias            => self.test_alias(),
             Check::Mutable              => {
-                let scan = res!(mutable::scan(self.src, Lang::Rust, ""));
+                let scan = res!(mutable::scan(self.src, Lang::Rust, "", self.test_attrs));
                 scan.hits.iter().map(|h| h.line)
                     .chain(scan.bad_fixed.iter().map(|m| m.line)).collect()
             }
@@ -532,6 +538,24 @@ impl<'a> RustSrc<'a> {
             };
             if !rs {
                 out.push(self.line(*i));
+            }
+        }
+        out
+    }
+
+    /// `as <name>` or, for a path of two segments or more, `mod <name>`, where `<name>` begins a
+    /// test attribute's path: after `use tokio::main as test;`, `#[test]` is not a test.
+    fn test_alias(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for w in self.code.windows(2) {
+            let (k, n) = (&self.toks[w[0]], &self.toks[w[1]]);
+            let hit = self.test_attrs.iter().any(|a| {
+                let mut segs = a.split("::");
+                let first = segs.next().unwrap_or("");
+                n.text == first && (k.text == "as" || (k.text == "mod" && segs.next().is_some()))
+            });
+            if hit {
+                out.push(self.line(w[0]));
             }
         }
         out

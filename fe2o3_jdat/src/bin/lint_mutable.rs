@@ -42,15 +42,16 @@ fn run() -> Outcome<bool> {
     let root = res!(root.ok_or_else(|| err!("Missing --root <dir>."; Missing, Input)));
     let base_path = base_path.unwrap_or_else(|| root.join(BASELINE_NAME));
     let base = res!(lint::load_baseline(&base_path));
+    let test_attrs = res!(lint::parse_rules(lint::HEMATITE_RULES)).test_attrs;
     if write {
-        let (scan, files) = res!(mutable::scan_tree(&root));
+        let (scan, files) = res!(mutable::scan_tree(&root, &test_attrs));
         let next = base.regenerate(&scan.hits);
         res!(lint::save_baseline(&next, &base_path));
         println!("Wrote {} entries ({} hits, {} files) to {}.",
             next.entries.len(), scan.hits.len(), files, base_path.display());
         return Ok(true);
     }
-    let rep = res!(mutable::check_tree(&root, &base));
+    let rep = res!(mutable::check_tree(&root, &base, &test_attrs));
     println!("{}", rep);
     Ok(rep.is_clean())
 }
