@@ -108,6 +108,22 @@ fn test_hematite_git_rename_out_of_tests_read_whole() -> Outcome<()> {
 }
 
 #[test]
+fn test_hematite_git_symlink_refused() -> Outcome<()> {
+    // Rust behind a link to a file the gate would not read as Rust (QA hgate4 B).
+    let r = res!(repo("link"));
+    res!(write(&r, "data/imp.txt", UNWRAP));
+    res!(write(&r, "src/lib.rs", b"pub fn base() {}\npub mod imp;\n"));
+    match std::os::unix::fs::symlink("../data/imp.txt", r.join("src/imp.rs")) {
+        Ok(())  => {}
+        Err(e)  => return Err(err!(e, "symlink"; IO)),
+    }
+    res!(commit(&r));
+    let (rc, out) = res!(gate(&r));
+    assert!(rc == 1 && out.contains("src/imp.rs:1: symlink"), "rc {}: {}", rc, out);
+    Ok(())
+}
+
+#[test]
 fn test_hematite_git_repo_config_cannot_hide_lines() -> Outcome<()> {
     // An attributes file named by the repository's config, and hunks merged across an empty line
     // that the config prints bare.

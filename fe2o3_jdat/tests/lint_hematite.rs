@@ -34,7 +34,8 @@ fn rules() -> Outcome<Rules> {
 }
 
 fn gate_lines(rules: &Rules, file: &str, src: &str, lines: &[usize]) -> Outcome<Report> {
-    let a = Added { file: file.to_string(), src: src.to_string(), lines: lines.iter().copied().collect() };
+    let a = Added { file: file.to_string(), src: src.to_string(), lines: lines.iter().copied().collect(),
+        link: false };
     hematite::check(&[a], rules)
 }
 
@@ -180,9 +181,9 @@ diff --git a/src/a.rs b/src/a.rs
 -    let v = parse(x)?;
 +    let v = res!(parse(x));
 ";
-    let added = hematite::added_lines(diff);
+    let added = hematite::file_diffs(diff);
     let want: BTreeSet<usize> = [3].into_iter().collect();
-    assert_eq!(added.get("src/a.rs"), Some(&want));
+    assert_eq!(added.get("src/a.rs").map(|d| &d.lines), Some(&want));
     let src = "fn f(x: &str, y: Option<u8>) -> Outcome<u8> {\n    let w = y.unwrap();\n    let v = res!(parse(x));\n    Ok(v + w)\n}\n";
     let rep = res!(gate_lines(&rules, "src/a.rs", src, &[3]));
     assert!(rep.is_clean(), "{:?}", rep);
@@ -193,7 +194,7 @@ diff --git a/src/a.rs b/src/a.rs
 }
 
 #[test]
-fn test_hematite_added_lines_reads_hunks() -> Outcome<()> {
+fn test_hematite_file_diffs_reads_hunks() -> Outcome<()> {
     // An added line that itself starts "++" is content, not a header; a deleted file adds nothing.
     let diff = "\
 --- a/x.rs
@@ -211,11 +212,21 @@ fn test_hematite_added_lines_reads_hunks() -> Outcome<()> {
 +++ /dev/null
 @@ -1 +0,0 @@
 -h
+diff --git a/src/imp.rs b/src/imp.rs
+new file mode 120000
+index 0000000..1c5c3f5
+--- /dev/null
++++ b/src/imp.rs
+@@ -0,0 +1 @@
++../data/imp.txt
+\\ No newline at end of file
 ";
-    let added = hematite::added_lines(diff);
+    let added = hematite::file_diffs(diff);
     let want: BTreeSet<usize> = [1, 2, 3, 12, 13].into_iter().collect();
-    assert_eq!(added.get("x.rs"), Some(&want));
-    assert_eq!(added.len(), 1);
+    assert_eq!(added.get("x.rs").map(|d| (&d.lines, d.link)), Some((&want, false)));
+    let one: BTreeSet<usize> = [1].into_iter().collect();
+    assert_eq!(added.get("src/imp.rs").map(|d| (&d.lines, d.link)), Some((&one, true)));
+    assert_eq!(added.len(), 2);
     Ok(())
 }
 

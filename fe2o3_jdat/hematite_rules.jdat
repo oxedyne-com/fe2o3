@@ -2,7 +2,7 @@
 # Start set: mgr-qa-b's list G1-G13, ~/usr/code/ai/claude/briefs/hematite_rules_daimon_check.md part A.
 # A rule is added here without code: "check" is one of seq (consecutive code tokens), comment_words,
 # doc_heading (each with a list), question, ok_args, raw_lock, doc_member, import_order, credential,
-# mutable, placement, test_alias.  "test_attrs" are the attribute paths that mark a test item, matched
+# mutable, placement, test_alias, link.  "test_attrs" are the attribute paths that mark a test item, matched
 # exactly.  A rule may have several rows under one id, each a shape of the same breach.  "in_tests" false exempts test code; "fixed_ok" true lets "// fixed: <why>" exempt a line.
 {
 	"local_crates": ["oxedyne_"],
@@ -46,6 +46,8 @@
 		  "msg": "US spelling in a comment -- British: behaviour, colour, initialise…" },
 		{ "id": "G14", "check": "placement", "on": true, "in_tests": true, "fixed_ok": false,
 		  "msg": "Rust in a non-.rs file -- name it .rs so the gate reads it" },
+		{ "id": "G14", "check": "link", "on": true, "in_tests": true, "fixed_ok": false,
+		  "msg": "symlink -- commit the file itself so the gate reads what is built" },
 		{ "id": "G14", "check": "test_alias", "on": true, "in_tests": true, "fixed_ok": false,
 		  "msg": "rename to a test attribute's name -- #[test] and #[tokio::test] must mean the test harness" },
 	],

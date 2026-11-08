@@ -94,9 +94,9 @@ fn run() -> Outcome<bool> {
     }
     let diff = res!(git(&repo, &hematite::diff_args(&revs)));
     let mut added = Vec::new();
-    for (file, lines) in hematite::added_lines(&diff) {
+    for (file, d) in hematite::file_diffs(&diff) {
         let src = res!(git(&repo, &["cat-file", "blob", &fmt!("{}{}", prefix, file)]));
-        added.push(Added { file, src, lines });
+        added.push(Added { file, src, lines: d.lines, link: d.link });
     }
     let rep = res!(hematite::check(&added, &rules));
     for b in &rep.breaches {

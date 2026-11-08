@@ -75,6 +75,7 @@ pub enum Check {
     CommentWords(Vec<String>),  // a comment word starting with one of these, case aside
     Placement,                  // `#[path]` or `include!` of a file not ending `.rs`
     TestAlias,                  // a rename to a name that `Rules::test_attrs` begins with
+    Link,                       // a symlink the change adds, whose target the gate does not read
 }
 
 impl Check {
@@ -101,6 +102,7 @@ impl Check {
             "comment_words" => Self::CommentWords(list),
             "placement"     => Self::Placement,
             "test_alias"    => Self::TestAlias,
+            "link"          => Self::Link,
             _               => return Err(err!("Unknown Hematite check '{}'.", name;
                 Invalid, Input)),
         })
@@ -128,8 +130,16 @@ pub struct Rules {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Added {
     pub file:   String,
-    pub src:    String,
+    pub src:    String,             // a symlink's target
     pub lines:  BTreeSet<usize>,
+    pub link:   bool,
+}
+
+/// One file of a diff taken with [`diff_args`], by its new path.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FileDiff {
+    pub lines:  BTreeSet<usize>,    // added, 1-based in the new file
+    pub link:   bool,               // the new side is a symlink
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -187,7 +197,7 @@ pub const GIT_ENV: [(&str, &str); 4] = [
 
 pub const INFO_ATTRIBUTES: &str = "info/attributes"; // fixed: git's layout, under `git rev-parse --git-path`
 
-/// The arguments of the one `git` call whose output [`added_lines`] reads, `revs` being
+/// The arguments of the one `git` call whose output [`file_diffs`] reads, `revs` being
 /// `--cached` or a base and a head. The gate, not the repository, decides what counts as a change:
 /// every file is text (a `-diff` attribute or a NUL byte cannot hide one), no textconv or external
 /// driver runs, a rename is a deletion and an addition (so a file moved out of `tests/` is read
@@ -217,11 +227,11 @@ pub fn attributes_in(names: &str) -> Vec<String> {
         .collect()
 }
 
-/// The lines each file gains in a unified diff, by the file's new path, the diff taken with
-/// [`diff_args`].
-pub fn added_lines(diff: &str) -> BTreeMap<String, BTreeSet<usize>> {
-    let mut out: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+/// Each file a unified diff taken with [`diff_args`] adds lines to, by the file's new path.
+pub fn file_diffs(diff: &str) -> BTreeMap<String, FileDiff> {
+    let mut out: BTreeMap<String, FileDiff> = BTreeMap::new();
     let mut file: Option<String> = None;
+    let mut link = false;
     let mut old_left = 0usize;
     let mut new_left = 0usize;
     let mut at = 0usize;
@@ -230,7 +240,7 @@ pub fn added_lines(diff: &str) -> BTreeMap<String, BTreeSet<usize>> {
             match l.as_bytes().first() {
                 Some(b'+') if new_left > 0 => {
                     if let Some(f) = &file {
-                        out.entry(f.clone()).or_default().insert(at);
+                        out.entry(f.clone()).or_default().lines.insert(at);
                     }
                     at += 1;
                     new_left -= 1;
@@ -253,11 +263,22 @@ pub fn added_lines(diff: &str) -> BTreeMap<String, BTreeSet<usize>> {
                 }
             }
         }
-        if let Some(p) = l.strip_prefix("+++ ") {
+        if l.starts_with("diff --git ") {
+            file = None;
+            link = false;
+        } else if l.starts_with("new file mode ") || l.starts_with("new mode ")
+            || l.starts_with("index ")
+        {
+            // fixed: git's mode of a symbolic link.
+            link |= l.ends_with(" 120000");
+        } else if let Some(p) = l.strip_prefix("+++ ") {
             file = match p {
                 "/dev/null" => None, // fixed: git diff format
                 _           => Some(p.strip_prefix("b/").unwrap_or(p).to_string()),
             };
+            if let Some(f) = &file {
+                out.entry(f.clone()).or_default().link = link;
+            }
         } else if let Some(h) = l.strip_prefix("@@ ") {
             let mut parts = h.split_whitespace();
             let old = parts.next().and_then(|p| p.strip_prefix('-')).map(span_of);
@@ -305,7 +326,7 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
             }
         }
     }
-    let rust = match a.file.ends_with(".rs") {
+    let rust = match a.file.ends_with(".rs") && !a.link {
         true    => Some(res!(RustSrc::new(&a.src, &a.file, &rules.test_attrs))),
         false   => None,
     };
@@ -315,6 +336,10 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
             (Check::Credential, _) => match secret::skip_path(a.file.as_bytes()) {
                 true    => Vec::new(),
                 false   => secret::scan(a.src.as_bytes()).iter().map(|f| f.line).collect(),
+            },
+            (Check::Link, _) => match a.link {
+                true    => vec![1],
+                false   => Vec::new(),
             },
             (_, Some(rs))   => res!(rs.find(&r.check, rules, &a.lines)),
             (_, None)       => Vec::new(),
@@ -448,7 +473,7 @@ impl<'a> RustSrc<'a> {
                 scan.hits.iter().map(|h| h.line)
                     .chain(scan.bad_fixed.iter().map(|m| m.line)).collect()
             }
-            Check::Credential           => Vec::new(),
+            Check::Credential | Check::Link => Vec::new(),
         })
     }
 
