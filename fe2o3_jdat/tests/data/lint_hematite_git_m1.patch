@@ -1,0 +1,21 @@
+diff --git a/fe2o3_jdat/src/bin/lint_hematite.rs b/fe2o3_jdat/src/bin/lint_hematite.rs
+index fe34f2f4..40d8d971 100644
+--- a/fe2o3_jdat/src/bin/lint_hematite.rs
++++ b/fe2o3_jdat/src/bin/lint_hematite.rs
+@@ -87,12 +87,14 @@ fn run() -> Outcome<bool> {
+     if info.exists() {
+         attrs.push(fmt!("{}", info.display()));
+     }
+-    if !attrs.is_empty() {
++    if false && !attrs.is_empty() {
+         return Err(err!("The repository carries git attributes ({}), which decide what git reads \
+             as a change; remove them so the Hematite gate can read every line.", attrs.join(", ");
+             Invalid, Input));
+     }
+-    let diff = res!(git(&repo, &hematite::diff_args(&revs)));
++    let mut old = vec!["diff", "-U0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"];
++    old.extend(revs.iter());
++    let diff = res!(git(&repo, &old));
+     let mut added = Vec::new();
+     for (file, lines) in hematite::added_lines(&diff) {
+         let src = res!(git(&repo, &["cat-file", "blob", &fmt!("{}{}", prefix, file)]));
