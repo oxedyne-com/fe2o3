@@ -33,17 +33,21 @@ use std::{
 
 /// Moves the caller into a new user namespace and a new mount namespace, keeping its own uid and
 /// gid, with every mount private so nothing it mounts reaches the namespace it left.  With `pid`,
-/// its next child is the first process of a new pid namespace.  The caller must have one thread:
+/// its next child is the first process of a new pid namespace; with `net`, it has a network
+/// namespace of its own, whose loopback it alone reaches.  The caller must have one thread:
 /// the kernel refuses a user namespace to a process with more.
-pub fn enter_own(pid: bool) -> Outcome<()> {
+pub fn enter_own(pid: bool, net: bool) -> Outcome<()> {
     let uid = getuid();
     let gid = getgid();
     let mut flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS;
     if pid {
         flags |= CloneFlags::CLONE_NEWPID;
     }
+    if net {
+        flags |= CloneFlags::CLONE_NEWNET;
+    }
     if let Err(e) = unshare(flags) {
-        return Err(err!("A user and mount namespace could not be made: {}.", e;
+        return Err(err!("A user, mount or network namespace could not be made: {}.", e;
             System, Security));
     }
     // fixed: kernel ABI paths and formats.
