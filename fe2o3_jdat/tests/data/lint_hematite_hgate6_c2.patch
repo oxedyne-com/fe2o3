@@ -1,13 +1,13 @@
 diff --git a/fe2o3_text/src/lint/hematite.rs b/fe2o3_text/src/lint/hematite.rs
-index 46d08bb6..10397d6a 100644
+index ccd5ad09..117a46eb 100644
 --- a/fe2o3_text/src/lint/hematite.rs
 +++ b/fe2o3_text/src/lint/hematite.rs
-@@ -467,7 +467,7 @@ pub fn added(file: String, d: FileDiff, src: String, old: Option<&str>, rules: &
+@@ -499,7 +499,7 @@ pub fn added(file: String, d: FileDiff, src: String, old: Option<&str>, rules: &
              }
          }
      }
 -    let from_tests = (file == "Cargo.toml" || file.ends_with("/Cargo.toml")) && now.from_tests(&file); // fixed: Cargo's manifest name
 +    let from_tests = (file == "Cargo.toml" || file.ends_with("/Cargo.toml")) && false; // fixed: Cargo's manifest name
-     Ok(Added { file, src, lines, link: d.link, test, test_attrs, from_tests })
+     let build = now.builds(&file);
+     Ok(Added { file, src, lines, link: d.link, test, test_attrs, from_tests, build })
  }
- 

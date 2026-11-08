@@ -1,8 +1,8 @@
 diff --git a/fe2o3_text/src/lint/hematite.rs b/fe2o3_text/src/lint/hematite.rs
-index 46d08bb6..ce76c300 100644
+index ccd5ad09..0a15a723 100644
 --- a/fe2o3_text/src/lint/hematite.rs
 +++ b/fe2o3_text/src/lint/hematite.rs
-@@ -196,11 +196,8 @@ impl Cargo {
+@@ -195,11 +195,8 @@ impl Cargo {
      /// Does `file` lie in its package's `tests` directory, from which Cargo builds nothing but
      /// tests?  A package rooted inside another's `tests` is a package, its code product.
      pub fn is_test(&self, file: &str) -> bool {
@@ -15,4 +15,4 @@ index 46d08bb6..ce76c300 100644
 +        parts.contains(&"tests") && !parts.contains(&"src")
      }
  
-     /// Does the manifest `file` build a target that is not a test from a `tests` directory?
+     /// Does `file` shape what Cargo builds other than through the code the gate reads: a build
