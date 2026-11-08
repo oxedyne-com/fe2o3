@@ -9,7 +9,6 @@ use oxedyne_fe2o3_jdat::lint;
 use oxedyne_fe2o3_text::lint::hematite;
 
 use std::{
-    collections::BTreeSet,
     path::{
         Path,
         PathBuf,
@@ -104,11 +103,7 @@ fn run() -> Outcome<bool> {
     let now = res!(cargo_of(&repo, &scratch.join("now"), &now_list, &changed, &prefix));
     let was = res!(cargo_of(&repo, &scratch.join("was"), &was_list, &changed, &old_prefix));
     let _ = std::fs::remove_dir_all(&scratch);
-    // A file new to the tree is read whole, so only one the base holds can be turned.
-    let was_files: BTreeSet<&str> = hematite::tree_paths(&was_list).into_iter().map(|(_, p)| p).collect();
-    let files: Vec<String> = hematite::tree_paths(&now_list).into_iter()
-        .filter(|(_, p)| p.ends_with(".rs") && was_files.contains(p)).map(|(_, p)| p.to_string()).collect();
-    let turned = now.turned(&was, &files, &rules.test_attrs);
+    let turned = now.turned(&was, &hematite::kept_rust(&now_list, &was_list), &rules.test_attrs);
     let mut added = Vec::new();
     for (file, d) in diffs {
         let src = res!(git(&repo, &["cat-file", "blob", &fmt!("{}{}", prefix, file)]));
@@ -139,17 +134,13 @@ fn cargo_of(repo: &PathBuf, dir: &Path, listing: &str, changed: &[String], prefi
         |m, full| {
             let mut c = Command::new("cargo"); // fixed: the program's name, found on PATH
             c.env_clear();
-            for k in ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME"] {
+            for k in lint::CARGO_ENV {
                 if let Some(v) = std::env::var_os(k) {
                     c.env(k, v);
                 }
             }
-            c.env("CARGO_NET_OFFLINE", "true").current_dir(dir)
-                .args(["metadata", "--format-version", "1", "--offline"]); // fixed: Cargo's metadata format
-            if !full {
-                c.arg("--no-deps");
-            }
-            let out = res!(c.arg("--manifest-path").arg(m).output()
+            c.envs(lint::CARGO_SET).current_dir(dir).args(lint::metadata_args(m, full));
+            let out = res!(c.output()
                 .map_err(|e| err!(e, "Could not run cargo metadata."; IO, Missing)));
             match out.status.success() {
                 true    => Ok(String::from_utf8_lossy(&out.stdout).to_string()),

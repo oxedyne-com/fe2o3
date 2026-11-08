@@ -356,6 +356,14 @@ pub fn tree_paths(listing: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// The Rust files of the long listing `now` that `was` also holds: a file new to the tree is read
+/// whole, so only these can be turned product unchanged ([`Cargo::turned`]).
+pub fn kept_rust(now: &str, was: &str) -> Vec<String> {
+    let was: BTreeSet<&str> = tree_paths(was).into_iter().map(|(_, p)| p).collect();
+    tree_paths(now).into_iter().filter(|(_, p)| p.ends_with(".rs") && was.contains(p))
+        .map(|(_, p)| p.to_string()).collect()
+}
+
 /// Each file a unified diff taken with [`diff_args`] adds lines to, by the file's new path.
 pub fn file_diffs(diff: &str) -> BTreeMap<String, FileDiff> {
     let mut out: BTreeMap<String, FileDiff> = BTreeMap::new();

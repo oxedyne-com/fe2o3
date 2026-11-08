@@ -43,6 +43,7 @@ use std::{
         BTreeMap,
         BTreeSet,
     },
+    ffi::OsString,
     fs,
     path::Path,
 };
@@ -223,6 +224,22 @@ fn rule_from_dat(dat: &Dat) -> Outcome<Rule> {
         msg,
         id,
     })
+}
+
+// cargo metadata environment
+pub const CARGO_ENV: [&str; 4] = ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME"]; // fixed: what Cargo needs to find itself and its registry cache
+pub const CARGO_SET: [(&str, &str); 1] = [("CARGO_NET_OFFLINE", "true")]; // fixed: never fetch
+
+/// The arguments of the `cargo metadata` call [`cargo_of`] asks for.
+pub fn metadata_args(manifest: &Path, full: bool) -> Vec<OsString> {
+    let mut a: Vec<OsString> = ["metadata", "--format-version", "1", "--offline"] // fixed: Cargo's metadata format
+        .iter().map(OsString::from).collect();
+    if !full {
+        a.push(OsString::from("--no-deps"));
+    }
+    a.push(OsString::from("--manifest-path"));
+    a.push(manifest.as_os_str().to_os_string());
+    a
 }
 
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index"; // fixed: Cargo's id of the crates.io registry
