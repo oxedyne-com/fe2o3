@@ -79,7 +79,7 @@ impl Namespace {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Why {
-    Name,               // Not UTF-8, or holds a control character.
+    Name,               // Not UTF-8, holds a control character, or longer than a path may be.
     Special,            // A pipe, socket or device other than a whiteout.
     Unreadable(String), // Could not be opened, listed or read; the error.
     Mark(String),       // Carries an overlay attribute no op expresses; its name.
@@ -96,7 +96,7 @@ pub enum Op {
     Delete(PathBuf),        // A whiteout over a lower entry.
     Opaque(PathBuf),        // Lower directory kept, its contents removed; creates beneath follow.
     Meta(PathBuf, Kind),    // Same contents, new mode, modification time or attributes.
-    Refused(PathBuf, Why),  // Not applied, nor anything beneath it.
+    Refused(PathBuf, Why),  // The only op on its path, and none beneath it.
 }
 
 impl Op {
@@ -113,6 +113,7 @@ impl Op {
 }
 
 const BUF_LEN: usize = 64 * 1024; // fixed: a read size, not a limit
+const PATH_MAX: usize = 4096;      // fixed: Linux's limit on a path, its closing NUL included
 
 /// Lists what `upper` changes over `lower`, in path order, a directory's op before those beneath
 /// it.  Refuses the whole walk only for an unopenable root or more than `max_entries` entries.
@@ -143,7 +144,19 @@ pub fn changes(upper: &Path, lower: &Path, ns: Namespace, max_entries: usize) ->
     }
     // Stable, so two ops on one path keep their order: a delete before the create replacing it.
     walk.ops.sort_by(|a, b| a.path().cmp(b.path()));
-    Ok(walk.ops)
+    // A directory refused when reopened or listed already carries its parent's op for it, such as
+    // the delete of the lower file it replaces, which must not be applied without its contents.
+    // Nothing beneath it was listed, and its refusal sorts last on its path.
+    let mut ops: Vec<Op> = Vec::with_capacity(walk.ops.len());
+    for op in walk.ops {
+        if let Op::Refused(p, _) = &op {
+            while ops.last().map_or(false, |last| last.path() == p) {
+                ops.pop();
+            }
+        }
+        ops.push(op);
+    }
+    Ok(ops)
 }
 
 /// A directory owed a listing, held by its parents' descriptors and name so that a wide upper does
@@ -216,6 +229,10 @@ impl Walker {
         match name.to_str() {
             Some(s) if !s.chars().any(char::is_control) => {}
             _ => return Err(Why::Name),
+        }
+        // No call can name a longer path, and refusing here bounds a deep chain's paths.
+        if path.as_os_str().len() >= PATH_MAX {
+            return Err(Why::Name);
         }
         let ust = ok!(sys(rustix::fs::statat(up, name, AtFlags::SYMLINK_NOFOLLOW)));
         let lower = match low {

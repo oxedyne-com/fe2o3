@@ -402,3 +402,138 @@ fn overlay_marks_only_in_the_mounts_namespace() -> Outcome<()> {
         Op::Meta(p("d"),        Kind::Dir),
     ])
 }
+
+// QA SWT4b faults.
+
+/// Runs this binary's ignored arm `arm` alone under `prlimit` limits, which bind that process only.
+fn limited(arm: &str, limits: &[&str]) -> Outcome<()> {
+    let out = res!(Command::new("prlimit").args(limits).arg("--")
+        .arg(res!(std::env::current_exe()))
+        .args([arm, "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+        .output());
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() || !text.contains("1 passed") {
+        return Err(err!("{} under {:?} failed ({}):\n{}\n{}", arm, limits, out.status, text,
+            String::from_utf8_lossy(&out.stderr); Test));
+    }
+    Ok(())
+}
+
+const CHAIN: usize = 200_000;   // A chain the entry cap allows.
+const KEPT: usize = 2_048;      // The deepest `d/…/d` under PATH_MAX, 2 bytes a level.
+
+#[test]
+fn overlay_deep_chain_refused_at_path_max() -> Outcome<()> {
+    let old = Path::new(env!("CARGO_TARGET_TMPDIR")).join("overlay/chain/U");
+    if old.exists() {
+        res!(flatten(&old));
+    }
+    let dir = res!(base("chain"));
+    let mut fd = res!(rustix::fs::open(dir.join("U"), rustix::fs::OFlags::DIRECTORY,
+        rustix::fs::Mode::empty()));
+    for _ in 0..CHAIN {
+        res!(rustix::fs::mkdirat(&fd, "d", rustix::fs::Mode::from_raw_mode(0o755)));
+        fd = res!(rustix::fs::openat(&fd, "d", rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty()));
+    }
+    // Paths of every depth cost O(depth²), about 45 GB here, so 2 GiB holds only a bounded walk.
+    let r = limited("overlay_deep_chain_walk", &["--as=2147483648"]);
+    res!(flatten(&dir.join("U")));
+    r
+}
+
+#[test]
+#[ignore = "run by overlay_deep_chain_refused_at_path_max under an address space cap"]
+fn overlay_deep_chain_walk() -> Outcome<()> {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("overlay/chain");
+    let ops = res!(changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX));
+    let mut want = Vec::with_capacity(KEPT + 1);
+    let mut path = PathBuf::new();
+    for _ in 0..KEPT {
+        path.push("d");
+        want.push(Op::Create(path.clone(), Kind::Dir));
+    }
+    path.push("d");
+    want.push(Op::Refused(path, Why::Name));
+    if let Some(i) = (0..want.len().max(ops.len())).find(|&i| ops.get(i) != want.get(i)) {
+        return Err(err!("{} ops, first differing at {}: got {:?}.", ops.len(), i,
+            ops.get(i).map(|op| op.path().as_os_str().len()); Test));
+    }
+    Ok(())
+}
+
+const WALKS: usize = 5_000;
+
+/// While a thread swaps the upper's directory `r` with a twin, a reopen meets the other inode and
+/// refuses `r` after its parent listed the delete of the lower file and the create.
+#[test]
+fn overlay_refused_dir_keeps_no_other_op() -> Outcome<()> {
+    use std::sync::{
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
+        Arc,
+    };
+    let ops = res!(staged("swap", |l| write(&l.join("r"), "lower file\n"),
+        "rm r; mkdir r; echo n > r/n"));
+    res!(expect(ops, vec![
+        Op::Delete(p("r")),
+        Op::Create(p("r"),      Kind::Dir),
+        Op::Create(p("r/n"),    Kind::File),
+    ]));
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("overlay/swap");
+    res!(fs::create_dir_all(dir.join("X/r")));
+    res!(rustix::fs::setxattr(dir.join("X/r"), "user.overlay.opaque", b"y",
+        rustix::fs::XattrFlags::empty()));
+    res!(write(&dir.join("X/r/m"), "m\n"));
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, a, b) = (Arc::clone(&stop), dir.join("U/r"), dir.join("X/r"));
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if let Err(e) = rustix::fs::renameat_with(rustix::fs::CWD, &a, rustix::fs::CWD, &b,
+                    rustix::fs::RenameFlags::EXCHANGE)
+                {
+                    return Err(e);
+                }
+            }
+            Ok(())
+        })
+    };
+    let mut refusals = 0;
+    let mut fault = None;
+    for _ in 0..WALKS {
+        let ops = match changes(&dir.join("U"), &dir.join("L"), Namespace::User, MAX) {
+            Ok(ops) => ops,
+            Err(e) => {
+                fault = Some(err!("Walk failed: {}", e; Test));
+                break;
+            }
+        };
+        for (i, op) in ops.iter().enumerate() {
+            if let Op::Refused(rp, _) = op {
+                refusals += 1;
+                if ops.iter().enumerate().any(|(j, o)| j != i && o.path().starts_with(rp)) {
+                    fault = Some(err!("{:?} is refused beside other ops: {:?}", rp, ops; Test));
+                }
+            }
+        }
+        if fault.is_some() {
+            break;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    match swapper.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(err!("The swap failed: {}", e; Test)),
+        Err(_) => return Err(err!("The swapper panicked."; Test)),
+    }
+    if let Some(e) = fault {
+        return Err(e);
+    }
+    if refusals == 0 {
+        return Err(err!("No walk of {} met the swap.", WALKS; Test));
+    }
+    Ok(())
+}
