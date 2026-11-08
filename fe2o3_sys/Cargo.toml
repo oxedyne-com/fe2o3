@@ -25,8 +25,10 @@ signal = ["dep:nix", "nix/signal", "nix/process"]
 # restart budget. Builds on signal.
 supervise = ["signal"]
 # ns: a user and mount namespace keeping the caller's own ids, and an overlay mounted in it, safe
-# over nix. Off by default for the same reason.
-ns = ["dep:nix", "nix/sched", "nix/mount", "nix/user", "nix/fs", "nix/socket"]
+# over nix, and capabilities handed to a pid namespace's first process over rustix. Off by default
+# for the same reason.
+ns = ["dep:nix", "nix/sched", "nix/mount", "nix/user", "nix/fs", "nix/socket", "dep:rustix"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }
+rustix = { version = "1.1", default-features = false, features = ["std", "thread"], optional = true }

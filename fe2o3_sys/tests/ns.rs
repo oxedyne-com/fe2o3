@@ -39,3 +39,24 @@ fn test_mounts_outside_a_namespace_are_refused() {
         assert!(r.is_err(), "{} was made outside a namespace", what);
     }
 }
+
+#[test]
+fn test_hand_down_without_the_capabilities_is_refused() {
+    if as_root() {
+        return;
+    }
+    assert!(ns::hand_down().is_err(), "capabilities the caller does not hold were handed down");
+}
+
+#[test]
+fn test_drop_capabilities_leaves_none() {
+    if let Err(e) = ns::drop_capabilities() {
+        panic!("{}", e);
+    }
+    // fixed: kernel ABI path and fields; capabilities are per thread.
+    let status = std::fs::read_to_string("/proc/thread-self/status").unwrap_or_default();
+    for key in ["CapInh:", "CapPrm:", "CapEff:", "CapAmb:"] {
+        let line = status.lines().find(|l| l.starts_with(key)).unwrap_or("");
+        assert!(line.ends_with("0000000000000000"), "{} not empty: {}", key, line);
+    }
+}

@@ -9,7 +9,12 @@
 //! `setgroups` write on kernel 7.0); a program a profile grants
 //! `userns`, `capability sys_admin` and `mount` succeeds.
 //!
-//! The system calls come from `nix`, which owns the `unsafe` this crate forbids.
+//! The caller keeps its own uid, so it is not root in its namespace and an `exec` drops every
+//! capability it holds there: [`hand_down`] keeps `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` for the
+//! first process of its pid namespace, which alone can mount that namespace's `/proc`, and
+//! [`drop_capabilities`] takes them away again before that process runs anything else.
+//!
+//! The system calls come from `nix` and `rustix`, which own the `unsafe` this crate forbids.
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -42,6 +47,15 @@ use nix::sched::{
 use nix::unistd::{
     getgid,
     getuid,
+};
+
+use rustix::thread::{
+    capabilities,
+    clear_ambient_capability_set,
+    configure_capability_in_ambient_set,
+    set_capabilities,
+    CapabilitySet,
+    CapabilitySets,
 };
 
 use std::{
@@ -82,6 +96,46 @@ pub fn enter_own(pid: bool, net: bool) -> Outcome<()> {
     {
         return Err(err!("The new mount namespace could not be made private: {}.", e;
             System, Security));
+    }
+    Ok(())
+}
+
+/// Puts `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` in the caller's inheritable and ambient sets, so the
+/// program it runs next keeps them across `exec` in the user namespace [`enter_own`] made.
+pub fn hand_down() -> Outcome<()> {
+    let caps = CapabilitySet::SYS_ADMIN | CapabilitySet::NET_ADMIN;
+    let mut sets = match capabilities(None) {
+        Ok(s)   => s,
+        Err(e)  => return Err(err!("The caller's capabilities could not be read: {}.", e;
+            System, Security)),
+    };
+    sets.inheritable |= caps;
+    if let Err(e) = set_capabilities(None, sets) {
+        return Err(err!("The capabilities {:?} could not be made inheritable: {}.", caps, e;
+            System, Security));
+    }
+    for cap in caps.iter() {
+        if let Err(e) = configure_capability_in_ambient_set(cap, true) {
+            return Err(err!("The capability {:?} could not be made ambient: {}.", cap, e;
+                System, Security));
+        }
+    }
+    Ok(())
+}
+
+/// Empties the caller's ambient, inheritable, permitted and effective capability sets, so nothing
+/// it runs from then on holds a capability by inheritance.
+pub fn drop_capabilities() -> Outcome<()> {
+    if let Err(e) = clear_ambient_capability_set() {
+        return Err(err!("The ambient capabilities could not be cleared: {}.", e; System, Security));
+    }
+    let none = CapabilitySets {
+        effective:      CapabilitySet::empty(),
+        permitted:      CapabilitySet::empty(),
+        inheritable:    CapabilitySet::empty(),
+    };
+    if let Err(e) = set_capabilities(None, none) {
+        return Err(err!("The capabilities could not be dropped: {}.", e; System, Security));
     }
     Ok(())
 }
