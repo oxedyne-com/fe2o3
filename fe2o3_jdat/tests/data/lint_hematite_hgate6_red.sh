@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# QA hgate5 C1, C2, C3, H1, D1 red claims, replayed from the commit: each arm GREEN as committed and
+# QA hgate5 C1, C2, C3, H1, D1 red claims, and the out-of-tree path dependency of hgate7 (d2-d4), replayed from the commit: each arm GREEN as committed and
 # RED on its mutant (lint_hematite_hgate6_<m>.patch), applied and reversed in turn.
 #   c1 a #[path] or include! literal read raw, so an escape hides tests
 #   c2 a manifest building a lib from tests/ not refused
@@ -7,6 +7,9 @@
 #   h1 c::test kept whatever crate Cargo resolves c to
 #   t  a test file turned product, unchanged, not refused
 #   d1 a changed build script or Cargo config not flagged for his card
+#   d2 the tree written with no links to its ancestors' entries, so a path dependency leaving it is lost
+#   d3 a manifest whose dependency is absent refused without naming where to check it out
+#   d4 the CLI's Cargo scratch back inside the repository, under its manifest
 # Run from the fe2o3 root through rc-build: bash fe2o3_jdat/tests/data/lint_hematite_hgate6_red.sh
 set -u
 here=$(dirname "$0")
@@ -26,6 +29,9 @@ cases=(
 	"h1 lint_hematite test_hematite_test_code_exempt_only_where_the_table_says"
 	"t lint_hematite_git test_hematite_git_test_code_turned_product_refused"
 	"d1 lint_hematite_git test_hematite_git_build_script_changed_flagged_not_refused"
+	"d2 lint_hematite_git test_hematite_git_path_dep_outside_the_tree_read"
+	"d3 lint_hematite_git test_hematite_git_missing_path_dep_named"
+	"d4 lint_hematite_git test_hematite_git_path_dep_outside_the_tree_read"
 )
 build || { echo "build failed"; exit 2; }
 for c in "${cases[@]}"; do
@@ -39,6 +45,9 @@ patches=(
 	lint_hematite_hgate6_h1.patch
 	lint_hematite_hgate6_t.patch
 	lint_hematite_hgate6_d1.patch
+	lint_hematite_hgate6_d2.patch
+	lint_hematite_hgate6_d3.patch
+	lint_hematite_hgate6_d4.patch
 )
 for f in "${patches[@]}"; do
 	p="$here/$f"

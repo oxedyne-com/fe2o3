@@ -1,0 +1,13 @@
+diff --git a/fe2o3_jdat/src/lint.rs b/fe2o3_jdat/src/lint.rs
+index 6fee177f..62f817ba 100644
+--- a/fe2o3_jdat/src/lint.rs
++++ b/fe2o3_jdat/src/lint.rs
+@@ -367,7 +367,7 @@ fn mirror(dir: &Path, real: &Path) -> Outcome<PathBuf> {
+         if let Ok(rd) = fs::read_dir(&at) {
+             for e in rd.flatten() {
+                 if e.file_name() != next {
+-                    res!(link(&e.path(), &twin.join(e.file_name())));
++                    let _ = link;
+                 }
+             }
+         }

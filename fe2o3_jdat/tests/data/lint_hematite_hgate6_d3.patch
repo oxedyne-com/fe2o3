@@ -1,0 +1,13 @@
+diff --git a/fe2o3_jdat/src/lint.rs b/fe2o3_jdat/src/lint.rs
+index 6fee177f..df68dfb8 100644
+--- a/fe2o3_jdat/src/lint.rs
++++ b/fe2o3_jdat/src/lint.rs
+@@ -331,7 +331,7 @@ pub fn cargo_of(
+                     let t = &text[i + after.len()..];
+                     t.find('`').map(|j| t[..j].to_string())
+                 });
+-                return Err(match (quoted("for dependency `"), quoted("failed to read `")) {
++                return Err(match (None::<String>, None::<String>) {
+                     (Some(name), Some(read))    => {
+                         let at = read.strip_suffix("/Cargo.toml").unwrap_or(&read);
+                         let at = match Path::new(at).strip_prefix(&base) {

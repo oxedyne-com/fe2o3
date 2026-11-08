@@ -1,0 +1,14 @@
+diff --git a/fe2o3_jdat/src/bin/lint_hematite.rs b/fe2o3_jdat/src/bin/lint_hematite.rs
+index cf4b6c4b..4db24a6d 100644
+--- a/fe2o3_jdat/src/bin/lint_hematite.rs
++++ b/fe2o3_jdat/src/bin/lint_hematite.rs
+@@ -98,7 +98,8 @@ fn run() -> Outcome<bool> {
+     let diff = res!(git(&repo, &hematite::diff_args(&revs)));
+     let diffs = hematite::file_diffs(&diff);
+     let changed: Vec<String> = diffs.keys().cloned().collect();
+-    let scratch = std::env::temp_dir().join(fmt!("hematite-cargo-{}", std::process::id()));
++    let scratch = PathBuf::from(res!(git(&repo, &["rev-parse", "--path-format=absolute", "--git-path",
++        &fmt!("hematite-cargo-{}", std::process::id())])).trim());
+     let _ = std::fs::remove_dir_all(&scratch);
+     let mut mk = std::fs::DirBuilder::new();
+     #[cfg(unix)]
