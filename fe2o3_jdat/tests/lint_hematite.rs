@@ -88,6 +88,12 @@ fn seeds() -> Vec<(&'static str, &'static str, String, usize)> {
         ("G9",  "src/a.rs", fmt!("use crate::a; use crate::b;\n"), 1),
         ("G10", "notes.txt", fmt!("one\nkey = {}\n", key), 2),
         ("G11", "src/a.rs", fmt!("fn f() {{\n    let p = \"/var/lib/app/state\";\n}}\n"), 2),
+        ("G11", "src/a.rs", fmt!("fn f(h: &str) -> bool {{\n    h == \"api.example.com\"\n}}\n"), 2),
+        ("G11", "src/a.rs", fmt!("fn f(m: &str) -> bool {{\n    m != \"claude-opus-4-1\"\n}}\n"), 2),
+        ("G11", "src/a.rs", fmt!("fn f(p: &str) -> bool {{\n    p.starts_with(\"/home/jason/usr/\")\n}}\n"), 2),
+        ("G11", "src/a.rs", fmt!("fn f(u: &str) -> bool {{\n    u.contains(\"https://api.example.com/v1\")\n}}\n"), 2),
+        ("G11", "src/a.rs", fmt!("fn f(u: &str) -> bool {{\n    \"/etc/kimberlite/runner.jdat\".contains(u)\n}}\n"), 2),
+        ("G11", "src/a.rs", fmt!("fn f(h: &str) -> bool {{\n    h == \"localhost\"\n}}\n"), 2),
         ("G11", "src/a.rs", fmt!("#[cfg(any(test, unix))]\nfn f() {{\n    let p = \"/var/lib/app/state\";\n}}\n"), 3),
         ("G12", "src/a.rs", fmt!("fn f(x: Box<dyn Fn()>) {{}}\n"), 1),
         ("G13", "src/a.rs", fmt!("// The behavior of it.\nfn f() {{}}\n"), 1),
@@ -151,7 +157,7 @@ fn k() { include!(\"gen.rs\"); }
 
 // Derives serde's Serialize, so the map reads as JSON.
 fn p(s: &str, c: char) -> bool {
-    s.starts_with(\"./\") || s.ends_with(\"../\") || s == \"localhost\" || \"~/\" != s
+    s.starts_with(\"./\") || s.ends_with(\"../\") || \"~/\" != s
         || \"/._-~\".contains(c) || s.strip_prefix(\"~/\").is_some()
 }
 

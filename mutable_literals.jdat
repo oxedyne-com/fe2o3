@@ -238,7 +238,7 @@
 		},
 		{
 			"class": "path",
-			"count": (u64|2),
+			"count": (u64|3),
 			"file": "fe2o3_austenite/tools/bench/door_smoke.mjs",
 			"text": "/main.typ",
 		},
@@ -265,6 +265,12 @@
 			"count": (u64|1),
 			"file": "fe2o3_austenite/tools/bench/lib/packages.mjs",
 			"text": "/_pkg",
+		},
+		{
+			"class": "path",
+			"count": (u64|2),
+			"file": "fe2o3_austenite/tools/bench/lib/packages.mjs",
+			"text": "typst.toml",
 		},
 		{
 			"class": "path",
@@ -1287,6 +1293,18 @@
 			"text": "DAY_MS",
 		},
 		{
+			"class": "host",
+			"count": (u64|1),
+			"file": "fe2o3_net/src/presentation/shape.rs",
+			"text": "127.0.0.1",
+		},
+		{
+			"class": "host",
+			"count": (u64|1),
+			"file": "fe2o3_net/src/presentation/shape.rs",
+			"text": "localhost",
+		},
+		{
 			"class": "named",
 			"count": (u64|1),
 			"file": "fe2o3_net/src/presentation/shape.rs",
@@ -2079,6 +2097,30 @@
 			"text": "package.json",
 		},
 		{
+			"class": "path",
+			"count": (u64|2),
+			"file": "fe2o3_steel/src/app/https.rs",
+			"text": "/admin",
+		},
+		{
+			"class": "path",
+			"count": (u64|2),
+			"file": "fe2o3_steel/src/app/https.rs",
+			"text": "/admin/",
+		},
+		{
+			"class": "path",
+			"count": (u64|1),
+			"file": "fe2o3_steel/src/app/https.rs",
+			"text": "/admin/database",
+		},
+		{
+			"class": "path",
+			"count": (u64|1),
+			"file": "fe2o3_steel/src/app/https.rs",
+			"text": "/admin/database/",
+		},
+		{
 			"class": "timing",
 			"count": (u64|1),
 			"file": "fe2o3_steel/src/app/mail.rs",
@@ -2104,7 +2146,7 @@
 		},
 		{
 			"class": "path",
-			"count": (u64|1),
+			"count": (u64|3),
 			"file": "fe2o3_steel/src/srv/admin/assets.rs",
 			"text": "/admin",
 		},
@@ -2185,6 +2227,12 @@
 			"count": (u64|3),
 			"file": "fe2o3_steel/src/srv/admin/handler.rs",
 			"text": "/admin",
+		},
+		{
+			"class": "path",
+			"count": (u64|2),
+			"file": "fe2o3_steel/src/srv/admin/handler.rs",
+			"text": "/admin/",
 		},
 		{
 			"class": "path",
@@ -2278,7 +2326,31 @@
 		},
 		{
 			"class": "path",
-			"count": (u64|3),
+			"count": (u64|1),
+			"file": "fe2o3_steel/src/srv/admin/local_listener.rs",
+			"text": "/admin",
+		},
+		{
+			"class": "path",
+			"count": (u64|1),
+			"file": "fe2o3_steel/src/srv/admin/local_listener.rs",
+			"text": "/admin/",
+		},
+		{
+			"class": "path",
+			"count": (u64|1),
+			"file": "fe2o3_steel/src/srv/admin/local_listener.rs",
+			"text": "/admin/database",
+		},
+		{
+			"class": "path",
+			"count": (u64|1),
+			"file": "fe2o3_steel/src/srv/admin/local_listener.rs",
+			"text": "/admin/database/",
+		},
+		{
+			"class": "path",
+			"count": (u64|4),
 			"file": "fe2o3_steel/src/srv/admin/ozone_view.rs",
 			"text": "/admin/database",
 		},
@@ -2811,6 +2883,12 @@
 			"text": "MAX_REQUEST_BYTES",
 		},
 		{
+			"class": "path",
+			"count": (u64|2),
+			"file": "fe2o3_steel/src/srv/https.rs",
+			"text": "/term/",
+		},
+		{
 			"class": "named",
 			"count": (u64|1),
 			"file": "fe2o3_steel/src/srv/publish/comment.rs",
@@ -2884,19 +2962,19 @@
 		},
 		{
 			"class": "path",
-			"count": (u64|1),
+			"count": (u64|2),
 			"file": "fe2o3_steel/src/srv/publish/mod.rs",
 			"text": "/comment",
 		},
 		{
 			"class": "path",
-			"count": (u64|1),
+			"count": (u64|2),
 			"file": "fe2o3_steel/src/srv/publish/mod.rs",
 			"text": "/comment/edit",
 		},
 		{
 			"class": "path",
-			"count": (u64|1),
+			"count": (u64|2),
 			"file": "fe2o3_steel/src/srv/publish/mod.rs",
 			"text": "/comment/preview",
 		},
@@ -3279,6 +3357,12 @@
 			"text": "/proc",
 		},
 		{
+			"class": "path",
+			"count": (u64|1),
+			"file": "fe2o3_test/src/scratch.rs",
+			"text": "/tmp",
+		},
+		{
 			"class": "named",
 			"count": (u64|1),
 			"file": "fe2o3_test/src/scratch.rs",
@@ -3373,6 +3457,12 @@
 			"count": (u64|1),
 			"file": "fe2o3_text/src/glob.rs",
 			"text": "MAX_ALTS",
+		},
+		{
+			"class": "host",
+			"count": (u64|2),
+			"file": "fe2o3_text/src/lint/mutable.rs",
+			"text": "localhost",
 		},
 		{
 			"class": "named",

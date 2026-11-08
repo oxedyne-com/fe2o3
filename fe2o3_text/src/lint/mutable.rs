@@ -413,7 +413,9 @@ pub fn scan(src: &str, lang: Lang, file: &str, test_attrs: &[String]) -> Outcome
             None => None,
         };
         if let Some((text, end)) = folded {
-            if is_pattern(&toks, i, end) {
+            // Only a literal with no letter or digit is a pattern; a host, path or model id
+            // compared against is still data.
+            if is_pattern(&toks, i, end) && !text.chars().any(|c| c.is_alphanumeric()) {
                 i = end;
                 continue;
             }
@@ -599,7 +601,7 @@ pub(crate) fn item_end(toks: &[Token], mut i: usize) -> usize {
     toks.len()
 }
 
-/// Is the literal at `i..end` a pattern the code tests a value against: the one argument of a
+/// Is the literal at `i..end` placed as a pattern the code tests a value against: the one argument of a
 /// `PATTERN_CALLS` method, an operand of `==` or `!=`, or the receiver of `.contains(`?
 fn is_pattern(toks: &[Token], i: usize, end: usize) -> bool {
     let before = |n: usize| i.checked_sub(n).and_then(|k| toks.get(k));

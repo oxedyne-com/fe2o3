@@ -212,7 +212,7 @@ pub fn diff_args(revs: &[&str]) -> Vec<String> {
 /// file as text.
 pub fn attributes_in(names: &str) -> Vec<String> {
     names.split(['\0', '\n'])
-        .filter(|n| *n == ".gitattributes" || n.ends_with("/.gitattributes"))
+        .filter(|n| *n == ".gitattributes" || n.ends_with("/.gitattributes")) // fixed: git's attributes file name
         .map(|n| n.to_string())
         .collect()
 }
