@@ -8,7 +8,8 @@
 //!
 //! The optional `inotify` feature adds a watcher for directory trees on Linux, built on
 //! `nix`, the optional `clock` feature the boot clock and a check for the machine
-//! having slept, and the optional `signal` feature signals to a process group; without
+//! having slept, the optional `signal` feature signals to a process group, and the optional `ns`
+//! feature makes a user and mount namespace and mounts an overlay in it; without
 //! them the crate has no third-party dependency at all.
 //!
 //! Intended consumers include admin dashboards, long-running
@@ -32,6 +33,8 @@ pub mod inotify;
 pub mod load;
 pub mod mem;
 pub mod net;
+#[cfg(all(target_os = "linux", feature = "ns"))]
+pub mod ns;
 pub mod parse;
 pub mod proc_self;
 pub mod resident;
