@@ -1,0 +1,11 @@
+--- a/fe2o3_text/src/lint/hematite.rs
++++ b/fe2o3_text/src/lint/hematite.rs
+@@ -477,7 +477,7 @@
+     let mut out = String::new();
+     let mut cs = body.chars().peekable();
+     while let Some(c) = cs.next() {
+-        if c != '\\' {
++        if c != '\\' || !lit.is_empty() {
+             out.push(c);
+             continue;
+         }

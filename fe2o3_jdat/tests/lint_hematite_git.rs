@@ -148,6 +148,28 @@ fn test_hematite_git_product_code_from_tests_refused() -> Outcome<()> {
 }
 
 #[test]
+fn test_hematite_git_escaped_path_into_tests_refused() -> Outcome<()> {
+    // rustc decodes the literal, so an escape cannot hide `tests` from the gate (QA hgate5 C1).
+    const DYN: &[u8] = b"pub trait T {}\npub fn f(x: Box<dyn T>) -> Box<dyn T> { x }\n";
+    let cases: [(&str, &[u8]); 4] = [
+        ("x", b"pub fn base() {}\n#[path = \"../t\\x65sts/imp.rs\"]\npub mod imp;\n"),
+        ("u", b"pub fn base() {}\n#[path = \"../t\\u{65}sts/imp.rs\"]\npub mod imp;\n"),
+        ("incl", b"pub fn base() {}\ninclude!(\"../t\\x65sts/imp.rs\");\n"),
+        ("raw", b"pub fn base() {}\ninclude!(r#\"../tests/imp.rs\"#);\n"),
+    ];
+    for (name, body) in cases {
+        let r = res!(repo(&fmt!("esc_{}", name)));
+        res!(write(&r, "tests/imp.rs", DYN));
+        res!(write(&r, "src/lib.rs", body));
+        res!(commit(&r));
+        let (rc, out) = res!(gate(&r));
+        assert!(rc == 1 && out.contains("src/lib.rs:2: product code from a tests directory"),
+            "{}: rc {}: {}", name, rc, out);
+    }
+    Ok(())
+}
+
+#[test]
 fn test_hematite_git_deleted_cfg_test_reads_the_module() -> Outcome<()> {
     // The change only deletes `#[cfg(test)]`; the module it guarded is product code now (QA hgate4 E).
     let r = res!(repo("cfgdel"));

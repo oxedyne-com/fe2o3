@@ -460,6 +460,62 @@ fn cfg_test_lines(src: &str) -> Vec<usize> {
     out
 }
 
+/// The value of a Rust string literal, `"…"` or raw `r#"…"#`, with its escapes decoded, or `None`
+/// where it is not one: rustc reads `"../t\x65sts"` as `../tests`.
+fn str_value(lit: &str) -> Option<String> {
+    if let Some(r) = lit.strip_prefix('r') {
+        let fence = "#".repeat(r.len() - r.trim_start_matches('#').len());
+        return r.strip_prefix(fence.as_str()).and_then(|b| b.strip_prefix('"'))
+            .and_then(|b| b.strip_suffix(fence.as_str()))
+            .and_then(|b| b.strip_suffix('"'))
+            .map(|b| b.to_string());
+    }
+    let body = match lit.strip_prefix('"').and_then(|b| b.strip_suffix('"')) {
+        Some(b) => b,
+        None    => return None,
+    };
+    let mut out = String::new();
+    let mut cs = body.chars().peekable();
+    while let Some(c) = cs.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let v = match cs.next() {
+            Some('n')   => '\n',
+            Some('r')   => '\r',
+            Some('t')   => '\t',
+            Some('0')   => '\0',
+            Some('\\')  => '\\',
+            Some('\'')  => '\'',
+            Some('"')   => '"',
+            Some('x')   => {
+                let h: String = cs.by_ref().take(2).collect();
+                match u8::from_str_radix(&h, 16) {
+                    Ok(b) if h.len() == 2 && b <= 0x7f => b as char, // fixed: a str escape is ASCII
+                    _                                   => return None,
+                }
+            }
+            Some('u') if cs.next() == Some('{') => {
+                let h: String = cs.by_ref().take_while(|d| *d != '}').filter(|d| *d != '_').collect();
+                match u32::from_str_radix(&h, 16).ok().and_then(char::from_u32) {
+                    Some(u) => u,
+                    None    => return None,
+                }
+            }
+            Some('\n')  => {
+                while cs.peek().map(|w| matches!(w, ' ' | '\t' | '\n' | '\r')).unwrap_or(false) {
+                    cs.next();
+                }
+                continue;
+            }
+            _           => return None,
+        };
+        out.push(v);
+    }
+    Some(out)
+}
+
 /// Does a path name a `tests` directory?
 fn into_tests(path: &str) -> bool {
     path.split(['/', '\\']).any(|c| c == "tests")
@@ -639,22 +695,30 @@ impl<'a> RustSrc<'a> {
             .map(|(line, _)| line).collect()
     }
 
-    /// Each `path` attribute and `include!` with its literal, `None` when it names no literal the
-    /// lexer can close.
+    /// Each `path` attribute and `include!` with the value of its literal, `None` when it names no
+    /// literal that can be decoded.
     fn placed(&self) -> Vec<(usize, Option<String>)> {
         let mut out = Vec::new();
-        for (i, t) in self.toks.iter().enumerate() {
-            if t.kind != TokenKind::Attribute {
-                continue;
-            }
-            let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
-            for (at, _) in a.match_indices("path=") {
-                if matches!(a[..at].chars().last(), Some('[') | Some('(') | Some(',')) {
-                    let lit = a[at + 5..].strip_prefix('"')
-                        .and_then(|r| r.split_once('"'))
-                        .map(|(name, _)| name.to_string());
-                    out.push((self.line(i), lit));
+        let attr_toks = self.toks.iter().filter(|t| t.kind == TokenKind::Attribute);
+        for (t, (at, toks)) in attr_toks.zip(&self.attrs) {
+            let mut named = false;
+            for (j, p) in toks.iter().enumerate() {
+                let lead = j == 0 || matches!(toks[j - 1].kind,
+                    TokenKind::Punct('[') | TokenKind::Punct('(') | TokenKind::Punct(','));
+                if !lead || !is_ident(p, "path")
+                    || !toks.get(j + 1).map(|e| is_punct(e, '=')).unwrap_or(false)
+                {
+                    continue;
                 }
+                named = true;
+                let lit = toks.get(j + 2).filter(|l| l.kind == TokenKind::StringLit)
+                    .and_then(|l| str_value(&l.text));
+                out.push((self.lines.line_of(at + p.span.start), lit));
+            }
+            // An attribute the lexer cannot read still names a path the gate cannot check.
+            let flat: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
+            if !named && flat.contains("path=") {
+                out.push((self.lines.line_of(t.span.start), None));
             }
         }
         for (k, i) in self.code.iter().enumerate() {
@@ -667,10 +731,8 @@ impl<'a> RustSrc<'a> {
                 self.code.get(k + 4).map(|n| &self.toks[*n]))
             {
                 (Some(lit), Some(close)) if lit.kind == TokenKind::StringLit
-                    && lit.text.len() >= 2 && lit.text.starts_with('"') && lit.text.ends_with('"')
                     && matches!(close.kind, TokenKind::Punct(')') | TokenKind::Punct(']')
-                        | TokenKind::Punct('}') | TokenKind::Punct(',')) =>
-                    Some(lit.text[1..lit.text.len() - 1].to_string()),
+                        | TokenKind::Punct('}') | TokenKind::Punct(',')) => str_value(&lit.text),
                 _ => None,
             };
             out.push((self.line(*i), lit));
