@@ -162,12 +162,15 @@ impl Report {
     }
 }
 
-/// The environment of every git call that feeds the gate: no system config or attributes and no
-/// replaced objects, so that what a commit holds is what its hash names.
-pub const GIT_ENV: [(&str, &str); 3] = [
+// The environment of every git call that feeds the gate: no system config or attributes, no
+// replaced objects and no grafts, so that what a commit holds, and what its parents are, is what
+// its hash names.  A graft in the repository could otherwise make a commit the change adds into
+// an ancestor of the base.
+pub const GIT_ENV: [(&str, &str); 4] = [
     ("GIT_CONFIG_NOSYSTEM",     "1"),
     ("GIT_ATTR_NOSYSTEM",       "1"),
     ("GIT_NO_REPLACE_OBJECTS",  "1"),
+    ("GIT_GRAFT_FILE",          "/dev/null"), // fixed: an empty graft file
 ];
 
 /// Where a repository's own attributes file lies, under `git rev-parse --git-path`.
