@@ -14,7 +14,7 @@ index fe34f2f4..40d8d971 100644
      }
 -    let diff = res!(git(&repo, &hematite::diff_args(&revs)));
 +    let mut old = vec!["diff", "-U0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"];
-+    old.extend(revs.iter());
++    old.extend(revs.iter().copied());
 +    let diff = res!(git(&repo, &old));
      let mut added = Vec::new();
      for (file, lines) in hematite::added_lines(&diff) {
