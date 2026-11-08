@@ -26,7 +26,7 @@ signal = ["dep:nix", "nix/signal", "nix/process"]
 supervise = ["signal"]
 # ns: a user and mount namespace keeping the caller's own ids, and an overlay mounted in it, safe
 # over nix. Off by default for the same reason.
-ns = ["dep:nix", "nix/sched", "nix/mount", "nix/user"]
+ns = ["dep:nix", "nix/sched", "nix/mount", "nix/user", "nix/fs", "nix/socket"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }

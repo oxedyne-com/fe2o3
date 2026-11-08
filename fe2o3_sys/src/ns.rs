@@ -1,6 +1,7 @@
 //! A user namespace in which the caller keeps its own uid and gid, a mount namespace of its own,
 //! and the mounts such a process may make there: an overlay, so that writes land in an upper
-//! folder and the lower one is left as it was.
+//! folder and the lower one is left as it was, a tmpfs, a `/proc` for a new pid namespace, a bind
+//! and a read-only remount of one, and the network namespace's loopback brought up.
 //!
 //! The kernel lets an unprivileged program make these only where its security module allows. Under
 //! AppArmor's `apparmor_restrict_unprivileged_userns`, an unconfined program's namespace is made but
@@ -16,6 +17,22 @@ use nix::mount::{
     umount2,
     MntFlags,
     MsFlags,
+};
+use nix::sys::socket::{
+    bind as bind_socket,
+    recv,
+    send,
+    socket,
+    AddressFamily,
+    MsgFlags,
+    NetlinkAddr,
+    SockFlag,
+    SockProtocol,
+    SockType,
+};
+use nix::sys::statvfs::{
+    statvfs,
+    FsFlags,
 };
 use nix::sched::{
     unshare,
@@ -99,4 +116,117 @@ pub fn unmount(at: &Path) -> Outcome<()> {
         Err(e)  => Err(err!("The mount on {} could not be detached: {}.", at.display(), e;
             System, Security)),
     }
+}
+
+/// Mounts an empty tmpfs on `at`, in which no set-user-id bit or device node takes effect.
+pub fn mount_tmpfs(at: &Path) -> Outcome<()> {
+    mount_as("tmpfs", at, MsFlags::MS_NOSUID | MsFlags::MS_NODEV)
+}
+
+/// Mounts a `/proc` on `at` for the caller's pid namespace, which must be one the caller's user
+/// namespace owns: the first child after [`enter_own`] with `pid`, or one it starts.
+pub fn mount_proc(at: &Path) -> Outcome<()> {
+    mount_as("proc", at, MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC)
+}
+
+fn mount_as(fstype: &str, at: &Path, flags: MsFlags) -> Outcome<()> {
+    match mount(Some(fstype), at, Some(fstype), flags, None::<&str>) {
+        Ok(())  => Ok(()),
+        Err(e)  => Err(err!("A {} could not be mounted on {}: {}.", fstype, at.display(), e;
+            System, Security)),
+    }
+}
+
+/// Binds the folder `from` on `at`, without the mounts below `from`.
+pub fn bind(from: &Path, at: &Path) -> Outcome<()> {
+    match mount(Some(from), at, None::<&str>, MsFlags::MS_BIND, None::<&str>) {
+        Ok(())  => Ok(()),
+        Err(e)  => Err(err!("{} could not be bound on {}: {}.", from.display(), at.display(), e;
+            System, Security)),
+    }
+}
+
+/// Makes the mount on `at`, a bind, read-only.  Its other flags are kept, since a namespace may
+/// not clear those of a mount it was handed.
+pub fn remount_ro(at: &Path) -> Outcome<()> {
+    let have = match statvfs(at) {
+        Ok(s)   => s.flags(),
+        Err(e)  => return Err(err!("The mount on {} could not be read: {}.", at.display(), e;
+            System, IO)),
+    };
+    let mut flags = MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY;
+    for (f, m) in [
+        (FsFlags::ST_NOSUID,        MsFlags::MS_NOSUID),
+        (FsFlags::ST_NODEV,         MsFlags::MS_NODEV),
+        (FsFlags::ST_NOEXEC,        MsFlags::MS_NOEXEC),
+        (FsFlags::ST_NOATIME,       MsFlags::MS_NOATIME),
+        (FsFlags::ST_NODIRATIME,    MsFlags::MS_NODIRATIME),
+        (FsFlags::ST_RELATIME,      MsFlags::MS_RELATIME),
+    ] {
+        if have.contains(f) {
+            flags |= m;
+        }
+    }
+    match mount(None::<&str>, at, None::<&str>, flags, None::<&str>) {
+        Ok(())  => Ok(()),
+        Err(e)  => Err(err!("The mount on {} could not be made read-only: {}.", at.display(), e;
+            System, Security)),
+    }
+}
+
+// fixed: rtnetlink ABI (linux/netlink.h, linux/rtnetlink.h, linux/if.h).
+const RTM_NEWLINK:      u16 = 16;
+const NLMSG_ERROR:      u16 = 2;
+const NLM_F_REQUEST:    u16 = 1;
+const NLM_F_ACK:        u16 = 4;
+const IFF_UP:           u32 = 1;
+const LOOPBACK_INDEX:   i32 = 1; // a new network namespace's first link
+const NLMSG_HDR_LEN:    usize = 16;
+const IFINFO_LEN:       usize = 16;
+
+/// Brings up the loopback of the caller's network namespace, over rtnetlink, as `ip link set lo
+/// up` does.  The caller needs `CAP_NET_ADMIN` in the user namespace that owns it.
+pub fn loopback_up() -> Outcome<()> {
+    let fd = match socket(AddressFamily::Netlink, SockType::Raw, SockFlag::SOCK_CLOEXEC,
+        SockProtocol::NetlinkRoute)
+    {
+        Ok(f)   => f,
+        Err(e)  => return Err(err!("A route netlink socket could not be opened: {}.", e;
+            System, Network)),
+    };
+    if let Err(e) = bind_socket(std::os::fd::AsRawFd::as_raw_fd(&fd), &NetlinkAddr::new(0, 0)) {
+        return Err(err!("The route netlink socket could not be bound: {}.", e; System, Network));
+    }
+    let len = NLMSG_HDR_LEN + IFINFO_LEN;
+    let mut msg = Vec::with_capacity(len);
+    msg.extend_from_slice(&(len as u32).to_ne_bytes());
+    msg.extend_from_slice(&RTM_NEWLINK.to_ne_bytes());
+    msg.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
+    msg.extend_from_slice(&1u32.to_ne_bytes()); // sequence
+    msg.extend_from_slice(&0u32.to_ne_bytes()); // port: the kernel's
+    msg.extend_from_slice(&[0u8, 0u8]);         // AF_UNSPEC, padding
+    msg.extend_from_slice(&0u16.to_ne_bytes()); // device type
+    msg.extend_from_slice(&LOOPBACK_INDEX.to_ne_bytes());
+    msg.extend_from_slice(&IFF_UP.to_ne_bytes());
+    msg.extend_from_slice(&IFF_UP.to_ne_bytes()); // change mask
+    let raw = std::os::fd::AsRawFd::as_raw_fd(&fd);
+    if let Err(e) = send(raw, &msg, MsgFlags::empty()) {
+        return Err(err!("The loopback's link-up request could not be sent: {}.", e; System, Network));
+    }
+    let mut buf = [0u8; 512]; // fixed: an error ack is a header, an errno and the request echoed
+    let n = match recv(raw, &mut buf, MsgFlags::empty()) {
+        Ok(n)   => n,
+        Err(e)  => return Err(err!("The loopback's link-up ack could not be read: {}.", e;
+            System, Network)),
+    };
+    if n < NLMSG_HDR_LEN + 4 || u16::from_ne_bytes([buf[4], buf[5]]) != NLMSG_ERROR {
+        return Err(err!("The kernel's answer to the loopback's link-up is not an ack ({} bytes).", n;
+            System, Network, Unexpected));
+    }
+    let code = i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
+    if code != 0 {
+        return Err(err!("The kernel refused to bring the loopback up: {}.",
+            nix::errno::Errno::from_raw(-code); System, Network));
+    }
+    Ok(())
 }
