@@ -123,7 +123,7 @@ fn key_from_dat(dat: &Dat) -> Outcome<Key> {
     })
 }
 
-/// The release's rule table, so an installer can write it where a daimon cannot reach.
+// The release's rule table, so an installer can write it where a daimon cannot reach.
 pub const HEMATITE_RULES: &str = include_str!("../../hematite_rules.jdat");
 
 /// Reads a Hematite rule table. Unlike a baseline, an absent table is an error: a gate with no

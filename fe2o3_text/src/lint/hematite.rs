@@ -142,7 +142,7 @@ impl fmt::Display for Breach {
     }
 }
 
-/// An added line carrying `allowlist hematite`.
+/// An added line carrying `allowlist hematite` that would otherwise break a rule.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Allowed {
     pub file:   String,
@@ -181,8 +181,7 @@ pub const GIT_ENV: [(&str, &str); 4] = [
     ("GIT_GRAFT_FILE",          "/dev/null"), // fixed: an empty graft file
 ];
 
-/// Where a repository's own attributes file lies, under `git rev-parse --git-path`.
-pub const INFO_ATTRIBUTES: &str = "info/attributes"; // fixed: git's layout
+pub const INFO_ATTRIBUTES: &str = "info/attributes"; // fixed: git's layout, under `git rev-parse --git-path`
 
 /// The arguments of the one `git` call whose output [`added_lines`] reads, `revs` being
 /// `--cached` or a base and a head. The gate, not the repository, decides what counts as a change:
@@ -252,7 +251,7 @@ pub fn added_lines(diff: &str) -> BTreeMap<String, BTreeSet<usize>> {
         }
         if let Some(p) = l.strip_prefix("+++ ") {
             file = match p {
-                "/dev/null" => None,
+                "/dev/null" => None, // fixed: git diff format
                 _           => Some(p.strip_prefix("b/").unwrap_or(p).to_string()),
             };
         } else if let Some(h) = l.strip_prefix("@@ ") {
@@ -341,7 +340,8 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
             });
         }
     }
-    rep.allows.extend(allowed.into_values());
+    // A line that only names the escape breaks no rule, so is not one.
+    rep.allows.extend(allowed.into_values().filter(|al| !al.rules.is_empty()));
     Ok(())
 }
 

@@ -225,7 +225,8 @@ fn test_hematite_rule_off_in_table_passes() -> Outcome<()> {
 #[test]
 fn test_hematite_allowlist_passes_and_is_reported() -> Outcome<()> {
     let rules = res!(rules());
-    let src = "fn f(x: &str) -> Outcome<u8> {\n    let v = parse(x)?; // allowlist hematite: a seeded case\n    Ok(v)\n}\n";
+    // Line 3 only names the escape, so it breaks no rule and is not listed.
+    let src = "fn f(x: &str) -> Outcome<u8> {\n    let v = parse(x)?; // allowlist hematite: a seeded case\n    // Mark a line allowlist hematite to let it through.\n    Ok(v)\n}\n";
     let rep = res!(gate(&rules, "src/a.rs", src));
     assert!(rep.is_clean(), "{:?}", rep);
     assert_eq!(rep.allows.iter().map(|a| (a.line, a.rules.clone())).collect::<Vec<_>>(),
@@ -277,5 +278,24 @@ fn test_hematite_built_in_table_is_the_file() -> Outcome<()> {
     assert_eq!(lint::HEMATITE_RULES, text);
     let rules = res!(lint::parse_rules(lint::HEMATITE_RULES));
     assert_eq!(rules.rules.len(), res!(lint::load_rules(&path)).rules.len());
+    Ok(())
+}
+
+#[test]
+fn test_hematite_the_gate_meets_its_own_rules() -> Outcome<()> {
+    let rules = res!(rules());
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    for file in ["fe2o3_text/src/lint/hematite.rs", "fe2o3_jdat/src/lint.rs",
+        "fe2o3_jdat/src/bin/lint_hematite.rs"]
+    {
+        let path = root.join(file);
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s)   => s,
+            Err(e)  => return Err(err!(e, "While reading {}.", path.display(); IO, File, Read)),
+        };
+        let rep = res!(gate(&rules, file, &src));
+        assert!(rep.is_clean(), "{}:\n{}", file,
+            rep.breaches.iter().map(|b| fmt!("{}", b)).collect::<Vec<_>>().join("\n"));
+    }
     Ok(())
 }
