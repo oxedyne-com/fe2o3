@@ -1,4 +1,4 @@
-//! The Hematite gate, `fe2o3_text::lint::hematite`, run with the rule table at the fe2o3 root as
+//! The Hematite gate, `fe2o3_text::lint::hematite`, run with the rule table in fe2o3_jdat as
 //! `fe2o3_jdat::lint::load_rules` reads it: a seeded breach of each rule is refused by name and
 //! line, a clean change passes, a breach only in removed or unchanged lines passes, and a rule
 //! switched off in the table passes.
@@ -23,7 +23,7 @@ use std::{
 
 // Mutant switches for the red script: HEMATITE_M<n> set switches rule G<n> off.
 fn rules() -> Outcome<Rules> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("hematite_rules.jdat");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hematite_rules.jdat");
     let mut rules = res!(lint::load_rules(&path));
     for r in rules.rules.iter_mut() {
         if std::env::var(fmt!("HEMATITE_M{}", r.id.trim_start_matches('G'))).is_ok() {
@@ -270,7 +270,7 @@ fn test_hematite_unknown_check_is_refused_and_seq_rule_needs_no_code() -> Outcom
 
 #[test]
 fn test_hematite_built_in_table_is_the_file() -> Outcome<()> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("hematite_rules.jdat");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hematite_rules.jdat");
     let text = match std::fs::read_to_string(&path) {
         Ok(s)   => s,
         Err(e)  => return Err(err!(e, "While reading {}.", path.display(); IO, File, Read)),

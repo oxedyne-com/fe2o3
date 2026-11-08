@@ -54,7 +54,7 @@ fn commit(r: &Path) -> Outcome<()> {
 
 /// The CLI's exit code and output for the change `main...HEAD`.
 fn gate(r: &Path) -> Outcome<(i32, String)> {
-    let rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("hematite_rules.jdat");
+    let rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hematite_rules.jdat");
     let out = res!(Command::new(env!("CARGO_BIN_EXE_lint_hematite"))
         .arg("--rules").arg(&rules).arg("--repo").arg(r).args(["--base", "main", "--head", "HEAD"])
         .output().map_err(|e| err!(e, "Could not run lint_hematite."; IO)));
