@@ -105,6 +105,12 @@ fn seeds() -> Vec<(&'static str, &'static str, String, usize)> {
         ("G14", "src/a.rs", fmt!("fn f() {{\n    std::include!(concat!(\"gen\", \".in\"));\n}}\n"), 2),
         ("G14", "src/a.rs", fmt!("mod rt {{\n    pub use tokio::main as test;\n}}\n"), 2),
         ("G14", "src/a.rs", fmt!("extern crate tokio_x as tokio;\n"), 1),
+        ("G14", "src/a.rs", fmt!("#[path = \"../tests/imp.rs\"]\nmod imp;\n"), 1),
+        ("G14", "src/a.rs", fmt!("fn f() {{\n    include!(\"../tests/imp.rs\");\n}}\n"), 2),
+        ("G14", "Cargo.toml", fmt!("[package]\nname = \"x\"\n\n[lib]\npath = \"tests/lib.rs\"\n"), 5),
+        ("G14", "x/Cargo.toml", fmt!("[package]\nbuild = 'tests/build.rs'\n"), 2),
+        ("G14", "Cargo.toml", fmt!("[dependencies]\nh = {{ version = \"1\", path = \"helper/tests\" }}\n"), 2),
+        ("G14", "Cargo.toml", fmt!("[lib]\nname = \"x\"\n\n[[test]]\npath = \"tests/t.rs\"\n[lib.x]\npath = \"tests/lib.rs\"\n"), 7),
     ]
 }
 
@@ -166,6 +172,11 @@ async fn q(m: &tokio::sync::RwLock<u8>) -> u8 { *m.read().await + *m.write().awa
 ";
     let rep = res!(gate(&rules, "src/a.rs", src));
     assert_eq!(hits(&rep), Vec::<(String, usize)>::new());
+    // Cargo's own test layout, and a test module reading a file under `tests/`.
+    let toml = "[package]\ninclude = [\"src/**\", \"tests/**\"]\n\n[[test]]\nname = \"t\"\npath = \"tests/t.rs\"\n";
+    assert!(res!(gate(&rules, "Cargo.toml", toml)).is_clean());
+    let src = "#[cfg(test)]\nmod t {\n    #[path = \"../tests/common.rs\"]\n    mod common;\n}\n";
+    assert!(res!(gate(&rules, "src/a.rs", src)).is_clean());
     Ok(())
 }
 
@@ -286,7 +297,10 @@ fn test_hematite_test_code_exempt_only_where_the_table_says() -> Outcome<()> {
         let src = fmt!("#[{}]\nasync fn t() {{\n    let p = \"/var/lib/app/state\";\n}}\n", attr);
         assert!(res!(gate(&rules, "src/a.rs", &src)).is_clean(), "{}", attr);
     }
-    for file in ["src/util_tests.rs", "src/tests.rs", "src/tests/mod.rs", "fe2o3_x/src/tests/a.rs"] {
+    // A crate placed under `tests/` is built as product (QA hgate4 C).
+    for file in ["src/util_tests.rs", "src/tests.rs", "src/tests/mod.rs", "fe2o3_x/src/tests/a.rs",
+        "helper/tests/src/lib.rs", "tests/x/src/a.rs"]
+    {
         assert_eq!(hits(&res!(gate(&rules, file, "// The color.\n"))), vec![(fmt!("G13"), 1)], "{}", file);
     }
     Ok(())

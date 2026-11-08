@@ -124,6 +124,30 @@ fn test_hematite_git_symlink_refused() -> Outcome<()> {
 }
 
 #[test]
+fn test_hematite_git_product_code_from_tests_refused() -> Outcome<()> {
+    // Product code placed under `tests/`, where G7-G13 do not read (QA hgate4 C).
+    const DYN: &[u8] = b"pub trait T {}\npub fn f(x: Box<dyn T>) -> Box<dyn T> { x }\n";
+    let cases: [(&str, &str, &[u8], &str); 4] = [
+        ("path", "src/lib.rs", b"pub fn base() {}\n#[path = \"../tests/imp.rs\"]\npub mod imp;\n",
+            "src/lib.rs:2: product code from a tests directory"),
+        ("incl", "src/lib.rs", b"pub fn base() {}\ninclude!(\"../tests/imp.rs\");\n",
+            "src/lib.rs:2: product code from a tests directory"),
+        ("cargo", "Cargo.toml", b"[package]\nname = \"x\"\n\n[lib]\npath = \"tests/imp.rs\"\n",
+            "Cargo.toml:5: product code from a tests directory"),
+        ("crate", "helper/tests/src/lib.rs", DYN, "helper/tests/src/lib.rs:2: dyn Trait"),
+    ];
+    for (name, file, body, want) in cases {
+        let r = res!(repo(&fmt!("tp_{}", name)));
+        res!(write(&r, "tests/imp.rs", DYN));
+        res!(write(&r, file, body));
+        res!(commit(&r));
+        let (rc, out) = res!(gate(&r));
+        assert!(rc == 1 && out.contains(want), "{}: rc {}: {}", name, rc, out);
+    }
+    Ok(())
+}
+
+#[test]
 fn test_hematite_git_repo_config_cannot_hide_lines() -> Outcome<()> {
     // An attributes file named by the repository's config, and hunks merged across an empty line
     // that the config prints bare.

@@ -76,6 +76,7 @@ pub enum Check {
     Placement,                  // `#[path]` or `include!` of a file not ending `.rs`
     TestAlias,                  // a rename to a name that `Rules::test_attrs` begins with
     Link,                       // a symlink the change adds, whose target the gate does not read
+    TestPath,                   // product code placed under `tests/`, where test code is exempt
 }
 
 impl Check {
@@ -103,6 +104,7 @@ impl Check {
             "placement"     => Self::Placement,
             "test_alias"    => Self::TestAlias,
             "link"          => Self::Link,
+            "test_path"     => Self::TestPath,
             _               => return Err(err!("Unknown Hematite check '{}'.", name;
                 Invalid, Input)),
         })
@@ -341,6 +343,10 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
                 true    => vec![1],
                 false   => Vec::new(),
             },
+            (Check::TestPath, None) => match a.file == "Cargo.toml" || a.file.ends_with("/Cargo.toml") { // fixed: cargo's manifest name
+                true    => cargo_test_paths(&a.src),
+                false   => Vec::new(),
+            },
             (_, Some(rs))   => res!(rs.find(&r.check, rules, &a.lines)),
             (_, None)       => Vec::new(),
         };
@@ -379,18 +385,48 @@ fn allow_marked(line: &str) -> bool {
     line.to_lowercase().replace(['_', '-'], " ").contains("allowlist hematite")
 }
 
-/// Is the file under a `tests` directory with no `src` above it?
+/// Is the file under a `tests` directory with no `src` above or below it?  A `src` below is a
+/// crate's, built as product wherever it is placed.
 fn is_test_path(file: &str) -> bool {
     let mut dirs = file.split('/').collect::<Vec<_>>();
     dirs.pop();
-    for d in dirs {
-        match d {
-            "src"   => return false,
-            "tests" => return true,
-            _       => {}
+    dirs.contains(&"tests") && !dirs.contains(&"src")
+}
+
+/// Does a path name a `tests` directory?
+fn into_tests(path: &str) -> bool {
+    path.split(['/', '\\']).any(|c| c == "tests")
+}
+
+/// The lines of a Cargo manifest whose `path` or `build` value leads into a `tests` directory,
+/// outside a `[[test]]` target, so building product code from test files.
+fn cargo_test_paths(src: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut test_target = false;
+    for (n, l) in src.split('\n').enumerate() {
+        let t = l.trim();
+        if t.starts_with('[') {
+            test_target = t.replace(' ', "") == "[[test]]";
+            continue;
+        }
+        if test_target || t.starts_with('#') {
+            continue;
+        }
+        let hit = ["path", "build"].iter().any(|k| l.match_indices(k).any(|(at, _)| {
+            let lead = l[..at].chars().last();
+            let word = !matches!(lead, Some(c) if c.is_alphanumeric() || c == '_' || c == '-');
+            let rest = l[at + k.len()..].trim_start();
+            word && rest.strip_prefix('=').map(|v| {
+                let v = v.trim_start();
+                let q = v.chars().next().unwrap_or(' ');
+                matches!(q, '"' | '\'') && v[1..].split(q).next().map(into_tests).unwrap_or(false)
+            }).unwrap_or(false)
+        }));
+        if hit {
+            out.push(n + 1);
         }
     }
-    false
+    out
 }
 
 /// One Rust source, lexed once for every rule.
@@ -468,6 +504,9 @@ impl<'a> RustSrc<'a> {
             Check::CommentWords(words)  => self.comment_words(words),
             Check::Placement            => self.placement(),
             Check::TestAlias            => self.test_alias(),
+            Check::TestPath             => self.placed().into_iter()
+                .filter(|(_, lit)| lit.as_deref().map(into_tests).unwrap_or(false))
+                .map(|(line, _)| line).collect(),
             Check::Mutable              => {
                 let scan = res!(mutable::scan(self.src, Lang::Rust, "", self.test_attrs));
                 scan.hits.iter().map(|h| h.line)
@@ -526,24 +565,29 @@ impl<'a> RustSrc<'a> {
     }
 
     /// Rust the gate would not read: a `path` attribute or an `include!` naming anything but a
-    /// literal ending `.rs`.  A literal the lexer cannot close counts as not `.rs`.
+    /// literal ending `.rs`.
     fn placement(&self) -> Vec<usize> {
+        self.placed().into_iter()
+            .filter(|(_, lit)| !lit.as_deref().map(|p| p.ends_with(".rs")).unwrap_or(false))
+            .map(|(line, _)| line).collect()
+    }
+
+    /// Each `path` attribute and `include!` with its literal, `None` when it names no literal the
+    /// lexer can close.
+    fn placed(&self) -> Vec<(usize, Option<String>)> {
         let mut out = Vec::new();
         for (i, t) in self.toks.iter().enumerate() {
             if t.kind != TokenKind::Attribute {
                 continue;
             }
             let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
-            let hidden = a.match_indices("path=").any(|(at, _)| {
-                let lead = a[..at].chars().last();
-                matches!(lead, Some('[') | Some('(') | Some(','))
-                    && !a[at + 5..].strip_prefix('"')
+            for (at, _) in a.match_indices("path=") {
+                if matches!(a[..at].chars().last(), Some('[') | Some('(') | Some(',')) {
+                    let lit = a[at + 5..].strip_prefix('"')
                         .and_then(|r| r.split_once('"'))
-                        .map(|(name, _)| name.ends_with(".rs"))
-                        .unwrap_or(false)
-            });
-            if hidden {
-                out.push(self.line(i));
+                        .map(|(name, _)| name.to_string());
+                    out.push((self.line(i), lit));
+                }
             }
         }
         for (k, i) in self.code.iter().enumerate() {
@@ -552,18 +596,17 @@ impl<'a> RustSrc<'a> {
             {
                 continue;
             }
-            let rs = match (self.code.get(k + 3).map(|n| &self.toks[*n]),
+            let lit = match (self.code.get(k + 3).map(|n| &self.toks[*n]),
                 self.code.get(k + 4).map(|n| &self.toks[*n]))
             {
-                (Some(lit), Some(close)) => lit.kind == TokenKind::StringLit
-                    && lit.text.starts_with('"') && lit.text.ends_with(".rs\"")
+                (Some(lit), Some(close)) if lit.kind == TokenKind::StringLit
+                    && lit.text.len() >= 2 && lit.text.starts_with('"') && lit.text.ends_with('"')
                     && matches!(close.kind, TokenKind::Punct(')') | TokenKind::Punct(']')
-                        | TokenKind::Punct('}') | TokenKind::Punct(',')),
-                _ => false,
+                        | TokenKind::Punct('}') | TokenKind::Punct(',')) =>
+                    Some(lit.text[1..lit.text.len() - 1].to_string()),
+                _ => None,
             };
-            if !rs {
-                out.push(self.line(*i));
-            }
+            out.push((self.line(*i), lit));
         }
         out
     }
