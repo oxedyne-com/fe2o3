@@ -98,8 +98,16 @@ fn run() -> Outcome<bool> {
     let diff = res!(git(&repo, &hematite::diff_args(&revs)));
     let diffs = hematite::file_diffs(&diff);
     let changed: Vec<String> = diffs.keys().cloned().collect();
-    let scratch = PathBuf::from(res!(git(&repo, &["rev-parse", "--path-format=absolute", "--git-path",
-        &fmt!("hematite-cargo-{}", std::process::id())])).trim());
+    let scratch = std::env::temp_dir().join(fmt!("hematite-cargo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let mut mk = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        // The repository's manifests are written here, in the shared temporary directory.
+        mk.mode(0o700);
+    }
+    res!(mk.create(&scratch).map_err(|e| err!(e, "While making {}.", scratch.display(); IO, File, Write)));
     let top = PathBuf::from(res!(git(&repo, &["rev-parse", "--show-toplevel"])).trim());
     let now = res!(cargo_of(&repo, &top, &scratch.join("now"), &now_list, &changed, &prefix));
     let was = res!(cargo_of(&repo, &top, &scratch.join("was"), &was_list, &changed, &old_prefix));

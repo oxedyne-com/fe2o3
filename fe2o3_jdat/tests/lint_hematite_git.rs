@@ -289,13 +289,14 @@ fn test_hematite_git_repo_config_cannot_hide_lines() -> Outcome<()> {
 
 #[test]
 fn test_hematite_git_path_dep_outside_the_tree_read() -> Outcome<()> {
-    // A path dependency leaving the repository resolves as it does from the repository itself.
+    // A path dependency leaving the repository resolves as it does from the repository itself; a
+    // workspace root loads it even for `--no-deps`.
     let r = res!(repo("dep_out"));
     let name = res!(r.file_name().and_then(|n| n.to_str()).ok_or_else(|| err!("No name"; Missing)));
     let dep = r.with_file_name(fmt!("{}_dep", name));
     res!(write(&dep, "Cargo.toml", b"[package]\nname = \"d\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"));
     res!(write(&dep, "src/lib.rs", b""));
-    res!(write(&r, "Cargo.toml", fmt!("{}\n[dependencies]\nd = {{ path = \"../{}_dep\" }}\n",
+    res!(write(&r, "Cargo.toml", fmt!("{}\n[workspace]\n\n[dependencies]\nd = {{ path = \"../{}_dep\" }}\n",
         String::from_utf8_lossy(MANIFEST), name).as_bytes()));
     res!(write(&r, "src/lib.rs", b"pub fn base() {}\npub fn more() {}\n"));
     res!(commit(&r));
@@ -311,7 +312,7 @@ fn test_hematite_git_missing_path_dep_named() -> Outcome<()> {
     let r = res!(repo("dep_gone"));
     let name = res!(r.file_name().and_then(|n| n.to_str()).ok_or_else(|| err!("No name"; Missing)));
     let gone = r.with_file_name(fmt!("{}_nowhere", name));
-    res!(write(&r, "Cargo.toml", fmt!("{}\n[dependencies]\nd = {{ path = \"../{}_nowhere\" }}\n",
+    res!(write(&r, "Cargo.toml", fmt!("{}\n[workspace]\n\n[dependencies]\nd = {{ path = \"../{}_nowhere\" }}\n",
         String::from_utf8_lossy(MANIFEST), name).as_bytes()));
     res!(commit(&r));
     let (rc, out) = res!(gate(&r));

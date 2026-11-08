@@ -249,9 +249,9 @@ pub fn metadata_args(manifest: &Path, full: bool) -> Vec<OsString> {
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index"; // fixed: Cargo's id of the crates.io registry
 
 /// The packages Cargo builds from a tree whose root is `real` on this machine, worked out in `dir`,
-/// an empty directory the caller then removes. The tree is written at its own path under `dir`,
-/// beside links to its ancestors' other entries, so that a path dependency leaving the tree reaches
-/// what Cargo reaches from `real`. `listing` is the tree as `git ls-tree -r -z` or `git ls-files -s -z` gives it and
+/// an empty directory under no Cargo manifest that the caller then removes. The tree is written at
+/// its own path under `dir`, beside links to its ancestors' other entries, so that a path
+/// dependency leaving the tree reaches what Cargo reaches from `real`. `listing` is the tree as `git ls-tree -r -z` or `git ls-files -s -z` gives it and
 /// `read(path)` a file's content. Each `Cargo.toml` and `Cargo.lock` is written with its content
 /// and every other `.rs` file empty, for Cargo to find the targets; nothing else, so no `.cargo`
 /// config or toolchain file of the tree is read. `metadata(manifest, full)` runs `cargo metadata
@@ -270,6 +270,11 @@ pub fn cargo_of(
     -> Outcome<Cargo>
 {
     let base = res!(fs::canonicalize(dir).map_err(|e| err!(e, "While finding the Cargo scratch directory {}.", dir.display(); IO, File)));
+    // Cargo looks above a manifest for the workspace that claims it.
+    if let Some(a) = base.ancestors().find(|a| a.join("Cargo.toml").exists()) { // fixed: Cargo's manifest name
+        return Err(err!("The Cargo scratch directory {} lies under the Cargo manifest of {}, which \
+            Cargo would read as the tree's workspace.", base.display(), a.display(); Invalid, Input));
+    }
     let dir = res!(mirror(&base, real));
     let mut manifests = Vec::new();
     for (mode, path) in hematite::tree_paths(listing) {
