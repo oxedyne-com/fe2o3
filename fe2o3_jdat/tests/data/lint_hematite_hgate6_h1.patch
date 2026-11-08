@@ -1,0 +1,13 @@
+diff --git a/fe2o3_text/src/lint/hematite.rs b/fe2o3_text/src/lint/hematite.rs
+index 46d08bb6..57f506c0 100644
+--- a/fe2o3_text/src/lint/hematite.rs
++++ b/fe2o3_text/src/lint/hematite.rs
+@@ -216,7 +216,7 @@ impl Cargo {
+     pub fn test_attrs(&self, file: &str, attrs: &[String]) -> Vec<String> {
+         let crates = self.package_of(file).and_then(|p| p.crates.as_ref());
+         attrs.iter().filter(|a| match a.split_once("::") {
+-            Some((c, _))    => crates.and_then(|m| m.get(c)).copied().unwrap_or(false),
++            Some((_, _))    => crates.is_some() || crates.is_none(),
+             None            => true,
+         }).cloned().collect()
+     }

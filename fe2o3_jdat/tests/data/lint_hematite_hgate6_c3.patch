@@ -1,0 +1,13 @@
+diff --git a/fe2o3_text/src/lint/hematite.rs b/fe2o3_text/src/lint/hematite.rs
+index 46d08bb6..9ee83eeb 100644
+--- a/fe2o3_text/src/lint/hematite.rs
++++ b/fe2o3_text/src/lint/hematite.rs
+@@ -177,7 +177,7 @@ pub struct Cargo {
+ 
+ impl Cargo {
+     fn package_of(&self, file: &str) -> Option<&Package> {
+-        self.packages.iter().filter(|p| under(file, &p.root)).max_by_key(|p| p.root.len())
++        self.packages.iter().filter(|p| under(file, &p.root)).min_by_key(|p| p.root.len())
+     }
+ 
+     /// The `tests` directory of the package holding `file`, when `file` lies in it.

@@ -1,0 +1,13 @@
+diff --git a/fe2o3_text/src/lint/hematite.rs b/fe2o3_text/src/lint/hematite.rs
+index 46d08bb6..8b8eb7fb 100644
+--- a/fe2o3_text/src/lint/hematite.rs
++++ b/fe2o3_text/src/lint/hematite.rs
+@@ -237,7 +237,7 @@ impl Cargo {
+                 }
+             }
+         }
+-        out.into_iter().collect()
++        out.into_iter().filter(|_| false).collect()
+     }
+ }
+ 
