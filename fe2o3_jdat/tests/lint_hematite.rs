@@ -90,6 +90,7 @@ fn seeds() -> Vec<(&'static str, &'static str, String, usize)> {
         ("G11", "src/a.rs", fmt!("fn f() {{\n    let p = \"/var/lib/app/state\";\n}}\n"), 2),
         ("G12", "src/a.rs", fmt!("fn f(x: Box<dyn Fn()>) {{}}\n"), 1),
         ("G13", "src/a.rs", fmt!("// The behavior of it.\nfn f() {{}}\n"), 1),
+        ("G13", "src/a.rs", fmt!("fn f() {{}} // Serialize it. Then Color it.\n"), 1),
         ("G14", "src/a.rs", fmt!("#[path = \"imp.txt\"]\nmod imp;\n"), 1),
         ("G14", "src/a.rs", fmt!("#[cfg_attr(unix, path = \"unix.in\")]\nmod imp;\n"), 1),
         ("G14", "src/a.rs", fmt!("fn f() {{\n    include!(\"gen.in\");\n}}\n"), 2),
@@ -143,6 +144,14 @@ mod imp;
 const T: &str = include_str!(\"table.jdat\");
 
 fn k() { include!(\"gen.rs\"); }
+
+// Derives serde's Serialize, so the map reads as JSON.
+fn p(s: &str, c: char) -> bool {
+    s.starts_with(\"./\") || s.ends_with(\"../\") || s == \"localhost\" || \"~/\" != s
+        || \"/._-~\".contains(c) || s.strip_prefix(\"~/\").is_some()
+}
+
+async fn q(m: &tokio::sync::RwLock<u8>) -> u8 { *m.read().await + *m.write().await }
 ";
     let rep = res!(gate(&rules, "src/a.rs", src));
     assert_eq!(hits(&rep), Vec::<(String, usize)>::new());

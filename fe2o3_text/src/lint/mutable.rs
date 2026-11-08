@@ -356,6 +356,13 @@ const MESSAGE_MACROS: [&str; 26] = [
     "include", "env", "option_env",
 ];
 
+// Calls whose one argument is a pattern the code tests a value against, not data.
+// fixed: method names of Rust's str and JavaScript's String.
+const PATTERN_CALLS: [&str; 8] = [
+    "starts_with", "ends_with", "contains", "strip_prefix", "strip_suffix",
+    "startsWith", "endsWith", "includes",
+];
+
 // fixed: the console and error methods of the JavaScript standard library.
 const JS_MESSAGE_CALLS: [&str; 6] = ["log", "warn", "error", "info", "debug", "trace"];
 
@@ -405,6 +412,10 @@ pub fn scan(src: &str, lang: Lang, file: &str) -> Outcome<Scan> {
             None => None,
         };
         if let Some((text, end)) = folded {
+            if is_pattern(&toks, i, end) {
+                i = end;
+                continue;
+            }
             if let Some(class) = classify(&text) {
                 if !covered {
                     out.hits.push(Hit { file: file.to_string(), line, class, text });
@@ -539,6 +550,22 @@ pub(crate) fn item_end(toks: &[Token], mut i: usize) -> usize {
         }
     }
     toks.len()
+}
+
+/// Is the literal at `i..end` a pattern the code tests a value against: the one argument of a
+/// `PATTERN_CALLS` method, an operand of `==` or `!=`, or the receiver of `.contains(`?
+fn is_pattern(toks: &[Token], i: usize, end: usize) -> bool {
+    let before = |n: usize| i.checked_sub(n).and_then(|k| toks.get(k));
+    let after = |n: usize| toks.get(end + n);
+    let punct = |t: Option<&Token>, c: char| t.map(|t| is_punct(t, c)).unwrap_or(false);
+    let compare = |t: Option<&Token>| matches!(t.map(|t| &t.kind),
+        Some(TokenKind::Operator(o)) if ["==", "!=", "===", "!=="].contains(&o.as_str()));
+    let argument = punct(before(1), '(') && punct(before(3), '.') && punct(after(0), ')')
+        && before(2).map(|t| t.kind == TokenKind::Ident && PATTERN_CALLS.contains(&t.text.as_str()))
+            .unwrap_or(false);
+    let receiver = punct(after(0), '.') && punct(after(2), '(')
+        && after(1).map(|t| is_ident(t, "contains") || is_ident(t, "includes")).unwrap_or(false);
+    argument || receiver || compare(before(1)) || compare(after(0))
 }
 
 /// Marks the tokens no rule looks at: test items, message macro arguments, and the `Default` of

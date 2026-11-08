@@ -9,7 +9,10 @@
 //!   which reads only comments, and outside backticks there),
 //! - a `?` that does not follow an expression (`?Sized`, `<?>`), a `?` that closes a `$( … )`
 //!   repetition, and any raw lock call in a `macro_rules!` body, where the lock macros are defined,
-//! - `.lock()` on `stdin()`, `stdout()` or `stderr()`, which are not data locks,
+//! - `.lock()` on `stdin()`, `stdout()` or `stderr()`, which are not data locks, and a lock call
+//!   that is awaited (an async lock, which the lock macros do not take),
+//! - a capitalised word within a sentence of a comment, which is a name (`Serialize`), not a
+//!   spelling,
 //! - `pub use` in import order, since a re-export is placed for the reader of the module,
 //! - `include_str!` and `include_bytes!`, which read data, not code (G14 refuses only `include!`
 //!   and `#[path]` of a file not ending `.rs`, which the gate would not read),
@@ -597,12 +600,15 @@ impl<'a> RustSrc<'a> {
             {
                 continue;
             }
+            // An async lock (tokio's), which the lock macros do not take.
+            let awaited = self.code.get(k + 3).map(|n| is_punct(&self.toks[*n], '.')).unwrap_or(false)
+                && self.code.get(k + 4).map(|n| is_keyword(&self.toks[*n], "await")).unwrap_or(false);
             let io = k >= 4
                 && is_punct(&self.toks[self.code[k - 2]], ')')
                 && is_punct(&self.toks[self.code[k - 3]], '(')
                 && ["stdin", "stdout", "stderr"].iter()
                     .any(|n| is_ident(&self.toks[self.code[k - 4]], n));
-            if !io {
+            if !io && !awaited {
                 out.push(self.line(*i));
             }
         }
@@ -867,9 +873,29 @@ impl<'a> RustSrc<'a> {
     }
 }
 
-/// Does `text`, outside backticks, hold a word starting with one of `words`, case aside?
+/// Does `text`, outside backticks, hold a word starting with one of `words`, case aside?  A
+/// capitalised word within a sentence is a name (serde's `Serialize`), not a spelling.
 fn has_word(text: &str, words: &[String]) -> bool {
-    let plain: String = text.split('`').step_by(2).collect::<Vec<_>>().join(" ").to_lowercase();
-    plain.split(|c: char| !c.is_alphanumeric())
-        .any(|w| words.iter().any(|p| w.starts_with(p.to_lowercase().as_str())))
+    let plain = text.split('`').step_by(2).collect::<Vec<_>>().join(" ");
+    let mut start = true; // at the start of a sentence
+    let mut word = String::new();
+    for c in plain.chars().chain(std::iter::once(' ')) {
+        if c.is_alphanumeric() {
+            word.push(c);
+            continue;
+        }
+        if !word.is_empty() {
+            let name = !start && word.chars().next().map(char::is_uppercase).unwrap_or(false);
+            let low = word.to_lowercase();
+            if !name && words.iter().any(|p| low.starts_with(p.to_lowercase().as_str())) {
+                return true;
+            }
+            start = false;
+            word.clear();
+        }
+        if matches!(c, '.' | '!' | '?' | ':') {
+            start = true;
+        }
+    }
+    false
 }
