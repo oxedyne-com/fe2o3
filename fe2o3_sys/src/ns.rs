@@ -145,15 +145,25 @@ pub fn drop_capabilities() -> Outcome<()> {
 }
 
 fn empty_bounding() -> Outcome<()> {
-    for cap in CapabilitySet::all().iter() {
+    // Every capability the running kernel knows, not only those rustix names.
+    let last = res!(fs::read_to_string(CAP_LAST_CAP).map_err(|e| err!(e,
+        "{} could not be read.", CAP_LAST_CAP; IO, File, Read)));
+    let last: u32 = res!(last.trim().parse().map_err(|e| err!(e,
+        "{} holds '{}', not a capability number.", CAP_LAST_CAP, last.trim(); Invalid, Input)));
+    if last > 63 {
+        return Err(err!("{} names capability {}, beyond a 64-bit set.", CAP_LAST_CAP, last;
+            Unimplemented, Security));
+    }
+    for n in 0..=last {
+        let cap = CapabilitySet::from_bits_retain(1u64 << n);
         match capability_is_in_bounding_set(cap) {
             Ok(false)   => (),
             Ok(true)    => if let Err(e) = remove_capability_from_bounding_set(cap) {
-                return Err(err!("The capability {:?} could not be dropped from the bounding set: {}.",
-                    cap, e; System, Security));
+                return Err(err!("Capability {} could not be dropped from the bounding set: {}.",
+                    n, e; System, Security));
             },
-            // The kernel does not know this capability, so no process can hold it.
-            Err(_)      => (),
+            Err(e)      => return Err(err!("Whether capability {} is in the bounding set could \
+                not be read: {}.", n, e; System, Security)),
         }
     }
     Ok(())
@@ -249,6 +259,7 @@ pub fn remount_ro(at: &Path) -> Outcome<()> {
 }
 
 // fixed: rtnetlink ABI (linux/netlink.h, linux/rtnetlink.h, linux/if.h).
+const CAP_LAST_CAP:     &str = "/proc/sys/kernel/cap_last_cap"; // fixed: kernel ABI path
 const RTM_NEWLINK:      u16 = 16;
 const NLMSG_ERROR:      u16 = 2;
 const NLM_F_REQUEST:    u16 = 1;
