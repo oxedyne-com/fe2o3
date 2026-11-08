@@ -28,9 +28,10 @@ fn main() {
     }
 }
 
-fn git(repo: &PathBuf, args: &[&str]) -> Outcome<String> {
+fn git<S: AsRef<str>>(repo: &PathBuf, args: &[S]) -> Outcome<String> {
+    let args: Vec<&str> = args.iter().map(|a| a.as_ref()).collect();
     let out = match Command::new("git").arg("-C").arg(repo).args(["-c", "core.quotePath=false"])
-        .args(args).output()
+        .envs(hematite::GIT_ENV).args(&args).output()
     {
         Ok(o)   => o,
         Err(e)  => return Err(err!(e, "Could not run git {}.", args.join(" "); IO, Missing)),
@@ -69,26 +70,32 @@ fn run() -> Outcome<bool> {
     }
     let rules = res!(lint::load_rules(&res!(rules
         .ok_or_else(|| err!("Missing --rules <file>."; Missing, Input)))));
-    let mut diff_args = vec!["diff", "-U0", "--no-color", "--no-ext-diff", "--src-prefix=a/",
-        "--dst-prefix=b/"];
     let range;
-    let prefix = match (staged, &base) {
-        (true, None)    => {
-            diff_args.push("--cached");
-            String::from(":")
-        }
-        (false, Some(b)) => {
+    let (revs, prefix, names) = match (staged, &base) {
+        (true, None)        => (vec!["--cached"], String::from(":"), res!(git(&repo, &["ls-files", "-z"]))),
+        (false, Some(b))    => {
             range = fmt!("{}...{}", b, head);
-            diff_args.push(&range);
-            fmt!("{}:", head)
+            (vec![range.as_str()], fmt!("{}:", head),
+                res!(git(&repo, &["ls-tree", "-r", "--name-only", "-z", &head])))
         }
-        _               => return Err(err!("Give exactly one of --staged and --base <rev>.";
+        _                   => return Err(err!("Give exactly one of --staged and --base <rev>.";
             Invalid, Input)),
     };
-    let diff = res!(git(&repo, &diff_args));
+    let mut attrs = hematite::attributes_in(&names);
+    let info = PathBuf::from(res!(git(&repo, &["rev-parse", "--path-format=absolute", "--git-path",
+        hematite::INFO_ATTRIBUTES])).trim());
+    if info.exists() {
+        attrs.push(fmt!("{}", info.display()));
+    }
+    if !attrs.is_empty() {
+        return Err(err!("The repository carries git attributes ({}), which decide what git reads \
+            as a change; remove them so the Hematite gate can read every line.", attrs.join(", ");
+            Invalid, Input));
+    }
+    let diff = res!(git(&repo, &hematite::diff_args(&revs)));
     let mut added = Vec::new();
     for (file, lines) in hematite::added_lines(&diff) {
-        let src = res!(git(&repo, &["show", &fmt!("{}{}", prefix, file)]));
+        let src = res!(git(&repo, &["cat-file", "blob", &fmt!("{}{}", prefix, file)]));
         added.push(Added { file, src, lines });
     }
     let rep = res!(hematite::check(&added, &rules));

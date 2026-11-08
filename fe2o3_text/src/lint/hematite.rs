@@ -162,8 +162,49 @@ impl Report {
     }
 }
 
-/// The lines each file gains in a unified diff, by the file's new path. Run git with
-/// `--src-prefix=a/ --dst-prefix=b/` so that the new path reads `b/<path>`.
+/// The environment of every git call that feeds the gate: no system config or attributes and no
+/// replaced objects, so that what a commit holds is what its hash names.
+pub const GIT_ENV: [(&str, &str); 3] = [
+    ("GIT_CONFIG_NOSYSTEM",     "1"),
+    ("GIT_ATTR_NOSYSTEM",       "1"),
+    ("GIT_NO_REPLACE_OBJECTS",  "1"),
+];
+
+/// Where a repository's own attributes file lies, under `git rev-parse --git-path`.
+pub const INFO_ATTRIBUTES: &str = "info/attributes"; // fixed: git's layout
+
+/// The arguments of the one `git` call whose output [`added_lines`] reads, `revs` being
+/// `--cached` or a base and a head. The gate, not the repository, decides what counts as a change:
+/// every file is text (a `-diff` attribute or a NUL byte cannot hide one), no textconv or external
+/// driver runs, a rename is a deletion and an addition (so a file moved out of `tests/` is read
+/// whole), and the repository's config cannot reshape the hunks.
+pub fn diff_args(revs: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = [
+        "-c", "core.quotePath=false",
+        "-c", "core.attributesFile=",
+        "-c", "diff.noprefix=false",
+        "-c", "diff.mnemonicPrefix=false",
+        "-c", "diff.relative=false",
+        "-c", "diff.suppressBlankEmpty=false",
+        "diff", "-U0", "--inter-hunk-context=0", "--no-color", "--text", "--no-textconv",
+        "--no-renames", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/",
+    ].iter().map(|a| a.to_string()).collect();
+    v.extend(revs.iter().map(|r| r.to_string()));
+    v
+}
+
+/// The `.gitattributes` files among `names` (as `git ls-tree -r --name-only -z` or
+/// `git ls-files -z` gives them), which the gate refuses: attributes decide whether git reads a
+/// file as text.
+pub fn attributes_in(names: &str) -> Vec<String> {
+    names.split(['\0', '\n'])
+        .filter(|n| *n == ".gitattributes" || n.ends_with("/.gitattributes"))
+        .map(|n| n.to_string())
+        .collect()
+}
+
+/// The lines each file gains in a unified diff, by the file's new path, the diff taken with
+/// [`diff_args`].
 pub fn added_lines(diff: &str) -> BTreeMap<String, BTreeSet<usize>> {
     let mut out: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
     let mut file: Option<String> = None;
