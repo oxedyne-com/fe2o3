@@ -1,0 +1,15 @@
+diff --git a/fe2o3_jdat/src/lint.rs b/fe2o3_jdat/src/lint.rs
+index 8b6129af..b72e489a 100644
+--- a/fe2o3_jdat/src/lint.rs
++++ b/fe2o3_jdat/src/lint.rs
+@@ -273,10 +273,6 @@ pub fn cargo_of(
+ {
+     let base = res!(fs::canonicalize(dir).map_err(|e| err!(e, "While finding the Cargo scratch directory {}.", dir.display(); IO, File)));
+     // Cargo looks above a manifest for the workspace that claims it.
+-    if let Some(a) = base.ancestors().find(|a| a.join("Cargo.toml").exists()) { // fixed: Cargo's manifest name
+-        return Err(err!("The Cargo scratch directory {} lies under the Cargo manifest of {}, which \
+-            Cargo would read as the tree's workspace.", base.display(), a.display(); Invalid, Input));
+-    }
+     // Cargo reads config from the ancestors of its working directory, `dir`, and a config can name
+     // a program (`rustc-wrapper`) that `cargo metadata` runs.
+     let home = std::env::var_os("CARGO_HOME").map(PathBuf::from)

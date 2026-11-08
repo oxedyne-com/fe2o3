@@ -1,0 +1,16 @@
+diff --git a/fe2o3_jdat/src/lint.rs b/fe2o3_jdat/src/lint.rs
+index 8b6129af..bd467b5a 100644
+--- a/fe2o3_jdat/src/lint.rs
++++ b/fe2o3_jdat/src/lint.rs
+@@ -305,11 +305,6 @@ pub fn cargo_of(
+             let m = res!(stat(a));
+             // Another account able to write here could plant a Cargo config or manifest.
+             let group = m.mode() & 0o020 != 0 && !group_only(me, m.gid()); // fixed: the group write bit
+-            if (m.uid() != me && m.uid() != 0) || m.mode() & 0o002 != 0 || group { // fixed: root's uid, the other write bit
+-                return Err(err!("The Cargo scratch directory {} lies under {}, which another \
+-                    account can write to and so plant a Cargo config. Use a private directory, \
+-                    such as one under $XDG_RUNTIME_DIR.", base.display(), a.display(); Invalid, Input));
+-            }
+         }
+     }
+     let dir = res!(mirror(&base, real));

@@ -1,0 +1,15 @@
+diff --git a/fe2o3_jdat/src/lint.rs b/fe2o3_jdat/src/lint.rs
+index 8b6129af..6da9a2ae 100644
+--- a/fe2o3_jdat/src/lint.rs
++++ b/fe2o3_jdat/src/lint.rs
+@@ -297,10 +297,6 @@ pub fn cargo_of(
+         let stat = |a: &Path| fs::metadata(a).map_err(|e| err!(e, "While reading {}.", a.display(); IO, File));
+         let m = res!(stat(&base));
+         let me = m.uid();
+-        if m.mode() & 0o077 != 0 { // fixed: the group and other bits
+-            return Err(err!("The Cargo scratch directory {} can be opened by other accounts; the \
+-                tree's manifests are written there, so make it 0700.", base.display(); Invalid, Input));
+-        }
+         for a in base.ancestors() {
+             let m = res!(stat(a));
+             // Another account able to write here could plant a Cargo config or manifest.

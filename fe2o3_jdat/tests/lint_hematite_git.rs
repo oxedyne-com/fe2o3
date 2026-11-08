@@ -66,10 +66,12 @@ fn gate(r: &Path) -> Outcome<(i32, String)> {
         String::from_utf8_lossy(&out.stderr))))
 }
 
-/// The CLI's exit code and output for the change `main...HEAD`, its Cargo scratch made in `room`.
+/// The CLI's exit code and output for the change `main...HEAD`, its Cargo scratch made in `room`
+/// and its temporary directory, beside `room`, open to every account as `/tmp` is.
 fn gate_in(r: &Path, room: &Path) -> Outcome<(i32, String)> {
     let rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hematite_rules.jdat");
-    let out = res!(Command::new(env!("CARGO_BIN_EXE_lint_hematite"))
+    let tmp = res!(dir_of(&room.with_extension("tmp"), 0o1777));
+    let out = res!(Command::new(env!("CARGO_BIN_EXE_lint_hematite")).env("TMPDIR", &tmp)
         .arg("--rules").arg(&rules).arg("--repo").arg(r).arg("--scratch").arg(room)
         .args(["--base", "main", "--head", "HEAD"])
         .output().map_err(|e| err!(e, "Could not run lint_hematite."; IO)));

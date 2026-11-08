@@ -1,0 +1,16 @@
+diff --git a/fe2o3_jdat/src/lint.rs b/fe2o3_jdat/src/lint.rs
+index 8b6129af..59778584 100644
+--- a/fe2o3_jdat/src/lint.rs
++++ b/fe2o3_jdat/src/lint.rs
+@@ -285,11 +285,6 @@ pub fn cargo_of(
+     for a in base.ancestors() {
+         let at = a.join(".cargo"); // fixed: Cargo's config directory
+         let config = ["config", "config.toml"].iter().any(|c| fs::symlink_metadata(at.join(c)).is_ok()); // fixed: Cargo's config file names
+-        if config && fs::canonicalize(&at).ok() != home {
+-            return Err(err!("The Cargo scratch directory {} lies under the Cargo config of {}, which \
+-                Cargo would read and which can name a program for it to run.", base.display(),
+-                at.display(); Invalid, Input));
+-        }
+     }
+     #[cfg(unix)]
+     {

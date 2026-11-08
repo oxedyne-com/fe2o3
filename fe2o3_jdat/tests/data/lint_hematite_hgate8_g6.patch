@@ -1,0 +1,13 @@
+diff --git a/fe2o3_jdat/src/bin/lint_hematite.rs b/fe2o3_jdat/src/bin/lint_hematite.rs
+index 6243a931..d02c1237 100644
+--- a/fe2o3_jdat/src/bin/lint_hematite.rs
++++ b/fe2o3_jdat/src/bin/lint_hematite.rs
+@@ -105,7 +105,7 @@ fn run() -> Outcome<bool> {
+     let changed: Vec<String> = diffs.keys().cloned().collect();
+     let room = res!(room.ok_or_else(|| err!("Give --scratch <dir>, a private directory for Cargo's \
+         scratch, or run where $XDG_RUNTIME_DIR is set."; Missing, Input)));
+-    let scratch = |side: &str| room.join(fmt!("hematite-cargo-{}-{}", std::process::id(), side));
++    let scratch = |side: &str| std::env::temp_dir().join(fmt!("hematite-cargo-{}-{}", std::process::id(), side));
+     let top = PathBuf::from(res!(git(&repo, &["rev-parse", "--show-toplevel"])).trim());
+     let now = res!(cargo_of(&repo, &top, &scratch("now"), &now_list, &changed, &prefix));
+     let was = res!(cargo_of(&repo, &top, &scratch("was"), &was_list, &changed, &old_prefix));
