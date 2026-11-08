@@ -8,10 +8,10 @@
 //! literal argument (`Duration::from_secs(30)`, `sleep(30)`, `setTimeout(f, 30)`). Bare numerals in
 //! expressions are never flagged.
 //!
-//! Exempt: comments, the arguments of message macros, `#[cfg(test)]` and `#[test]` items, the body
-//! of `impl Default` for a config type (the one sanctioned home of a default), and anything marked
-//! `// fixed: <why>`, trailing on its line or as a banner over a group that ends at the first
-//! blank line. A why of fewer than two words is itself a failure.
+//! Exempt: comments, the arguments of message macros, test items (`#[test]`, or a `cfg` that holds
+//! only under test, such as `all(test, unix)`), the body of `impl Default` for a config type (the
+//! one sanctioned home of a default), and anything marked `// fixed: <why>`, trailing on its line or
+//! as a banner over a group that ends at the first blank line. A why of fewer than two words is itself a failure.
 //!
 //! A ratchet `Baseline` lists the debt that exists: a hit beyond it fails, and so does an entry no
 //! longer found, so the baseline only shrinks. Entries are keyed by file, class and token text,
@@ -503,6 +503,45 @@ pub(crate) fn fixed_lines(
     covered
 }
 
+/// Does the attribute, whitespace removed, mark test code: `#[test]`, a `…::test` runner, or a
+/// `cfg` that can only hold under test (`any(test, unix)` also builds outside tests)?
+pub(crate) fn is_test_attr(a: &str) -> bool {
+    a == "#[test]" || a.ends_with("::test]")
+        || a.strip_prefix("#[cfg(").and_then(|r| r.strip_suffix(")]")).map(cfg_needs_test).unwrap_or(false)
+}
+
+/// Can the cfg predicate hold only when `test` does?
+fn cfg_needs_test(p: &str) -> bool {
+    if p == "test" {
+        return true;
+    }
+    let (head, args) = match (p.find('('), p.ends_with(')')) {
+        (Some(k), true) => (&p[..k], &p[k + 1..p.len() - 1]),
+        _               => return false,
+    };
+    let mut parts = Vec::new();
+    let (mut depth, mut in_str, mut start) = (0usize, false, 0);
+    for (k, c) in args.char_indices() {
+        match c {
+            '"'                     => in_str = !in_str,
+            '(' if !in_str          => depth += 1,
+            ')' if !in_str          => depth = depth.saturating_sub(1),
+            ',' if !in_str && depth == 0 => {
+                parts.push(&args[start..k]);
+                start = k + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&args[start..]);
+    parts.retain(|x| !x.is_empty());
+    match head {
+        "all"   => parts.iter().any(|x| cfg_needs_test(x)),
+        "any"   => !parts.is_empty() && parts.iter().all(|x| cfg_needs_test(x)),
+        _       => false,
+    }
+}
+
 pub(crate) fn is_punct(t: &Token, c: char) -> bool {
     t.kind == TokenKind::Punct(c)
 }
@@ -579,10 +618,7 @@ fn skipped(toks: &[Token], lang: Lang) -> Vec<bool> {
         let mut span: Option<(usize, usize)> = None;
         if t.kind == TokenKind::Attribute {
             let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
-            // `any(test, …)` also builds outside tests, so is product code.
-            if a == "#[test]" || a.starts_with("#[cfg(test") || a.contains("::test]")
-                || a.starts_with("#[cfg(all(test")
-            {
+            if is_test_attr(&a) {
                 span = Some((i, item_end(toks, i + 1)));
             }
         } else if t.kind == TokenKind::Ident && i + 2 < toks.len() && is_punct(&toks[i + 1], '!')

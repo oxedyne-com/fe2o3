@@ -16,8 +16,8 @@
 //! - `pub use` in import order, since a re-export is placed for the reader of the module,
 //! - `include_str!` and `include_bytes!`, which read data, not code (G14 refuses only `include!`
 //!   and `#[path]` of a file not ending `.rs`, which the gate would not read),
-//! - test code (a `tests` directory with no `src` above it, a `#[test]` or exactly `#[cfg(test)]`
-//!   item) for a rule whose `in_tests` is false,
+//! - test code (a `tests` directory with no `src` above it, a `#[test]` item or one under a `cfg`
+//!   that holds only under test, such as `all(test, unix)`) for a rule whose `in_tests` is false,
 //! - a line marked `// fixed: <why>` for a rule whose `fixed_ok` is true,
 //! - any line carrying `allowlist hematite`, which is reported in `Report::allows` so that the
 //!   escape is shown, not silent.
@@ -405,7 +405,7 @@ impl<'a> RustSrc<'a> {
             }
             if t.kind == TokenKind::Attribute {
                 let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
-                if a == "#[test]" || a == "#[cfg(test)]" || a.ends_with("::test]") {
+                if mutable::is_test_attr(&a) {
                     let end = item_end(&toks, i + 1).min(toks.len());
                     if end > i {
                         let first = lines.line_of(t.span.start);

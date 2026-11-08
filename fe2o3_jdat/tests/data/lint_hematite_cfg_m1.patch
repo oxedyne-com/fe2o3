@@ -1,0 +1,101 @@
+diff --git b/fe2o3_text/src/lint/hematite.rs a/fe2o3_text/src/lint/hematite.rs
+index ea7f6a40..eb8b976e 100644
+--- b/fe2o3_text/src/lint/hematite.rs
++++ a/fe2o3_text/src/lint/hematite.rs
+@@ -16,8 +16,8 @@
+ //! - `pub use` in import order, since a re-export is placed for the reader of the module,
+ //! - `include_str!` and `include_bytes!`, which read data, not code (G14 refuses only `include!`
+ //!   and `#[path]` of a file not ending `.rs`, which the gate would not read),
+-//! - test code (a `tests` directory with no `src` above it, a `#[test]` item or one under a `cfg`
+-//!   that holds only under test, such as `all(test, unix)`) for a rule whose `in_tests` is false,
++//! - test code (a `tests` directory with no `src` above it, a `#[test]` or exactly `#[cfg(test)]`
++//!   item) for a rule whose `in_tests` is false,
+ //! - a line marked `// fixed: <why>` for a rule whose `fixed_ok` is true,
+ //! - any line carrying `allowlist hematite`, which is reported in `Report::allows` so that the
+ //!   escape is shown, not silent.
+@@ -405,7 +405,7 @@ impl<'a> RustSrc<'a> {
+             }
+             if t.kind == TokenKind::Attribute {
+                 let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
+-                if mutable::is_test_attr(&a) {
++                if a == "#[test]" || a == "#[cfg(test)]" || a.ends_with("::test]") {
+                     let end = item_end(&toks, i + 1).min(toks.len());
+                     if end > i {
+                         let first = lines.line_of(t.span.start);
+diff --git b/fe2o3_text/src/lint/mutable.rs a/fe2o3_text/src/lint/mutable.rs
+index db040a36..22a1c0a9 100644
+--- b/fe2o3_text/src/lint/mutable.rs
++++ a/fe2o3_text/src/lint/mutable.rs
+@@ -8,10 +8,10 @@
+ //! literal argument (`Duration::from_secs(30)`, `sleep(30)`, `setTimeout(f, 30)`). Bare numerals in
+ //! expressions are never flagged.
+ //!
+-//! Exempt: comments, the arguments of message macros, test items (`#[test]`, or a `cfg` that holds
+-//! only under test, such as `all(test, unix)`), the body of `impl Default` for a config type (the
+-//! one sanctioned home of a default), and anything marked `// fixed: <why>`, trailing on its line or
+-//! as a banner over a group that ends at the first blank line. A why of fewer than two words is itself a failure.
++//! Exempt: comments, the arguments of message macros, `#[cfg(test)]` and `#[test]` items, the body
++//! of `impl Default` for a config type (the one sanctioned home of a default), and anything marked
++//! `// fixed: <why>`, trailing on its line or as a banner over a group that ends at the first
++//! blank line. A why of fewer than two words is itself a failure.
+ //!
+ //! A ratchet `Baseline` lists the debt that exists: a hit beyond it fails, and so does an entry no
+ //! longer found, so the baseline only shrinks. Entries are keyed by file, class and token text,
+@@ -503,45 +503,6 @@ pub(crate) fn fixed_lines(
+     covered
+ }
+ 
+-/// Does the attribute, whitespace removed, mark test code: `#[test]`, a `…::test` runner, or a
+-/// `cfg` that can only hold under test (`any(test, unix)` also builds outside tests)?
+-pub(crate) fn is_test_attr(a: &str) -> bool {
+-    a == "#[test]" || a.ends_with("::test]")
+-        || a.strip_prefix("#[cfg(").and_then(|r| r.strip_suffix(")]")).map(cfg_needs_test).unwrap_or(false)
+-}
+-
+-/// Can the cfg predicate hold only when `test` does?
+-fn cfg_needs_test(p: &str) -> bool {
+-    if p == "test" {
+-        return true;
+-    }
+-    let (head, args) = match (p.find('('), p.ends_with(')')) {
+-        (Some(k), true) => (&p[..k], &p[k + 1..p.len() - 1]),
+-        _               => return false,
+-    };
+-    let mut parts = Vec::new();
+-    let (mut depth, mut in_str, mut start) = (0usize, false, 0);
+-    for (k, c) in args.char_indices() {
+-        match c {
+-            '"'                     => in_str = !in_str,
+-            '(' if !in_str          => depth += 1,
+-            ')' if !in_str          => depth = depth.saturating_sub(1),
+-            ',' if !in_str && depth == 0 => {
+-                parts.push(&args[start..k]);
+-                start = k + 1;
+-            }
+-            _ => {}
+-        }
+-    }
+-    parts.push(&args[start..]);
+-    parts.retain(|x| !x.is_empty());
+-    match head {
+-        "all"   => parts.iter().any(|x| cfg_needs_test(x)),
+-        "any"   => !parts.is_empty() && parts.iter().all(|x| cfg_needs_test(x)),
+-        _       => false,
+-    }
+-}
+-
+ pub(crate) fn is_punct(t: &Token, c: char) -> bool {
+     t.kind == TokenKind::Punct(c)
+ }
+@@ -618,7 +579,10 @@ fn skipped(toks: &[Token], lang: Lang) -> Vec<bool> {
+         let mut span: Option<(usize, usize)> = None;
+         if t.kind == TokenKind::Attribute {
+             let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
+-            if is_test_attr(&a) {
++            // `any(test, …)` also builds outside tests, so is product code.
++            if a == "#[test]" || a.starts_with("#[cfg(test") || a.contains("::test]")
++                || a.starts_with("#[cfg(all(test")
++            {
+                 span = Some((i, item_end(toks, i + 1)));
+             }
+         } else if t.kind == TokenKind::Ident && i + 2 < toks.len() && is_punct(&toks[i + 1], '!')

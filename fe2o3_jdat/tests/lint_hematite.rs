@@ -245,9 +245,18 @@ fn test_hematite_test_code_exempt_only_where_the_table_says() -> Outcome<()> {
     assert!(rep.is_clean(), "{:?}", rep);
     let rep = res!(gate(&rules, "fe2o3_x/tests/data/a.rs", "// The color.\n"));
     assert!(rep.is_clean(), "{:?}", rep);
-    // Only `#[cfg(test)]` and a `tests` directory outside `src` are test code.
+    // A cfg that only holds under test is test code; one that also builds outside tests is not.
     let src = "#[cfg(any(test, unix))]\nfn t() {\n    // The behavior.\n}\n";
     assert_eq!(hits(&res!(gate(&rules, "src/a.rs", src))), vec![(fmt!("G13"), 3)]);
+    for cfg in ["all(test, unix)", "all(unix, test)", "all(unix, any(test, all(test, windows)))"] {
+        let src = fmt!("#[cfg({})]\nfn t() {{\n    // The behavior.\n    let p = \"/var/lib/app/state\";\n}}\n", cfg);
+        let rep = res!(gate(&rules, "src/a.rs", &src));
+        assert!(rep.is_clean(), "{}: {:?}", cfg, rep);
+    }
+    for cfg in ["any(test, unix)", "not(test)", "all(unix, not(test))", "testing", "all(testing, unix)"] {
+        let src = fmt!("#[cfg({})]\nfn t() {{\n    let p = \"/var/lib/app/state\";\n}}\n", cfg);
+        assert_eq!(hits(&res!(gate(&rules, "src/a.rs", &src))), vec![(fmt!("G11"), 3)], "{}", cfg);
+    }
     for file in ["src/util_tests.rs", "src/tests.rs", "src/tests/mod.rs", "fe2o3_x/src/tests/a.rs"] {
         assert_eq!(hits(&res!(gate(&rules, file, "// The color.\n"))), vec![(fmt!("G13"), 1)], "{}", file);
     }
