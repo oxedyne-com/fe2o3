@@ -249,7 +249,8 @@ pub fn metadata_args(manifest: &Path, full: bool) -> Vec<OsString> {
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index"; // fixed: Cargo's id of the crates.io registry
 
 /// The packages Cargo builds from a tree whose root is `real` on this machine, worked out in `dir`,
-/// an empty directory under no Cargo manifest that the caller then removes. The tree is written at
+/// an empty directory of mode 0700 that the caller then removes, under no Cargo manifest or Cargo
+/// config but `$CARGO_HOME`'s and no directory another account can write to. The tree is written at
 /// its own path under `dir`, beside links to its ancestors' other entries, so that a path
 /// dependency leaving the tree reaches what Cargo reaches from `real`. `listing` is the tree as `git ls-tree -r -z` or `git ls-files -s -z` gives it and
 /// `read(path)` a file's content. Each `Cargo.toml` and `Cargo.lock` is written with its content
@@ -274,6 +275,40 @@ pub fn cargo_of(
     if let Some(a) = base.ancestors().find(|a| a.join("Cargo.toml").exists()) { // fixed: Cargo's manifest name
         return Err(err!("The Cargo scratch directory {} lies under the Cargo manifest of {}, which \
             Cargo would read as the tree's workspace.", base.display(), a.display(); Invalid, Input));
+    }
+    // Cargo reads config from the ancestors of its working directory, `dir`, and a config can name
+    // a program (`rustc-wrapper`) that `cargo metadata` runs.
+    let home = std::env::var_os("CARGO_HOME").map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo"))) // fixed: Cargo's default home
+        .and_then(|c| fs::canonicalize(c).ok());
+    for a in base.ancestors() {
+        let at = a.join(".cargo"); // fixed: Cargo's config directory
+        let config = ["config", "config.toml"].iter().any(|c| fs::symlink_metadata(at.join(c)).is_ok()); // fixed: Cargo's config file names
+        if config && fs::canonicalize(&at).ok() != home {
+            return Err(err!("The Cargo scratch directory {} lies under the Cargo config of {}, which \
+                Cargo would read and which can name a program for it to run.", base.display(),
+                at.display(); Invalid, Input));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let stat = |a: &Path| fs::metadata(a).map_err(|e| err!(e, "While reading {}.", a.display(); IO, File));
+        let m = res!(stat(&base));
+        let me = m.uid();
+        if m.mode() & 0o077 != 0 { // fixed: the group and other bits
+            return Err(err!("The Cargo scratch directory {} can be opened by other accounts; the \
+                tree's manifests are written there, so make it 0700.", base.display(); Invalid, Input));
+        }
+        for a in base.ancestors() {
+            let m = res!(stat(a));
+            // Another account able to write here could plant a Cargo config or manifest.
+            if (m.uid() != me && m.uid() != 0) || m.mode() & 0o022 != 0 { // fixed: root's uid, the group and other write bits
+                return Err(err!("The Cargo scratch directory {} lies under {}, which another \
+                    account can write to and so plant a Cargo config. Use a private directory, \
+                    such as one under $XDG_RUNTIME_DIR.", base.display(), a.display(); Invalid, Input));
+            }
+        }
     }
     let dir = res!(mirror(&base, real));
     let mut manifests = Vec::new();

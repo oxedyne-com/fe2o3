@@ -1,8 +1,10 @@
-//! `lint_hematite --rules <file> [--repo <dir>] (--staged | --base <rev> [--head <rev>])`: the
+//! `lint_hematite --rules <file> [--repo <dir>] [--scratch <dir>] (--staged | --base <rev> [--head <rev>])`: the
 //! Hematite gate on the lines a change adds, the staged change or `<base>...<head>`. Prints one
 //! `<file>:<line>: <rule> -- <fix>` line per breach and one line per `allowlist hematite`, and
 //! exits 1 on a breach, 2 when it cannot run. `lint_hematite --print-rules` prints the table built
-//! in, for an installer to write outside the tree.
+//! in, for an installer to write outside the tree. Cargo's scratch is made in `--scratch`, else in
+//! `$XDG_RUNTIME_DIR`, and never in the shared temporary directory, where another account could
+//! plant a Cargo config.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::lint;
@@ -49,6 +51,7 @@ fn run() -> Outcome<bool> {
     let mut staged = false;
     let mut base: Option<String> = None;
     let mut head = String::from("HEAD");
+    let mut room = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -59,13 +62,15 @@ fn run() -> Outcome<bool> {
             "--rules"   => rules = args.next().map(PathBuf::from),
             "--repo"    => repo = res!(args.next().map(PathBuf::from)
                 .ok_or_else(|| err!("--repo needs a directory."; Missing, Input))),
+            "--scratch" => room = Some(res!(args.next().map(PathBuf::from)
+                .ok_or_else(|| err!("--scratch needs a directory."; Missing, Input)))),
             "--staged"  => staged = true,
             "--base"    => base = args.next(),
             "--head"    => head = res!(args.next()
                 .ok_or_else(|| err!("--head needs a revision."; Missing, Input))),
             _           => return Err(err!(
                 "Unknown argument '{}'; usage: lint_hematite --rules <file> [--repo <dir>] \
-                (--staged | --base <rev> [--head <rev>]) | --print-rules.", a; Invalid, Input)),
+                [--scratch <dir>] (--staged | --base <rev> [--head <rev>]) | --print-rules.", a; Invalid, Input)),
         }
     }
     let rules = res!(lint::load_rules(&res!(rules
@@ -98,20 +103,12 @@ fn run() -> Outcome<bool> {
     let diff = res!(git(&repo, &hematite::diff_args(&revs)));
     let diffs = hematite::file_diffs(&diff);
     let changed: Vec<String> = diffs.keys().cloned().collect();
-    let scratch = std::env::temp_dir().join(fmt!("hematite-cargo-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&scratch);
-    let mut mk = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        // The repository's manifests are written here, in the shared temporary directory.
-        mk.mode(0o700);
-    }
-    res!(mk.create(&scratch).map_err(|e| err!(e, "While making {}.", scratch.display(); IO, File, Write)));
+    let room = res!(room.ok_or_else(|| err!("Give --scratch <dir>, a private directory for Cargo's \
+        scratch, or run where $XDG_RUNTIME_DIR is set."; Missing, Input)));
+    let scratch = |side: &str| room.join(fmt!("hematite-cargo-{}-{}", std::process::id(), side));
     let top = PathBuf::from(res!(git(&repo, &["rev-parse", "--show-toplevel"])).trim());
-    let now = res!(cargo_of(&repo, &top, &scratch.join("now"), &now_list, &changed, &prefix));
-    let was = res!(cargo_of(&repo, &top, &scratch.join("was"), &was_list, &changed, &old_prefix));
-    let _ = std::fs::remove_dir_all(&scratch);
+    let now = res!(cargo_of(&repo, &top, &scratch("now"), &now_list, &changed, &prefix));
+    let was = res!(cargo_of(&repo, &top, &scratch("was"), &was_list, &changed, &old_prefix));
     let turned = now.turned(&was, &hematite::kept_rust(&now_list, &was_list), &rules.test_attrs);
     let mut added = Vec::new();
     for (file, d) in diffs {
@@ -141,7 +138,14 @@ fn cargo_of(repo: &PathBuf, top: &Path, dir: &Path, listing: &str, changed: &[St
     -> Outcome<hematite::Cargo>
 {
     let _ = std::fs::remove_dir_all(dir);
-    res!(std::fs::create_dir_all(dir).map_err(|e| err!(e, "While making {}.", dir.display(); IO, File, Write)));
+    let mut mk = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        // The repository's manifests are written here.
+        mk.mode(0o700);
+    }
+    res!(mk.create(dir).map_err(|e| err!(e, "While making {}.", dir.display(); IO, File, Write)));
     let got = lint::cargo_of(dir, top, listing, changed,
         |p| git(repo, &["cat-file", "blob", &fmt!("{}{}", prefix, p)]),
         |m, full| {
