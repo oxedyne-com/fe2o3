@@ -250,7 +250,8 @@ const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
 /// The packages Cargo builds from a tree whose root is `real` on this machine, worked out in `dir`,
 /// an empty directory of mode 0700 that the caller then removes, under no Cargo manifest or Cargo
-/// config but `$CARGO_HOME`'s and no directory another account can write to. The tree is written at
+/// config but `$CARGO_HOME`'s and no directory another account can write to (a group-writable
+/// directory passes only when the group holds the caller alone). The tree is written at
 /// its own path under `dir`, beside links to its ancestors' other entries, so that a path
 /// dependency leaving the tree reaches what Cargo reaches from `real`. `listing` is the tree as `git ls-tree -r -z` or `git ls-files -s -z` gives it and
 /// `read(path)` a file's content. Each `Cargo.toml` and `Cargo.lock` is written with its content
@@ -303,7 +304,8 @@ pub fn cargo_of(
         for a in base.ancestors() {
             let m = res!(stat(a));
             // Another account able to write here could plant a Cargo config or manifest.
-            if (m.uid() != me && m.uid() != 0) || m.mode() & 0o022 != 0 { // fixed: root's uid, the group and other write bits
+            let group = m.mode() & 0o020 != 0 && !group_only(me, m.gid()); // fixed: the group write bit
+            if (m.uid() != me && m.uid() != 0) || m.mode() & 0o002 != 0 || group { // fixed: root's uid, the other write bit
                 return Err(err!("The Cargo scratch directory {} lies under {}, which another \
                     account can write to and so plant a Cargo config. Use a private directory, \
                     such as one under $XDG_RUNTIME_DIR.", base.display(), a.display(); Invalid, Input));
@@ -385,6 +387,27 @@ pub fn cargo_of(
         }
     }
     Ok(cargo)
+}
+
+/// Is `uid` the only account in group `gid`, as `/etc/passwd` and `/etc/group` list them (a user
+/// private group, whose write bit lets no one else in)? An account database they do not hold, such
+/// as a directory service, reads as no.
+#[cfg(unix)]
+fn group_only(uid: u32, gid: u32) -> bool {
+    let fields = |p: &str| fs::read_to_string(p).unwrap_or_default().lines()
+        .map(|l| l.split(':').map(|f| f.to_string()).collect::<Vec<_>>())
+        .filter(|f| f.len() >= 4).collect::<Vec<_>>(); // fixed: name, password, id, then gid or members
+    let users = fields("/etc/passwd"); // fixed: the system's account database
+    let name = match users.iter().find(|f| f[2].parse::<u32>().ok() == Some(uid)) {
+        Some(f) => f[0].clone(),
+        None    => return false,
+    };
+    if users.iter().any(|f| f[0] != name && f[3].parse::<u32>().ok() == Some(gid)) {
+        return false;
+    }
+    let groups: Vec<_> = fields("/etc/group").into_iter() // fixed: the system's group database
+        .filter(|f| f[2].parse::<u32>().ok() == Some(gid)).collect();
+    !groups.is_empty() && groups.iter().all(|f| f[3].split(',').all(|m| m.is_empty() || m == name))
 }
 
 /// The directory under `dir` at which to write a tree whose root is `real`: each ancestor of `real`
