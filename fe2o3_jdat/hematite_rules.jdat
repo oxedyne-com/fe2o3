@@ -2,7 +2,7 @@
 # Start set: mgr-qa-b's list G1-G13, ~/usr/code/ai/claude/briefs/hematite_rules_daimon_check.md part A.
 # A rule is added here without code: "check" is one of seq (consecutive code tokens), comment_words,
 # doc_heading (each with a list), question, ok_args, raw_lock, doc_member, import_order, credential,
-# mutable, placement, test_alias, link, test_path.  "test_attrs" are the attribute paths that mark a test item, matched
+# mutable, placement, test_alias, link, test_path, cfg_test.  "test_attrs" are the attribute paths that mark a test item, matched
 # exactly.  A rule may have several rows under one id, each a shape of the same breach.  "in_tests" false exempts test code; "fixed_ok" true lets "// fixed: <why>" exempt a line.
 {
 	"local_crates": ["oxedyne_"],
@@ -52,5 +52,7 @@
 		  "msg": "rename to a test attribute's name -- #[test] and #[tokio::test] must mean the test harness" },
 		{ "id": "G14", "check": "test_path", "on": true, "in_tests": false, "fixed_ok": false,
 		  "msg": "product code from a tests directory -- place it under src/ so the gate reads it as product" },
+		{ "id": "G14", "check": "cfg_test", "on": true, "in_tests": true, "fixed_ok": false,
+		  "msg": "cfg test set for a build -- #[cfg(test)] code must stay test code" },
 	],
 }

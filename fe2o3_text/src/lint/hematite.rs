@@ -77,6 +77,7 @@ pub enum Check {
     TestAlias,                  // a rename to a name that `Rules::test_attrs` begins with
     Link,                       // a symlink the change adds, whose target the gate does not read
     TestPath,                   // product code placed under `tests/`, where test code is exempt
+    CfgTest,                    // a build setting `test`, which makes `#[cfg(test)]` code product
 }
 
 impl Check {
@@ -105,6 +106,7 @@ impl Check {
             "test_alias"    => Self::TestAlias,
             "link"          => Self::Link,
             "test_path"     => Self::TestPath,
+            "cfg_test"      => Self::CfgTest,
             _               => return Err(err!("Unknown Hematite check '{}'.", name;
                 Invalid, Input)),
         })
@@ -343,6 +345,7 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
                 true    => vec![1],
                 false   => Vec::new(),
             },
+            (Check::CfgTest, _) => cfg_test_lines(&a.src),
             (Check::TestPath, None) => match a.file == "Cargo.toml" || a.file.ends_with("/Cargo.toml") { // fixed: cargo's manifest name
                 true    => cargo_test_paths(&a.src),
                 false   => Vec::new(),
@@ -391,6 +394,23 @@ fn is_test_path(file: &str) -> bool {
     let mut dirs = file.split('/').collect::<Vec<_>>();
     dirs.pop();
     dirs.contains(&"tests") && !dirs.contains(&"src")
+}
+
+/// The lines that set the cfg `test` for a build: `rustc-cfg` (a build script's `cargo:` line)
+/// or `--cfg` followed by the word `test`, or a `rustc-cfg` whose value is formatted at run time.
+fn cfg_test_lines(src: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for (n, l) in src.split('\n').enumerate() {
+        let words: Vec<&str> = l.split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '-' | ':')))
+            .filter(|w| !w.is_empty()).collect();
+        let sets = words.windows(2).any(|w| (w[0].ends_with("rustc-cfg") || w[0] == "--cfg")
+            && w[1] == "test");
+        let formatted = l.match_indices("rustc-cfg").any(|(at, k)| l[at + k.len()..].starts_with("={"));
+        if sets || formatted {
+            out.push(n + 1);
+        }
+    }
+    out
 }
 
 /// Does a path name a `tests` directory?
@@ -512,7 +532,7 @@ impl<'a> RustSrc<'a> {
                 scan.hits.iter().map(|h| h.line)
                     .chain(scan.bad_fixed.iter().map(|m| m.line)).collect()
             }
-            Check::Credential | Check::Link => Vec::new(),
+            Check::Credential | Check::Link | Check::CfgTest => Vec::new(),
         })
     }
 
