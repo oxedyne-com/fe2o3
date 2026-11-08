@@ -37,11 +37,8 @@ const MAX: usize = 200_000; // The cap Kimberlite configures.
 fn base(name: &str) -> Outcome<PathBuf> {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("overlay").join(name);
     if dir.exists() {
-        // overlayfs leaves its work directory at mode 0, which an earlier run's removal trips on.
-        let work = dir.join("W/work");
-        if work.exists() {
-            res!(fs::set_permissions(&work, fs::Permissions::from_mode(0o700)));
-        }
+        // overlayfs leaves its work directory at mode 0, and some arms leave entries so.
+        res!(Command::new("chmod").arg("-R").arg("u+rwx").arg(&dir).status());
         res!(fs::remove_dir_all(&dir));
     }
     for sub in ["L", "U", "W"] {
