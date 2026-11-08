@@ -32,7 +32,6 @@ pub const SYNTAX_CMD_SIMILARITY_THRESHOLD:  f64 = 0.7;
 pub const DEV_TREE_CREATE: &[&str] = &[
     "tls/dev",
     "tls/prod",
-    "www/logs",
     "www/public",
     "www/public/assets",
     "www/public/assets/font",

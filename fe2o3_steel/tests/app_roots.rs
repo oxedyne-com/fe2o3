@@ -48,7 +48,7 @@ fn a_config_without_the_new_keys_resolves_as_before() -> Outcome<()> {
     assert_eq!(res!(cfg.wallet_dir(cfg_dir)), cfg_dir);
 
     let server_cfg = ServerConfig::default();
-    assert_eq!(res!(roots.state(server_cfg.log_dir())), app.join("www").join("logs"));
+    assert_eq!(res!(roots.state(&server_cfg.log_dir())), app.join("www").join("logs"));
     Ok(())
 }
 
@@ -70,9 +70,12 @@ fn named_roots_place_state_and_the_wallet_apart() -> Outcome<()> {
     assert_eq!(res!(cfg.wallet_dir(&app)), secret);
 
     let mut server_cfg = ServerConfig::default();
-    assert_eq!(res!(roots.state(server_cfg.log_dir())), state.join("www").join("logs"));
+    assert_eq!(res!(roots.state(&server_cfg.log_dir())), state.join("www").join("logs"));
     server_cfg.log_dir_rel = fmt!("./www-logs");
-    assert_eq!(res!(roots.state(server_cfg.log_dir())), state.join("www-logs"));
+    assert_eq!(res!(roots.state(&server_cfg.log_dir())), state.join("www-logs"));
+    // A config written with the key empty, as Steel once wrote it, takes the default.
+    server_cfg.log_dir_rel = String::new();
+    assert_eq!(res!(roots.state(&server_cfg.log_dir())), state.join("www").join("logs"));
     Ok(())
 }
 

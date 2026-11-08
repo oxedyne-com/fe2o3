@@ -2782,7 +2782,7 @@ pub struct ServerConfig {
 
     // --- Server bind and policy (shared) ------------------------------------
     pub log_level:                      String,         // used by the server once running
-    // The server log's directory under the state root; empty means `./www/logs`, as before.
+    // The server log's directory under the state root; absent or empty takes the default config's.
     #[optional]
     pub log_dir_rel:                    String,
     // The log file's rotation, under `log_dir_rel`. A file past `log_file_max_bytes`
@@ -3085,7 +3085,7 @@ impl Default for ServerConfig {
 
         Self {
             tls_dir_rel:                    fmt!("./tls"),
-            log_dir_rel:                    String::new(),
+            log_dir_rel:                    fmt!("./www/logs"),
             tls_cert_file:                  fmt!("fullchain.pem"),
             tls_key_file:                   fmt!("privkey.pem"),
             ca_bundle_paths:                TrustConfig::default().ca_bundle_paths,
@@ -3143,11 +3143,11 @@ impl Default for ServerConfig {
 impl ServerConfig {
 
     /// The server log's directory, relative to the state root.
-    pub fn log_dir(&self) -> &str {
+    pub fn log_dir(&self) -> String {
         if self.log_dir_rel.is_empty() {
-            constant::LOG_DIR_REL_DEFAULT
+            Self::default().log_dir_rel
         } else {
-            &self.log_dir_rel
+            self.log_dir_rel.clone()
         }
     }
 

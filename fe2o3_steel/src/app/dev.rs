@@ -562,7 +562,6 @@ pub fn ensure_compatibility(app_root: &Path) -> Outcome<()> {
     let required_dirs = [
         "tls/dev",
         "tls/prod",
-        "www/logs",
     ];
 
     for dir in &required_dirs {

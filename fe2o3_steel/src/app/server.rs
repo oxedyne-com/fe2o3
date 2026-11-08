@@ -221,7 +221,7 @@ impl AppShellContext {
         let (log_max, log_keep, log_age) = server_cfg.log_rotation();
         let (log_flush, log_durable) = server_cfg.log_flush();
         log_cfg.file = Some(FileConfig::new(
-            res!(roots.state(server_cfg.log_dir())),
+            res!(roots.state(&server_cfg.log_dir())),
             self.app_cfg.app_name.clone(),
             "log".to_string(),
             0,
