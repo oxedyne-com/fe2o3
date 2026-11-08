@@ -144,6 +144,17 @@ pub struct Added {
 pub struct FileDiff {
     pub lines:  BTreeSet<usize>,    // added, 1-based in the new file
     pub link:   bool,               // the new side is a symlink
+    pub old:    bool,               // the file has an old side
+    pub hunks:  Vec<Hunk>,
+}
+
+/// A hunk header's spans; with no context, a count of 0 has its start on the line before.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Hunk {
+    pub old_start:  usize,
+    pub old_count:  usize,
+    pub new_start:  usize,
+    pub new_count:  usize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -236,6 +247,7 @@ pub fn file_diffs(diff: &str) -> BTreeMap<String, FileDiff> {
     let mut out: BTreeMap<String, FileDiff> = BTreeMap::new();
     let mut file: Option<String> = None;
     let mut link = false;
+    let mut old_side = false;
     let mut old_left = 0usize;
     let mut new_left = 0usize;
     let mut at = 0usize;
@@ -270,6 +282,9 @@ pub fn file_diffs(diff: &str) -> BTreeMap<String, FileDiff> {
         if l.starts_with("diff --git ") {
             file = None;
             link = false;
+            old_side = false;
+        } else if let Some(p) = l.strip_prefix("--- ") {
+            old_side = p != "/dev/null"; // fixed: git diff format
         } else if l.starts_with("new file mode ") || l.starts_with("new mode ")
             || l.starts_with("index ")
         {
@@ -281,16 +296,22 @@ pub fn file_diffs(diff: &str) -> BTreeMap<String, FileDiff> {
                 _           => Some(p.strip_prefix("b/").unwrap_or(p).to_string()),
             };
             if let Some(f) = &file {
-                out.entry(f.clone()).or_default().link = link;
+                let d = out.entry(f.clone()).or_default();
+                d.link = link;
+                d.old = old_side;
             }
         } else if let Some(h) = l.strip_prefix("@@ ") {
             let mut parts = h.split_whitespace();
             let old = parts.next().and_then(|p| p.strip_prefix('-')).map(span_of);
             let new = parts.next().and_then(|p| p.strip_prefix('+')).map(span_of);
-            if let (Some((_, o)), Some((s, n))) = (old, new) {
+            if let (Some((os, o)), Some((s, n))) = (old, new) {
                 old_left = o;
                 new_left = n;
                 at = s;
+                if let Some(f) = &file {
+                    out.entry(f.clone()).or_default().hunks.push(Hunk { old_start: os, old_count: o,
+                        new_start: s, new_count: n });
+                }
             }
         }
     }
@@ -303,6 +324,32 @@ fn span_of(s: &str) -> (usize, usize) {
     let start = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
     let count = it.next().map(|v| v.parse().unwrap_or(0)).unwrap_or(1);
     (start, count)
+}
+
+/// The file `file` as the change leaves it, `src`, with the lines the change adds: those of the
+/// diff `d`, and those it leaves in place that were test code in `old` (the file at the base) and
+/// are product code now, as when a `#[cfg(test)]` line is deleted.
+pub fn added(file: String, d: FileDiff, src: String, old: Option<&str>, rules: &Rules)
+    -> Outcome<Added>
+{
+    let mut lines = d.lines;
+    let rust = d.old && !d.link && file.ends_with(".rs") && !is_test_path(&file);
+    if let (Some(old), true) = (old, rust) {
+        let was = res!(RustSrc::new(old, &file, &rules.test_attrs)).tests;
+        let now = res!(RustSrc::new(&src, &file, &rules.test_attrs)).tests;
+        for n in 1..=src.split('\n').count() {
+            if lines.contains(&n) || now.contains(&n) {
+                continue;
+            }
+            // An unchanged line moves by what each hunk above it removes less what it adds.
+            let o = d.hunks.iter().filter(|h| n >= h.new_start + h.new_count.max(1))
+                .fold(n as isize, |o, h| o + h.old_count as isize - h.new_count as isize);
+            if o >= 1 && was.contains(&(o as usize)) {
+                lines.insert(n);
+            }
+        }
+    }
+    Ok(Added { file, src, lines, link: d.link })
 }
 
 /// Checks the added lines of each file against the rules that are on.

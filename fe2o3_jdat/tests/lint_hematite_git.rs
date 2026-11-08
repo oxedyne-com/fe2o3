@@ -148,6 +148,20 @@ fn test_hematite_git_product_code_from_tests_refused() -> Outcome<()> {
 }
 
 #[test]
+fn test_hematite_git_deleted_cfg_test_reads_the_module() -> Outcome<()> {
+    // The change only deletes `#[cfg(test)]`; the module it guarded is product code now (QA hgate4 E).
+    let r = res!(repo("cfgdel"));
+    res!(write(&r, "src/t.rs", b"#[cfg(test)]\npub mod t {\n    pub trait T {}\n    pub fn f(x: Box<dyn T>) {}\n}\n"));
+    res!(commit(&r));
+    res!(git(&r, &["branch", "-f", "main"]));
+    res!(write(&r, "src/t.rs", b"pub mod t {\n    pub trait T {}\n    pub fn f(x: Box<dyn T>) {}\n}\n"));
+    res!(commit(&r));
+    let (rc, out) = res!(gate(&r));
+    assert!(rc == 1 && out.contains("src/t.rs:3: dyn Trait"), "rc {}: {}", rc, out);
+    Ok(())
+}
+
+#[test]
 fn test_hematite_git_repo_config_cannot_hide_lines() -> Outcome<()> {
     // An attributes file named by the repository's config, and hunks merged across an empty line
     // that the config prints bare.

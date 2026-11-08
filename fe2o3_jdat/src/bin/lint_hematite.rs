@@ -6,10 +6,7 @@
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::lint;
-use oxedyne_fe2o3_text::lint::hematite::{
-    self,
-    Added,
-};
+use oxedyne_fe2o3_text::lint::hematite;
 
 use std::{
     path::PathBuf,
@@ -71,11 +68,13 @@ fn run() -> Outcome<bool> {
     let rules = res!(lint::load_rules(&res!(rules
         .ok_or_else(|| err!("Missing --rules <file>."; Missing, Input)))));
     let range;
-    let (revs, prefix, names) = match (staged, &base) {
-        (true, None)        => (vec!["--cached"], String::from(":"), res!(git(&repo, &["ls-files", "-z"]))),
+    let (revs, prefix, old_prefix, names) = match (staged, &base) {
+        (true, None)        => (vec!["--cached"], String::from(":"), String::from("HEAD:"),
+            res!(git(&repo, &["ls-files", "-z"]))),
         (false, Some(b))    => {
             range = fmt!("{}...{}", b, head);
-            (vec![range.as_str()], fmt!("{}:", head),
+            let mb = res!(git(&repo, &["merge-base", b.as_str(), head.as_str()]));
+            (vec![range.as_str()], fmt!("{}:", head), fmt!("{}:", mb.trim()),
                 res!(git(&repo, &["ls-tree", "-r", "--name-only", "-z", &head])))
         }
         _                   => return Err(err!("Give exactly one of --staged and --base <rev>.";
@@ -96,7 +95,11 @@ fn run() -> Outcome<bool> {
     let mut added = Vec::new();
     for (file, d) in hematite::file_diffs(&diff) {
         let src = res!(git(&repo, &["cat-file", "blob", &fmt!("{}{}", prefix, file)]));
-        added.push(Added { file, src, lines: d.lines, link: d.link });
+        let old = match d.old {
+            true    => Some(res!(git(&repo, &["cat-file", "blob", &fmt!("{}{}", old_prefix, file)]))),
+            false   => None,
+        };
+        added.push(res!(hematite::added(file, d, src, old.as_deref(), &rules)));
     }
     let rep = res!(hematite::check(&added, &rules));
     for b in &rep.breaches {

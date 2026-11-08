@@ -245,6 +245,30 @@ index 0000000..1c5c3f5
     let one: BTreeSet<usize> = [1].into_iter().collect();
     assert_eq!(added.get("src/imp.rs").map(|d| (&d.lines, d.link)), Some((&one, true)));
     assert_eq!(added.len(), 2);
+    let hunks = added.get("x.rs").map(|d| (d.old, d.hunks.iter()
+        .map(|h| (h.old_start, h.old_count, h.new_start, h.new_count)).collect::<Vec<_>>()));
+    assert_eq!(hunks, Some((true, vec![(1, 2, 1, 3), (10, 0, 12, 2)])));
+    assert_eq!(added.get("src/imp.rs").map(|d| d.old), Some(false));
+    Ok(())
+}
+
+#[test]
+fn test_hematite_line_moved_from_test_to_product_is_added() -> Outcome<()> {
+    // Deleting a `#[cfg(test)]` line makes its module product code (QA hgate4 E).
+    let rules = res!(rules());
+    let old = "pub fn a() {}\n#[cfg(test)]\nmod t {\n    fn f(x: Box<dyn Fn()>) {}\n}\n";
+    let new = "pub fn a() {}\nmod t {\n    fn f(x: Box<dyn Fn()>) {}\n}\n";
+    let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -2 +1,0 @@\n-#[cfg(test)]\n";
+    let d = res!(hematite::file_diffs(diff).remove("src/a.rs").ok_or_else(|| err!("no diff"; Missing)));
+    let a = res!(hematite::added(fmt!("src/a.rs"), d, fmt!("{}", new), Some(old), &rules));
+    assert_eq!(hits(&res!(hematite::check(&[a], &rules))), vec![(fmt!("G12"), 3)]);
+    // A line added above a test module leaves the module test code.
+    let new = "use crate::x;\npub fn a() {}\n#[cfg(test)]\nmod t {\n    fn f(x: Box<dyn Fn()>) {}\n}\n";
+    let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -0,0 +1 @@\n+use crate::x;\n";
+    let d = res!(hematite::file_diffs(diff).remove("src/a.rs").ok_or_else(|| err!("no diff"; Missing)));
+    let a = res!(hematite::added(fmt!("src/a.rs"), d, fmt!("{}", new), Some(old), &rules));
+    let want: BTreeSet<usize> = [1].into_iter().collect();
+    assert_eq!(a.lines, want);
     Ok(())
 }
 
