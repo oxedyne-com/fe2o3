@@ -1,0 +1,13 @@
+diff --git a/fe2o3_text/src/lint/hematite.rs b/fe2o3_text/src/lint/hematite.rs
+index 047d0e19..af6a84da 100644
+--- a/fe2o3_text/src/lint/hematite.rs
++++ b/fe2o3_text/src/lint/hematite.rs
+@@ -440,7 +440,7 @@ fn allow_marked(line: &str) -> bool {
+ fn is_test_path(file: &str) -> bool {
+     let mut dirs = file.split('/').collect::<Vec<_>>();
+     dirs.pop();
+-    dirs.contains(&"tests") && !dirs.contains(&"src")
++    dirs.contains(&"tests")
+ }
+ 
+ /// The lines that set the cfg `test` for a build: `rustc-cfg` (a build script's `cargo:` line)

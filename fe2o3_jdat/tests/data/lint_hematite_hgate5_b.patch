@@ -1,0 +1,13 @@
+diff --git a/fe2o3_text/src/lint/hematite.rs b/fe2o3_text/src/lint/hematite.rs
+index 047d0e19..60ed1692 100644
+--- a/fe2o3_text/src/lint/hematite.rs
++++ b/fe2o3_text/src/lint/hematite.rs
+@@ -389,7 +389,7 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
+                 false   => secret::scan(a.src.as_bytes()).iter().map(|f| f.line).collect(),
+             },
+             (Check::Link, _) => match a.link {
+-                true    => vec![1],
++                true    => Vec::new(),
+                 false   => Vec::new(),
+             },
+             (Check::CfgTest, _) => cfg_test_lines(&a.src),

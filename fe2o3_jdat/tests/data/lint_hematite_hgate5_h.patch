@@ -1,0 +1,13 @@
+diff --git a/fe2o3_text/src/lint/mutable.rs b/fe2o3_text/src/lint/mutable.rs
+index 0716ff8f..941c1c56 100644
+--- a/fe2o3_text/src/lint/mutable.rs
++++ b/fe2o3_text/src/lint/mutable.rs
+@@ -516,7 +516,7 @@ pub(crate) fn is_test_attr(a: &str, names: &[String]) -> bool {
+     };
+     let path = inner.split(['(', '=']).next().unwrap_or("");
+     let path = path.strip_prefix("::").unwrap_or(path);
+-    names.iter().any(|n| n == path)
++    names.iter().any(|n| n == path || path.ends_with("::test"))
+         || inner.strip_prefix("cfg(").and_then(|r| r.strip_suffix(')')).map(cfg_needs_test).unwrap_or(false)
+ }
+ 

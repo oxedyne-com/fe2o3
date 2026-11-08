@@ -1,0 +1,13 @@
+diff --git a/fe2o3_text/src/lint/hematite.rs b/fe2o3_text/src/lint/hematite.rs
+index 047d0e19..5b208a1b 100644
+--- a/fe2o3_text/src/lint/hematite.rs
++++ b/fe2o3_text/src/lint/hematite.rs
+@@ -392,7 +392,7 @@ fn check_one(a: &Added, rules: &Rules, rep: &mut Report) -> Outcome<()> {
+                 true    => vec![1],
+                 false   => Vec::new(),
+             },
+-            (Check::CfgTest, _) => cfg_test_lines(&a.src),
++            (Check::CfgTest, _) => Vec::new(),
+             (Check::TestPath, None) => match a.file == "Cargo.toml" || a.file.ends_with("/Cargo.toml") { // fixed: cargo's manifest name
+                 true    => cargo_test_paths(&a.src),
+                 false   => Vec::new(),

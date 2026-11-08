@@ -1,0 +1,13 @@
+diff --git a/fe2o3_text/src/lint/hematite.rs b/fe2o3_text/src/lint/hematite.rs
+index 047d0e19..c14bcc87 100644
+--- a/fe2o3_text/src/lint/hematite.rs
++++ b/fe2o3_text/src/lint/hematite.rs
+@@ -334,7 +334,7 @@ pub fn added(file: String, d: FileDiff, src: String, old: Option<&str>, rules: &
+ {
+     let mut lines = d.lines;
+     let rust = d.old && !d.link && file.ends_with(".rs") && !is_test_path(&file);
+-    if let (Some(old), true) = (old, rust) {
++    if let (Some(old), true) = (old, false && rust) {
+         let was = res!(RustSrc::new(old, &file, &rules.test_attrs)).tests;
+         let now = res!(RustSrc::new(&src, &file, &rules.test_attrs)).tests;
+         for n in 1..=src.split('\n').count() {
