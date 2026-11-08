@@ -333,7 +333,7 @@ pub fn cargo_of(
                 });
                 return Err(match (quoted("for dependency `"), quoted("failed to read `")) {
                     (Some(name), Some(read))    => {
-                        let at = read.strip_suffix("/Cargo.toml").unwrap_or(&read);
+                        let at = read.strip_suffix("/Cargo.toml").unwrap_or(&read); // fixed: Cargo's manifest name
                         let at = match Path::new(at).strip_prefix(&base) {
                             Ok(r)   => fmt!("/{}", r.display()),
                             Err(_)  => at.to_string(),
