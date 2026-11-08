@@ -5,7 +5,7 @@
 # Run from the fe2o3 root through rc-build: bash fe2o3_jdat/tests/data/lint_hematite_git_red.sh
 set -u
 here=$(dirname "$0")
-run() { cargo test -q -p oxedyne_fe2o3_jdat --test lint_hematite_git 2>&1 | sed -n 's/^test result: [A-Z]*\. [0-9]* passed; \([0-9]*\) failed.*/\1/p'; }
+run() { cargo test -q -p oxedyne_fe2o3_jdat --test lint_hematite_git 2>&1 | sed -n 's/^test result: [a-zA-Z]*\. [0-9]* passed; \([0-9]*\) failed.*/\1/p'; }
 fails=0
 build() { cargo test -q -p oxedyne_fe2o3_jdat --test lint_hematite_git --no-run > /dev/null 2>&1 || { echo "build failed"; exit 2; }; }
 build
