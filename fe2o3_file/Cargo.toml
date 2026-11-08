@@ -34,6 +34,11 @@ oxedyne_fe2o3_text 		   	= { path = "../fe2o3_text" }
 # the CRC-32 an archive checks each member with, so there is no second implementation of one here.
 flate2 					= "1.0"
 
+# Descriptor-relative calls (`openat2`, `O_NOFOLLOW`, extended attributes) for `overlay`, without
+# `unsafe`.  Linux only, so the browser build does not see it; `fe2o3_sys` already uses this version.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix 					= { version = "1.1", default-features = false, features = ["std", "fs"] }
+
 [dev-dependencies]
 # `Media`, so the tests can check that an OpenDocument package is named from its own opening bytes
 # rather than from what somebody called the file.  A dev-dependency: nothing in the crate itself

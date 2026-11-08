@@ -36,12 +36,17 @@
 //! caller, not this crate -- has it gone still? It is a pure state machine with no I/O, for a poll
 //! loop to debounce against.
 //!
+//! [`overlay`] (Linux) reads an overlayfs upper directory against its lower as a typed op list,
+//! following no symbolic link and refusing an upper it cannot trust.
+//!
 //! [Written with AI](https://need2know.ai/with-ai/code)\
 //! Anthropic Claude
 
 pub mod exif;
 pub mod glob;
 pub mod office;
+#[cfg(target_os = "linux")]
+pub mod overlay;
 pub mod quiet;
 pub mod relpath;
 pub mod tree;

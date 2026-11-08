@@ -3197,6 +3197,7 @@ dependencies = [
  "oxedyne_fe2o3_data",
  "oxedyne_fe2o3_stds",
  "oxedyne_fe2o3_text",
+ "rustix 1.1.5",
 ]
 
 [[package]]
