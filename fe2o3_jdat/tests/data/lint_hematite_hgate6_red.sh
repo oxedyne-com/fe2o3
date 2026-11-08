@@ -6,6 +6,7 @@
 #   c3 test code read from the path (a tests component, no src), so a package in tests/ is test code
 #   h1 c::test kept whatever crate Cargo resolves c to
 #   t  a test file turned product, unchanged, not refused
+#   d1 a changed build script or Cargo config not flagged for his card
 # Run from the fe2o3 root through rc-build: bash fe2o3_jdat/tests/data/lint_hematite_hgate6_red.sh
 set -u
 here=$(dirname "$0")
@@ -24,13 +25,14 @@ cases=(
 	"h1 lint_hematite_git test_hematite_git_renamed_test_crate_not_a_test"
 	"h1 lint_hematite test_hematite_test_code_exempt_only_where_the_table_says"
 	"t lint_hematite_git test_hematite_git_test_code_turned_product_refused"
+	"d1 lint_hematite_git test_hematite_git_build_script_changed_flagged_not_refused"
 )
 build || { echo "build failed"; exit 2; }
 for c in "${cases[@]}"; do
 	set -- $c
 	arm pass none "$2" "$3"
 done
-for p in "$here"/lint_hematite_hgate6_{c1,c2,c3,h1,t}.patch; do
+for p in "$here"/lint_hematite_hgate6_{c1,c2,c3,h1,t,d1}.patch; do
 	m=${p##*_}; m=${m%.patch}
 	git apply "$p" || { echo "patch $p did not apply"; exit 2; }
 	if build; then
