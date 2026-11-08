@@ -88,6 +88,7 @@ fn seeds() -> Vec<(&'static str, &'static str, String, usize)> {
         ("G9",  "src/a.rs", fmt!("use crate::a; use crate::b;\n"), 1),
         ("G10", "notes.txt", fmt!("one\nkey = {}\n", key), 2),
         ("G11", "src/a.rs", fmt!("fn f() {{\n    let p = \"/var/lib/app/state\";\n}}\n"), 2),
+        ("G11", "src/a.rs", fmt!("#[cfg(any(test, unix))]\nfn f() {{\n    let p = \"/var/lib/app/state\";\n}}\n"), 3),
         ("G12", "src/a.rs", fmt!("fn f(x: Box<dyn Fn()>) {{}}\n"), 1),
         ("G13", "src/a.rs", fmt!("// The behavior of it.\nfn f() {{}}\n"), 1),
         ("G13", "src/a.rs", fmt!("fn f() {{}} // Serialize it. Then Color it.\n"), 1),

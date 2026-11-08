@@ -579,8 +579,9 @@ fn skipped(toks: &[Token], lang: Lang) -> Vec<bool> {
         let mut span: Option<(usize, usize)> = None;
         if t.kind == TokenKind::Attribute {
             let a: String = t.text.chars().filter(|c| !c.is_whitespace()).collect();
+            // `any(test, …)` also builds outside tests, so is product code.
             if a == "#[test]" || a.starts_with("#[cfg(test") || a.contains("::test]")
-                || a.starts_with("#[cfg(all(test") || a.starts_with("#[cfg(any(test")
+                || a.starts_with("#[cfg(all(test")
             {
                 span = Some((i, item_end(toks, i + 1)));
             }
