@@ -16,7 +16,8 @@ fail=0
 cargo test --test overlay > "$here/c_head.log" 2>&1 || { echo "head: overlay arms not green"; exit 1; }
 echo "head: overlay arms green"
 
-git -C "$root" show "$base:fe2o3_file/src/overlay.rs" > src/overlay.rs || exit 2
+# c_base_7affe96b.patch puts back 7affe96b's overlay.rs: no PATH_MAX refusal, no drop of a refused path's other ops.
+git -C "$root" apply "$here/c_base_7affe96b.patch" || exit 2
 cargo test --test overlay --no-run > "$here/c_base_build.log" 2>&1 || { echo "base: arms did not build"; exit 1; }
 for arm in $arms; do
 	if cargo test --test overlay "$arm" -- --exact > "$here/c_base_$arm.log" 2>&1; then
