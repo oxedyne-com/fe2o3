@@ -1,13 +1,18 @@
 diff --git a/fe2o3_text/src/lint/hematite.rs b/fe2o3_text/src/lint/hematite.rs
-index 46d08bb6..9ee83eeb 100644
+index 46d08bb6..ce76c300 100644
 --- a/fe2o3_text/src/lint/hematite.rs
 +++ b/fe2o3_text/src/lint/hematite.rs
-@@ -177,7 +177,7 @@ pub struct Cargo {
- 
- impl Cargo {
-     fn package_of(&self, file: &str) -> Option<&Package> {
--        self.packages.iter().filter(|p| under(file, &p.root)).max_by_key(|p| p.root.len())
-+        self.packages.iter().filter(|p| under(file, &p.root)).min_by_key(|p| p.root.len())
+@@ -196,11 +196,8 @@ impl Cargo {
+     /// Does `file` lie in its package's `tests` directory, from which Cargo builds nothing but
+     /// tests?  A package rooted inside another's `tests` is a package, its code product.
+     pub fn is_test(&self, file: &str) -> bool {
+-        match self.tests_dir_of(file) {
+-            Some(dir)   => !self.packages.iter().flat_map(|p| &p.targets)
+-                .any(|t| t.kind != TargetKind::Test && self.tests_dir_of(&t.src).as_ref() == Some(&dir)),
+-            None        => false,
+-        }
++        let parts: Vec<&str> = file.split('/').collect();
++        parts.contains(&"tests") && !parts.contains(&"src")
      }
  
-     /// The `tests` directory of the package holding `file`, when `file` lies in it.
+     /// Does the manifest `file` build a target that is not a test from a `tests` directory?

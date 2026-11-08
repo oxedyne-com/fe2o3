@@ -3,7 +3,7 @@
 # RED on its mutant (lint_hematite_hgate6_<m>.patch), applied and reversed in turn.
 #   c1 a #[path] or include! literal read raw, so an escape hides tests
 #   c2 a manifest building a lib from tests/ not refused
-#   c3 a file's package taken as the outermost, so a package in tests/ is test code
+#   c3 test code read from the path (a tests component, no src), so a package in tests/ is test code
 #   h1 c::test kept whatever crate Cargo resolves c to
 #   t  a test file turned product, unchanged, not refused
 # Run from the fe2o3 root through rc-build: bash fe2o3_jdat/tests/data/lint_hematite_hgate6_red.sh
