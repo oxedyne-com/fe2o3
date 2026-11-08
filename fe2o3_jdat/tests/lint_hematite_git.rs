@@ -3,6 +3,7 @@
 //! `tests/`) that a repository setting would hide, and the gate must still refuse it.
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::lint;
 use oxedyne_fe2o3_text::lint::hematite;
 
 use std::{
@@ -63,6 +64,35 @@ fn gate(r: &Path) -> Outcome<(i32, String)> {
     let _ = std::fs::remove_dir_all(r);
     Ok((out.status.code().unwrap_or(-1), fmt!("{}{}", String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr))))
+}
+
+/// The CLI's exit code and output for the change `main...HEAD`, its Cargo scratch made in `room`.
+fn gate_in(r: &Path, room: &Path) -> Outcome<(i32, String)> {
+    let rules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hematite_rules.jdat");
+    let out = res!(Command::new(env!("CARGO_BIN_EXE_lint_hematite"))
+        .arg("--rules").arg(&rules).arg("--repo").arg(r).arg("--scratch").arg(room)
+        .args(["--base", "main", "--head", "HEAD"])
+        .output().map_err(|e| err!(e, "Could not run lint_hematite."; IO)));
+    let _ = std::fs::remove_dir_all(r);
+    Ok((out.status.code().unwrap_or(-1), fmt!("{}{}", String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr))))
+}
+
+/// A fresh directory of `mode` at `p`.
+fn dir_of(p: &Path, mode: u32) -> Outcome<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::remove_dir_all(p);
+    res!(std::fs::create_dir_all(p).map_err(|e| err!(e, "mkdir {}", p.display(); IO)));
+    res!(std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
+        .map_err(|e| err!(e, "chmod {}", p.display(); IO)));
+    Ok(p.to_path_buf())
+}
+
+/// A fresh private directory under `$XDG_RUNTIME_DIR`, whose ancestors no other account can write.
+fn private(name: &str) -> Outcome<PathBuf> {
+    let run = res!(std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| err!(
+        "Set XDG_RUNTIME_DIR to a private directory to run this test."; Missing)));
+    dir_of(&PathBuf::from(run).join(fmt!("hematite_git_{}_{}", std::process::id(), name)), 0o700)
 }
 
 const MANIFEST: &[u8] = b"[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
@@ -320,5 +350,92 @@ fn test_hematite_git_missing_path_dep_named() -> Outcome<()> {
         .map_err(|e| err!(e, "temp dir"; IO))).join(res!(gone.file_name().ok_or_else(|| err!("No name"; Missing))));
     assert!(rc == 2 && out.contains(&fmt!("its dependency d is not at {} on this machine. Check that \
         dependency out at {}", gone.display(), gone.display())), "rc {}: {}", rc, out);
+    Ok(())
+}
+
+#[test]
+fn test_hematite_git_scratch_under_a_manifest_refused() -> Outcome<()> {
+    // Cargo would read a manifest above the scratch as the tree's workspace.
+    let p = res!(private("sc_manifest"));
+    res!(write(&p, "Cargo.toml", b"[workspace\n"));
+    let room = res!(dir_of(&p.join("r"), 0o700));
+    let r = res!(repo("sc_manifest"));
+    res!(write(&r, "src/lib.rs", b"pub fn base() {}\npub fn more() {}\n"));
+    res!(commit(&r));
+    let (rc, out) = res!(gate_in(&r, &room));
+    let _ = std::fs::remove_dir_all(&p);
+    assert!(rc == 2 && out.contains("lies under the Cargo manifest of"), "rc {}: {}", rc, out);
+    Ok(())
+}
+
+#[test]
+fn test_hematite_git_planted_cargo_config_never_runs() -> Outcome<()> {
+    // A `.cargo/config.toml` above the scratch names a `rustc-wrapper`, which `cargo metadata` would
+    // run; the gate refuses and the program never runs.
+    let p = res!(private("sc_config"));
+    let ran = p.join("ran");
+    res!(write(&p, "w.sh", fmt!("#!/bin/sh\necho ran >> '{}'\nexec \"$@\"\n", ran.display()).as_bytes()));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        res!(std::fs::set_permissions(p.join("w.sh"), std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| err!(e, "chmod"; IO)));
+    }
+    res!(write(&p, ".cargo/config.toml", fmt!("[build]\nrustc-wrapper = \"{}\"\n",
+        p.join("w.sh").display()).as_bytes()));
+    let room = res!(dir_of(&p.join("r"), 0o700));
+    let r = res!(repo("sc_config"));
+    res!(write(&r, "src/lib.rs", b"pub fn base() {}\npub fn more() {}\n"));
+    res!(commit(&r));
+    let (rc, out) = res!(gate_in(&r, &room));
+    let planted_ran = ran.exists();
+    let _ = std::fs::remove_dir_all(&p);
+    assert!(!planted_ran, "the planted rustc-wrapper ran: rc {}: {}", rc, out);
+    assert!(rc == 2 && out.contains("lies under the Cargo config of"), "rc {}: {}", rc, out);
+    Ok(())
+}
+
+#[test]
+fn test_hematite_git_scratch_another_account_can_write_refused() -> Outcome<()> {
+    // As /tmp: open to every account, with and without the sticky bit.
+    for mode in [0o777, 0o1777] {
+        let p = res!(private(&fmt!("sc_open_{:o}", mode)));
+        let open = res!(dir_of(&p.join("open"), mode));
+        let room = res!(dir_of(&open.join("r"), 0o700));
+        let r = res!(repo(&fmt!("sc_open_{:o}", mode)));
+        res!(write(&r, "src/lib.rs", b"pub fn base() {}\npub fn more() {}\n"));
+        res!(commit(&r));
+        let (rc, out) = res!(gate_in(&r, &room));
+        let _ = std::fs::remove_dir_all(&p);
+        assert!(rc == 2 && out.contains(&fmt!("lies under {}, which another account can write to",
+            open.display())), "mode {:o}: rc {}: {}", mode, rc, out);
+    }
+    Ok(())
+}
+
+#[test]
+fn test_hematite_git_scratch_open_to_others_refused() -> Outcome<()> {
+    // The tree's manifests are written in the scratch, so only its owner may open it.
+    let p = res!(private("sc_0755"));
+    let s = res!(dir_of(&p.join("s"), 0o755));
+    let got = lint::cargo_of(&s, &s, "", &[], |_| Ok(String::new()), |_, _| Ok(String::new()));
+    let _ = std::fs::remove_dir_all(&p);
+    match got {
+        Err(e)  => assert!(fmt!("{}", e).contains("can be opened by other accounts"), "{}", e),
+        Ok(_)   => panic!("a scratch of mode 0755 was taken"),
+    }
+    Ok(())
+}
+
+#[test]
+fn test_hematite_git_private_scratch_named_read() -> Outcome<()> {
+    let p = res!(private("sc_ok"));
+    let room = res!(dir_of(&p.join("r"), 0o700));
+    let r = res!(repo("sc_ok"));
+    res!(write(&r, "src/lib.rs", b"pub fn base() {}\npub fn more() {}\n"));
+    res!(commit(&r));
+    let (rc, out) = res!(gate_in(&r, &room));
+    let left = res!(std::fs::read_dir(&room).map_err(|e| err!(e, "read_dir"; IO))).count();
+    let _ = std::fs::remove_dir_all(&p);
+    assert!(rc == 0 && left == 0, "rc {}, {} left in the scratch: {}", rc, left, out);
     Ok(())
 }
