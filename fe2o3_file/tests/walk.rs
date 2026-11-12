@@ -14,6 +14,7 @@ use oxedyne_fe2o3_file::{
         EXCLUDES_NAME,
         git_config_excludes,
         git_global_excludes,
+        repo_top,
     },
 };
 
@@ -492,6 +493,20 @@ pub fn test_walk(filter: &'static str) -> Outcome<()> {
         assert_eq!(res!(named), Some(b"*.tmp\n".to_vec()), "core.excludesFile from GIT_CONFIG_GLOBAL");
         assert_eq!(res!(default), Some(b"*.xdg\n".to_vec()), "XDG git/ignore when unset");
         assert_eq!(res!(absent), None);
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["The nearest repository top holds the start 000", "all", "walk"], || {
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fe2o3_file_walk_top");
+        let _ = fs::remove_dir_all(&root);
+        res!(fs::create_dir_all(root.join("outer/.ore")));
+        res!(fs::create_dir_all(root.join("outer/inner/src/deep")));
+        res!(fs::write(root.join("outer/inner/.git"), "gitdir: elsewhere\n"));
+        assert_eq!(repo_top(&root.join("outer/inner/src/deep")), Some(root.join("outer/inner")),
+            "a .git file marks a worktree's top");
+        assert_eq!(repo_top(&root.join("outer/inner")), Some(root.join("outer/inner")));
+        assert_eq!(repo_top(&root.join("outer")), Some(root.join("outer")));
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }));

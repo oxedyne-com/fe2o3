@@ -82,6 +82,7 @@ pub const IGNORE_NAMES: &[&str] = &[
 	".oreignore",
 ];
 
+pub const REPO_MARKS:		&[&str] = &[".git", ".ore"];	// what a repository's top holds
 pub const REPO_EXCLUDE:		&str = ".git/info/exclude";	// a repository's own excludes, below its files
 pub const EXCLUDES_NAME:	&str = "core.excludesFile";	// how Rules::why names the global excludes
 
@@ -687,6 +688,17 @@ fn read_tolerant(path: &std::path::Path) -> Outcome<Option<Vec<u8>>> {
         Err(e)                          => Err(err!(Error::from(e),
             "While reading git's global excludes from {:?}.", path; IO, File)),
     }
+}
+
+/// The nearest directory at or above `dir` holding one of [`REPO_MARKS`], `None` outside any.
+///
+/// A walk of a directory inside a repository roots at this one and starts [`Walk::beneath`] the
+/// directory, so the ignore files above it speak, as they do for git and ripgrep.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn repo_top(dir: &std::path::Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|d| REPO_MARKS.iter().any(|m| d.join(m).exists()))
+        .map(|d| d.to_path_buf())
 }
 
 
