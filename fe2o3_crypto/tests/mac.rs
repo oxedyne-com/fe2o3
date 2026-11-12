@@ -101,3 +101,11 @@ fn test_pbkdf2_refuses_zero_rounds_00() {
     let mut out = [0u8; 32];
     assert!(pbkdf2_hmac_sha256(b"p", b"s", 0, &mut out).is_err());
 }
+
+#[test]
+fn test_pbkdf2_empty_output_is_nothing_to_do_00() -> Outcome<()> {
+    let mut out: [u8; 0] = [];
+    res!(pbkdf2_hmac_sha256(b"p", b"s", 1, &mut out));
+    assert!(pbkdf2_hmac_sha256(b"p", b"s", 0, &mut out).is_err(), "zero rounds still refused");
+    Ok(())
+}

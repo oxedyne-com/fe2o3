@@ -1,7 +1,7 @@
 //! HMAC-SHA256 (RFC 2104), HKDF-SHA256 (RFC 5869) and PBKDF2-HMAC-SHA256 (RFC 8018), in pure
 //! Rust.
 //!
-//! Both rest on [`oxedyne_fe2o3_hash::sha256`], so nothing here asks for a C toolchain or the
+//! All rest on [`oxedyne_fe2o3_hash::sha256`], so nothing here asks for a C toolchain or the
 //! operating system and the module compiles to wasm32 with the rest of the pure-Rust subset.
 //! That is the reason it exists beside `fe2o3_net::hmac`, which wraps `ring` and is native only:
 //! a key derived in a browser by WebCrypto's HKDF and the same key derived by a native process
@@ -159,13 +159,7 @@ pub fn pbkdf2_hmac_sha256(pass: &[u8], salt: &[u8], rounds: u32, out: &mut [u8])
             "PBKDF2-HMAC-SHA256 was asked for zero rounds; at least one is required.";
         Invalid, Input));
     }
-    let blocks = out.len().div_ceil(HMAC_SHA256_LEN);
-    if blocks as u64 > u32::MAX as u64 {
-        return Err(err!(
-            "PBKDF2-HMAC-SHA256 was asked for {} bytes, more than its 32-bit block counter can \
-            name.", out.len();
-        Invalid, Input, TooBig));
-    }
+    res!(pbkdf2_blocks(out.len()));
     let prf = Keyed::new(pass);
     for (i, chunk) in out.chunks_mut(HMAC_SHA256_LEN).enumerate() {
         // F(P, S, c, i) = U1 ^ U2 ^ ... ^ Uc, with U1 = PRF(P, S || INT(i)), i from 1.
@@ -186,6 +180,19 @@ pub fn pbkdf2_hmac_sha256(pass: &[u8], salt: &[u8], rounds: u32, out: &mut [u8])
     Ok(())
 }
 
+/// How many blocks PBKDF2 derives `len` bytes in, refusing more than its 32-bit block counter
+/// can name (RFC 8018 §5.2 step 1). Apart, so the refusal is tested without such a buffer.
+fn pbkdf2_blocks(len: usize) -> Outcome<usize> {
+    let blocks = len.div_ceil(HMAC_SHA256_LEN);
+    if blocks as u64 > u32::MAX as u64 {
+        return Err(err!(
+            "PBKDF2-HMAC-SHA256 was asked for {} bytes, more than its 32-bit block counter can \
+            name.", len;
+        Invalid, Input, TooBig));
+    }
+    Ok(blocks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,6 +211,17 @@ mod tests {
     }
 
     // RFC 4231 test cases 1, 2, 6 (a key longer than a block) and 7.
+    // The largest output the counter can name, and one byte more.
+    #[test]
+    fn test_pbkdf2_blocks_refuses_past_the_counter() -> Outcome<()> {
+        let max = u32::MAX as usize * HMAC_SHA256_LEN;
+        req!(res!(pbkdf2_blocks(0)), 0);
+        req!(res!(pbkdf2_blocks(33)), 2);
+        req!(res!(pbkdf2_blocks(max)), u32::MAX as usize);
+        req!(pbkdf2_blocks(max + 1).is_err(), true);
+        Ok(())
+    }
+
     #[test]
     fn test_hmac_sha256_rfc4231() -> Outcome<()> {
         let cases: [(&str, &[u8], &str); 4] = [

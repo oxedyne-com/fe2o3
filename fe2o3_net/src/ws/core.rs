@@ -170,13 +170,15 @@ pub fn connect_request_with(
 )
     -> Outcome<(HttpMessage, String)>
 {
-    const RESERVED: [&str; 6] = [ // fixed: RFC 6455 §4.1, the handshake's own fields
+    // Extensions are the handshake's too: this client can honour none a server accepts.
+    const RESERVED: [&str; 7] = [ // fixed: RFC 6455 §4.1, the handshake's own fields
         "host",
         "upgrade",
         "connection",
         "origin",
         "sec-websocket-key",
         "sec-websocket-version",
+        "sec-websocket-extensions",
     ];
     let mut extra = String::new();
     for (name, value) in fields {
@@ -203,6 +205,24 @@ pub fn connect_request_with(
         return Err(err!(
             "A websocket request path must begin with '/', found '{}'.", path;
         Invalid, Input, String));
+    }
+    // Each goes into the request as written, so a line break in any would add a field.
+    if path.chars().any(|c| c.is_control() || c == ' ') {
+        return Err(err!(
+            "The websocket request path {:?} holds a control character or space.", path;
+        Invalid, Input, String));
+    }
+    if host.chars().any(|c| c.is_control()) {
+        return Err(err!(
+            "The websocket request host {:?} holds a control character.", host;
+        Invalid, Input, String));
+    }
+    if let Some(origin) = origin {
+        if origin.chars().any(|c| c.is_control()) {
+            return Err(err!(
+                "The websocket request origin {:?} holds a control character.", origin;
+            Invalid, Input, String));
+        }
     }
     let mut key = [0u8; 16];
     Rand::fill_u8(&mut key);

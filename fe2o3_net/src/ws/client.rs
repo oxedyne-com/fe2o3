@@ -94,7 +94,7 @@ impl WsConnect {
 /// reads. A timed-out [`recv`](Self::recv) loses nothing, because it only ever gives up between
 /// frames.
 pub struct WsClient {
-    stream: Chain<Cursor<Vec<u8>>, BufReader<ClientStream>>, // bytes read past the handshake, then the socket
+    stream: Chain<Cursor<Vec<u8>>, BufReader<ClientStream>>,    // bytes read past the handshake, then the socket
     limits: WebSocketLimits,
     opcode: Option<u8>,                                         // of the fragmented message in progress
     buffer: Vec<u8>,                                            // its payload so far
@@ -118,7 +118,7 @@ impl WsClient {
         -> Outcome<Self>
     {
         let tcp = res!(Self::dial(addr, addr).await);
-        Self::handshake(ClientStream::Plain(tcp), addr, path, origin, &[], addr).await
+        Self::handshake(ClientStream::Plain(tcp), addr, path, origin, &[]).await
     }
 
     /// Connects to `url`, whose scheme chooses the transport: `ws` or `http` plain, `wss` or
@@ -154,7 +154,6 @@ impl WsClient {
             &url.target,
             opts.origin.as_deref(),
             &opts.fields,
-            &host,
         ).await
     }
 
@@ -193,22 +192,21 @@ impl WsClient {
         Ok(tcp)
     }
 
-    /// Sends the upgrade request for `path` over `stream` and checks the answer. `label` names
-    /// the server in errors.
+    /// Sends the upgrade request for `path` over `stream` to `host`, as the request names it,
+    /// and checks the answer.
     async fn handshake(
         mut stream: ClientStream,
         host:       &str,
         path:       &str,
         origin:     Option<&str>,
         fields:     &[(String, String)],
-        label:      &str,
     )
         -> Outcome<Self>
     {
         let (request, key) = res!(connect_request_with(host, path, origin, fields));
         if let Err(e) = request.write_all(&mut stream).await {
             return Err(err!(e,
-                "While sending the websocket upgrade request for {} to {}.", path, label;
+                "While sending the websocket upgrade request for {} to {}.", path, host;
             IO, Network, Wire, Write));
         }
         let (response, remnant) = match HttpMessage::read::<
@@ -219,11 +217,11 @@ impl WsClient {
             Ok((Some(response), remnant)) => (response, remnant),
             Ok((None, _)) => return Err(err!(
                 "The websocket server {} closed the connection before answering the upgrade \
-                request for {}.", label, path;
+                request for {}.", host, path;
             IO, Network, Wire, Read)),
             Err(e) => return Err(err!(e,
                 "While reading the websocket server {}'s answer to the upgrade request for {}.",
-                label, path;
+                host, path;
             IO, Network, Wire, Read)),
         };
         if let Err(e) = response.check_websocket_handshake(&accept_key(&key)) {
@@ -231,7 +229,7 @@ impl WsClient {
             let n = response.body.len().min(REFUSAL_SHOWN);
             let reason = String::from_utf8_lossy(&response.body[..n]);
             return Err(err!(e,
-                "The websocket upgrade of {} on {} failed{}{}.", path, label,
+                "The websocket upgrade of {} on {} failed{}{}.", path, host,
                 if reason.trim().is_empty() { "" } else { ": " }, reason.trim();
             IO, Network, Wire, Invalid, Input));
         }

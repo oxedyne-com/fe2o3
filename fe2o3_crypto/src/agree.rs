@@ -341,6 +341,11 @@ impl AgreementScheme {
     pub fn x25519_public_of_ed25519(ed_pk: &[u8])
         -> Outcome<[u8; Self::X25519_PK_LEN]>
     {
+        if ed_pk.len() != Self::X25519_PK_LEN {
+            return Err(err!(
+                "An Ed25519 public key is {} bytes, not {}.", Self::X25519_PK_LEN, ed_pk.len();
+            Invalid, Input, Size));
+        }
         let ed_pk = res!(<[u8; Self::X25519_PK_LEN]>::try_from(ed_pk));
         let point = match CompressedEdwardsY(ed_pk).decompress() {
             Some(p) => p,

@@ -310,11 +310,24 @@ fn test_upgrade_fields_that_could_forge_the_request_are_refused_00() -> Outcome<
         ("X-Split",                 "a\r\nHost: elsewhere"),
         ("Bad Name",                "x"),
         ("",                        "x"),
+        ("Sec-WebSocket-Extensions","permessage-deflate"),
     ] {
         if connect_request_with("h.example", "/", None, &[(fmt!("{}", name), fmt!("{}", value))])
             .is_ok()
         {
             return Err(err!("The field {:?}: {:?} was accepted.", name, value; Test, Unexpected));
+        }
+    }
+    // The path, host and origin go into the request as written, so none may break a line.
+    for (host, path, origin) in [
+        ("h.example",               "/p\r\nX-Evil: 1",    None),
+        ("h.example",               "/p q",                 None),
+        ("h.example\r\nX-Evil: 1",  "/",                    None),
+        ("h.example",               "/",                    Some("a\r\nHost: b")),
+    ] {
+        if connect_request_with(host, path, origin, &[]).is_ok() {
+            return Err(err!("The request for {:?} {:?} {:?} was accepted.", host, path, origin;
+                Test, Unexpected));
         }
     }
     Ok(())
