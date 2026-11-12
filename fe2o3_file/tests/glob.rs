@@ -309,5 +309,61 @@ pub fn test_glob(filter: &'static str) -> Outcome<()> {
         Ok(())
     }));
 
+    res!(test_it(filter, &["Braces offer alternatives 000", "all", "glob", "braces"], || {
+        let g = res!(Glob::with_braces(b"*.{rs,toml}", 16));
+        assert!(g.matches(b"lib.rs", false));
+        assert!(g.matches(b"deep/Cargo.toml", false), "each alternative unanchored");
+        assert!(!g.matches(b"lib.c", false));
+        let g = res!(Glob::with_braces(b"{*.rs,src/*.toml}", 16));
+        assert!(g.matches(b"a/b/lib.rs", false));
+        assert!(g.matches(b"src/x.toml", false));
+        assert!(!g.matches(b"a/src/x.toml", false), "the slashed alternative is anchored");
+        let g = res!(Glob::with_braces(b"a{b,c{d,e}}f", 16));
+        for p in [&b"abf"[..], b"acdf", b"acef"] {
+            assert!(g.matches(p, false), "nested: {:?}", p);
+        }
+        assert!(!g.matches(b"acf", false));
+        let g = res!(Glob::with_braces(b"*.rs{,.bak}", 16));
+        assert!(g.matches(b"a.rs", false) && g.matches(b"a.rs.bak", false), "empty alternative");
+        let g = res!(Glob::with_braces(b"{only}", 16));
+        assert!(g.matches(b"only", false), "one alternative is itself");
+        let g = res!(Glob::with_braces(b"{src,tests}/**/*.rs", 16));
+        assert!(g.matches(b"tests/a/b.rs", false));
+        assert!(!g.matches(b"benches/b.rs", false));
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["Braces escape and stay literal where they cannot open 000", "all", "glob", "braces"], || {
+        let g = res!(Glob::with_braces(b"\\{a,b\\}", 16));
+        assert!(g.matches(b"{a,b}", false), "escaped braces are literal");
+        assert!(!g.matches(b"a", false));
+        let g = res!(Glob::with_braces(b"{a\\,b,c}", 16));
+        assert!(g.matches(b"a,b", false) && g.matches(b"c", false), "an escaped comma divides nothing");
+        let g = res!(Glob::with_braces(b"x[{,]y", 16));
+        assert!(g.matches(b"x{y", false) && g.matches(b"x,y", false), "inside a class, members");
+        let g = res!(Glob::with_braces(b"{a,{b}", 16));
+        assert!(g.matches(b"{a,b", false), "an unclosed brace is literal, the inner still opens");
+        let g = res!(Glob::with_braces(b"a,b}", 16));
+        assert!(g.matches(b"a,b}", false), "outside braces, comma and close are bytes");
+        let g = res!(glob("{a,b}"));
+        assert!(g.matches(b"{a,b}", false) && !g.matches(b"a", false), "git reads braces literally");
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["Braces keep negation, trailing slash and the cap 000", "all", "glob", "braces"], || {
+        let g = res!(Glob::with_braces(b"!{a,b}.log", 16));
+        assert!(g.is_negated() && g.matches(b"b.log", false));
+        let g = res!(Glob::with_braces(b"{build/,*.o}", 16));
+        assert!(!g.is_dir_only(), "only one alternative is for directories");
+        assert!(g.matches(b"build", true) && !g.matches(b"build", false));
+        assert!(g.matches(b"x.o", false));
+        let g = res!(Glob::with_braces(b"{a,b}/", 16));
+        assert!(g.is_dir_only());
+        assert!(Glob::with_braces(b"{a,b}{c,d}{e,f}", 8).is_ok(), "eight is within eight");
+        assert!(Glob::with_braces(b"{a,b}{c,d}{e,f}{g,h}", 8).is_err(), "sixteen is not");
+        assert!(Glob::with_braces(b"{,}", 8).is_err(), "nothing left to match");
+        Ok(())
+    }));
+
     Ok(())
 }

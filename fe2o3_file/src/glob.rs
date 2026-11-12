@@ -22,6 +22,11 @@
 //! - In a file, blank lines are nothing and lines beginning `#` are comments.
 //!   Trailing spaces are trimmed unless escaped with `\`.
 //!
+//! Git's ignore files have no `{a,b}`, so neither [`Glob::new`] nor
+//! [`IgnoreFile`] reads one. [`Glob::with_braces`] compiles a pattern whose
+//! braces offer alternatives, as a search tool's pattern does, matching what any
+//! of its expansions matches.
+//!
 //! # Paths are bytes
 //!
 //! A path here is a `&[u8]` of components joined by `/`, relative to the
@@ -70,11 +75,24 @@ enum Comp {
 #[derive(Clone, Debug)]
 pub struct Glob {
     negated:    bool,       // the pattern began with `!`
-    dir_only:   bool,       // the pattern ended with `/`, so directories only
     files_only: bool,       // set by the caller, never by the pattern: not a directory
+    alts:       Vec<Alt>,   // one, unless braces were expanded; any may match
+}
+
+/// One brace-free pattern, as one line of an ignore file compiles to.
+#[derive(Clone, Debug)]
+struct Alt {
+    dir_only:   bool,       // the pattern ended with `/`, so directories only
     // A leading Comp::Globstar stands in for an unanchored pattern's freedom to
     // match at any depth.
     comps:      Vec<Comp>,
+}
+
+/// One piece of a pattern being read for braces.
+#[derive(Clone, Debug)]
+enum Piece {
+    Bytes(Vec<u8>),         // copied as written, escapes and classes kept
+    Alts(Vec<Vec<Piece>>),  // `{a,b}`: one sequence per alternative
 }
 
 impl Glob {
@@ -86,12 +104,69 @@ impl Glob {
     /// [`IgnoreFile::parse`]. A line that is empty, or empty once its `!` and
     /// `/` dressing is removed, is an error, since it can match nothing.
     pub fn new(line: &[u8]) -> Outcome<Self> {
-        let mut rest = line;
-        let mut negated = false;
-        if rest.first() == Some(&b'!') {
-            negated = true;
-            rest = &rest[1..];
+        let (negated, rest) = Self::negation(line);
+        match Self::alt(rest) {
+            Some(alt)   => Ok(Self { negated, files_only: false, alts: vec![alt] }),
+            None        => Err(Self::empty(line)),
         }
+    }
+
+    /// Compiles a pattern in which `{a,b}` offers alternatives, as a shell's
+    /// brace expansion and most search tools read it; git's ignore files do not,
+    /// so [`Glob::new`] and [`IgnoreFile`] take a brace literally.
+    ///
+    /// The pattern matches what any of its expansions would match compiled alone
+    /// by [`Glob::new`], so each alternative decides its own anchoring and
+    /// trailing `/`: `{*.rs,src/*.toml}` finds a Rust file at any depth and the
+    /// manifests directly under `src`. A leading `!` is read from the whole line
+    /// before the braces. Alternatives nest, `{}` around one alternative is just
+    /// that alternative, and an empty alternative stands for nothing, so
+    /// `*.rs{,.bak}` matches `a.rs` and `a.rs.bak`. A `\{`, `\,` or `\}` is
+    /// literal, as is a brace or comma inside a class, a `{` that never closes,
+    /// and a `,` or `}` outside any braces.
+    ///
+    /// Nested and successive braces multiply, so a pattern expanding to more
+    /// than `alts_max` alternatives is refused rather than compiled.
+    pub fn with_braces(line: &[u8], alts_max: usize) -> Outcome<Self> {
+        let (negated, rest) = Self::negation(line);
+        let seq = Self::pieces(rest);
+        let n = Self::count(&seq);
+        if n > alts_max {
+            return Err(err!(
+                "The pattern {:?} expands to {} alternatives, more than the {} allowed.",
+                String::from_utf8_lossy(line), n, alts_max;
+            Invalid, Input, Excessive));
+        }
+        let mut alts = Vec::new();
+        for one in Self::spell(&seq) {
+            // An alternative left with no content can match no path.
+            if let Some(alt) = Self::alt(&one) {
+                alts.push(alt);
+            }
+        }
+        if alts.is_empty() {
+            return Err(Self::empty(line));
+        }
+        Ok(Self { negated, files_only: false, alts })
+    }
+
+    fn negation(line: &[u8]) -> (bool, &[u8]) {
+        match line.first() {
+            Some(b'!')  => (true, &line[1..]),
+            _           => (false, line),
+        }
+    }
+
+    fn empty(line: &[u8]) -> Error<ErrTag> {
+        err!(
+            "The pattern {:?} has no content to match a path against.",
+            String::from_utf8_lossy(line);
+        Invalid, Input)
+    }
+
+    /// Compiles a pattern free of its `!`; nothing when no content is left.
+    fn alt(line: &[u8]) -> Option<Alt> {
+        let mut rest = line;
         let mut dir_only = false;
         if rest.last() == Some(&b'/') {
             dir_only = true;
@@ -106,10 +181,7 @@ impl Glob {
             rest.contains(&b'/')
         };
         if rest.is_empty() {
-            return Err(err!(
-                "The pattern {:?} has no content to match a path against.",
-                String::from_utf8_lossy(line);
-            Invalid, Input));
+            return None;
         }
         let mut comps = Vec::new();
         if !anchored {
@@ -122,7 +194,127 @@ impl Glob {
                 comps.push(Comp::One(Self::tokens(part)));
             }
         }
-        Ok(Self { negated, dir_only, files_only: false, comps })
+        Some(Alt { dir_only, comps })
+    }
+
+    /// How many bytes at `i` must be read as one: an escape pair, a class (which
+    /// ends, as in [`Glob::new`], before any `/`), or a single byte.
+    fn unit(s: &[u8], i: usize) -> usize {
+        match s[i] {
+            b'\\' if i + 1 < s.len() => 2,
+            b'[' => {
+                let end = match s[i..].iter().position(|b| *b == b'/') {
+                    Some(p) => i + p,
+                    None    => s.len(),
+                };
+                match Self::class(&s[i..end]) {
+                    Some((_, used)) => used,
+                    None            => 1,
+                }
+            },
+            _ => 1,
+        }
+    }
+
+    /// Where the brace opened at `open` closes, with the commas that divide it at
+    /// its own depth; nothing when it never closes.
+    fn close(s: &[u8], open: usize) -> Option<(Vec<usize>, usize)> {
+        let mut depth = 0usize;
+        let mut cuts = Vec::new();
+        let mut i = open;
+        while i < s.len() {
+            match s[i] {
+                b'{'                => depth += 1,
+                b'}'                => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((cuts, i));
+                    }
+                },
+                b',' if depth == 1  => cuts.push(i),
+                _                   => (),
+            }
+            i += Self::unit(s, i);
+        }
+        None
+    }
+
+    fn pieces(s: &[u8]) -> Vec<Piece> {
+        let mut seq = Vec::new();
+        let mut lit = Vec::new();
+        let mut i = 0;
+        while i < s.len() {
+            if s[i] == b'{' {
+                match Self::close(s, i) {
+                    Some((cuts, close)) => {
+                        if !lit.is_empty() {
+                            seq.push(Piece::Bytes(std::mem::take(&mut lit)));
+                        }
+                        let mut alts = Vec::new();
+                        let mut from = i + 1;
+                        for cut in cuts.into_iter().chain(std::iter::once(close)) {
+                            alts.push(Self::pieces(&s[from..cut]));
+                            from = cut + 1;
+                        }
+                        seq.push(Piece::Alts(alts));
+                        i = close + 1;
+                    },
+                    // A brace that never closes is a literal one, escaped so
+                    // that it stays one.
+                    None => {
+                        lit.extend_from_slice(b"\\{");
+                        i += 1;
+                    },
+                }
+                continue;
+            }
+            let n = Self::unit(s, i);
+            lit.extend_from_slice(&s[i..i + n]);
+            i += n;
+        }
+        if !lit.is_empty() {
+            seq.push(Piece::Bytes(lit));
+        }
+        seq
+    }
+
+    /// How many patterns a sequence spells, saturating rather than overflowing.
+    fn count(seq: &[Piece]) -> usize {
+        let mut n = 1usize;
+        for piece in seq {
+            if let Piece::Alts(alts) = piece {
+                let sum = alts.iter().fold(0usize, |acc, a| acc.saturating_add(Self::count(a)));
+                n = n.saturating_mul(sum);
+            }
+        }
+        n
+    }
+
+    fn spell(seq: &[Piece]) -> Vec<Vec<u8>> {
+        let mut out = vec![Vec::new()];
+        for piece in seq {
+            match piece {
+                Piece::Bytes(b) => for one in out.iter_mut() {
+                    one.extend_from_slice(b);
+                },
+                Piece::Alts(alts) => {
+                    let mut ends = Vec::new();
+                    for a in alts {
+                        ends.extend(Self::spell(a));
+                    }
+                    let mut next = Vec::with_capacity(out.len() * ends.len());
+                    for head in &out {
+                        for end in &ends {
+                            let mut one = head.clone();
+                            one.extend_from_slice(end);
+                            next.push(one);
+                        }
+                    }
+                    out = next;
+                },
+            }
+        }
+        out
     }
 
     /// Narrows the pattern to what is not a directory, which no ignore-file syntax
@@ -137,8 +329,9 @@ impl Glob {
         self.negated
     }
 
+    /// Does every alternative of the pattern match directories alone?
     pub fn is_dir_only(&self) -> bool {
-        self.dir_only
+        self.alts.iter().all(|a| a.dir_only)
     }
 
     pub fn is_files_only(&self) -> bool {
@@ -152,14 +345,11 @@ impl Glob {
     /// files-only one refuses a directory; neither by itself speaks for the files
     /// beneath, which is the business of [`IgnoreFile::excludes`].
     pub fn matches(&self, path: &[u8], is_dir: bool) -> bool {
-        if (self.dir_only && !is_dir) || (self.files_only && is_dir) {
-            return false;
-        }
-        if path.is_empty() {
+        if (self.files_only && is_dir) || path.is_empty() {
             return false;
         }
         let parts: Vec<&[u8]> = path.split(|b| *b == b'/').collect();
-        Self::match_comps(&self.comps, &parts)
+        self.alts.iter().any(|a| (is_dir || !a.dir_only) && Self::match_comps(&a.comps, &parts))
     }
 
     fn match_comps(comps: &[Comp], parts: &[&[u8]]) -> bool {
