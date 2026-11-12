@@ -322,6 +322,11 @@ fn test_upgrade_fields_that_could_forge_the_request_are_refused_00() -> Outcome<
     for (host, path, origin) in [
         ("h.example",               "/p\r\nX-Evil: 1",    None),
         ("h.example",               "/p q",                 None),
+        // The request line is split on any white space, so these would cut the path short.
+        ("h.example",               "/a\u{3000}HTTP/1.1\u{3000}x", None),
+        ("h.example",               "/a\u{a0}b",           None),
+        ("h.example",               "/a\u{2028}b",         None),
+        ("h.example",               "/caf\u{e9}",          None),
         ("h.example\r\nX-Evil: 1",  "/",                    None),
         ("h.example",               "/",                    Some("a\r\nHost: b")),
     ] {

@@ -158,7 +158,8 @@ pub fn connect_request(
 }
 
 /// As [`connect_request`], with further fields on the request, such as a credential a server
-/// checks before its `101`. `path` may carry a query string, which goes out as given. A field
+/// checks before its `101`. `path` may carry a query string, which goes out as given, and must be visible ASCII,
+/// anything else percent-encoded. A field
 /// the handshake itself sets (`Host`, `Upgrade`, `Connection`, `Origin` and the
 /// `Sec-WebSocket-Key` and `-Version`) is refused, as is a name that is not an RFC 9110 token
 /// and a value holding a control character, which could otherwise end the field early.
@@ -206,10 +207,13 @@ pub fn connect_request_with(
             "A websocket request path must begin with '/', found '{}'.", path;
         Invalid, Input, String));
     }
-    // Each goes into the request as written, so a line break in any would add a field.
-    if path.chars().any(|c| c.is_control() || c == ' ') {
+    // Each goes into the request as written, so a line break in any would add a field. The
+    // request line is also split on any white space, Unicode's included, so the path is held to
+    // the visible ASCII a request target is made of (RFC 9112 §3.2), the rest percent-encoded.
+    if path.bytes().any(|b| !(0x21..=0x7e).contains(&b)) { // fixed: RFC 9112 visible ASCII
         return Err(err!(
-            "The websocket request path {:?} holds a control character or space.", path;
+            "The websocket request path {:?} holds a byte other than visible ASCII; \
+            percent-encode it.", path;
         Invalid, Input, String));
     }
     if host.chars().any(|c| c.is_control()) {
