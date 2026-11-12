@@ -1,4 +1,5 @@
-//! HMAC-SHA256 (RFC 2104) and HKDF-SHA256 (RFC 5869), in pure Rust.
+//! HMAC-SHA256 (RFC 2104), HKDF-SHA256 (RFC 5869) and PBKDF2-HMAC-SHA256 (RFC 8018), in pure
+//! Rust.
 //!
 //! Both rest on [`oxedyne_fe2o3_hash::sha256`], so nothing here asks for a C toolchain or the
 //! operating system and the module compiles to wasm32 with the rest of the pure-Rust subset.
@@ -35,34 +36,53 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; HMAC_SHA256_LEN] {
 
 /// HMAC-SHA256 over the concatenation of `parts`, without making the concatenation.
 pub fn hmac_sha256_parts(key: &[u8], parts: &[&[u8]]) -> [u8; HMAC_SHA256_LEN] {
-    let mut k = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        let d = sha256::digest(key);
-        k[..d.len()].copy_from_slice(&d);
-    } else {
-        k[..key.len()].copy_from_slice(key);
+    Keyed::new(key).tag(parts)
+}
+
+/// The inner and outer hashers with the padded key already absorbed, so that a caller tagging
+/// many messages under one key, as PBKDF2 does, hashes the key's two blocks once.
+struct Keyed {
+    inner: Sha256,
+    outer: Sha256,
+}
+
+impl Keyed {
+
+    fn new(key: &[u8]) -> Self {
+        let mut k = [0u8; BLOCK];
+        if key.len() > BLOCK {
+            let d = sha256::digest(key);
+            k[..d.len()].copy_from_slice(&d);
+        } else {
+            k[..key.len()].copy_from_slice(key);
+        }
+        let mut ipad = [0x36u8; BLOCK];
+        let mut opad = [0x5cu8; BLOCK];
+        for i in 0..BLOCK {
+            ipad[i] ^= k[i];
+            opad[i] ^= k[i];
+        }
+        let mut inner = Sha256::new();
+        inner.update(&ipad);
+        let mut outer = Sha256::new();
+        outer.update(&opad);
+        // The padded key is the key: it is not left lying in a stack slot for the next caller.
+        for b in k.iter_mut().chain(ipad.iter_mut()).chain(opad.iter_mut()) {
+            *b = 0;
+        }
+        Self { inner, outer }
     }
-    let mut ipad = [0x36u8; BLOCK];
-    let mut opad = [0x5cu8; BLOCK];
-    for i in 0..BLOCK {
-        ipad[i] ^= k[i];
-        opad[i] ^= k[i];
+
+    fn tag(&self, parts: &[&[u8]]) -> [u8; HMAC_SHA256_LEN] {
+        let mut inner = self.inner.clone();
+        for p in parts {
+            inner.update(p);
+        }
+        let ih = inner.finish();
+        let mut outer = self.outer.clone();
+        outer.update(&ih);
+        outer.finish()
     }
-    let mut inner = Sha256::new();
-    inner.update(&ipad);
-    for p in parts {
-        inner.update(p);
-    }
-    let ih = inner.finish();
-    let mut outer = Sha256::new();
-    outer.update(&opad);
-    outer.update(&ih);
-    let tag = outer.finish();
-    // The padded key is the key: it is not left lying in a stack slot for the next caller.
-    for b in k.iter_mut().chain(ipad.iter_mut()).chain(opad.iter_mut()) {
-        *b = 0;
-    }
-    tag
 }
 
 /// Whether `tag` is the HMAC-SHA256 of `msg` under `key`, compared in constant time.
@@ -126,6 +146,44 @@ pub fn hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], out: &mut [u8]) -> Outc
         *b = 0;
     }
     result
+}
+
+/// PBKDF2-HMAC-SHA256 (RFC 8018 §5.2): `out.len()` bytes derived from `pass` and `salt` over
+/// `rounds` iterations. This is what WebCrypto's
+/// `deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, ..)` computes for
+/// `8 * out.len()` bits. Refuses no rounds at all, and more output than the block counter can
+/// name.
+pub fn pbkdf2_hmac_sha256(pass: &[u8], salt: &[u8], rounds: u32, out: &mut [u8]) -> Outcome<()> {
+    if rounds == 0 {
+        return Err(err!(
+            "PBKDF2-HMAC-SHA256 was asked for zero rounds; at least one is required.";
+        Invalid, Input));
+    }
+    let blocks = out.len().div_ceil(HMAC_SHA256_LEN);
+    if blocks as u64 > u32::MAX as u64 {
+        return Err(err!(
+            "PBKDF2-HMAC-SHA256 was asked for {} bytes, more than its 32-bit block counter can \
+            name.", out.len();
+        Invalid, Input, TooBig));
+    }
+    let prf = Keyed::new(pass);
+    for (i, chunk) in out.chunks_mut(HMAC_SHA256_LEN).enumerate() {
+        // F(P, S, c, i) = U1 ^ U2 ^ ... ^ Uc, with U1 = PRF(P, S || INT(i)), i from 1.
+        let index = (i as u32 + 1).to_be_bytes();
+        let mut u = prf.tag(&[salt, &index]);
+        let mut t = u;
+        for _ in 1..rounds {
+            u = prf.tag(&[&u]);
+            for j in 0..HMAC_SHA256_LEN {
+                t[j] ^= u[j];
+            }
+        }
+        chunk.copy_from_slice(&t[..chunk.len()]);
+        for b in u.iter_mut().chain(t.iter_mut()) {
+            *b = 0;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
