@@ -13,6 +13,7 @@ pub use self::core::{
     accept_key,
     accept_response,
     connect_request,
+    connect_request_with,
     encode_message,
     read_frame,
     read_message,
@@ -22,7 +23,10 @@ pub use self::core::{
     WebSocketMessage,
 };
 #[cfg(feature = "async")]
-pub use self::client::WsClient;
+pub use self::client::{
+    WsClient,
+    WsConnect,
+};
 #[cfg(feature = "async")]
 pub use self::tap::{
     encode_message_tapped,

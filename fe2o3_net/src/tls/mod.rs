@@ -380,6 +380,23 @@ pub async fn upgrade(
 )
     -> Outcome<ClientStream>
 {
+    match tokio::time::timeout(deadline, handshake(plain, host, cfg)).await {
+        Ok(result) => result,
+        Err(_)     => Err(err!(
+            "The TLS handshake to {} did not finish within {:?}.", host, deadline;
+            IO, Network, Init, Timeout)),
+    }
+}
+
+/// As [`upgrade`], with nothing bounding the handshake, for a caller that bounds a longer
+/// exchange as a whole.
+pub async fn handshake(
+    plain:  TcpStream,
+    host:   &str,
+    cfg:    Arc<ClientConfig>,
+)
+    -> Outcome<ClientStream>
+{
     let name = match ServerName::try_from(host.to_string()) {
         Ok(n)  => n,
         Err(_) => return Err(err!(
@@ -387,23 +404,20 @@ pub async fn upgrade(
             Invalid, Input)),
     };
     let connector = TlsConnector::from(cfg);
-    match tokio::time::timeout(deadline, connector.connect(name, plain)).await {
-        Ok(Ok(s))  => Ok(ClientStream::Tls(Box::new(s))),
+    match connector.connect(name, plain).await {
+        Ok(s)  => Ok(ClientStream::Tls(Box::new(s))),
         // Sorted by cause, because a caller explaining the failure to a person must not tell them
         // a certificate was refused when the connection merely dropped (D-20261006-09). The
         // words of both mention TLS and the handshake, so only the tags can tell them apart.
-        Ok(Err(e)) if refuses_certificate(&e) => Err(err!(e,
+        Err(e) if refuses_certificate(&e) => Err(err!(e,
             "TLS handshake to {}: the certificate was not accepted.", host;
             IO, Network, Init, Security)),
-        Ok(Err(e)) if is_dropped(&e) => Err(err!(e,
+        Err(e) if is_dropped(&e) => Err(err!(e,
             "TLS handshake to {}: the connection dropped.", host;
             IO, Network, Init, Interrupted)),
-        Ok(Err(e)) => Err(err!(e,
+        Err(e) => Err(err!(e,
             "TLS handshake to {}.", host;
             IO, Network, Init)),
-        Err(_)     => Err(err!(
-            "The TLS handshake to {} did not finish within {:?}.", host, deadline;
-            IO, Network, Init, Timeout)),
     }
 }
 

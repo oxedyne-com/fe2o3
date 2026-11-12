@@ -154,6 +154,51 @@ pub fn connect_request(
 )
     -> Outcome<(HttpMessage, String)>
 {
+    connect_request_with(host, path, origin, &[])
+}
+
+/// As [`connect_request`], with further fields on the request, such as a credential a server
+/// checks before its `101`. `path` may carry a query string, which goes out as given. A field
+/// the handshake itself sets (`Host`, `Upgrade`, `Connection`, `Origin` and the
+/// `Sec-WebSocket-Key` and `-Version`) is refused, as is a name that is not an RFC 9110 token
+/// and a value holding a control character, which could otherwise end the field early.
+pub fn connect_request_with(
+    host:       &str,
+    path:       &str,
+    origin:     Option<&str>,
+    fields:     &[(String, String)],
+)
+    -> Outcome<(HttpMessage, String)>
+{
+    const RESERVED: [&str; 6] = [ // fixed: RFC 6455 §4.1, the handshake's own fields
+        "host",
+        "upgrade",
+        "connection",
+        "origin",
+        "sec-websocket-key",
+        "sec-websocket-version",
+    ];
+    let mut extra = String::new();
+    for (name, value) in fields {
+        let token = !name.is_empty() && name.bytes().all(|b|
+            b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+        if !token {
+            return Err(err!(
+                "The websocket request field name {:?} is not an RFC 9110 token.", name;
+            Invalid, Input, String));
+        }
+        if RESERVED.iter().any(|r| name.eq_ignore_ascii_case(r)) {
+            return Err(err!(
+                "The websocket request field {:?} is set by the handshake itself.", name;
+            Invalid, Input, Exists));
+        }
+        if value.chars().any(|c| c.is_control() && c != '\t') {
+            return Err(err!(
+                "The value of websocket request field {:?} holds a control character.", name;
+            Invalid, Input, String));
+        }
+        extra.push_str(&fmt!("{}: {}\r\n", name, value));
+    }
     if !path.starts_with('/') {
         return Err(err!(
             "A websocket request path must begin with '/', found '{}'.", path;
@@ -173,8 +218,8 @@ pub fn connect_request(
         Connection: Upgrade\r\n\
         Sec-WebSocket-Key: {}\r\n\
         Sec-WebSocket-Version: 13\r\n\
-        {}\r\n",
-        path, host, key_str.clone(), origin_line,
+        {}{}\r\n",
+        path, host, key_str.clone(), origin_line, extra,
     );
     Ok((
         HttpMessage {

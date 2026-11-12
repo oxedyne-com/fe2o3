@@ -1,11 +1,18 @@
 use crate::{
     constant,
-    http::msg::HttpMessage,
+    http::{
+        loc::Url,
+        msg::HttpMessage,
+    },
+    tls::{
+        self,
+        ClientStream,
+    },
     ws::{
         core::{
             accept_key,
             assemble,
-            connect_request,
+            connect_request_with,
             encode_message,
             read_frame,
             Assembled,
@@ -21,13 +28,16 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::{
     io::Cursor,
     pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
 use tokio::{
     io::{
+        AsyncBufReadExt,
         AsyncReadExt,
         AsyncWriteExt,
+        BufReader,
         Chain,
     },
     net::TcpStream,
@@ -36,9 +46,11 @@ use tokio::{
         Instant,
     },
 };
+use tokio_rustls::rustls::ClientConfig;
 
 
 const READ_CHUNK: usize = 4_096; // payload bytes per read call
+const REFUSAL_SHOWN: usize = 512; // bytes of a refusal's body quoted in its error
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
@@ -47,26 +59,54 @@ enum State {
     Broken, // the stream lost its place in a frame, or the peer vanished
 }
 
-/// A websocket client that owns its TCP connection, for a caller that wants to talk to a server
-/// and has no database or handler to give [`crate::ws::core::WebSocket`].
+/// What [`WsClient::connect_url`] sends beyond the URL, and whom it trusts.
+#[derive(Clone, Debug, Default)]
+pub struct WsConnect {
+    pub origin: Option<String>,             // sent as `Origin`
+    pub fields: Vec<(String, String)>,      // further upgrade request fields, in order
+    pub tls:    Option<Arc<ClientConfig>>,  // for `wss`; `None` takes `tls::default_client_config`
+}
+
+impl WsConnect {
+
+    pub fn origin(mut self, origin: &str) -> Self {
+        self.origin = Some(origin.to_string());
+        self
+    }
+
+    /// Adds one field to the upgrade request.
+    pub fn field(mut self, name: &str, value: &str) -> Self {
+        self.fields.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    pub fn tls(mut self, cfg: Arc<ClientConfig>) -> Self {
+        self.tls = Some(cfg);
+        self
+    }
+}
+
+/// A websocket client that owns its connection, plain or TLS, for a caller that wants to talk to
+/// a server and has no database or handler to give [`crate::ws::core::WebSocket`].
 ///
 /// It answers pings, reassembles fragmented messages (answering a ping that arrives between the
 /// fragments), masks every frame it sends, and applies [`WebSocketLimits`] to everything it
 /// reads. A timed-out [`recv`](Self::recv) loses nothing, because it only ever gives up between
 /// frames.
 pub struct WsClient {
-    stream: Chain<Cursor<Vec<u8>>, TcpStream>,  // bytes read past the handshake, then the socket
+    stream: Chain<Cursor<Vec<u8>>, BufReader<ClientStream>>, // bytes read past the handshake, then the socket
     limits: WebSocketLimits,
-    opcode: Option<u8>,                         // of the fragmented message in progress
-    buffer: Vec<u8>,                            // its payload so far
+    opcode: Option<u8>,                                         // of the fragmented message in progress
+    buffer: Vec<u8>,                                            // its payload so far
     state:  State,
 }
 
 impl WsClient {
 
-    /// Connects to `addr` (`host:port`), upgrading `path` to a websocket, and verifies the
-    /// server's `Sec-WebSocket-Accept` against the random key sent. `addr` doubles as the `Host`
-    /// field. A refusal is an error naming the status; a wrong accept key, one naming both keys.
+    /// Connects to `addr` (`host:port`) in plain TCP, upgrading `path` to a websocket, and
+    /// verifies the server's `Sec-WebSocket-Accept` against the random key sent. `addr` doubles
+    /// as the `Host` field. A refusal is an error naming the status; a wrong accept key, one
+    /// naming both keys.
     ///
     /// Nothing bounds the handshake's duration, and dropping the future abandons it cleanly, so a
     /// caller wanting a bound wraps this in `tokio::time::timeout`.
@@ -77,44 +117,128 @@ impl WsClient {
     )
         -> Outcome<Self>
     {
-        let (request, key) = res!(connect_request(addr, path, origin));
-        let mut tcp = match TcpStream::connect(addr).await {
+        let tcp = res!(Self::dial(addr, addr).await);
+        Self::handshake(ClientStream::Plain(tcp), addr, path, origin, &[], addr).await
+    }
+
+    /// Connects to `url`, whose scheme chooses the transport: `ws` or `http` plain, `wss` or
+    /// `https` over TLS (as a browser's `WebSocket` takes all four), with the server's
+    /// certificate checked for the URL's host against `opts.tls`. The path and any query string
+    /// go on the request line exactly as written, and `opts` adds the origin and further fields.
+    /// A refusal is an error naming the status and quoting the start of the server's reason.
+    ///
+    /// As [`connect`](Self::connect), nothing bounds the whole of it but the caller's timeout.
+    pub async fn connect_url(url: &str, opts: &WsConnect) -> Outcome<Self> {
+        let (url, tls) = res!(Self::parse_url(url));
+        // RFC 9110 §7.2: the port only where it is not the scheme's, an IPv6 literal bracketed.
+        let name = if url.host.contains(':') { fmt!("[{}]", url.host) } else { url.host.clone() };
+        let host = if url.port == url.scheme.default_port() {
+            name.clone()
+        } else {
+            fmt!("{}:{}", name, url.port)
+        };
+        let dial = fmt!("{}:{}", name, url.port);
+        let tcp = res!(Self::dial(&dial, &host).await);
+        let stream = if tls {
+            let cfg = match &opts.tls {
+                Some(cfg)   => cfg.clone(),
+                None        => Arc::new(res!(tls::default_client_config())),
+            };
+            res!(tls::handshake(tcp, &url.host, cfg).await)
+        } else {
+            ClientStream::Plain(tcp)
+        };
+        Self::handshake(
+            stream,
+            &host,
+            &url.target,
+            opts.origin.as_deref(),
+            &opts.fields,
+            &host,
+        ).await
+    }
+
+    /// The URL read as the HTTP one it stands for (RFC 6455 §3), and whether it wants TLS.
+    fn parse_url(raw: &str) -> Outcome<(Url, bool)> {
+        let raw = raw.trim();
+        let (scheme, rest) = match raw.find("://") {
+            Some(i) => (raw[..i].to_lowercase(), &raw[i..]),
+            None    => return Err(err!(
+                "The websocket URL {:?} names no scheme; ws://, wss://, http:// or https:// is \
+                required.", raw;
+            Invalid, Input, Missing)),
+        };
+        let http = match scheme.as_str() {
+            "ws"    | "http"    => "http",
+            "wss"   | "https"   => "https",
+            other               => return Err(err!(
+                "The URL scheme {:?} is not a websocket one; only ws, wss, http and https are.",
+                other;
+            Invalid, Input, Unimplemented)),
+        };
+        let url = res!(Url::parse(&fmt!("{}{}", http, rest)));
+        let tls = url.scheme.is_tls();
+        Ok((url, tls))
+    }
+
+    async fn dial(addr: &str, host: &str) -> Outcome<TcpStream> {
+        let tcp = match TcpStream::connect(addr).await {
             Ok(tcp) => tcp,
             Err(e)  => return Err(err!(e,
-                "While connecting to websocket server {}.", addr;
+                "While connecting to websocket server {}.", host;
             IO, Network)),
         };
         // Frames are small and latency is the point.
         res!(tcp.set_nodelay(true), IO, Network);
-        if let Err(e) = request.write_all(&mut tcp).await {
+        Ok(tcp)
+    }
+
+    /// Sends the upgrade request for `path` over `stream` and checks the answer. `label` names
+    /// the server in errors.
+    async fn handshake(
+        mut stream: ClientStream,
+        host:       &str,
+        path:       &str,
+        origin:     Option<&str>,
+        fields:     &[(String, String)],
+        label:      &str,
+    )
+        -> Outcome<Self>
+    {
+        let (request, key) = res!(connect_request_with(host, path, origin, fields));
+        if let Err(e) = request.write_all(&mut stream).await {
             return Err(err!(e,
-                "While sending the websocket upgrade request for {} to {}.", path, addr;
+                "While sending the websocket upgrade request for {} to {}.", path, label;
             IO, Network, Wire, Write));
         }
         let (response, remnant) = match HttpMessage::read::<
             { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
             { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
             _,
-        >(Pin::new(&mut tcp), &Vec::new(), Some(false), None).await {
+        >(Pin::new(&mut stream), &Vec::new(), Some(false), None).await {
             Ok((Some(response), remnant)) => (response, remnant),
             Ok((None, _)) => return Err(err!(
                 "The websocket server {} closed the connection before answering the upgrade \
-                request for {}.", addr, path;
+                request for {}.", label, path;
             IO, Network, Wire, Read)),
             Err(e) => return Err(err!(e,
                 "While reading the websocket server {}'s answer to the upgrade request for {}.",
-                addr, path;
+                label, path;
             IO, Network, Wire, Read)),
         };
         if let Err(e) = response.check_websocket_handshake(&accept_key(&key)) {
+            // A server that refuses before its 101 usually says why in the body.
+            let n = response.body.len().min(REFUSAL_SHOWN);
+            let reason = String::from_utf8_lossy(&response.body[..n]);
             return Err(err!(e,
-                "The websocket upgrade of {} on {} failed.", path, addr;
+                "The websocket upgrade of {} on {} failed{}{}.", path, label,
+                if reason.trim().is_empty() { "" } else { ": " }, reason.trim();
             IO, Network, Wire, Invalid, Input));
         }
         // The server may speak straight after its 101, and whatever of that the header reader
         // took is the start of the frame stream.
         Ok(Self {
-            stream: Cursor::new(remnant).chain(tcp),
+            stream: Cursor::new(remnant).chain(BufReader::new(stream)),
             limits: WebSocketLimits::default(),
             opcode: None,
             buffer: Vec::new(),
@@ -174,7 +298,7 @@ impl WsClient {
                     // RFC 6455 §5.5.1: answer a close with a close, echoing the status.
                     let echo = self.write(&WebSocketMessage::Close(code, None)).await;
                     self.state = State::Closed;
-                    let _ = self.tcp().shutdown().await;
+                    let _ = self.conn().shutdown().await;
                     if let Err(e) = echo {
                         return Err(err!(e,
                             "While echoing the server's websocket close."; IO, Network, Wire, Write));
@@ -193,7 +317,7 @@ impl WsClient {
         match self.state {
             State::Closed => return Ok(()),
             State::Broken => {
-                let _ = self.tcp().shutdown().await;
+                let _ = self.conn().shutdown().await;
                 return Ok(());
             }
             State::Open => (),
@@ -215,14 +339,14 @@ impl WsClient {
         }
         // A failed read above may already have shut the socket, and a shutdown refused now leaves
         // the caller nothing to do, so only the close frame's fate is reported.
-        let _ = self.tcp().shutdown().await;
+        let _ = self.conn().shutdown().await;
         if let Err(e) = sent {
             return Err(err!(e, "While sending a websocket close."; IO, Network, Wire, Write));
         }
         Ok(())
     }
 
-    fn tcp(&mut self) -> &mut TcpStream { self.stream.get_mut().1 }
+    fn conn(&mut self) -> &mut BufReader<ClientStream> { self.stream.get_mut().1 }
 
     fn check_open(&self) -> Outcome<()> {
         match self.state {
@@ -239,12 +363,12 @@ impl WsClient {
         // One frame per message: a client is required to mask (RFC 6455 §5.3), and it need not
         // fragment.
         let byts = res!(encode_message(message, true, usize::MAX, usize::MAX));
-        let tcp = self.tcp();
-        if let Err(e) = tcp.write_all(&byts).await {
+        let conn = self.conn();
+        if let Err(e) = conn.write_all(&byts).await {
             self.state = State::Broken;
             return Err(err!(e, "While writing a websocket frame."; IO, Network, Wire, Write));
         }
-        if let Err(e) = tcp.flush().await {
+        if let Err(e) = conn.flush().await {
             self.state = State::Broken;
             return Err(err!(e, "While flushing a websocket frame."; IO, Network, Wire, Write));
         }
@@ -255,12 +379,12 @@ impl WsClient {
     /// leaves the stream exactly where it was. End of stream counts as begun, for `read_frame` to
     /// report.
     async fn frame_begun(&mut self, deadline: Instant) -> Outcome<bool> {
-        let (remnant, tcp) = self.stream.get_mut();
+        let (remnant, conn) = self.stream.get_mut();
         if (remnant.position() as usize) < remnant.get_ref().len() {
             return Ok(true);
         }
-        let mut probe = [0u8; 1];
-        match timeout_at(deadline, tcp.peek(&mut probe)).await {
+        // Filling the read buffer is cancel safe, and a TLS stream has no peek.
+        match timeout_at(deadline, conn.fill_buf()).await {
             Err(_)      => Ok(false),
             Ok(Ok(_))   => Ok(true),
             Ok(Err(e))  => {
@@ -307,7 +431,7 @@ impl WsClient {
                         IO, Network, Wire, Write));
                     }
                 }
-                let _ = self.tcp().shutdown().await;
+                let _ = self.conn().shutdown().await;
                 Err(e)
             }
         }
