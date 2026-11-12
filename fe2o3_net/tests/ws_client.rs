@@ -346,3 +346,73 @@ async fn test_ws_client_echoes_server_close_00() -> Outcome<()> {
     }
     join(server).await
 }
+
+/// A wait dropped part way through a frame loses none of it: the next wait gives the whole
+/// message, and a send made in between goes out whole.
+#[tokio::test]
+async fn test_ws_client_dropped_recv_keeps_partial_frame_00() -> Outcome<()> {
+    let (addr, server) = res!(spawn_server(|mut stream| async move {
+        res!(accept(&mut stream).await);
+        let frame = res!(encode_message(
+            &WebSocketMessage::Text(fmt!("one whole message")), false, 1_024, 1_024));
+        res!(stream.write_all(&frame[..7]).await);
+        // The client sends only once its wait has been dropped with the frame half read.
+        let sent = res!(read_masked(&mut stream).await);
+        req!(sent.payload, b"said while waiting".to_vec());
+        res!(stream.write_all(&frame[7..]).await);
+        Ok(())
+    }).await);
+
+    let mut client = res!(WsClient::connect(&addr, "/", None).await);
+    tokio::select! {
+        got = client.recv(WAIT) => return Err(err!(
+            "Expected the wait to lose to the timer, got {:?}.", got; Test, Unexpected)),
+        _ = tokio::time::sleep(Duration::from_millis(200)) => (),
+    }
+    res!(client.send_text("said while waiting").await);
+    match res!(client.recv(WAIT).await) {
+        Some(WebSocketMessage::Text(txt)) => req!(txt, fmt!("one whole message")),
+        other => return Err(err!("Expected the whole message, got {:?}.", other;
+            Test, Mismatch)),
+    }
+    join(server).await
+}
+
+/// One task both waits and sends: each thing to say arrives on a channel while a wait is pending,
+/// and the wait that loses is simply made again.
+#[tokio::test]
+async fn test_ws_client_sends_while_recv_pending_00() -> Outcome<()> {
+    let (addr, server) = res!(spawn_server(|mut stream| async move {
+        res!(accept(&mut stream).await);
+        for want in ["first", "second"] {
+            let frame = res!(read_masked(&mut stream).await);
+            req!(frame.payload, want.as_bytes().to_vec());
+        }
+        let reply = res!(encode_message(
+            &WebSocketMessage::Text(fmt!("both heard")), false, 1_024, 1_024));
+        res!(stream.write_all(&reply).await);
+        Ok(())
+    }).await);
+
+    let mut client = res!(WsClient::connect(&addr, "/", None).await);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<&str>();
+    tokio::spawn(async move {
+        for say in ["first", "second"] {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(say);
+        }
+    });
+    loop {
+        tokio::select! {
+            got = client.recv(WAIT) => match res!(got) {
+                Some(WebSocketMessage::Text(txt)) => {
+                    req!(txt, fmt!("both heard"));
+                    break;
+                }
+                other => return Err(err!("Expected the reply, got {:?}.", other; Test, Mismatch)),
+            },
+            Some(say) = rx.recv() => res!(client.send_text(say).await),
+        }
+    }
+    join(server).await
+}

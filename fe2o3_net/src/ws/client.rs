@@ -26,7 +26,6 @@ use crate::{
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
-    io::Cursor,
     pin::Pin,
     sync::Arc,
     time::Duration,
@@ -34,11 +33,8 @@ use std::{
 
 use tokio::{
     io::{
-        AsyncBufReadExt,
         AsyncReadExt,
         AsyncWriteExt,
-        BufReader,
-        Chain,
     },
     net::TcpStream,
     time::{
@@ -91,13 +87,19 @@ impl WsConnect {
 ///
 /// It answers pings, reassembles fragmented messages (answering a ping that arrives between the
 /// fragments), masks every frame it sends, and applies [`WebSocketLimits`] to everything it
-/// reads. A timed-out [`recv`](Self::recv) loses nothing, because it only ever gives up between
-/// frames.
+/// reads.
+///
+/// Whatever has been read of a frame not yet whole, and whatever of a frame has not yet been
+/// written, is held here and not in a future. So a [`recv`](Self::recv) that times out, or is
+/// dropped as the losing branch of a `tokio::select!`, loses nothing, and one task can wait for a
+/// message and send when something else happens.
 pub struct WsClient {
-    stream: Chain<Cursor<Vec<u8>>, BufReader<ClientStream>>,    // bytes read past the handshake, then the socket
+    stream: ClientStream,
     limits: WebSocketLimits,
-    opcode: Option<u8>,                                         // of the fragmented message in progress
-    buffer: Vec<u8>,                                            // its payload so far
+    raw:    Vec<u8>,        // bytes read that are not yet a whole frame
+    out:    Vec<u8>,        // bytes of frames not yet written
+    opcode: Option<u8>,     // of the fragmented message in progress
+    buffer: Vec<u8>,        // its payload so far
     state:  State,
 }
 
@@ -236,8 +238,10 @@ impl WsClient {
         // The server may speak straight after its 101, and whatever of that the header reader
         // took is the start of the frame stream.
         Ok(Self {
-            stream: Cursor::new(remnant).chain(BufReader::new(stream)),
+            stream,
             limits: WebSocketLimits::default(),
+            raw:    remnant,
+            out:    Vec::new(),
             opcode: None,
             buffer: Vec::new(),
             state:  State::Open,
@@ -259,30 +263,35 @@ impl WsClient {
         self.send(&WebSocketMessage::Text(text.to_string())).await
     }
 
-    /// Sends `message` as one masked frame.
+    /// Sends `message` as one masked frame. If the future is dropped before it ends, what is left
+    /// of the frame goes out ahead of the next thing written.
     pub async fn send(&mut self, message: &WebSocketMessage) -> Outcome<()> {
         res!(self.check_open());
         self.write(message).await
     }
 
     /// Waits up to `timeout` for the next text, binary or close message. `Ok(None)` means the time
-    /// ran out; a message half-assembled then is kept for the next call.
+    /// ran out; a frame or message part read then is kept for the next call.
+    ///
+    /// Cancel safe: the future may be dropped at any await, as the losing branch of a
+    /// `tokio::select!` is, and the next call carries on from the same byte. The one thing a drop
+    /// can cost is the server's close, if it falls while that is being echoed: the client is then
+    /// closed and the next call says so.
     ///
     /// Pings are answered and pongs dropped on the way. A close from the server is echoed and
-    /// returned, after which the client is closed. The peer vanishing without a close, a read
-    /// failing, or the time running out part way through a frame each leave the stream unusable,
-    /// and are errors.
+    /// returned, after which the client is closed. The peer vanishing without a close, or a read
+    /// failing, leaves the stream unusable and is an error.
     pub async fn recv(&mut self, timeout: Duration) -> Outcome<Option<WebSocketMessage>> {
         res!(self.check_open());
+        // What an earlier call was dropped before writing.
+        res!(self.drain().await);
         let deadline = Instant::now() + timeout;
         loop {
-            if !res!(self.frame_begun(deadline).await) {
-                return Ok(None);
-            }
             let msg = match res!(self.next_frame(deadline).await) {
-                Assembled::Pending          => continue,
-                Assembled::Message(msg)     => return Ok(Some(msg)),
-                Assembled::Control(msg)     => msg,
+                None                            => return Ok(None),
+                Some(Assembled::Pending)        => continue,
+                Some(Assembled::Message(msg))   => return Ok(Some(msg)),
+                Some(Assembled::Control(msg))   => msg,
             };
             match msg {
                 WebSocketMessage::Ping(data) => {
@@ -294,9 +303,9 @@ impl WsClient {
                 WebSocketMessage::Pong(_) => (),
                 WebSocketMessage::Close(code, reason) => {
                     // RFC 6455 §5.5.1: answer a close with a close, echoing the status.
-                    let echo = self.write(&WebSocketMessage::Close(code, None)).await;
                     self.state = State::Closed;
-                    let _ = self.conn().shutdown().await;
+                    let echo = self.write(&WebSocketMessage::Close(code, None)).await;
+                    let _ = self.stream.shutdown().await;
                     if let Err(e) = echo {
                         return Err(err!(e,
                             "While echoing the server's websocket close."; IO, Network, Wire, Write));
@@ -315,7 +324,7 @@ impl WsClient {
         match self.state {
             State::Closed => return Ok(()),
             State::Broken => {
-                let _ = self.conn().shutdown().await;
+                let _ = self.stream.shutdown().await;
                 return Ok(());
             }
             State::Open => (),
@@ -327,24 +336,20 @@ impl WsClient {
             let deadline = Instant::now() + timeout;
             // The server's close, its vanishing, or the deadline all end the wait; none of them
             // leaves anything more to do than shut the socket.
-            while let Ok(true) = self.frame_begun(deadline).await {
-                match self.next_frame(deadline).await {
-                    Ok(Assembled::Control(WebSocketMessage::Close(..))) => break,
-                    Ok(_) => (),
-                    Err(_) => break,
+            while let Ok(Some(step)) = self.next_frame(deadline).await {
+                if let Assembled::Control(WebSocketMessage::Close(..)) = step {
+                    break;
                 }
             }
         }
         // A failed read above may already have shut the socket, and a shutdown refused now leaves
         // the caller nothing to do, so only the close frame's fate is reported.
-        let _ = self.conn().shutdown().await;
+        let _ = self.stream.shutdown().await;
         if let Err(e) = sent {
             return Err(err!(e, "While sending a websocket close."; IO, Network, Wire, Write));
         }
         Ok(())
     }
-
-    fn conn(&mut self) -> &mut BufReader<ClientStream> { self.stream.get_mut().1 }
 
     fn check_open(&self) -> Outcome<()> {
         match self.state {
@@ -361,56 +366,99 @@ impl WsClient {
         // One frame per message: a client is required to mask (RFC 6455 §5.3), and it need not
         // fragment.
         let byts = res!(encode_message(message, true, usize::MAX, usize::MAX));
-        let conn = self.conn();
-        if let Err(e) = conn.write_all(&byts).await {
-            self.state = State::Broken;
-            return Err(err!(e, "While writing a websocket frame."; IO, Network, Wire, Write));
+        self.out.extend_from_slice(&byts);
+        self.drain().await
+    }
+
+    /// Writes what is queued. Each write takes its bytes off the queue as it lands, so a drop
+    /// between two of them leaves the rest in order for the next call.
+    async fn drain(&mut self) -> Outcome<()> {
+        while !self.out.is_empty() {
+            match self.stream.write(&self.out).await {
+                Ok(0) => {
+                    self.state = State::Broken;
+                    return Err(err!(
+                        "The websocket connection took none of a frame."; IO, Network, Wire, Write));
+                }
+                Ok(n) => {
+                    self.out.drain(..n);
+                }
+                Err(e) => {
+                    self.state = State::Broken;
+                    return Err(err!(e, "While writing a websocket frame."; IO, Network, Wire, Write));
+                }
+            }
         }
-        if let Err(e) = conn.flush().await {
+        if let Err(e) = self.stream.flush().await {
             self.state = State::Broken;
             return Err(err!(e, "While flushing a websocket frame."; IO, Network, Wire, Write));
         }
         Ok(())
     }
 
-    /// Waits until `deadline` for a frame's first byte, consuming nothing, so that giving up here
-    /// leaves the stream exactly where it was. End of stream counts as begun, for `read_frame` to
-    /// report.
-    async fn frame_begun(&mut self, deadline: Instant) -> Outcome<bool> {
-        let (remnant, conn) = self.stream.get_mut();
-        if (remnant.position() as usize) < remnant.get_ref().len() {
-            return Ok(true);
+    /// The length on the wire of the frame at the head of `raw`, once its header is all there,
+    /// with its declared payload held to the limits before any of it is gathered.
+    fn frame_len(&self) -> Outcome<Option<usize>> {
+        let raw = &self.raw;
+        if raw.len() < 2 {
+            return Ok(None);
         }
-        // Filling the read buffer is cancel safe, and a TLS stream has no peek.
-        match timeout_at(deadline, conn.fill_buf()).await {
-            Err(_)      => Ok(false),
-            Ok(Ok(_))   => Ok(true),
-            Ok(Err(e))  => {
-                self.state = State::Broken;
-                Err(err!(e, "While waiting for a websocket frame."; IO, Network, Wire, Read))
+        let mask = if raw[1] & 0x80 != 0 { 4 } else { 0 }; // fixed: RFC 6455 §5.2
+        let (head, declared) = match raw[1] & 0x7F {
+            126 if raw.len() < 4    => return Ok(None),
+            126                     => (4, u16::from_be_bytes([raw[2], raw[3]]) as u64),
+            127 if raw.len() < 10   => return Ok(None),
+            127                     => {
+                let mut len = [0u8; 8];
+                len.copy_from_slice(&raw[2..10]);
+                (10, u64::from_be_bytes(len))
+            }
+            len                     => (2, len as u64),
+        };
+        res!(self.limits.check_frame(declared));
+        let payload = declared as usize; // Narrowing is safe: `check_frame` bounded it.
+        if raw[0] & 0x08 == 0 {
+            res!(self.limits.check_msg(self.buffer.len().saturating_add(payload)));
+        }
+        Ok(Some(head + mask + payload))
+    }
+
+    /// Gathers one whole frame into `raw` and takes it from there. `None` is the deadline. Only
+    /// the read is awaited, and it is cancel safe, so giving up at any point leaves `raw` holding
+    /// exactly what has arrived.
+    async fn whole_frame(&mut self, deadline: Instant) -> Outcome<Option<Assembled>> {
+        loop {
+            if let Some(len) = res!(self.frame_len()) {
+                if self.raw.len() >= len {
+                    // A slice is read without waiting, so the frame reader cannot be left part way.
+                    let mut byts = &self.raw[..len];
+                    let frame = res!(read_frame(
+                        &mut byts, READ_CHUNK, self.limits, self.buffer.len()).await);
+                    self.raw.drain(..len);
+                    return match frame {
+                        Some(frame) => assemble(&mut self.opcode, &mut self.buffer, frame).map(Some),
+                        None        => Err(err!(
+                            "A websocket frame of {} bytes was cut short in memory.", len; Bug)),
+                    };
+                }
+            }
+            self.raw.reserve(READ_CHUNK);
+            match timeout_at(deadline, self.stream.read_buf(&mut self.raw)).await {
+                Err(_)      => return Ok(None),
+                Ok(Ok(0))   => return Err(err!(
+                    "The websocket server closed the connection without a close frame.";
+                IO, Network, Wire, Read)),
+                Ok(Ok(_))   => (),
+                Ok(Err(e))  => return Err(err!(e,
+                    "While waiting for a websocket frame."; IO, Network, Wire, Read)),
             }
         }
     }
 
-    /// Reads the frame that has begun and folds it into the message in progress. Any failure here
-    /// leaves the stream part way through a frame, so the client is marked broken.
-    async fn next_frame(&mut self, deadline: Instant) -> Outcome<Assembled> {
-        let limits = self.limits;
-        let buffered = self.buffer.len();
-        let result = match timeout_at(
-            deadline,
-            read_frame(&mut self.stream, READ_CHUNK, limits, buffered),
-        ).await {
-            Err(_) => Err(err!(
-                "The deadline passed part way through a websocket frame, so the stream has lost \
-                its place.";
-            IO, Network, Wire, Read, Timeout)),
-            Ok(Ok(None)) => Err(err!(
-                "The websocket server closed the connection without a close frame.";
-            IO, Network, Wire, Read)),
-            Ok(Ok(Some(frame))) => assemble(&mut self.opcode, &mut self.buffer, frame),
-            Ok(Err(e)) => Err(e),
-        };
+    /// Folds the next frame into the message in progress, or gives `None` at the deadline. A
+    /// failure leaves the stream unusable, so the client is marked broken.
+    async fn next_frame(&mut self, deadline: Instant) -> Outcome<Option<Assembled>> {
+        let result = self.whole_frame(deadline).await;
         match result {
             Ok(step) => Ok(step),
             Err(e) => {
@@ -429,7 +477,7 @@ impl WsClient {
                         IO, Network, Wire, Write));
                     }
                 }
-                let _ = self.conn().shutdown().await;
+                let _ = self.stream.shutdown().await;
                 Err(e)
             }
         }
