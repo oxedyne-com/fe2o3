@@ -1,3 +1,6 @@
+#[cfg(not(target_arch = "wasm32"))]
+pub mod line;
+
 /// ANSI Terminal control characters.  Intended to accord with ECMA-48.
 #[derive(Debug)]
 pub struct Term {}
