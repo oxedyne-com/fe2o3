@@ -45,7 +45,10 @@ use std::{
     str,
 };
 
-use curve25519_dalek::montgomery::MontgomeryPoint;
+use curve25519_dalek::{
+    edwards::CompressedEdwardsY,
+    montgomery::MontgomeryPoint,
+};
 use rand_core::{
     OsRng,
     RngCore,
@@ -54,6 +57,11 @@ use secrecy::{
     ExposeSecret,
     Secret,
 };
+use sha2::{
+    Digest,
+    Sha512,
+};
+use zeroize::Zeroizing;
 
 
 #[derive(Clone)]
@@ -325,6 +333,51 @@ impl AgreementScheme {
     {
         let sk = res!(<[u8; Self::X25519_SK_LEN]>::try_from(sk));
         Ok(MontgomeryPoint::mul_base_clamped(sk).to_bytes())
+    }
+
+    /// The X25519 public key with the same point as an Ed25519 public key, its Montgomery `u`
+    /// (RFC 7748 §4.1), so that one Ed25519 key can also be sealed to. Refuses a key that is not
+    /// a point, and one of small order, which would seal to a secret everyone holds.
+    pub fn x25519_public_of_ed25519(ed_pk: &[u8])
+        -> Outcome<[u8; Self::X25519_PK_LEN]>
+    {
+        let ed_pk = res!(<[u8; Self::X25519_PK_LEN]>::try_from(ed_pk));
+        let point = match CompressedEdwardsY(ed_pk).decompress() {
+            Some(p) => p,
+            None    => return Err(err!(
+                "The Ed25519 public key is not a point on the curve."; Invalid, Input)),
+        };
+        if point.is_small_order() {
+            return Err(err!(
+                "The Ed25519 public key is of small order."; Invalid, Input));
+        }
+        Ok(point.to_montgomery().to_bytes())
+    }
+
+    /// The X25519 secret matching [`x25519_public_of_ed25519`](Self::x25519_public_of_ed25519) of
+    /// the seed's public key: the first half of SHA-512 of the 32-byte Ed25519 seed, clamped,
+    /// which is the scalar Ed25519 itself signs with (RFC 8032 §5.1.5). Wiped when it drops.
+    pub fn x25519_secret_of_ed25519(seed: &[u8])
+        -> Outcome<Zeroizing<[u8; Self::X25519_SK_LEN]>>
+    {
+        if seed.len() != Self::X25519_SK_LEN {
+            return Err(err!(
+                "An Ed25519 seed is {} bytes, not {}.", Self::X25519_SK_LEN, seed.len();
+            Invalid, Input, Size));
+        }
+        // Hashed into a buffer that is wiped, rather than a digest value that is not.
+        let mut h = Zeroizing::new([0u8; 64]);
+        let mut hasher = Sha512::new();
+        hasher.update(seed);
+        hasher.finalize_into((&mut h[..]).into());
+        let mut sk = Zeroizing::new([0u8; Self::X25519_SK_LEN]);
+        sk.copy_from_slice(&h[..Self::X25519_SK_LEN]);
+        // RFC 7748 §5's clamp, which X25519 would apply anyway, made explicit so the bytes are
+        // the scalar itself.
+        sk[0] &= 248;
+        sk[31] &= 127;
+        sk[31] |= 64;
+        Ok(sk)
     }
 
     /// The raw X25519 Diffie-Hellman of a secret and a public key (RFC 7748), refusing the all
