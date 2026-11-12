@@ -264,14 +264,16 @@ impl WsClient {
     }
 
     /// Sends `message` as one masked frame. If the future is dropped before it ends, what is left
-    /// of the frame goes out ahead of the next thing written.
+    /// of the frame still goes out, whole, ahead of the next thing written, so a caller that
+    /// retries a dropped send sends the message twice.
     pub async fn send(&mut self, message: &WebSocketMessage) -> Outcome<()> {
         res!(self.check_open());
         self.write(message).await
     }
 
     /// Waits up to `timeout` for the next text, binary or close message. `Ok(None)` means the time
-    /// ran out; a frame or message part read then is kept for the next call.
+    /// ran out; a frame or message part read then is kept for the next call, as is the rest of a
+    /// dropped send that could not be written in time.
     ///
     /// Cancel safe: the future may be dropped at any await, as the losing branch of a
     /// `tokio::select!` is, and the next call carries on from the same byte. The one thing a drop
@@ -283,9 +285,13 @@ impl WsClient {
     /// failing, leaves the stream unusable and is an error.
     pub async fn recv(&mut self, timeout: Duration) -> Outcome<Option<WebSocketMessage>> {
         res!(self.check_open());
-        // What an earlier call was dropped before writing.
-        res!(self.drain().await);
         let deadline = Instant::now() + timeout;
+        // What an earlier call was dropped before writing, under the same deadline, since a peer
+        // that stops reading would otherwise hold the wait past it.
+        match timeout_at(deadline, self.drain()).await {
+            Ok(drained) => res!(drained),
+            Err(_)      => return Ok(None),
+        }
         loop {
             let msg = match res!(self.next_frame(deadline).await) {
                 None                            => return Ok(None),

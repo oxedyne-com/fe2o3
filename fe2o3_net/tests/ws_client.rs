@@ -416,3 +416,31 @@ async fn test_ws_client_sends_while_recv_pending_00() -> Outcome<()> {
     }
     join(server).await
 }
+
+#[tokio::test]
+async fn test_ws_client_recv_deadline_covers_dropped_send_00() -> Outcome<()> {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    let (addr, server) = res!(spawn_server(|mut stream| async move {
+        res!(accept(&mut stream).await);
+        // Read nothing more, so the client's socket buffers fill and stay full.
+        let _ = done_rx.await;
+        Ok(())
+    }).await);
+
+    let mut client = res!(WsClient::connect(&addr, "/", None).await);
+    let big = WebSocketMessage::Binary(vec![7u8; 16 * 1_024 * 1_024]);
+    let sent = tokio::time::timeout(Duration::from_millis(200), client.send(&big)).await;
+    if sent.is_ok() {
+        return Err(err!("16 MiB went out to a peer that reads nothing."; Test, Unexpected));
+    }
+    // The dropped send's remainder cannot leave, and the wait must still end on time.
+    match tokio::time::timeout(WAIT, client.recv(Duration::from_millis(100))).await {
+        Ok(got) => if let Some(msg) = res!(got) {
+            return Err(err!("Expected the deadline, got {:?}.", msg; Test, Mismatch));
+        },
+        Err(_)  => return Err(err!(
+            "recv(100 ms) was still writing the dropped send after {:?}.", WAIT; Test, Timeout)),
+    }
+    let _ = done_tx.send(());
+    join(server).await
+}
