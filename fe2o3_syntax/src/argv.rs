@@ -25,7 +25,8 @@ pub const SIMILARITY_THRESHOLD: f64 = 0.4;
 
 /// Reads a process's arguments, `std::env::args_os()` or the like, program name first.
 ///
-/// With no words, or `help`, `-h` or `--help` first, the answer is the command table.
+/// With no words, or `help`, `-h` or `--help` first, the answer is the command table, except
+/// that no words run the syntax's `default_cmd` where it names one.
 /// `help <command>` or `help <topic>` is that page, and `help --all` is everything.  A
 /// command followed by `-h` or `--help` where an option could stand is the command's page;
 /// as an option's value, after a `--`, or among the words of a verbatim value, either is a
@@ -64,7 +65,8 @@ pub fn words<I, S>(args: I) -> Outcome<Vec<String>>
 pub fn read(syntax: &SyntaxRef, words: Vec<String>) -> Outcome<Parsed> {
     let first = match words.first() {
         Some(w) => w.as_str(),
-        None => return Ok(Parsed::Help(Page::Summary)),
+        None if syntax.config().default_cmd.is_none() => return Ok(Parsed::Help(Page::Summary)),
+        None => "",
     };
     if words.len() == 1 && (first == "--version" || first == "-V") {
         return Ok(Parsed::Version);

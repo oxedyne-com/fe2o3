@@ -690,3 +690,148 @@ fn a_hidden_switch_is_parsed_but_never_shown() -> Outcome<()> {
     }
     Ok(())
 }
+
+/// A syntax shaped like a chat viewer's: `view` alone lists, `view 3` attaches to the third.
+fn view(default: bool, value: bool) -> Outcome<SyntaxRef> {
+    let mut s = Syntax::from(SyntaxConfig {
+        name:       fmt!("view"),
+        one_cmd:    true,
+        ..Default::default()
+    });
+    if default {
+        s = s.default_cmd("list");
+    }
+    if value {
+        s = s.value_cmd("attach");
+    }
+    s = res!(s.add_arg(Arg::from(ArgConfig {
+        name: fmt!("config"), hyph2: Some(fmt!("config")), vals: vec![Val::text("path")],
+        help: Some(fmt!("Another configuration")), ..Default::default() })));
+    s = res!(s.add_arg(Arg::from(ArgConfig {
+        name: fmt!("script"), hyph2: Some(fmt!("script")), ..Default::default() })));
+    s = res!(s.add_cmd(Cmd::from(CmdConfig {
+        name: fmt!("list"), help: Some(fmt!("List the chats")), ..Default::default() })));
+    s = res!(s.add_cmd(Cmd::from(CmdConfig {
+        name: fmt!("new"), vals: vec![Val::text("prompt").many().verbatim()],
+        help: Some(fmt!("Start a chat")), ..Default::default() })));
+    let mut c = Cmd::from(CmdConfig {
+        name:   fmt!("attach"),
+        vals:   vec![Val::text("chat").missing("attach needs a chat.")],
+        help:   Some(fmt!("Attach to a chat")),
+        ..Default::default()
+    });
+    c = res!(c.add_arg(Arg::from(ArgConfig {
+        name: fmt!("quiet"), hyph2: Some(fmt!("quiet")), ..Default::default() })));
+    s = res!(s.add_cmd(c));
+    Ok(SyntaxRef::new(s))
+}
+
+fn view_run(syntax: &SyntaxRef, line: &[&str]) -> Outcome<Msg> {
+    match res!(argv::read(syntax, strs(line))) {
+        Parsed::Run(msg)    => Ok(msg),
+        other               => Err(err!("'{}' gave {:?}, not a message.", line.join(" "), other;
+            Test, Unexpected)),
+    }
+}
+
+fn view_refusal(syntax: &SyntaxRef, line: &[&str]) -> Outcome<String> {
+    match argv::read(syntax, strs(line)) {
+        Ok(p)   => Err(err!("'{}' was accepted as {:?}.", line.join(" "), p; Test, Unexpected)),
+        Err(e)  => Ok(e.plain()),
+    }
+}
+
+#[test]
+fn a_default_command_runs_when_none_is_named() -> Outcome<()> {
+    let s = res!(view(true, true));
+    let m = res!(view_run(&s, &[]));
+    req!(m.cmds.len(), 1);
+    req!(m.has_cmd("list"), true, "no words at all");
+    let m = res!(view_run(&s, &["--script"]));
+    req!(m.has_cmd("list") && m.has_arg("script"), true, "the syntax's options alone");
+    let m = res!(view_run(&s, &["--config", "c.jdat"]));
+    req!(m.has_cmd("list") && m.has_arg("config"), true);
+    let m = res!(view_run(&s, &["new", "hello", "there"]));
+    req!(m.has_cmd("new") && !m.has_cmd("list"), true, "a named command is still that command");
+    // Help, the version and help flags still answer before anything runs.
+    req!(matches!(res!(argv::read(&s, strs(&["help"]))), Parsed::Help(Page::Summary)), true);
+    req!(matches!(res!(argv::read(&s, strs(&["--help"]))), Parsed::Help(Page::Summary)), true);
+    req!(matches!(res!(argv::read(&s, strs(&["-V"]))), Parsed::Version), true);
+    // Without one, no words are the command table, as before.
+    let s = res!(view(false, true));
+    req!(matches!(res!(argv::read(&s, strs(&[]))), Parsed::Help(Page::Summary)), true);
+    Ok(())
+}
+
+#[test]
+fn a_bare_value_starts_the_value_command() -> Outcome<()> {
+    let s = res!(view(true, true));
+    let m = res!(view_run(&s, &["3"]));
+    req!(res!(cmd(&m, "attach")).vals.clone(), vec![dat!("3")]);
+    let m = res!(view_run(&s, &["--config", "c.jdat", "last", "--quiet"]));
+    req!(res!(cmd(&m, "attach")).vals.clone(), vec![dat!("last")]);
+    req!(m.has_arg("config") && res!(cmd(&m, "attach")).has_arg("quiet"), true,
+        "the syntax's options before, the command's after");
+    match res!(argv::read(&s, strs(&["3", "--help"]))) {
+        Parsed::Help(Page::Command(name)) => { req!(name, fmt!("attach")); },
+        other => return Err(err!("'3 --help' gave {:?}.", other; Test, Unexpected)),
+    }
+    // Positions count the words as typed, with nothing inserted.
+    let e = res!(view_refusal(&s, &["3", "4"]));
+    req!(e.contains("'4' at position 2"), true, "{}", e);
+    let e = res!(view_refusal(&s, &["--config", "c", "3", "--loud"]));
+    req!(e.contains("position 4"), true, "{}", e);
+    let e = res!(view_refusal(&s, &["--bogus"]));
+    req!(e.contains("position 1"), true, "{}", e);
+    // Without one, a bare word is no command, as before.
+    let s = res!(view(true, false));
+    let e = res!(view_refusal(&s, &["3"]));
+    req!(e.contains("'3' at position 1 is not a command"), true, "{}", e);
+    Ok(())
+}
+
+#[test]
+fn a_default_or_value_command_must_exist() -> Outcome<()> {
+    let s = Syntax::from(SyntaxConfig { name: fmt!("x"), one_cmd: true, ..Default::default() })
+        .default_cmd("nowhere");
+    let s = SyntaxRef::new(res!(s.add_cmd(Cmd::from(CmdConfig {
+        name: fmt!("real"), ..Default::default() }))));
+    let e = res!(view_refusal(&s, &[]));
+    req!(e.contains("names 'nowhere' its default command"), true, "{}", e);
+    let s = Syntax::from(SyntaxConfig { name: fmt!("x"), one_cmd: true, ..Default::default() })
+        .value_cmd("nowhere");
+    let s = SyntaxRef::new(res!(s.add_cmd(Cmd::from(CmdConfig {
+        name: fmt!("real"), ..Default::default() }))));
+    let e = res!(view_refusal(&s, &["3"]));
+    req!(e.contains("names 'nowhere' its value command"), true, "{}", e);
+    Ok(())
+}
+
+#[test]
+fn help_shows_the_default_and_value_commands() -> Outcome<()> {
+    use oxedyne_fe2o3_syntax::help::{
+        Help,
+        HelpDisplayConfig,
+    };
+    let s = res!(view(true, true));
+    let help = Help::new(HelpDisplayConfig::plain(100));
+    let text = help.summary(&s).join("\n");
+    for want in [
+        "view [<options>] [<command>]",
+        "view [<options>]",
+        "is 'view list'",
+        "view [<options>] <chat>",
+        "is 'view attach <chat>'",
+    ] {
+        req!(text.contains(want), true, "'{}' missing from:\n{}", want, text);
+    }
+    let page = res!(help.command_page(&s, "attach")).join("\n");
+    req!(page.contains("view attach <chat> [--quiet]") && page.contains("view <chat> [--quiet]"),
+        true, "{}", page);
+    let page = res!(help.command_page(&s, "list")).join("\n");
+    req!(page.contains("\n     view [<options>]"), true, "{}", page);
+    let plain = res!(view(false, false));
+    let text = help.summary(&plain).join("\n");
+    req!(text.contains("is 'view") || text.contains("[<command>]"), false, "{}", text);
+    Ok(())
+}

@@ -1252,7 +1252,16 @@ impl Msg {
             }
 
             // CMD block
-            let cmd = res!(self.is_word_a_cmd(&word_key, pos, similarity_threshold, argv));
+            // Where no command is named yet, a word that is not one may start the value one.
+            let by_value = match &syntax.config().value_cmd {
+                Some(name) if active_cmd.is_none()
+                    && syntax.cmds.get_recursive(&word_key).is_none() => Some(name),
+                _ => None,
+            };
+            let cmd = match by_value {
+                Some(name)  => res!(syntax.named_cmd(name, "value")),
+                None        => res!(self.is_word_a_cmd(&word_key, pos, similarity_threshold, argv)),
+            };
             msgrx.cmds.insert(
                 cmd.config().name.clone(),
                 res!(MsgCmd::new(self.syntaxref(), cmd.config().name.clone())),
@@ -1264,6 +1273,35 @@ impl Msg {
             res!(self.check_required_txt_args(rargs, &None));
             // Reset rargs for the command.
             rargs = cmd.config().rargs.iter().map(|s| s.as_str()).collect();
+            if by_value.is_some() {
+                // The word that started the command is its first value, at its own position.
+                let val = match cmd_slots.current() {
+                    Some(val)   => val,
+                    None        => return Err(Self::excess(cmd, &word, pos)),
+                };
+                let owner = fmt!("the command '{}'", cmd.config().name);
+                let d = res!(Self::decode_word(&word, val, src, pos, &owner));
+                res!(Self::push_val(&mut msgrx, &collecting, active_cmd, None, d));
+                cmd_slots.accept();
+            }
+        }
+
+        if active_cmd.is_none() {
+            if let Some(name) = &syntax.config().default_cmd {
+                // Nothing named a command, so the message is the default one's.
+                let cmd = res!(syntax.named_cmd(name, "default"));
+                msgrx.cmds.insert(
+                    cmd.config().name.clone(),
+                    res!(MsgCmd::new(self.syntaxref(), cmd.config().name.clone())),
+                );
+                res!(self.check_required_txt_args(rargs, &None));
+                rargs = cmd.config().rargs.iter().map(|s| s.as_str()).collect();
+                active_cmd = Some(cmd);
+                cmd_slots = Slots::new(&cmd.config().vals);
+                if collecting == Collecting::None {
+                    collecting = Collecting::Command;
+                }
+            }
         }
 
         if argv {

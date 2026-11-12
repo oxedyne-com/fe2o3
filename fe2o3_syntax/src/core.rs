@@ -58,6 +58,8 @@ pub struct SyntaxConfig {
     pub rargs:  Vec<String>,            // Required arguments.
     pub cmds:   BTreeMap<Key, Recursive<Key, Cmd>>,
     pub one_cmd:bool,                   // A message names exactly one command.
+    pub default_cmd:Option<String>,     // The command a message naming none runs.
+    pub value_cmd:  Option<String>,     // Started by a value where a command could stand.
     // CLI
     pub author: Option<String>, 
     pub about:  Option<String>,
@@ -228,6 +230,32 @@ impl Syntax {
     pub fn one_cmd(mut self, b: bool) -> Self {
         self.cfg.one_cmd = b;
         self
+    }
+
+    /// Names the command a message that names none runs, so that `prog` alone, or with only
+    /// the syntax's own options, is `prog <name>`.
+    pub fn default_cmd<S: Into<String>>(mut self, name: S) -> Self {
+        self.cfg.default_cmd = Some(name.into());
+        self
+    }
+
+    /// Names the command a value starts where a command could stand, the value being its
+    /// first, so that `prog 3` is `prog <name> 3`.  A word naming a command is still that
+    /// command.
+    pub fn value_cmd<S: Into<String>>(mut self, name: S) -> Self {
+        self.cfg.value_cmd = Some(name.into());
+        self
+    }
+
+    /// The command the configuration names `role`, which must be one of the syntax's.
+    pub fn named_cmd(&self, name: &str, role: &str) -> Outcome<&Cmd> {
+        match self.cmds.get_recursive(&Key::Str(name.to_string())) {
+            Some(cmd)   => Ok(cmd),
+            None        => Err(err!(
+                "The syntax '{}' names '{}' its {} command, but has no such command.",
+                self.cfg.name, name, role;
+            Invalid, Input, Missing)),
+        }
     }
 
     /// Add help as a command.

@@ -176,16 +176,25 @@ impl Help {
         lines.push(fmt!("USAGE:"));
         lines.append(&mut self.synopsis(&cfg.name, &self.generic_synopsis(syntax)));
         if cfg.one_cmd {
-            let first = fmt!("{} help <command | topic>", cfg.name);
-            let second = fmt!("{} <command> --help", cfg.name);
-            let pad = " ".repeat(std::cmp::max(2, 40usize.saturating_sub(first.chars().count())));
-            let joined = fmt!("{}{}{}", first, pad, second);
-            if self.cfg.indent + joined.chars().count() <= self.cfg.width {
-                lines.push(fmt!("{}{}", self.ind(), joined));
-            } else {
-                lines.push(fmt!("{}{}", self.ind(), first));
-                lines.push(fmt!("{}{}", self.ind(), second));
-            }
+            lines.append(&mut self.pair(
+                &fmt!("{} help <command | topic>", cfg.name),
+                &fmt!("{} <command> --help", cfg.name),
+            ));
+        }
+        // The short forms, each beside the line it stands for.
+        let opts = if !syntax.shown_args().is_empty() { " [<options>]" } else { "" };
+        if let Some(cmd) = cfg.default_cmd.as_deref().and_then(|n| syntax.get_cmd(n)) {
+            lines.append(&mut self.pair(
+                &fmt!("{}{}", cfg.name, opts),
+                &fmt!("is '{} {}'", cfg.name, cmd.config().name),
+            ));
+        }
+        if let Some(cmd) = cfg.value_cmd.as_deref().and_then(|n| syntax.get_cmd(n)) {
+            let vals = Self::vals_synopsis(cmd);
+            lines.append(&mut self.pair(
+                &fmt!("{}{} {}", cfg.name, opts, vals),
+                &fmt!("is '{} {} {}'", cfg.name, cmd.config().name, vals),
+            ));
         }
         lines.push(String::new());
         let margs = syntax.shown_args();
@@ -239,6 +248,15 @@ impl Help {
         lines.push(String::new());
         lines.push(fmt!("USAGE:"));
         lines.append(&mut self.synopsis(&title, &Self::cmd_synopsis(cmd)));
+        // The command's short forms, where the syntax gives it any.
+        let scfg = syntax.config();
+        if scfg.value_cmd.as_deref() == Some(ccfg.name.as_str()) {
+            lines.append(&mut self.synopsis(sname, &Self::cmd_synopsis(cmd)));
+        }
+        if scfg.default_cmd.as_deref() == Some(ccfg.name.as_str()) {
+            let opts = if !syntax.shown_args().is_empty() { vec![fmt!("[<options>]")] } else { Vec::new() };
+            lines.append(&mut self.synopsis(sname, &opts));
+        }
         lines.push(String::new());
         if !ccfg.vals.is_empty() || ccfg.rest.is_some() {
             lines.push(fmt!("VALUES:"));
@@ -403,6 +421,22 @@ impl Help {
         words
     }
 
+    /// A command's values alone, as they follow its name.
+    fn vals_synopsis(cmd: &Cmd) -> String {
+        cmd.config().vals.iter().map(|v| v.synopsis()).collect::<Vec<_>>().join(" ")
+    }
+
+    /// Two lines side by side, the second at column 40 where the width allows, else beneath.
+    fn pair(&self, first: &str, second: &str) -> Vec<String> {
+        let pad = " ".repeat(std::cmp::max(2, 40usize.saturating_sub(first.chars().count())));
+        let joined = fmt!("{}{}{}", first, pad, second);
+        if self.cfg.indent + joined.chars().count() <= self.cfg.width {
+            vec![fmt!("{}{}", self.ind(), joined)]
+        } else {
+            vec![fmt!("{}{}", self.ind(), first), fmt!("{}{}", self.ind(), second)]
+        }
+    }
+
     pub fn arg_synopsis(arg: &Arg) -> String {
         let mut s = arg.long_name();
         for val in &arg.config().vals {
@@ -425,7 +459,11 @@ impl Help {
             words.push(fmt!("[<options>]"));
         }
         if !syntax.cmds.is_empty() {
-            words.push(fmt!("<command>"));
+            words.push(if syntax.config().default_cmd.is_some() {
+                fmt!("[<command>]")
+            } else {
+                fmt!("<command>")
+            });
             words.push(fmt!("[<values>]"));
             words.push(fmt!("[<options>]"));
             if !syntax.config().one_cmd {
