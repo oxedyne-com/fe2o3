@@ -126,10 +126,14 @@ impl Glob {
     /// and a `,` or `}` outside any braces.
     ///
     /// Nested and successive braces multiply, so a pattern expanding to more
-    /// than `alts_max` alternatives is refused rather than compiled.
+    /// than `alts_max` alternatives is refused rather than compiled. So is one
+    /// nesting braces more than `alts_max` deep: a choice at every level would
+    /// expand past the cap, so only levels offering no choice are lost, and the
+    /// work and stack stay bounded by the caller's one limit.
     pub fn with_braces(line: &[u8], alts_max: usize) -> Outcome<Self> {
         let (negated, rest) = Self::negation(line);
-        let seq = Self::pieces(rest);
+        let shut = Self::shuts(rest);
+        let seq = res!(Self::pieces(line, rest, &shut, 0, rest.len(), 0, alts_max));
         let n = Self::count(&seq);
         if n > alts_max {
             return Err(err!(
@@ -216,56 +220,77 @@ impl Glob {
         }
     }
 
-    /// Where the brace opened at `open` closes, with the commas that divide it at
-    /// its own depth; nothing when it never closes.
-    fn close(s: &[u8], open: usize) -> Option<(Vec<usize>, usize)> {
-        let mut depth = 0usize;
-        let mut cuts = Vec::new();
-        let mut i = open;
+    /// Where each brace closes, indexed by where it opens, found in one pass;
+    /// nothing for a brace that never closes.
+    fn shuts(s: &[u8]) -> Vec<Option<usize>> {
+        let mut shut = vec![None; s.len()];
+        let mut open = Vec::new();
+        let mut i = 0;
         while i < s.len() {
             match s[i] {
-                b'{'                => depth += 1,
-                b'}'                => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some((cuts, i));
-                    }
+                b'{'    => open.push(i),
+                b'}'    => if let Some(o) = open.pop() {
+                    shut[o] = Some(i);
                 },
-                b',' if depth == 1  => cuts.push(i),
-                _                   => (),
+                _       => (),
             }
             i += Self::unit(s, i);
         }
-        None
+        shut
     }
 
-    fn pieces(s: &[u8]) -> Vec<Piece> {
+    /// The sequence spelt by `s[from..to]`, inside `depth` braces. Every brace
+    /// that closes within the range is balanced there, since an inner brace
+    /// closes before its outer one.
+    fn pieces(
+        line:   &[u8],
+        s:      &[u8],
+        shut:   &[Option<usize>],
+        from:   usize,
+        to:     usize,
+        depth:  usize,
+        max:    usize,
+    )
+        -> Outcome<Vec<Piece>>
+    {
         let mut seq = Vec::new();
         let mut lit = Vec::new();
-        let mut i = 0;
-        while i < s.len() {
-            if s[i] == b'{' {
-                match Self::close(s, i) {
-                    Some((cuts, close)) => {
-                        if !lit.is_empty() {
-                            seq.push(Piece::Bytes(std::mem::take(&mut lit)));
-                        }
-                        let mut alts = Vec::new();
-                        let mut from = i + 1;
-                        for cut in cuts.into_iter().chain(std::iter::once(close)) {
-                            alts.push(Self::pieces(&s[from..cut]));
-                            from = cut + 1;
-                        }
-                        seq.push(Piece::Alts(alts));
-                        i = close + 1;
-                    },
-                    // A brace that never closes is a literal one, escaped so
-                    // that it stays one.
-                    None => {
-                        lit.extend_from_slice(b"\\{");
-                        i += 1;
-                    },
+        let mut i = from;
+        while i < to {
+            if let (b'{', Some(close)) = (s[i], shut[i]) {
+                if depth >= max {
+                    return Err(err!(
+                        "The pattern {:?} nests braces more than {} deep.",
+                        String::from_utf8_lossy(line), max;
+                    Invalid, Input, Excessive));
                 }
+                if !lit.is_empty() {
+                    seq.push(Piece::Bytes(std::mem::take(&mut lit)));
+                }
+                let mut alts = Vec::new();
+                let mut start = i + 1;
+                let mut j = start;
+                while j < close {
+                    match (s[j], shut[j]) {
+                        (b'{', Some(inner)) => j = inner + 1,
+                        (b',', _)           => {
+                            alts.push(res!(Self::pieces(line, s, shut, start, j, depth + 1, max)));
+                            j += 1;
+                            start = j;
+                        },
+                        _                   => j += Self::unit(s, j),
+                    }
+                }
+                alts.push(res!(Self::pieces(line, s, shut, start, close, depth + 1, max)));
+                seq.push(Piece::Alts(alts));
+                i = close + 1;
+                continue;
+            }
+            if s[i] == b'{' {
+                // A brace that never closes is a literal one, escaped so that
+                // it stays one.
+                lit.extend_from_slice(b"\\{");
+                i += 1;
                 continue;
             }
             let n = Self::unit(s, i);
@@ -275,7 +300,7 @@ impl Glob {
         if !lit.is_empty() {
             seq.push(Piece::Bytes(lit));
         }
-        seq
+        Ok(seq)
     }
 
     /// How many patterns a sequence spells, saturating rather than overflowing.

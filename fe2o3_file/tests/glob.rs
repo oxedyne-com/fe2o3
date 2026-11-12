@@ -365,5 +365,20 @@ pub fn test_glob(filter: &'static str) -> Outcome<()> {
         Ok(())
     }));
 
+    res!(test_it(filter, &["Braces nested past the cap are refused, not recursed 000", "all", "glob", "braces"], || {
+        // Each level here offers one alternative, so the count alone never fires.
+        let deep = [b"{".repeat(100_000), b"a".to_vec(), b"}".repeat(100_000)].concat();
+        match Glob::with_braces(&deep, 16) {
+            Err(e)  => assert!(e.tags().contains(&ErrTag::Excessive), "{}", e),
+            Ok(_)   => panic!("100,000 nested braces were compiled"),
+        }
+        assert!(Glob::with_braces(b"{{{{a}}}}", 4).is_ok(), "four deep is within four");
+        assert!(Glob::with_braces(b"{{{{{a}}}}}", 4).is_err(), "five is not");
+        // Braces that never close are literal, and read in one pass.
+        let open = b"{".repeat(200_000);
+        assert!(Glob::with_braces(&open, 16).is_ok());
+        Ok(())
+    }));
+
     Ok(())
 }
